@@ -157,7 +157,7 @@ async def finish_recording(app: rumps.App):
         if not path:
             logger.error("Audio recording failed or produced no file.")
             # reset state without success indication
-            MenuIcon.set(app, MenuIcon.idle)
+            MenuIcon.set(app, MenuIcon.IDLE)
             _set_status(app, "Ready")
             STATE = "IDLE"
             return
@@ -168,7 +168,7 @@ async def finish_recording(app: rumps.App):
         if raw_text is None:
             logger.error("Transcription failed.")
             # optionally notify user via menu?
-            MenuIcon.set(app, MenuIcon.idle)  # reset state
+            MenuIcon.set(app, MenuIcon.IDLE)  # reset state
             _set_status(app, "Ready")
             STATE = "IDLE"
             # clean up the temp file if transcription fails
@@ -209,7 +209,7 @@ async def finish_recording(app: rumps.App):
         logger.error(
             f"An unexpected error occurred during finish_recording: {e}", exc_info=True
         )
-        MenuIcon.set(app, MenuIcon.idle)  # reset state on error
+        MenuIcon.set(app, MenuIcon.IDLE)  # reset state on error
         _set_status(app, "Ready")
         STATE = "IDLE"
     finally:
@@ -247,7 +247,7 @@ async def _start_recording_after_delay(app: rumps.App):
         raise
     except Exception as e:
         logger.error(f"Failed to start recording after hold delay: {e}", exc_info=True)
-        MenuIcon.set(app, MenuIcon.idle)
+        MenuIcon.set(app, MenuIcon.IDLE)
         STATE = "IDLE"
 
 
@@ -322,7 +322,7 @@ async def handle_hotkey_event(app: rumps.App, key_type: str, action: str):
                     f"Failed to start recording on toggle-press: {e}", exc_info=True
                 )
                 # Reset state and attempt cleanup if start failed
-                MenuIcon.set(app, MenuIcon.idle)
+                MenuIcon.set(app, MenuIcon.IDLE)
                 STATE = "IDLE"
                 # Attempt graceful stop to clean up recorder state if needed
                 if recorder._stream:  # Check if stream was partially created
@@ -352,7 +352,7 @@ class VistaScribe(rumps.App):
 
     def __init__(self):
         """Initializes the rumps app, queue timer, and asyncio thread setup."""
-        super().__init__(MenuIcon.idle, quit_button=None)
+        super().__init__(MenuIcon.IDLE, quit_button=None)
 
         # Try to set a tray icon image (keeps state glyphs out of the title area)
         try:
@@ -423,10 +423,11 @@ class VistaScribe(rumps.App):
         self.item_hold_excl = rumps.MenuItem(
             "Exclusive (ignore extra modifiers)", callback=self._toggle_hold_exclusive
         )
+        self.item_hold_current = rumps.MenuItem(
+            "Current: " + hotkeys_hold_mods_label(), callback=lambda _s: None
+        )
         self.menu["Hotkey Settings"] = [
-            rumps.MenuItem(
-                "Current: " + hotkeys_hold_mods_label(), callback=lambda _s: None
-            ),
+            self.item_hold_current,
             None,
             self.item_hold_ctrl,
             self.item_hold_ctrl_opt,
@@ -530,9 +531,10 @@ class VistaScribe(rumps.App):
 
     def _refresh_hold_menu(self):
         label = hotkeys_hold_mods_label()
-        if "Hotkey Settings" in self.menu:
-            # First item shows current combo
-            self.menu["Hotkey Settings"][0].title = f"Current: {label}"
+        try:
+            self.item_hold_current.title = f"Current: {label}"
+        except Exception:
+            pass
         self.item_hold_ctrl.state = label == "Ctrl"
         self.item_hold_ctrl_opt.state = label == "Ctrl+Option"
         self.item_hold_ctrl_shift.state = label == "Ctrl+Shift"
@@ -888,7 +890,7 @@ class VistaScribe(rumps.App):
                 self.menu["Enable Hotkeys"].state = True
                 self.menu["Status: Hotkeys Disabled"].title = "Status: Hotkeys Enabled"
                 # Reset icon to idle state
-                MenuIcon.set(self, MenuIcon.idle)
+                MenuIcon.set(self, MenuIcon.IDLE)
             else:
                 # Failed to enable
                 logger.error("Failed to enable hotkeys. Check accessibility permissions.")
@@ -1006,7 +1008,7 @@ class VistaScribe(rumps.App):
         logger.debug("NSTimer fired: Resetting icon to idle.")
         # Only reset to idle if hotkeys are enabled
         if self.hotkeys_enabled:
-            MenuIcon.set(self, MenuIcon.idle)
+            MenuIcon.set(self, MenuIcon.IDLE)
             logger.info("UI State: Idle (🜏)")
         else:
             # Keep showing disabled state

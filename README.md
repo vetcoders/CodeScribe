@@ -49,6 +49,8 @@ uv run python backend.py
   open packaging/dmg/VistaScribe.dmg
   ```
 
+For internal team onboarding see: `docs/TEAM_SETUP.md`.
+
 ### Signing / Notarization (outside App Store)
 Masz “Developer ID Application”? Możesz podpisać i (opcjonalnie) znotaryzować:
 ```bash
