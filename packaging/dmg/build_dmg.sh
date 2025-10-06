@@ -17,7 +17,7 @@ STAGE_DIR="${OUT_DIR}/stage"
 # Resolve version for DMG naming
 VERSION="0.1.0"
 if [[ -f "$ROOT_DIR/pyproject.toml" ]]; then
-  VLINE=$(rg -n "^version\s*=\s*\"" "$ROOT_DIR/pyproject.toml" | head -n1 | sed 's/.*=\s*\"//; s/\".*//') || true
+  VLINE=$(awk -F '"' '/^version[[:space:]]*=/{print $2; exit}' "$ROOT_DIR/pyproject.toml" 2>/dev/null || true)
   [[ -n "${VLINE:-}" ]] && VERSION="$VLINE"
 fi
 STAMP=$(date +%Y%m%d_%H%M%S)

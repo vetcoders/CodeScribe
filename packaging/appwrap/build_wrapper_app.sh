@@ -8,7 +8,7 @@ APP_DIR="$DIST_DIR/VistaScribe.app"
 # Resolve version from pyproject.toml if present
 VERSION="0.1.0"
 if [[ -f "$ROOT_DIR/pyproject.toml" ]]; then
-  VER_LINE=$(rg -n "^version\s*=\s*\"" "$ROOT_DIR/pyproject.toml" | head -n1 | sed 's/.*=\s*\"//; s/\".*//') || true
+  VER_LINE=$(awk -F '"' '/^version[[:space:]]*=/{print $2; exit}' "$ROOT_DIR/pyproject.toml" 2>/dev/null || true)
   if [[ -n "${VER_LINE:-}" ]]; then VERSION="$VER_LINE"; fi
 fi
 
