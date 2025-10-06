@@ -38,6 +38,9 @@ WHISPER_SERVER_URL = os.environ.get("WHISPER_SERVER_URL", "").strip()
 
 # --- model load (once) ---
 _repo_root = os.path.dirname(os.path.abspath(__file__))
+# If running from an app bundle, bundled models may live in:
+#   <App>.app/Contents/Resources/Models
+_bundled_models_dir = os.path.normpath(os.path.join(_repo_root, "..", "..", "Resources", "Models"))
 # Allow choosing between large-v3-turbo and medium via env; fallback to what's present
 _variant = os.environ.get("WHISPER_VARIANT", "").strip().lower()
 
@@ -48,15 +51,21 @@ if not WHISPER_SERVER_URL:
     # If WHISPER_DIR provided, use it directly (normalized) below; otherwise compute default
     if not os.environ.get("WHISPER_DIR"):
         candidates = []
-        if _variant in {"large-v3-turbo", "medium"}:
-            candidates.append(os.path.join(_repo_root, "models", f"whisper-{_variant}"))
-            candidates.append(os.path.join(_repo_root, f"whisper-{_variant}"))
+        # If bundled small exists, prefer it for offline-first experience
+        for name in ("whisper-small", "whisper-small-mlx"):
+            candidates.append(os.path.join(_bundled_models_dir, name))
+        # If explicit variant set, search repo models for it
+        if _variant in {"small", "small-mlx", "large-v3-turbo", "large-v3", "medium"}:
+            vmap = {"small": "small-mlx"}  # resolve alias
+            vv = vmap.get(_variant, _variant)
+            candidates.append(os.path.join(_repo_root, "models", f"whisper-{vv}"))
+            candidates.append(os.path.join(_repo_root, f"whisper-{vv}"))
         else:
-            # No explicit variant: prefer large-v3-turbo if present, else medium
-            for v in ("large-v3-turbo", "medium"):
+            # Default order: large-v3, large-v3-turbo, medium, then small
+            for v in ("large-v3", "large-v3-turbo", "medium", "small-mlx", "small"):
                 candidates.append(os.path.join(_repo_root, "models", f"whisper-{v}"))
                 candidates.append(os.path.join(_repo_root, f"whisper-{v}"))
-        # pick first existing, else default to models/whisper-large-v3-turbo path
+        # pick first existing, else fallback to bundled small, else turbo path in repo
         _default_whisper_path = next(
             (c for c in candidates if os.path.isdir(c)),
             os.path.join(_repo_root, "models", "whisper-large-v3-turbo"),
@@ -112,6 +121,8 @@ def get_current_variant() -> str:
         return "large-v3"
     if "whisper-medium" in path:
         return "medium"
+    if "whisper-small" in path:
+        return "small"
     return "unknown"
 
 
@@ -126,10 +137,24 @@ def set_variant(variant: str) -> bool:
         logging.error("Cannot switch local model while WHISPER_SERVER_URL is set.")
         return False
     variant = (variant or "").strip().lower()
-    if variant not in {"medium", "large-v3", "large-v3-turbo"}:
+    if variant not in {"small", "small-mlx", "medium", "large-v3", "large-v3-turbo"}:
         logging.error(f"Unsupported variant: {variant}")
         return False
-    base = os.path.join(_repo_root, "models", f"whisper-{variant}")
+    # Resolve alias and search both repo models and bundled models
+    vnorm = {"small": "small-mlx"}.get(variant, variant)
+    base_candidates = [
+        os.path.join(_repo_root, "models", f"whisper-{vnorm}"),
+        os.path.join(_repo_root, f"whisper-{vnorm}"),
+        os.path.join(_bundled_models_dir, f"whisper-{vnorm}"),
+        os.path.join(_bundled_models_dir, vnorm),
+        os.path.join(_bundled_models_dir, "whisper-small"),
+    ]
+    base = next((p for p in base_candidates if os.path.isdir(p)), None)
+    if base is None:
+        logging.error(
+            f"Model directory not found for variant '{variant}'. Download via menu first."
+        )
+        return False
     if not os.path.isdir(base):
         logging.error(
             f"Model directory not found for variant '{variant}': {base}. Download via menu first."

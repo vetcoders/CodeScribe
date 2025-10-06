@@ -15,6 +15,7 @@ fi
 echo "[i] Building wrapper app at: $APP_DIR"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources/Repo"
+mkdir -p "$APP_DIR/Contents/Resources/Models"
 
 # Info.plist (minimal)
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
@@ -78,5 +79,34 @@ rsync -a --delete \
   --exclude 'logs/' --exclude 'packaging/dist/' --exclude 'packaging/build/' \
   --exclude 'packaging/dmg/' \
   "$ROOT_DIR/" "$APP_DIR/Contents/Resources/Repo/"
+
+# Optionally bundle a small Whisper model for offline start
+if [[ "${BUNDLE_SMALL:-1}" == "1" ]]; then
+  echo "[i] Bundling small Whisper model (if available)"
+  # prefer repo-provided model to avoid network; else try git clone if tools exist
+  SRC_DIR=""
+  for c in \
+    "$ROOT_DIR/models/whisper-small" \
+    "$ROOT_DIR/models/whisper-small-mlx"; do
+    if [[ -d "$c" ]]; then SRC_DIR="$c"; break; fi
+  done
+  if [[ -z "$SRC_DIR" ]]; then
+    if command -v git >/dev/null 2>&1 && command -v git-lfs >/dev/null 2>&1; then
+      TMP_M="$(mktemp -d)"/whisper-small-mlx
+      echo "[i] Cloning mlx-community/whisper-small-mlx (shallow)…"
+      git clone --depth 1 https://huggingface.co/mlx-community/whisper-small-mlx "$TMP_M" || true
+      if [[ -d "$TMP_M" ]]; then
+        (cd "$TMP_M" && git lfs install --local && git lfs pull || true)
+        SRC_DIR="$TMP_M"
+      fi
+    fi
+  fi
+  if [[ -n "$SRC_DIR" ]]; then
+    echo "[i] Embedding model: $SRC_DIR → Resources/Models/whisper-small"
+    rsync -a "$SRC_DIR/" "$APP_DIR/Contents/Resources/Models/whisper-small/"
+  else
+    echo "[!] Could not bundle small model (no local copy and git-lfs unavailable)."
+  fi
+fi
 
 echo "[✓] Wrapper app built: $APP_DIR"

@@ -473,6 +473,9 @@ class VistaScribe(rumps.App):
 
         # Models submenu: download & select
         self.item_model_current = rumps.MenuItem("Current: —")
+        self.item_use_small = rumps.MenuItem(
+            "Use Whisper: Small (Bundled)", callback=lambda _s: self._set_model_variant("small")
+        )
         self.item_use_medium = rumps.MenuItem(
             "Use Whisper: Medium", callback=lambda _s: self._set_model_variant("medium")
         )
@@ -482,6 +485,9 @@ class VistaScribe(rumps.App):
         self.item_use_lvt = rumps.MenuItem(
             "Use Whisper: Large v3 Turbo",
             callback=lambda _s: self._set_model_variant("large-v3-turbo"),
+        )
+        self.item_dl_small = rumps.MenuItem(
+            "Download Whisper: Small", callback=lambda _s: self._download_models("small-mlx")
         )
         self.item_dl_medium = rumps.MenuItem(
             "Download Whisper: Medium", callback=lambda _s: self._download_models("medium")
@@ -499,10 +505,12 @@ class VistaScribe(rumps.App):
         self.menu["Models"] = [
             self.item_model_current,
             None,
+            self.item_use_small,
             self.item_use_medium,
             self.item_use_lv3,
             self.item_use_lvt,
             None,
+            self.item_dl_small,
             self.item_dl_medium,
             self.item_dl_lv3,
             self.item_dl_lvt,
@@ -842,6 +850,7 @@ class VistaScribe(rumps.App):
             "remote": "Remote",
         }.get(cur, cur)
         self.item_model_current.title = f"Current: {label}"
+        self.item_use_small.state = cur == "small"
         self.item_use_medium.state = cur == "medium"
         self.item_use_lv3.state = cur == "large-v3"
         self.item_use_lvt.state = cur == "large-v3-turbo"
