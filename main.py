@@ -32,6 +32,7 @@ import os
 import queue  # for checking standard queue
 import sys
 import threading  # for asyncio thread
+import plistlib
 
 import objc  # for selector
 import requests
@@ -61,6 +62,7 @@ from ui import (
     start_sound,
     toggles_help_message,
 )
+import first_run
 
 # --- global state ---
 
@@ -376,6 +378,7 @@ class VistaScribe(rumps.App):
             "What do these toggles do?",
             None,  # Separator
             "Hotkey Settings",
+            "Start at Login",
             "Feedback",
             None,  # Separator
             "Models",
@@ -396,6 +399,7 @@ class VistaScribe(rumps.App):
         self.menu["What do these toggles do?"].set_callback(self._show_toggles_help)
         self.menu["Open System Accessibility Settings..."].set_callback(self._open_accessibility)
         self.menu["Quit"].set_callback(self._quit_app)
+        self.menu["Start at Login"].set_callback(self._toggle_login_item)
 
         # Hotkey settings submenu (predefined hold combos)
         self.item_hold_ctrl = rumps.MenuItem("Hold: Ctrl only", callback=self._set_hold_ctrl)
@@ -414,6 +418,7 @@ class VistaScribe(rumps.App):
         self.item_hold_current = rumps.MenuItem(
             "Current: " + hotkeys_hold_mods_label(), callback=lambda _s: None
         )
+        self.item_customize_hotkeys = rumps.MenuItem("Customize Hotkeys…", callback=self._customize_hotkeys)
         self.menu["Hotkey Settings"] = [
             self.item_hold_current,
             None,
@@ -424,6 +429,8 @@ class VistaScribe(rumps.App):
             rumps.MenuItem("Save Hotkeys to .env", callback=self._save_hotkeys_env),
             None,
             self.item_hold_excl,
+            None,
+            self.item_customize_hotkeys,
         ]
         self._refresh_hold_menu()
 
@@ -508,6 +515,104 @@ class VistaScribe(rumps.App):
         self.async_thread = None
         self.queue_timer = rumps.Timer(self.poll_queue, 0.05)  # poll queue every 50ms
         logger.info("Vista Scribe App initialized.")
+        # Minimal first-run setup: config + sensible defaults (non-blocking)
+        try:
+            first_run.ensure_config_and_permissions()
+        except Exception as e:
+            logger.warning(f"First-run setup skipped: {e}")
+
+        # Reflect Start at Login state
+        try:
+            self.menu["Start at Login"].state = self._is_login_installed()
+        except Exception:
+            pass
+
+    # --- Start at Login via LaunchAgent ---
+    def _login_plist_path(self) -> str:
+        home = os.path.expanduser("~")
+        return os.path.join(home, "Library", "LaunchAgents", "com.vistascribe.tray.plist")
+
+    def _is_login_installed(self) -> bool:
+        return os.path.exists(self._login_plist_path())
+
+    def _toggle_login_item(self, _sender):
+        try:
+            if self._is_login_installed():
+                self._remove_login_agent()
+            else:
+                self._install_login_agent()
+        except Exception as e:
+            logger.error(f"Login item toggle failed: {e}")
+        try:
+            self.menu["Start at Login"].state = self._is_login_installed()
+        except Exception:
+            pass
+
+    def _install_login_agent(self):
+        path = self._login_plist_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        app_repo = "/Applications/Vista Scribe.app/Contents/Resources/Repo"
+        cmd = (
+            f"cd '{app_repo}' && ./scripts/quickstart_mac.sh --mode both --daemon --log "
+            f"'$HOME/Library/Logs/VistaScribe.app.log'"
+        )
+        data = {
+            "Label": "com.vistascribe.tray",
+            "ProgramArguments": ["/bin/zsh", "-lc", cmd],
+            "RunAtLoad": True,
+            "KeepAlive": False,
+            "StandardOutPath": os.path.expanduser("~/Library/Logs/VistaScribe.launchd.out.log"),
+            "StandardErrorPath": os.path.expanduser("~/Library/Logs/VistaScribe.launchd.err.log"),
+        }
+        with open(path, "wb") as f:
+            plistlib.dump(data, f)
+        import subprocess
+        subprocess.run(["launchctl", "unload", "-w", path], check=False)
+        subprocess.run(["launchctl", "load", "-w", path], check=False)
+        logger.info("Installed Start at Login LaunchAgent")
+
+    def _remove_login_agent(self):
+        path = self._login_plist_path()
+        import subprocess
+        subprocess.run(["launchctl", "unload", "-w", path], check=False)
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        logger.info("Removed Start at Login LaunchAgent")
+
+    # --- Hotkey Customizer (MVP) ---
+    def _customize_hotkeys(self, _sender):
+        try:
+            import AppKit
+            alert = AppKit.NSAlert.new()
+            alert.setMessageText_("Customize Hotkeys")
+            alert.setInformativeText_(
+                "Choose the hold combination. Advanced 'press your combo' UI comes later."
+            )
+            choices = [
+                ("Ctrl+Option", "ctrl+alt"),
+                ("Ctrl only", "ctrl"),
+                ("Ctrl+Shift", "ctrl+shift"),
+                ("Ctrl+Command", "ctrl+cmd"),
+                ("Cancel", None),
+            ]
+            for title, _ in choices:
+                alert.addButtonWithTitle_(title)
+            resp = alert.runModal()
+            idx = resp - 1000
+            if 0 <= idx < len(choices):
+                spec = choices[idx][1]
+                if spec:
+                    os.environ["HOLD_MODS"] = spec
+                    hotkeys_set_hold_mods(spec)
+                    try:
+                        update_env_vars({"HOLD_MODS": spec})
+                    except Exception:
+                        pass
+                    self._refresh_hold_menu()
+        except Exception:
+            pass
 
     def _refresh_feedback_menu(self):
         self.item_beep.state = BEEP_ON_START
