@@ -59,6 +59,7 @@ echo "[i] Copying repo into app Resources (trimmed)"
 rsync -a --delete \
   --exclude '.git/' --exclude '.venv/' --exclude 'models/' --exclude 'outputs/' \
   --exclude 'logs/' --exclude 'packaging/dist/' --exclude 'packaging/build/' \
+  --exclude 'packaging/dmg/' \
   "$ROOT_DIR/" "$APP_DIR/Contents/Resources/Repo/"
 
 echo "[✓] Wrapper app built: $APP_DIR"
