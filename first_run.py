@@ -69,7 +69,7 @@ def ensure_config_and_permissions() -> None:
         variant = _nsalert_first_run()
         cfg = {
             "restore_clipboard": True,
-            "hold_mods": "ctrl+alt",
+            "hold_mods": "ctrl",
             "hold_exclusive": True,
             "beep_on_start": False,
             "whisper_variant": variant or "large-v3-turbo",

@@ -56,6 +56,20 @@ CMD_MASK = Quartz.kCGEventFlagMaskCommand
 # Double-tap Option timing (seconds); can be overridden via env var DOUBLE_OPTION_INTERVAL_MS
 _DOUBLE_OPTION_INTERVAL = float(os.environ.get("DOUBLE_OPTION_INTERVAL_MS", "350")) / 1000.0
 
+# Enable/disable toggle shortcuts (defaults: double Option ON, Slash OFF)
+_ENABLE_DOUBLE_OPTION = os.environ.get("ENABLE_DOUBLE_OPTION", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+_ENABLE_TOGGLE_SLASH = os.environ.get("ENABLE_TOGGLE_SLASH", "0").lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
 # Required modifiers to consider the "hold" gesture active
 _DEFAULT_HOLD_MODS = os.environ.get("HOLD_MODS", "ctrl").lower()
 
@@ -337,23 +351,24 @@ def _tap(_proxy, type_, event, _refcon):
                 )
 
             # Option double-tap detection: look for two down edges within interval
-            global _last_alt_state, _last_alt_down_ts
-            if alt_is_down != _last_alt_state and not (_required_hold_mask & ALT_MASK):
-                # Edge detected
-                now = time.perf_counter()
-                if alt_is_down:
-                    # This is a down edge; check time since previous down
-                    if _last_alt_down_ts and (now - _last_alt_down_ts) <= _DOUBLE_OPTION_INTERVAL:
-                        # Double tap detected -> emit toggle press
-                        _queue.put(("toggle", "press"))
-                        logger.info("Hotkey: Toggle press (Double Option)")
-                        _last_alt_down_ts = 0.0  # Reset window
-                    else:
-                        _last_alt_down_ts = now
-                _last_alt_state = alt_is_down
+            if _ENABLE_DOUBLE_OPTION:
+                global _last_alt_state, _last_alt_down_ts
+                if alt_is_down != _last_alt_state and not (_required_hold_mask & ALT_MASK):
+                    # Edge detected
+                    now = time.perf_counter()
+                    if alt_is_down:
+                        # This is a down edge; check time since previous down
+                        if _last_alt_down_ts and (now - _last_alt_down_ts) <= _DOUBLE_OPTION_INTERVAL:
+                            # Double tap detected -> emit toggle press
+                            _queue.put(("toggle", "press"))
+                            logger.info("Hotkey: Toggle press (Double Option)")
+                            _last_alt_down_ts = 0.0  # Reset window
+                        else:
+                            _last_alt_down_ts = now
+                    _last_alt_state = alt_is_down
 
         # Check for classic 'toggle' key (shift+cmd+/) - only on key down
-        elif type_ == Quartz.kCGEventKeyDown and keycode == TOGGLE_VK:
+        elif _ENABLE_TOGGLE_SLASH and type_ == Quartz.kCGEventKeyDown and keycode == TOGGLE_VK:
             # Using `(flags & TOGGLE_FL) == TOGGLE_FL` checks if at least
             # Shift and Command are pressed
             if (flags & TOGGLE_FL) == TOGGLE_FL:
