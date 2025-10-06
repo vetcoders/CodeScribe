@@ -29,15 +29,16 @@ import fcntl
 import importlib
 import logging
 import os
+import plistlib
 import queue  # for checking standard queue
 import sys
 import threading  # for asyncio thread
-import plistlib
 
 import objc  # for selector
 import requests
 import rumps
 
+import first_run
 import llm  # runtime toggle for formatting
 from audio import Recorder
 from config import Config, load_config, save_config, update_env_vars
@@ -62,7 +63,6 @@ from ui import (
     start_sound,
     toggles_help_message,
 )
-import first_run
 
 # --- global state ---
 
@@ -418,7 +418,9 @@ class VistaScribe(rumps.App):
         self.item_hold_current = rumps.MenuItem(
             "Current: " + hotkeys_hold_mods_label(), callback=lambda _s: None
         )
-        self.item_customize_hotkeys = rumps.MenuItem("Customize Hotkeys…", callback=self._customize_hotkeys)
+        self.item_customize_hotkeys = rumps.MenuItem(
+            "Customize Hotkeys…", callback=self._customize_hotkeys
+        )
         self.menu["Hotkey Settings"] = [
             self.item_hold_current,
             None,
@@ -567,6 +569,7 @@ class VistaScribe(rumps.App):
         with open(path, "wb") as f:
             plistlib.dump(data, f)
         import subprocess
+
         subprocess.run(["launchctl", "unload", "-w", path], check=False)
         subprocess.run(["launchctl", "load", "-w", path], check=False)
         logger.info("Installed Start at Login LaunchAgent")
@@ -574,6 +577,7 @@ class VistaScribe(rumps.App):
     def _remove_login_agent(self):
         path = self._login_plist_path()
         import subprocess
+
         subprocess.run(["launchctl", "unload", "-w", path], check=False)
         try:
             os.remove(path)
@@ -585,6 +589,7 @@ class VistaScribe(rumps.App):
     def _customize_hotkeys(self, _sender):
         try:
             import AppKit
+
             alert = AppKit.NSAlert.new()
             alert.setMessageText_("Customize Hotkeys")
             alert.setInformativeText_(
