@@ -62,6 +62,8 @@ from ui import (
     paste_text,
     start_sound,
     toggles_help_message,
+    show_hold_badge,
+    hide_hold_badge,
 )
 
 # --- global state ---
@@ -218,6 +220,11 @@ async def finish_recording(app: rumps.App):
                 logger.info(f"Cleaned up temp file (finally block): {path}")
             except OSError as e:
                 logger.error(f"Failed to remove temp file {path} in finally block: {e}")
+        # Hide the hold badge in any case
+        try:
+            hide_hold_badge()
+        except Exception:
+            pass
 
 
 async def _start_recording_after_delay(app: rumps.App):
@@ -238,6 +245,10 @@ async def _start_recording_after_delay(app: rumps.App):
         _set_status(app, "Listening…")
         if BEEP_ON_START:
             start_sound()
+        try:
+            show_hold_badge()
+        except Exception:
+            pass
         STATE = "REC_HOLD"
         logger.info("State transition: IDLE -> REC_HOLD")
     except asyncio.CancelledError:

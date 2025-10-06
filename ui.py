@@ -396,3 +396,94 @@ def start_sound():
         NSOperationQueue.mainQueue().addOperationWithBlock_(_play)
     else:
         _play()
+
+
+# --- recording indicator near cursor (for hold gesture) ---
+
+_badge_window = None
+_badge_timer = None
+
+
+def hold_indicator_enabled() -> bool:
+    return os.environ.get("HOLD_INDICATOR", "1").lower() not in ("0", "false", "no", "off")
+
+
+def set_hold_indicator_enabled(flag: bool) -> None:
+    os.environ["HOLD_INDICATOR"] = "1" if flag else "0"
+
+
+def _ensure_badge_window():
+    global _badge_window
+    if _badge_window is not None or AppKit is None:
+        return
+    frame = ((0.0, 0.0), (18.0, 18.0))
+    style = AppKit.NSBorderlessWindowMask
+    w = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        frame, style, AppKit.NSBackingStoreBuffered, False
+    )
+    w.setOpaque_(False)
+    w.setBackgroundColor_(AppKit.NSColor.clearColor())
+    w.setLevel_(AppKit.NSStatusWindowLevel)
+    # Draw a small red circle
+    view = AppKit.NSImageView.alloc().initWithFrame_(((0, 0), (18, 18)))
+    img = AppKit.NSImage.alloc().initWithSize_((18, 18))
+    img.lockFocus()
+    try:
+        AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.2, 0.2, 0.9).set()
+        path = AppKit.NSBezierPath.bezierPathWithOvalInRect_(((1, 1), (16, 16)))
+        path.fill()
+    finally:
+        img.unlockFocus()
+    view.setImage_(img)
+    w.setContentView_(view)
+    _badge_window = w
+
+
+def _move_badge_to_cursor():
+    if AppKit is None or _badge_window is None:
+        return
+    loc = AppKit.NSEvent.mouseLocation()
+    # Offset up-right from the cursor
+    x = float(loc.x) + 12.0
+    y = float(loc.y) - 12.0
+    _badge_window.setFrameTopLeftPoint_((x, y))
+
+
+def show_hold_badge():
+    if not hold_indicator_enabled() or AppKit is None:
+        return
+
+    def _show():
+        global _badge_timer
+        _ensure_badge_window()
+        if _badge_window is None:
+            return
+        _move_badge_to_cursor()
+        _badge_window.orderFrontRegardless()
+        # Update position periodically while visible
+        if _badge_timer is None:
+            _badge_timer = (
+                AppKit.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.2, _badge_window, "display:", None, True
+                )
+            )
+
+    if NSThread is not None and not NSThread.isMainThread() and NSOperationQueue is not None:
+        NSOperationQueue.mainQueue().addOperationWithBlock_(_show)
+    else:
+        _show()
+
+
+def hide_hold_badge():
+    def _hide():
+        global _badge_timer
+        if _badge_timer is not None and AppKit is not None:
+            _badge_timer.invalidate()
+            _badge_timer = None
+        if _badge_window is not None:
+            _badge_window.orderOut_(None)
+
+    if NSThread is not None and not NSThread.isMainThread() and NSOperationQueue is not None:
+        NSOperationQueue.mainQueue().addOperationWithBlock_(_hide)
+    else:
+        _hide()
