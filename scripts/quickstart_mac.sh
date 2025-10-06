@@ -61,8 +61,9 @@ FORMAT_ENABLED="${FORMAT_ENABLED:-1}"
 MODE="${MODE:-tray}"
 LLM_ID="${LLM_ID:-}"
 UV_ACTIVE=0
-DAEMON=0
-LOG_FILE="$REPO_DIR/VistaScribe.log"
+# Default: run in background with logging (nohup + disown)
+DAEMON=1
+LOG_FILE="$LOG_DIR/VistaScribe.log"
 SKIP_MODELS=0
 PERSIST_ENVS=()
 WITH_BACKEND=0
@@ -113,6 +114,7 @@ while [[ $# -gt 0 ]]; do
     --llm-id) LLM_ID="$2"; shift 2;;
     --active) UV_ACTIVE=1; shift;;
     --daemon) DAEMON=1; shift;;
+    --fg|--foreground|--no-daemon) DAEMON=0; shift;;
     --log) LOG_FILE="$2"; shift 2;;
     --no-models) SKIP_MODELS=1; shift;;
     --with-backend) WITH_BACKEND=1; shift;;
@@ -253,6 +255,8 @@ if [[ "$MODE" == "both" || "$WITH_BACKEND" -eq 1 ]]; then
   back_pid=$!
   disown "$back_pid" || true
   write_pid backend "$back_pid"
+  echo "backend pid: $back_pid (log: $LOG_DIR/backend.out.log)"
+  echo "backend pid: $back_pid" >> "$LOG_FILE" || true
   # krótkie oczekiwanie (bez twardego fail)
   sleep 1
 fi
@@ -263,6 +267,8 @@ if [[ "$DAEMON" -eq 1 ]]; then
   tray_pid=$!
   disown "$tray_pid" || true
   write_pid tray "$tray_pid"
+  echo "tray pid: $tray_pid (log: $LOG_FILE)"
+  echo "tray pid: $tray_pid" >> "$LOG_FILE" || true
 else
   env "${ENVVARS[@]}" "${CMD[@]}" "$TARGET"
 fi
