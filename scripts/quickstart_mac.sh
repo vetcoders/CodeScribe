@@ -49,6 +49,12 @@ mkdir -p "$LOG_DIR"
 PID_DIR="$REPO_DIR/.pids"
 mkdir -p "$PID_DIR"
 
+# Ensure we do NOT inherit a foreign virtualenv (e.g., from old ../vista-scribe)
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  echo "warning: ignoring inherited VIRTUAL_ENV=$VIRTUAL_ENV; using local .venv instead"
+  unset VIRTUAL_ENV
+fi
+
 # Default values for parameters (use :- for proper default substitution)
 WHISPER_VARIANT="${WHISPER_VARIANT:-large-v3-turbo}"
 FORMAT_ENABLED="${FORMAT_ENABLED:-1}"
