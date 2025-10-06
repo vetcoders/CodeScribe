@@ -108,44 +108,55 @@ if [[ -n "$DMG" && -f "$DMG" && -n "$IDENTITY" ]]; then
 fi
 
 # 3) Notarization
-TARGET="${DMG:-$APP}"
-if [[ -n "$PROFILE" ]]; then
-  echo "📨 Submitting with notarytool profile: $PROFILE"
-  xcrun notarytool submit "$TARGET" --keychain-profile "$PROFILE" --wait
-else
-  # Use stored profile if exists
-  if xcrun notarytool list-profiles >/dev/null 2>&1; then
-    PROFILE_DEF="$(xcrun notarytool list-profiles | awk 'NR==2{print $1}')"
-  else
-    PROFILE_DEF=""
-  fi
-  if [[ -n "$PROFILE_DEF" ]]; then
-    echo "📨 Submitting with detected profile: $PROFILE_DEF"
-    xcrun notarytool submit "$TARGET" --keychain-profile "$PROFILE_DEF" --wait
-  else
-    # Interactive credentials
-    if [[ -z "$APPLE_ID" ]]; then
-      vared -p "Apple ID (e.g., you@example.com): " -c APPLE_ID
-    fi
-    if [[ -z "$TEAM_ID" ]]; then
-      vared -p "Team ID (10 chars): " -c TEAM_ID
-    fi
-    read -s "APP_PW?App-specific password: "
-    echo
-    echo "📨 Submitting with Apple ID credentials"
-    xcrun notarytool submit "$TARGET" --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PW" --wait
-  fi
+# If we have a DMG, submit the DMG; additionally, submit the .app as a ZIP so it can be stapled too.
+ZIP_APP=""
+if [[ -d "$APP" ]]; then
+  ZIP_APP="${APP%/}.zip"
+  echo "[i] Creating ZIP for app notarization: $ZIP_APP"
+  /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP_APP"
 fi
 
-echo "📎 Stapling ticket"
-xcrun stapler staple "$TARGET" || true
-# Also staple the app bundle if present; improves offline/airgapped first run
-if [[ -d "$APP" ]]; then
-  xcrun stapler staple "$APP" || echo "[!] App staple failed; submit app separately if needed"
+submit_with_profile() {
+  local file="$1"
+  echo "📨 Submitting with notarytool profile: ${PROFILE:-$PROFILE_DEF} → $(basename "$file")"
+  if [[ -n "$PROFILE" ]]; then
+    xcrun notarytool submit "$file" --keychain-profile "$PROFILE" --wait
+  else
+    xcrun notarytool submit "$file" --keychain-profile "$PROFILE_DEF" --wait
+  fi
+}
+
+submit_with_creds() {
+  local file="$1"
+  echo "📨 Submitting with Apple ID credentials → $(basename "$file")"
+  xcrun notarytool submit "$file" --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PW" --wait
+}
+
+if [[ -n "$PROFILE" || $(xcrun notarytool list-profiles >/dev/null 2>&1; echo $?) -eq 0 ]]; then
+  # Prefer explicit profile, else the first stored profile
+  if [[ -z "$PROFILE" ]]; then
+    PROFILE_DEF="$(xcrun notarytool list-profiles | awk 'NR==2{print $1}')"
+  fi
+  [[ -n "$DMG" && -f "$DMG" ]] && submit_with_profile "$DMG"
+  [[ -n "$ZIP_APP" && -f "$ZIP_APP" ]] && submit_with_profile "$ZIP_APP"
+else
+  # Interactive credentials path
+  if [[ -z "$APPLE_ID" ]]; then vared -p "Apple ID (e.g., you@example.com): " -c APPLE_ID; fi
+  if [[ -z "$TEAM_ID" ]]; then vared -p "Team ID (10 chars): " -c TEAM_ID; fi
+  read -s "APP_PW?App-specific password: "; echo
+  [[ -n "$DMG" && -f "$DMG" ]] && submit_with_creds "$DMG"
+  [[ -n "$ZIP_APP" && -f "$ZIP_APP" ]] && submit_with_creds "$ZIP_APP"
 fi
+
+echo "📎 Stapling ticket(s)"
+[[ -n "$DMG" && -f "$DMG" ]] && xcrun stapler staple "$DMG" || true
+[[ -d "$APP" ]] && xcrun stapler staple "$APP" || true
+[[ -n "$DMG" && -f "$DMG" ]] && xcrun stapler validate "$DMG" || true
+
+# Cleanup temporary ZIP if we created one
+[[ -n "$ZIP_APP" && -f "$ZIP_APP" ]] && rm -f "$ZIP_APP"
 
 echo "🔎 Verifying Gatekeeper assessment"
 spctl --assess --type execute -vvvv "$APP" || true
-[[ -n "$DMG" && -f "$DMG" ]] && xcrun stapler validate "$DMG" || true
 
 echo "✅ Done. You can now distribute: ${DMG:-$APP}"
