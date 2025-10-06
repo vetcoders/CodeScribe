@@ -22,13 +22,11 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
-
 import shutil
 import subprocess
-from typing import Optional
+from pathlib import Path
 
-from huggingface_hub import HfHubHTTPError, snapshot_download
+from huggingface_hub import snapshot_download
 
 # Known MLX Whisper repos
 WHISPER_REPOS = {
@@ -88,14 +86,16 @@ def _clone_with_git(repo_id: str, out: Path) -> None:
         subprocess.run(["git", "lfs", "install", "--local"], cwd=str(out), check=False)
         subprocess.run(["git", "lfs", "pull"], cwd=str(out), check=True)
     except FileNotFoundError as e:
-        raise RuntimeError("git-lfs not found; install it (e.g., 'brew install git-lfs') and retry") from e
+        raise RuntimeError(
+            "git-lfs not found; install it (e.g., 'brew install git-lfs') and retry"
+        ) from e
 
 
 def download_repo(
     repo_id: str,
     dest_dir: Path,
     target_name: str | None = None,
-    token: Optional[str] = None,
+    token: str | None = None,
     method: str = "auto",
 ) -> Path:
     ensure_dir(dest_dir)
@@ -128,9 +128,7 @@ def download_repo(
             print(f"✔ Downloaded to: {out}")
             return out
     if not _git_available():
-        msg = (
-            "git-lfs not found. Install it (e.g., 'brew install git-lfs'), then retry, or set HF_TOKEN and use hub downloader."
-        )
+        msg = "git-lfs not found. Install it (e.g., 'brew install git-lfs'), then retry, or set HF_TOKEN and use hub downloader."
         if last_err:
             raise RuntimeError(f"{msg}\nOriginal error: {last_err}")
         raise RuntimeError(msg)
@@ -139,7 +137,9 @@ def download_repo(
     return out
 
 
-def download_whisper(which: str, dest_dir: Path, *, method: str = "auto", token: Optional[str] = None) -> list[Path]:
+def download_whisper(
+    which: str, dest_dir: Path, *, method: str = "auto", token: str | None = None
+) -> list[Path]:
     which = which.lower()
     paths: list[Path] = []
     if which == "none":
@@ -154,7 +154,9 @@ def download_whisper(which: str, dest_dir: Path, *, method: str = "auto", token:
         targets = [which]
     for t in targets:
         repo = WHISPER_REPOS[t]
-        local = download_repo(repo, dest_dir, target_name=f"whisper-{t}", token=token, method=method)
+        local = download_repo(
+            repo, dest_dir, target_name=f"whisper-{t}", token=token, method=method
+        )
         paths.append(local)
     return paths
 
@@ -203,7 +205,9 @@ def main() -> int:
     print(f"Models directory: {models_dir}")
 
     # Whisper
-    whisper_paths = download_whisper(args.whisper, models_dir, method=args.method, token=args.hf_token)
+    whisper_paths = download_whisper(
+        args.whisper, models_dir, method=args.method, token=args.hf_token
+    )
 
     # LLMs (optional)
     llm_paths: list[Path] = []
