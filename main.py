@@ -33,6 +33,7 @@ import plistlib
 import queue  # for checking standard queue
 import sys
 import threading  # for asyncio thread
+from pathlib import Path
 
 import objc  # for selector
 import requests
@@ -40,6 +41,7 @@ import rumps
 
 import diag  # developer diagnostics
 import first_run
+import history
 import llm  # runtime toggle for formatting
 from audio import Recorder
 from config import Config, load_config, save_config, update_env_vars
@@ -60,6 +62,7 @@ from ui import (
     MenuIcon,
     backend_status_labels,
     config_labels,
+    copy_text,
     focused_element_accepts_text,
     hide_hold_badge,
     paste_text,
@@ -199,7 +202,11 @@ async def finish_recording(app: rumps.App):
 
         # 4. paste text
         if text_to_paste:
-            paste_text(text_to_paste)
+            if focused_element_accepts_text():
+                paste_text(text_to_paste)
+            else:
+                logger.info("No editable field detected; archiving transcript instead of pasting.")
+                app._archive_transcript(text_to_paste)
         else:
             logger.warning("No text available to paste after processing.")
 
@@ -410,6 +417,8 @@ class VistaScribe(rumps.App):
             "Start at Login",
             "Feedback",
             None,  # Separator
+            "History",
+            None,  # Separator
             "Models",
             None,  # Separator
             "Backends",  # placeholder; populated below
@@ -533,6 +542,27 @@ class VistaScribe(rumps.App):
         # Reflect current env
         self._refresh_feedback_menu()
 
+        # History submenu
+        self.item_history_label = rumps.MenuItem("Latest: —", callback=lambda _s: None)
+        self.item_history_copy_last = rumps.MenuItem(
+            "Copy Latest to Clipboard", callback=lambda _s: self._copy_latest_history()
+        )
+        self.item_history_open = rumps.MenuItem(
+            "Open History Folder", callback=lambda _s: self._open_history_folder()
+        )
+        self.menu["History"] = [
+            self.item_history_label,
+            None,
+            self.item_history_copy_last,
+            None,
+            self.item_history_open,
+        ]
+        try:
+            self.menu["History"].set_callback(lambda _s: None)
+        except Exception:
+            pass
+        self._refresh_history_menu()
+
         # Models submenu: download & select
         self.item_model_current = rumps.MenuItem("Current: —")
         self.item_use_small = rumps.MenuItem(
@@ -623,6 +653,7 @@ class VistaScribe(rumps.App):
         self.async_loop = None
         self.async_thread = None
         self.queue_timer = rumps.Timer(self.poll_queue, 0.05)  # poll queue every 50ms
+        self._latest_history_path: Path | None = None
         logger.info("Vista Scribe App initialized.")
         # Developer diagnostics: preflight snapshot if DEV_MODE enabled
         try:
@@ -991,6 +1022,83 @@ class VistaScribe(rumps.App):
                 )
         except Exception as e:
             logger.error(f"Failed to switch model: {e}")
+
+    def _schedule_history_refresh(self):
+        helper = getattr(rumps, "AppHelper", None)
+        if helper is not None:
+            helper.call_after(self._refresh_history_menu)
+        else:
+            self._refresh_history_menu()
+
+    def _refresh_history_menu(self):
+        entries = history.recent_entries(5)
+        if entries:
+            latest = entries[0]
+            preview = latest.preview or "(empty)"
+            self.item_history_label.title = (
+                f"Latest: {latest.timestamp.strftime('%H:%M:%S')} – {preview}"
+            )
+        else:
+            self.item_history_label.title = "Latest: —"
+
+        items: list[rumps.MenuItem | None] = [self.item_history_label, None]
+        if entries:
+            for entry in entries:
+                label = entry.label or entry.timestamp.strftime("%H:%M:%S")
+                item = rumps.MenuItem(
+                    label,
+                    callback=lambda _s, p=entry.path: self._copy_history_entry(Path(p)),
+                )
+                items.append(item)
+            items.append(None)
+        else:
+            items.append(rumps.MenuItem("No history yet", callback=lambda _s: None))
+            items.append(None)
+
+        items.append(self.item_history_copy_last)
+        items.append(None)
+        items.append(self.item_history_open)
+        self.menu["History"] = items
+
+    def _open_history_folder(self):
+        history.open_history_folder()
+
+    def _copy_history_entry(self, path: Path):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            logger.error(f"Failed to read history entry '{path}': {exc}")
+            return
+        copy_text(text)
+        try:
+            rumps.notification(
+                title="VistaScribe",
+                subtitle="Copied from history",
+                message=path.name,
+            )
+        except Exception:
+            pass
+
+    def _copy_latest_history(self):
+        entries = history.recent_entries(1)
+        if not entries:
+            return
+        self._copy_history_entry(entries[0].path)
+
+    def _archive_transcript(self, text: str):
+        entry = history.save_entry(text)
+        self._latest_history_path = entry.path
+        copy_text(text)
+        _set_status(self, "Saved to history (clipboard)")
+        try:
+            rumps.notification(
+                title="VistaScribe",
+                subtitle="Saved to history",
+                message="Brak pola tekstowego – tekst w schowku",
+            )
+        except Exception:
+            pass
+        self._schedule_history_refresh()
 
     def poll_queue(self, _timer):
         """periodically called by rumps.timer to check the event queue.
