@@ -58,7 +58,9 @@ _DOUBLE_OPTION_INTERVAL = float(os.environ.get("DOUBLE_OPTION_INTERVAL_MS", "350
 _DOUBLE_SPACE_INTERVAL = float(os.environ.get("DOUBLE_SPACE_INTERVAL_MS", "300")) / 1000.0
 
 # Toggle trigger: double_option (default) | double_ralt | double_space | none
-_TOGGLE_TRIGGER = os.environ.get("TOGGLE_TRIGGER", "double_ralt").strip().lower() or "double_ralt"
+_TOGGLE_TRIGGER = (
+    os.environ.get("TOGGLE_TRIGGER", "double_option").strip().lower() or "double_option"
+)
 
 # Enable/disable toggle shortcuts (defaults: double Option ON, Slash OFF)
 _ENABLE_DOUBLE_OPTION = os.environ.get("ENABLE_DOUBLE_OPTION", "1").lower() not in (
