@@ -367,6 +367,25 @@ def paste_text(text: str):
         _do_paste()
 
 
+def copy_text(text: str) -> bool:
+    """Copy text to clipboard without simulating paste."""
+    if not text:
+        logging.warning("Copy called with empty text.")
+        return False
+    try:
+        if AppKit is None:
+            logging.warning("AppKit unavailable; cannot access pasteboard.")
+            return False
+        pasteboard = AppKit.NSPasteboard.generalPasteboard()
+        pasteboard.clearContents()
+        pasteboard.declareTypes_owner_([AppKit.NSStringPboardType], None)
+        ok = pasteboard.setString_forType_(text, AppKit.NSStringPboardType)
+        return bool(ok)
+    except Exception as exc:
+        logging.error(f"Failed to copy text: {exc}")
+        return False
+
+
 def start_sound():
     """Play a soft, non-error start sound.
 
