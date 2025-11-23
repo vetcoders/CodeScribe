@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "[pre-commit] make check (ruff + mypy + bandit + pytest)"
+if command -v make >/dev/null 2>&1; then
+  make check
+else
+  echo "make not found; skipping make check"
+fi
+
+if command -v semgrep >/dev/null 2>&1; then
+  echo "[pre-commit] semgrep (.semgrep.yaml)"
+  semgrep \
+    --config .semgrep.yaml \
+    --error --metrics=off \
+    --exclude target --exclude lancedb --exclude .fastembed_cache
+else
+  echo "[pre-commit] semgrep not installed; skipping (install via 'pipx install semgrep')."
+fi
+
+echo "[pre-commit] done"
