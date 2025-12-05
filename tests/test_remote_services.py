@@ -2,14 +2,14 @@ import asyncio
 import importlib
 import json
 
-from vistascribe.settings_store import reset_settings_for_tests
+from codescribe.settings_store import reset_settings_for_tests
 
 
 def test_stt_uses_remote_when_configured(monkeypatch, tmp_path):
     # Configure remote URL and stub HTTP post
     monkeypatch.setenv("WHISPER_SERVER_URL", "http://localhost:9999")
 
-    import vistascribe.stt as stt_mod
+    import codescribe.stt as stt_mod
 
     importlib.reload(stt_mod)
 
@@ -38,14 +38,14 @@ def test_stt_uses_remote_when_configured(monkeypatch, tmp_path):
 
 
 def test_llm_uses_remote_when_configured(monkeypatch, tmp_path):
-    import vistascribe.llm as llm_mod
+    import codescribe.llm as llm_mod
 
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(
         __import__("json").dumps({"ai_formatting_enabled": True, "ai_provider": "harmony"}),
         encoding="utf-8",
     )
-    monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(settings_path))
     reset_settings_for_tests()
 
     importlib.reload(llm_mod)
@@ -64,7 +64,7 @@ def test_servers_apps_exist_and_healthz():
 
     from fastapi.testclient import TestClient
 
-    whisper_server = importlib.import_module("vistascribe.whisper_server")
+    whisper_server = importlib.import_module("codescribe.whisper_server")
 
     wc = TestClient(whisper_server.app)
 
@@ -74,10 +74,10 @@ def test_servers_apps_exist_and_healthz():
 
 
 def test_ui_helper_backend_labels(monkeypatch, tmp_path):
-    from vistascribe.ui import backend_status_labels
+    from codescribe.ui import backend_status_labels
 
     settings_path = tmp_path / "settings.json"
-    monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(settings_path))
 
     settings_path.write_text(json.dumps({"ai_formatting_enabled": False}), encoding="utf-8")
     reset_settings_for_tests()

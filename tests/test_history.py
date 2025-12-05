@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest import mock
 
-import vistascribe.history as hist
+import codescribe.history as hist
 
 
 def _set_fake_root(tmp_path: Path, monkeypatch):

@@ -1,6 +1,6 @@
-# Contributing to VistaScribe
+# Contributing to CodeScribe
 
-Thanks for your interest in improving VistaScribe! This document explains how to set up
+Thanks for your interest in improving CodeScribe! This document explains how to set up
 your environment, the expectations we have for pull requests, and the checks that run in
 continuous integration.
 
@@ -12,7 +12,7 @@ continuous integration.
 - **English user-facing text.** UI strings, docs, scripts, and comments must be in English.
 - **Security & privacy.** Do not add secrets, personal paths, or machine-specific data to the
   repo. Shared configuration lives in `.env.example` and `settings_store.py`.
-- **Stay on macOS.** VistaScribe targets Apple Silicon macOS. The tooling (MLX, pyobjc,
+- **Stay on macOS.** CodeScribe targets Apple Silicon macOS. The tooling (MLX, pyobjc,
   permissions prompts) assumes that platform.
 
 ## Environment Setup
@@ -34,8 +34,8 @@ continuous integration.
 
 ### Helpful Utilities
 
-- `VistaScribe` – friendly launcher (start/stop/status/logs).
-- `VistaScribe-dev` – developer toolbox (fresh cleanup, build DMG, run lint/tests, etc.).
+- `CodeScribe` – friendly launcher (start/stop/status/logs).
+- `CodeScribe-dev` – developer toolbox (fresh cleanup, build DMG, run lint/tests, etc.).
 - `.run/*.run.xml` – JetBrains run configs for the common actions above.
 
 ## Coding Standards
@@ -90,4 +90,4 @@ File an issue or open a draft PR if you need early feedback. Maintainers hang ou
 repository Discussions tab; feel free to start a thread if you have questions about the
 architecture or packaging.
 
-Thanks again for helping us keep VistaScribe reliable for the Vista desktop clients!
+Thanks again for helping us keep CodeScribe reliable for the Vista desktop clients!

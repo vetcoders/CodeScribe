@@ -2,9 +2,9 @@ import json
 
 import pytest
 
-import vistascribe.llm as llm
-import vistascribe.stt as stt
-from vistascribe.settings_store import reset_settings_for_tests
+import codescribe.llm as llm
+import codescribe.stt as stt
+from codescribe.settings_store import reset_settings_for_tests
 
 
 def _settings(tmp_path, monkeypatch, **overrides):
@@ -17,7 +17,7 @@ def _settings(tmp_path, monkeypatch, **overrides):
     }
     data.update(overrides)
     path.write_text(json.dumps(data), encoding="utf-8")
-    monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(path))
     reset_settings_for_tests()
 
 

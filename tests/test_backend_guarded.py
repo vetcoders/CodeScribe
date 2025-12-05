@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def app_client(monkeypatch):
     # Import here so env-based flags are computed first; then override directly
-    import vistascribe.backend as backend
+    import codescribe.backend as backend
 
     # Ensure guarded endpoints are disabled by default for this test
     monkeypatch.setattr(backend, "_ACTIONS_ENABLED", False, raising=False)

@@ -58,7 +58,7 @@ rules:
     severity: ERROR
     paths:
       include:
-        - "src/vistascribe/assets/lab/**"
+        - "src/codescribe/assets/lab/**"
     pattern: import React from "../lib/react.js";
     fix: import { React } from "../lib/react.js";
 

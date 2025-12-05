@@ -1,7 +1,7 @@
 import sys
 import types
 
-import vistascribe.menu_model as mm
+import codescribe.menu_model as mm
 
 
 class FakeMenuItem:

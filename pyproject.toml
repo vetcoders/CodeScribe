@@ -1,5 +1,5 @@
 [project]
-name = "VistaScribe"
+name = "CodeScribe"
 version = "0.4.3"
 description = "Local macOS tray app for speech-to-text with MLX Whisper + optional MLX‑LM formatting"
 readme = "README.md"
@@ -224,10 +224,10 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["vistascribe*"]
+include = ["codescribe*"]
 
 [tool.setuptools.package-data]
-"vistascribe" = ["assets/*.png", "assets/*.html", "py.typed"]
+"codescribe" = ["assets/*.png", "assets/*.html", "py.typed"]
 
 [tool.ruff]
 line-length = 100
@@ -256,15 +256,15 @@ ignore = [
 "record_and_transcribe.py" = ["E501"]
 "packaging/setup.py" = ["E501"]
 # Legacy/monolithic modules or UI-heavy files with intentional patterns.
-"src/vistascribe/backend.py" = ["E402", "E501"]
-"src/vistascribe/llm.py" = ["E501"]
-"src/vistascribe/app/runtime.py" = ["E501", "E722", "F841"]
+"src/codescribe/backend.py" = ["E402", "E501"]
+"src/codescribe/llm.py" = ["E501"]
+"src/codescribe/app/runtime.py" = ["E501", "E722", "F841"]
 ".archive/main_backup.py" = ["E501", "E722"]
-"src/vistascribe/ollama_endpoint_setter.py" = ["F821", "E501", "E722"]
+"src/codescribe/ollama_endpoint_setter.py" = ["F821", "E501", "E722"]
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["vistascribe"]
+known-first-party = ["codescribe"]
 
 [tool.ruff.format]
 indent-style = "space"
@@ -304,10 +304,10 @@ exclude_dirs = [
     "tests",
     "scripts",
     # Client-side UI code often flags false positives in Bandit (subprocess, etc.)
-    "src/vistascribe/app",
-    "src/vistascribe/formatting",
+    "src/codescribe/app",
+    "src/codescribe/formatting",
 ]
-targets = ["src/vistascribe"]
+targets = ["src/codescribe"]
 
 [tool.bandit.assert_used]
 skips = ["*_test.py", "test_*.py"]

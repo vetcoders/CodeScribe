@@ -3,7 +3,7 @@
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "VISTASCRIBE PROCESS INSPECTOR"
+echo "CODESCRIBE PROCESS INSPECTOR"
 echo "======================================"
 
 # Check Ollama model
@@ -12,7 +12,7 @@ curl -s http://127.0.0.1:11434/api/ps 2>/dev/null | jq -r '.models[].name' 2>/de
 echo ""
 
 # Process info
-ps aux | grep -E "VistaScribe|vistascribe\\.main|vistascribe_server" | grep -v grep | while read user pid cpu mem vsz rss tty stat start time cmd rest; do
+ps aux | grep -E "CodeScribe|codescribe\\.main|codescribe_server" | grep -v grep | while read user pid cpu mem vsz rss tty stat start time cmd rest; do
     echo "======================================"
     # Extract just the command name
     cmd_name=$(basename "$cmd")

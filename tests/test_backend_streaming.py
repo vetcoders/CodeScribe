@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-import vistascribe.backend as backend
+import codescribe.backend as backend
 
 
 def _client(monkeypatch) -> TestClient:

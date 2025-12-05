@@ -30,7 +30,7 @@ def build_fake_hotkeys_module():
         "queue": queue.Queue(),
     }
 
-    module = types.ModuleType("vistascribe.hotkeys")
+    module = types.ModuleType("codescribe.hotkeys")
 
     def events():
         return state["queue"]

@@ -1,7 +1,7 @@
 import importlib
 import json
 
-from vistascribe.settings_store import reset_settings_for_tests
+from codescribe.settings_store import reset_settings_for_tests
 
 
 def _seed_settings(tmp_path, monkeypatch, **overrides):
@@ -15,7 +15,7 @@ def _seed_settings(tmp_path, monkeypatch, **overrides):
     }
     content.update(overrides)
     path.write_text(json.dumps(content), encoding="utf-8")
-    monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(path))
     reset_settings_for_tests()
 
 
@@ -26,7 +26,7 @@ def test_load_config_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WHISPER_LANGUAGE", "pl")
     _seed_settings(tmp_path, monkeypatch, ai_formatting_enabled=True, language="pl")
 
-    import vistascribe.config as cfg
+    import codescribe.config as cfg
 
     importlib.reload(cfg)
 
@@ -38,7 +38,7 @@ def test_load_config_from_env(monkeypatch, tmp_path):
 
 
 def test_serialize_env_and_save(tmp_path, monkeypatch):
-    import vistascribe.config as cfg
+    import codescribe.config as cfg
 
     _seed_settings(tmp_path, monkeypatch, ai_formatting_enabled=False)
 
@@ -62,8 +62,8 @@ def test_serialize_env_and_save(tmp_path, monkeypatch):
 
 
 def test_ui_config_labels(monkeypatch, tmp_path):
-    import vistascribe.config as cfg
-    import vistascribe.ui as ui_mod
+    import codescribe.config as cfg
+    import codescribe.ui as ui_mod
     # ensure we can import without macOS frameworks by not touching UI classes
 
     _seed_settings(tmp_path, monkeypatch, ai_formatting_enabled=True)

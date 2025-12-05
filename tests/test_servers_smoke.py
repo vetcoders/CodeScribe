@@ -24,7 +24,7 @@ def test_backend_healthz_smoke(monkeypatch):
 def test_whisper_server_healthz_smoke(monkeypatch):
     import importlib
 
-    ws = importlib.import_module("vistascribe.whisper_server")
+    ws = importlib.import_module("codescribe.whisper_server")
     monkeypatch.setattr(ws, "_whisper_model", None, raising=False)
     client = TestClient(ws.app)
     _health(client)

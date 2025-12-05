@@ -5,7 +5,7 @@ import pytest
 from dotenv import load_dotenv
 
 from tests.helpers.ollama import ensure_host_and_model
-from vistascribe.llm import _ollama_generate
+from codescribe.llm import _ollama_generate
 
 load_dotenv()
 

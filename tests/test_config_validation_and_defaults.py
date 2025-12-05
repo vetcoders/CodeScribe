@@ -1,15 +1,15 @@
 import importlib
 import json
 
-from vistascribe.settings_store import reset_settings_for_tests
+from codescribe.settings_store import reset_settings_for_tests
 
 
 def test_load_config_handles_non_string_urls_and_defaults(monkeypatch, tmp_path):
-    import vistascribe.config as cfg
+    import codescribe.config as cfg
 
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({"ai_formatting_enabled": False}), encoding="utf-8")
-    monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(settings_path))
     reset_settings_for_tests()
 
     importlib.reload(cfg)

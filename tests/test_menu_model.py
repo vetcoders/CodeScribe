@@ -1,4 +1,4 @@
-from vistascribe.menu_model import build_models_spec
+from codescribe.menu_model import build_models_spec
 
 
 def titles(spec):

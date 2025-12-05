@@ -3,7 +3,7 @@
 Quick reference for what the main paths do in this repo.
 
 ## Top level
-- `VistaScribe`, `VistaScribe-dev`: launchers (tray/backend start/stop, logs).
+- `CodeScribe`, `CodeScribe-dev`: launchers (tray/backend start/stop, logs).
 - `backend.py`, `whisper_server.py`: legacy CLI entrypoints for local STT server.
 - `scripts/`: helper shell scripts (quickstart_mac, clean, tests, model fetch).
 - `packaging/`: packaging/signing/notarization helpers and app wrapper scripts.
@@ -12,7 +12,7 @@ Quick reference for what the main paths do in this repo.
 ## Docs & reports
 - `docs/`: misc docs; `menu_tree.*` shows tray menu structure; `proposals/`, `reports/` (includes project-tree.txt capture), `TEAM_SETUP.md`, `MLX_CHEATSHEET.md`.
 
-## Core source (`src/vistascribe`)
+## Core source (`src/codescribe`)
 - `main.py`: tray entrypoint; loads `.env`, then runtime.
 - `app/runtime.py`: rumps app wiring; builds menu, pulls in mixins, hotkeys loop, state.
 - `app/recording_controller.py`: hotkey state machine + recorder lifecycle + paste/history glue.
@@ -31,7 +31,7 @@ Quick reference for what the main paths do in this repo.
 - `permission_manager.py`, `login_manager.py`, `first_run.py`, `hardware_detector.py`: env/perm checks.
 - `chatclient.py`, `tts.py`, `codescribe_context.py`, `context_folder.py`, `ollama_endpoint_setter.py`, `onboarding/`: optional helpers and integrations.
 - `assets/`: icon and voice chat lab HTML.
-- `vistascribe_server.py`, `whisper_server.py`: server entrypoints (FastAPI + legacy Whisper server).
+- `codescribe_server.py`, `whisper_server.py`: server entrypoints (FastAPI + legacy Whisper server).
 
 ## Tests
 - `tests/`: unit/integration; `manual/` has manual flow scripts; helpers include fake hotkeys/rumps and Ollama stubs.

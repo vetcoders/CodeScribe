@@ -7,9 +7,9 @@ from tests.helpers.fake_rumps import build_fake_rumps_module
 
 def test_hold_mods_label_and_exclusive_toggle(monkeypatch):
     fake_hotkeys = build_fake_hotkeys_module()
-    monkeypatch.setitem(sys.modules, "vistascribe.hotkeys", fake_hotkeys)
+    monkeypatch.setitem(sys.modules, "codescribe.hotkeys", fake_hotkeys)
 
-    hotkeys = importlib.import_module("vistascribe.hotkeys")
+    hotkeys = importlib.import_module("codescribe.hotkeys")
     assert hotkeys.hold_mods_label() == "Ctrl"
 
     hotkeys.set_hold_mods("ctrl+alt")
@@ -23,10 +23,10 @@ def test_hold_mods_label_and_exclusive_toggle(monkeypatch):
 def test_hold_menu_roundtrip_updates_hotkeys(monkeypatch):
     fake_hotkeys = build_fake_hotkeys_module()
     fake_rumps = build_fake_rumps_module()
-    monkeypatch.setitem(sys.modules, "vistascribe.hotkeys", fake_hotkeys)
+    monkeypatch.setitem(sys.modules, "codescribe.hotkeys", fake_hotkeys)
     monkeypatch.setitem(sys.modules, "rumps", fake_rumps)
 
-    module_name = "vistascribe.app.mixins.hold_menu"
+    module_name = "codescribe.app.mixins.hold_menu"
     sys.modules.pop(module_name, None)
     hold_menu = importlib.import_module(module_name)
     saved_env = []

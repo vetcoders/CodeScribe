@@ -1,8 +1,8 @@
 import json
 from types import SimpleNamespace
 
-from vistascribe.settings_store import reset_settings_for_tests
-from vistascribe.ui import MenuIcon, backend_status_labels, config_labels
+from codescribe.settings_store import reset_settings_for_tests
+from codescribe.ui import MenuIcon, backend_status_labels, config_labels
 
 
 def _seed_settings(tmp_path, monkeypatch, **data):
@@ -13,7 +13,7 @@ def _seed_settings(tmp_path, monkeypatch, **data):
     }
     base.update(data)
     path.write_text(json.dumps(base), encoding="utf-8")
-    monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(path))
     reset_settings_for_tests()
 
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname "$0")/../.." && pwd)"
 DIST_DIR="$ROOT_DIR/packaging/dist"
-APP_DIR="$DIST_DIR/VistaScribe.app"
+APP_DIR="$DIST_DIR/CodeScribe.app"
 
 # Resolve version from pyproject.toml if present
 VERSION="0.1.0"
@@ -46,13 +46,13 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>VistaScribe</string>
-  <key>CFBundleDisplayName</key><string>VistaScribe</string>
-  <key>CFBundleIdentifier</key><string>com.vistascribe.app</string>
+  <key>CFBundleName</key><string>CodeScribe</string>
+  <key>CFBundleDisplayName</key><string>CodeScribe</string>
+  <key>CFBundleIdentifier</key><string>com.codescribe.app</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleExecutable</key><string>vistascribe</string>
+  <key>CFBundleExecutable</key><string>codescribe</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Needed to transcribe speech.</string>
@@ -63,18 +63,18 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 PLIST
 
 # Launcher executable
-cat > "$APP_DIR/Contents/MacOS/vistascribe" <<'LAUNCH'
+cat > "$APP_DIR/Contents/MacOS/codescribe" <<'LAUNCH'
 #!/bin/zsh
 set -euo pipefail
 APP_DIR="$(cd -- "$(dirname "$0")/.." && pwd)"
 REPO_DIR="$APP_DIR/Contents/Resources/Repo"
 LOG_DIR="$HOME/Library/Logs"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/VistaScribe.app.log"
+LOG_FILE="$LOG_DIR/CodeScribe.app.log"
 MODELS_DIR="$APP_DIR/Contents/Resources/Models"
 
 # Ensure the shared settings live outside the app bundle
-export VISTASCRIBE_SETTINGS_PATH="$HOME/.VistaScribe/settings.json"
+export CODESCRIBE_SETTINGS_PATH="$HOME/.CodeScribe/settings.json"
 
 # Ensure uv and brew binaries are on PATH when launched from Finder
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -105,12 +105,12 @@ cd "$REPO_DIR"
 # All output goes to the app log for debugging if needed
 exec ./scripts/quickstart_mac.sh --mode both --fg >> "$LOG_FILE" 2>&1
 LAUNCH
-chmod +x "$APP_DIR/Contents/MacOS/vistascribe"
+chmod +x "$APP_DIR/Contents/MacOS/codescribe"
 
 # Build a basic .icns from assets/icon.png (best-effort)
 ICON_SRC="$ROOT_DIR/assets/icon.png"
 if [[ ! -f "$ICON_SRC" ]]; then
-  ICON_SRC="$ROOT_DIR/src/vistascribe/assets/icon.png"
+  ICON_SRC="$ROOT_DIR/src/codescribe/assets/icon.png"
 fi
 if [[ ! -f "$ICON_SRC" ]]; then
   ICON_SRC="$ROOT_DIR/Resources/assets/icon.png"

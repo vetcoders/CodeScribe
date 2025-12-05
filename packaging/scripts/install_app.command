@@ -3,13 +3,13 @@ set -euo pipefail
 
 HERE="$(cd -- "$(dirname "$0")" && pwd)"
 DMG_ROOT="$(cd -- "$HERE/.." && pwd)"
-APP_SRC="$DMG_ROOT/../dist/VistaScribe.app"
+APP_SRC="$DMG_ROOT/../dist/CodeScribe.app"
 if [[ ! -d "$APP_SRC" ]]; then
   # When executed from DMG: Helpers is sibling of the app bundle
   APP_SRC="$DMG_ROOT/../Vista Scribe.app"
 fi
 
-DEST="/Applications/VistaScribe.app"
+DEST="/Applications/CodeScribe.app"
 
 echo "[i] Installing to $DEST"
 if cp -R "$APP_SRC" "$DEST" 2>/dev/null; then

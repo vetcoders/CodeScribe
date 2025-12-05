@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture()
 def chat_client(monkeypatch):
-    import vistascribe.backend as backend
+    import codescribe.backend as backend
 
     async def fake_chat(messages, settings=None):
         suffix = messages[-1]["content"] if messages else ""

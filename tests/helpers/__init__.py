@@ -1,1 +1,1 @@
-"""Test helpers for VistaScribe."""
+"""Test helpers for CodeScribe."""

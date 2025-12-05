@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import asyncio
 
-import vistascribe.client as client
+import codescribe.client as client
 
 
 def test_sync():
@@ -46,7 +46,7 @@ async def test_async():
 
     import numpy as np
 
-    tmp_dir = tempfile.mkdtemp(prefix="vistascribe-manual-")
+    tmp_dir = tempfile.mkdtemp(prefix="codescribe-manual-")
     test_file = os.path.join(tmp_dir, "test.wav")
     sample_rate = 16000
     duration = 1  # second

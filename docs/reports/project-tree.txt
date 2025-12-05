@@ -851,7 +851,7 @@
 │   ├── modules.xml
 │   ├── shelf
 │   ├── vcs.xml
-│   ├── VistaScribe.iml
+│   ├── CodeScribe.iml
 │   └── workspace.xml
 ├── .mypy_cache
 │   ├── .DS_Store
@@ -862,7 +862,7 @@
 ├── .pids
 │   ├── server.pid
 │   ├── tray.pid
-│   └── vistascribe-server.pid
+│   └── codescribe-server.pid
 ├── .pre-commit-config.yaml
 ├── .pytest_cache
 │   ├── .DS_Store
@@ -888,31 +888,31 @@
 │   ├── MLX_Audio_Server.run.xml
 │   ├── MLX_LM_Server.run.xml
 │   ├── Tests_PyTest.run.xml
-│   ├── VistaScribe_Backend.run.xml
-│   ├── VistaScribe_fresh_yes.run.xml
-│   ├── VistaScribe_help.run.xml
-│   ├── VistaScribe_logs_follow.run.xml
-│   ├── VistaScribe_start_backend.run.xml
-│   ├── VistaScribe_start_both.run.xml
-│   ├── VistaScribe_start_tray.run.xml
-│   ├── VistaScribe_status.run.xml
-│   ├── VistaScribe_stop.run.xml
-│   ├── VistaScribe_Tray.run.xml
-│   ├── VistaScribe-dev_build_app.run.xml
-│   ├── VistaScribe-dev_build_dmg.run.xml
-│   ├── VistaScribe-dev_diag.run.xml
-│   ├── VistaScribe-dev_fresh_yes.run.xml
-│   ├── VistaScribe-dev_help.run.xml
-│   ├── VistaScribe-dev_lint.run.xml
-│   ├── VistaScribe-dev_logs_follow.run.xml
-│   ├── VistaScribe-dev_release_no_notary.run.xml
-│   ├── VistaScribe-dev_start_backend.run.xml
-│   ├── VistaScribe-dev_start_both.run.xml
-│   ├── VistaScribe-dev_start_tray.run.xml
-│   ├── VistaScribe-dev_status.run.xml
-│   ├── VistaScribe-dev_stop.run.xml
-│   └── VistaScribe-dev_test.run.xml
-├── .vista_scribe.lock
+│   ├── CodeScribe_Backend.run.xml
+│   ├── CodeScribe_fresh_yes.run.xml
+│   ├── CodeScribe_help.run.xml
+│   ├── CodeScribe_logs_follow.run.xml
+│   ├── CodeScribe_start_backend.run.xml
+│   ├── CodeScribe_start_both.run.xml
+│   ├── CodeScribe_start_tray.run.xml
+│   ├── CodeScribe_status.run.xml
+│   ├── CodeScribe_stop.run.xml
+│   ├── CodeScribe_Tray.run.xml
+│   ├── CodeScribe-dev_build_app.run.xml
+│   ├── CodeScribe-dev_build_dmg.run.xml
+│   ├── CodeScribe-dev_diag.run.xml
+│   ├── CodeScribe-dev_fresh_yes.run.xml
+│   ├── CodeScribe-dev_help.run.xml
+│   ├── CodeScribe-dev_lint.run.xml
+│   ├── CodeScribe-dev_logs_follow.run.xml
+│   ├── CodeScribe-dev_release_no_notary.run.xml
+│   ├── CodeScribe-dev_start_backend.run.xml
+│   ├── CodeScribe-dev_start_both.run.xml
+│   ├── CodeScribe-dev_start_tray.run.xml
+│   ├── CodeScribe-dev_status.run.xml
+│   ├── CodeScribe-dev_stop.run.xml
+│   └── CodeScribe-dev_test.run.xml
+├── .codescribe.lock
 ├── config
 │   ├── .DS_Store
 │   └── env
@@ -949,7 +949,7 @@
 │   └── vista-check.sh
 ├── src
 │   ├── .DS_Store
-│   └── vistascribe
+│   └── codescribe
 ├── streaming-stt-inspirations
 │   ├── .DS_Store
 │   ├── .env.example
@@ -989,7 +989,7 @@
 │   ├── expose_ollama_tailscale.sh
 │   └── sitecustomize.py
 ├── uv.lock
-├── VistaScribe
-└── VistaScribe-dev
+├── CodeScribe
+└── CodeScribe-dev
 
 51 directories, 942 files

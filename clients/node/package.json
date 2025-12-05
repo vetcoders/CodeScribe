@@ -1,9 +1,9 @@
 {
-  "name": "vistascribe-stream-client",
+  "name": "codescribe-stream-client",
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "Minimal NDJSON streaming client for VistaScribe backend",
+  "description": "Minimal NDJSON streaming client for CodeScribe backend",
   "scripts": {
     "start": "node vs-stream-client.mjs"
   },

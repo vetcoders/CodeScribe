@@ -7,19 +7,19 @@ from tests.helpers.fake_hotkeys import build_fake_hotkeys_module
 from tests.helpers.fake_rumps import MenuItem, build_fake_rumps_module
 
 MODULES_WITH_RUMPS = [
-    "vistascribe.permission_manager",
-    "vistascribe.menu_formatting",
-    "vistascribe.app.status",
-    "vistascribe.app.controllers.history",
-    "vistascribe.app.controllers.models",
-    "vistascribe.app.menu_utils",
-    "vistascribe.app.mixins.appearance",
-    "vistascribe.app.mixins.backends",
-    "vistascribe.app.mixins.feedback",
-    "vistascribe.app.mixins.hold_menu",
-    "vistascribe.app.mixins.runtime_loop",
-    "vistascribe.app.mixins.tools",
-    "vistascribe.app.recording_controller",
+    "codescribe.permission_manager",
+    "codescribe.menu_formatting",
+    "codescribe.app.status",
+    "codescribe.app.controllers.history",
+    "codescribe.app.controllers.models",
+    "codescribe.app.menu_utils",
+    "codescribe.app.mixins.appearance",
+    "codescribe.app.mixins.backends",
+    "codescribe.app.mixins.feedback",
+    "codescribe.app.mixins.hold_menu",
+    "codescribe.app.mixins.runtime_loop",
+    "codescribe.app.mixins.tools",
+    "codescribe.app.recording_controller",
 ]
 
 
@@ -36,17 +36,17 @@ def tray_runtime(monkeypatch):
     fake_rumps = build_fake_rumps_module()
     fake_hotkeys = build_fake_hotkeys_module()
     monkeypatch.setitem(sys.modules, "rumps", fake_rumps)
-    monkeypatch.setitem(sys.modules, "vistascribe.hotkeys", fake_hotkeys)
+    monkeypatch.setitem(sys.modules, "codescribe.hotkeys", fake_hotkeys)
 
-    import vistascribe.audio as audio
+    import codescribe.audio as audio
 
     monkeypatch.setattr(audio, "Recorder", DummyRecorder)
 
-    import vistascribe.first_run as first_run
+    import codescribe.first_run as first_run
 
     monkeypatch.setattr(first_run, "ensure_config_and_permissions", lambda: None)
 
-    import vistascribe.diag as diag
+    import codescribe.diag as diag
 
     monkeypatch.setattr(diag, "run_preflight", lambda _logger: {})
     monkeypatch.setattr(diag, "write_snapshot", lambda _info, _root: None)
@@ -54,19 +54,19 @@ def tray_runtime(monkeypatch):
     saved = {}
     for name in MODULES_WITH_RUMPS:
         saved[name] = sys.modules.pop(name, None)
-    sys.modules.pop("vistascribe.app.runtime", None)
+    sys.modules.pop("codescribe.app.runtime", None)
 
-    runtime = importlib.import_module("vistascribe.app.runtime")
+    runtime = importlib.import_module("codescribe.app.runtime")
 
     yield runtime, fake_rumps
 
-    sys.modules.pop("vistascribe.app.runtime", None)
+    sys.modules.pop("codescribe.app.runtime", None)
     for name in MODULES_WITH_RUMPS:
         sys.modules.pop(name, None)
         if saved[name] is not None:
             sys.modules[name] = saved[name]
     sys.modules.pop("rumps", None)
-    sys.modules.pop("vistascribe.hotkeys", None)
+    sys.modules.pop("codescribe.hotkeys", None)
 
 
 def _visible_titles(menu, fake_rumps_module):
@@ -79,7 +79,7 @@ def _visible_titles(menu, fake_rumps_module):
 
 def test_tray_menu_order_and_callbacks(tray_runtime):
     runtime, fake_rumps = tray_runtime
-    app = runtime.VistaScribe()
+    app = runtime.CodeScribe()
 
     titles = _visible_titles(app.menu, fake_rumps)
     expected = [

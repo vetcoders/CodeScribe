@@ -1,6 +1,6 @@
 import rumps
 
-from vistascribe.app.menu_utils import create_parent_item, ensure_parent_callback, set_submenu
+from codescribe.app.menu_utils import create_parent_item, ensure_parent_callback, set_submenu
 
 
 def test_parent_menu_items_remain_enabled():

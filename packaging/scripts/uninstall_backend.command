@@ -1,13 +1,13 @@
 #!/bin/zsh
 # uninstall_backend.command
 #
-# Purpose: Stop and remove the VistaScribe backend LaunchAgent and logs.
+# Purpose: Stop and remove the CodeScribe backend LaunchAgent and logs.
 
 set -euo pipefail
 
-PLIST="$HOME/Library/LaunchAgents/com.VistaScribe.backend.plist"
+PLIST="$HOME/Library/LaunchAgents/com.CodeScribe.backend.plist"
 
-if launchctl list | grep -q "com.VistaScribe.backend"; then
+if launchctl list | grep -q "com.CodeScribe.backend"; then
   echo "[i] Unloading LaunchAgent…"
   launchctl unload "$PLIST" || true
 fi
@@ -18,7 +18,7 @@ if [[ -f "$PLIST" ]]; then
 fi
 
 echo "[i] Removing logs from /tmp"
-rm -f /tmp/VistaScribe.backend.out.log || true
-rm -f /tmp/VistaScribe.backend.err.log || true
+rm -f /tmp/CodeScribe.backend.out.log || true
+rm -f /tmp/CodeScribe.backend.err.log || true
 
 echo "[✓] Backend uninstalled."

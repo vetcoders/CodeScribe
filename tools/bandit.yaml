@@ -1,4 +1,4 @@
-# Bandit configuration for VistaScribe
+# Bandit configuration for CodeScribe
 exclude_dirs:
   - .venv
   - dist
@@ -8,8 +8,8 @@ exclude_dirs:
   - models
   - tests
   - scripts
-  - src/vistascribe/app
-  - src/vistascribe/formatting
+  - src/codescribe/app
+  - src/codescribe/formatting
 skips: []
 targets:
-  - src/vistascribe
+  - src/codescribe

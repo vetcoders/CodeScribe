@@ -1,6 +1,6 @@
 import pytest
 
-import vistascribe.stt as stt
+import codescribe.stt as stt
 
 
 @pytest.mark.asyncio

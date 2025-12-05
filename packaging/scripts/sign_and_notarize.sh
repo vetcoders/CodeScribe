@@ -1,11 +1,11 @@
 #!/bin/zsh
-# sign_and_notarize.sh — helper to codesign and notarize VistaScribe
+# sign_and_notarize.sh — helper to codesign and notarize CodeScribe
 # Usage:
 #   packaging/scripts/sign_and_notarize.sh \
-#     --app "packaging/dist/VistaScribe.app" \
+#     --app "packaging/dist/CodeScribe.app" \
 #     --cert "Developer ID Application: Your Name (TEAMID)" \
 #     --profile "AC_PROFILE_NAME" \
-#     [--dmg packaging/dmg/VistaScribe.dmg]
+#     [--dmg packaging/dmg/CodeScribe.dmg]
 
 set -euo pipefail
 

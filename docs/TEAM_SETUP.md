@@ -1,7 +1,7 @@
-# VistaScribe — Internal Onboarding Cheatsheet
+# CodeScribe — Internal Onboarding Cheatsheet
 
 ## Option A – DMG Install (fastest)
-1. Copy `packaging/dmg/VistaScribe.dmg` to your Mac and open it.
+1. Copy `packaging/dmg/CodeScribe.dmg` to your Mac and open it.
 2. Inside the DMG run the helpers in order:
    - `Helpers/Get Models.command` – download Whisper (Large v3 Turbo or Medium).
    - `Helpers/Install App.command` – copy the app into `/Applications` and launch it.
@@ -14,7 +14,7 @@
    - Double‑tap `Option (⌥)` for toggle mode.
 
 ## Option B – Run from the repo (dev workflow)
-1. Clone the repo and `cd VistaScribe`.
+1. Clone the repo and `cd CodeScribe`.
 2. Install dependencies:
    ```bash
    uv sync
@@ -25,9 +25,9 @@
    ```
 4. Start tray + backend as daemons:
    ```bash
-   ./scripts/quickstart_mac.sh --mode both --daemon --log VistaScribe.log
+   ./scripts/quickstart_mac.sh --mode both --daemon --log CodeScribe.log
    ```
-   - Watch logs with `tail -f VistaScribe.log`.
+   - Watch logs with `tail -f CodeScribe.log`.
    - Stop everything via `./scripts/quickstart_mac.sh --stop-all`.
 
 ## Shortcuts & Toggles
@@ -36,8 +36,8 @@
 - Tray → **Feedback**: enable/disable the start chime, switch sounds (Tink/Pop), and set the volume—also persisted to `.env`.
 
 ## Logs & PID Files
-- Tray (launch agent) log: `~/Library/Logs/VistaScribe.app.log`
-- Quickstart log: `VistaScribe.log`, backend logs under `logs/backend.*.log`
+- Tray (launch agent) log: `~/Library/Logs/CodeScribe.app.log`
+- Quickstart log: `CodeScribe.log`, backend logs under `logs/backend.*.log`
 - PID files for emergency shutdowns: `.pids/tray.pid`, `.pids/backend.pid`
 
 ## Formatting / AI Models

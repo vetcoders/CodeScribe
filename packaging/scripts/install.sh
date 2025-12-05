@@ -1,5 +1,5 @@
 #!/bin/zsh
-# VistaScribe installer (macOS) — curl | sh friendly
+# CodeScribe installer (macOS) — curl | sh friendly
 #
 # Supports two sources:
 #  1) Direct DMG URL via --url
@@ -7,9 +7,9 @@
 # Installs app to /Applications, optionally sets Start at Login.
 #
 # Examples:
-#  curl -fsSL https://raw.githubusercontent.com/LibraxisAI/VistaScribe/develop/packaging/scripts/install.sh | zsh -s -- --url "https://example.com/VistaScribe-0.1.0.dmg"
+#  curl -fsSL https://raw.githubusercontent.com/Loctree/CodeScribe/develop/packaging/scripts/install.sh | zsh -s -- --url "https://example.com/CodeScribe-0.1.0.dmg"
 #  GH_TOKEN=xxxx curl -H "Authorization: token $GH_TOKEN" -fsSL \
-#    https://raw.githubusercontent.com/LibraxisAI/VistaScribe/develop/packaging/scripts/install.sh | zsh -s -- --repo LibraxisAI/VistaScribe --latest
+#    https://raw.githubusercontent.com/Loctree/CodeScribe/develop/packaging/scripts/install.sh | zsh -s -- --repo Loctree/CodeScribe --latest
 
 set -euo pipefail
 
@@ -37,7 +37,7 @@ TMPDIR="${TMPDIR:-/tmp}"
 DMG_PATH=""
 
 fetch_dmg() {
-  local out="$TMPDIR/VistaScribe.$$.$RANDOM.dmg"
+  local out="$TMPDIR/CodeScribe.$$.$RANDOM.dmg"
   if [[ -n "$URL" ]]; then
     echo "⬇ Downloading DMG…"
     curl -fL --retry 3 --output "$out" "$URL"
@@ -75,31 +75,31 @@ install_app() {
   [[ -d "$mp" ]] || { echo "❌ Failed to mount DMG" >&2; exit 4; }
   trap 'hdiutil detach -quiet "$mp" || true' EXIT
   local src
-  src=$(find "$mp" -maxdepth 1 -name "VistaScribe.app" -or -name "Vista Scribe.app" | head -n1)
+  src=$(find "$mp" -maxdepth 1 -name "CodeScribe.app" -or -name "Vista Scribe.app" | head -n1)
   [[ -d "$src" ]] || { echo "❌ App not found in DMG" >&2; exit 5; }
   echo "📥 Copying to /Applications…"
-  rsync -a --delete "$src/" "/Applications/VistaScribe.app/"
-  echo "✅ Installed: /Applications/VistaScribe.app"
+  rsync -a --delete "$src/" "/Applications/CodeScribe.app/"
+  echo "✅ Installed: /Applications/CodeScribe.app"
 }
 
 setup_login() {
-  local plist="$HOME/Library/LaunchAgents/com.vistascribe.tray.plist"
+  local plist="$HOME/Library/LaunchAgents/com.codescribe.tray.plist"
   mkdir -p "$(dirname "$plist")"
   /usr/bin/plutil -convert xml1 -o "$plist" - <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.vistascribe.tray</string>
+  <key>Label</key><string>com.codescribe.tray</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd "/Applications/VistaScribe.app/Contents/Resources/Repo" && ./scripts/quickstart_mac.sh --mode both --daemon --log "$HOME/Library/Logs/VistaScribe.app.log"</string>
+    <string>cd "/Applications/CodeScribe.app/Contents/Resources/Repo" && ./scripts/quickstart_mac.sh --mode both --daemon --log "$HOME/Library/Logs/CodeScribe.app.log"</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/VistaScribe.launchd.out.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/VistaScribe.launchd.err.log</string>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/CodeScribe.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/CodeScribe.launchd.err.log</string>
 </dict></plist>
 PLIST
   launchctl unload -w "$plist" >/dev/null 2>&1 || true
@@ -112,8 +112,8 @@ main() {
   install_app "$DMG_PATH"
   [[ $LOGIN -eq 1 ]] && setup_login
   echo "🚀 Launching app…"
-  open -a "/Applications/VistaScribe.app" || true
-  echo "Done. Logs: ~/Library/Logs/VistaScribe.app.log"
+  open -a "/Applications/CodeScribe.app" || true
+  echo "Done. Logs: ~/Library/Logs/CodeScribe.app.log"
 }
 
 main "$@"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate or compare a hashed manifest for the VistaScribe repository.
+"""Generate or compare a hashed manifest for the CodeScribe repository.
 
 The manifest format captures SHA256 hashes and sizes for tracked files. It can
 operate on the working tree or any git ref, and it supports focused path

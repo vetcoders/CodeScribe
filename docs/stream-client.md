@@ -21,7 +21,7 @@ Options:
 - `--pasteLive 0|1` simulate Cmd+V after copying (requires Accessibility perms)
 
 Notes:
-- The current HTTP NDJSON endpoint accumulates events and returns them at the end of the session; you receive the list (acks + final transcripts) after pressing Ctrl+C (which sends `end`). For true live updates, switch to the WebSocket endpoint `/ws/transcribe` and send `flush` messages – see `src/vistascribe/backend.py`.
+- The current HTTP NDJSON endpoint accumulates events and returns them at the end of the session; you receive the list (acks + final transcripts) after pressing Ctrl+C (which sends `end`). For true live updates, switch to the WebSocket endpoint `/ws/transcribe` and send `flush` messages – see `src/codescribe/backend.py`.
 - This client is intentionally minimal: it avoids global state, hotkeys, or tray UI.
 
 ## Next

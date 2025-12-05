@@ -1,4 +1,4 @@
-# VistaScribe Menu Tree
+# CodeScribe Menu Tree
 
 *Generated based on v0.4.3 codebase analysis*
 

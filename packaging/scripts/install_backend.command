@@ -1,10 +1,10 @@
 #!/bin/zsh
 # install_backend.command
 #
-# Purpose: Install and start the VistaScribe backend (FastAPI) as a LaunchAgent.
-# - Downloads/updates Whisper models into ~/.VistaScribe/models
+# Purpose: Install and start the CodeScribe backend (FastAPI) as a LaunchAgent.
+# - Downloads/updates Whisper models into ~/.CodeScribe/models
 # - Seeds the shared settings store so the backend follows the same AI provider/toggle as the tray
-# - Writes ~/Library/LaunchAgents/com.VistaScribe.backend.plist and loads it via launchctl
+# - Writes ~/Library/LaunchAgents/com.CodeScribe.backend.plist and loads it via launchctl
 #
 # Usage: double-click in Finder (Terminal will open) or run from shell.
 # Optional flags / env vars:
@@ -18,7 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-APP_SUPPORT="$HOME/.VistaScribe"
+APP_SUPPORT="$HOME/.CodeScribe"
 MODELS_DIR="$APP_SUPPORT/models"
 SETTINGS_PATH="$APP_SUPPORT/settings.json"
 
@@ -82,14 +82,14 @@ if [[ ! -d "$WHISPER_DIR" ]]; then
 fi
 WHISPER_DIR="$(lower_users "$WHISPER_DIR")"
 
-export VISTASCRIBE_SETTINGS_PATH="$SETTINGS_PATH"
+export CODESCRIBE_SETTINGS_PATH="$SETTINGS_PATH"
 export VS_AI_PROVIDER="$AI_PROVIDER"
 export VS_AI_FORMATTING="$AI_FORMATTING"
 export VS_LANGUAGE="$LANGUAGE"
 
 (cd "$REPO_DIR" && uv run python - <<'PY')
 import os
-from vistascribe.settings_store import update_settings
+from codescribe.settings_store import update_settings
 
 def _as_bool(val: str) -> bool:
     return val.strip().lower() not in {"0", "false", "no", "off"}
@@ -105,7 +105,7 @@ PY
 
 echo "[i] Settings stored at $SETTINGS_PATH"
 
-PLIST="$HOME/Library/LaunchAgents/com.VistaScribe.backend.plist"
+PLIST="$HOME/Library/LaunchAgents/com.CodeScribe.backend.plist"
 mkdir -p "$(dirname "$PLIST")"
 
 cat >"$PLIST" <<PLIST
@@ -114,13 +114,13 @@ cat >"$PLIST" <<PLIST
 <plist version="1.0">
   <dict>
     <key>Label</key>
-    <string>com.VistaScribe.backend</string>
+    <string>com.CodeScribe.backend</string>
     <key>ProgramArguments</key>
     <array>
       <string>/usr/bin/env</string>
       <string>bash</string>
       <string>-lc</string>
-      <string>cd "$(lower_users "$REPO_DIR")" && VISTASCRIBE_SETTINGS_PATH="$(lower_users "$SETTINGS_PATH")" uv run python -m vistascribe.vistascribe_server start --bind ${HOST} --port ${PORT} --log-level ${LOG_LEVEL}</string>
+      <string>cd "$(lower_users "$REPO_DIR")" && CODESCRIBE_SETTINGS_PATH="$(lower_users "$SETTINGS_PATH")" uv run python -m codescribe.codescribe_server start --bind ${HOST} --port ${PORT} --log-level ${LOG_LEVEL}</string>
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -130,23 +130,23 @@ cat >"$PLIST" <<PLIST
       <key>HOST</key><string>${HOST}</string>
       <key>PORT</key><string>${PORT}</string>
       <key>LOG_LEVEL</key><string>${LOG_LEVEL}</string>
-      <key>VISTASCRIBE_SETTINGS_PATH</key><string>$(lower_users "$SETTINGS_PATH")</string>
+      <key>CODESCRIBE_SETTINGS_PATH</key><string>$(lower_users "$SETTINGS_PATH")</string>
     </dict>
-    <key>StandardOutPath</key><string>/tmp/VistaScribe.backend.out.log</string>
-    <key>StandardErrorPath</key><string>/tmp/VistaScribe.backend.err.log</string>
+    <key>StandardOutPath</key><string>/tmp/CodeScribe.backend.out.log</string>
+    <key>StandardErrorPath</key><string>/tmp/CodeScribe.backend.err.log</string>
   </dict>
 </plist>
 PLIST
 
 echo "[i] LaunchAgent written to: $PLIST"
 
-if launchctl list | grep -q "com.VistaScribe.backend"; then
+if launchctl list | grep -q "com.CodeScribe.backend"; then
   launchctl unload "$PLIST" || true
 fi
 launchctl load "$PLIST"
-launchctl start com.VistaScribe.backend || true
+launchctl start com.CodeScribe.backend || true
 
-echo "[✓] Backend running on ${HOST}:${PORT} (LaunchAgent: com.VistaScribe.backend)"
-echo "    Logs: /tmp/VistaScribe.backend.{out,err}.log"
+echo "[✓] Backend running on ${HOST}:${PORT} (LaunchAgent: com.CodeScribe.backend)"
+echo "    Logs: /tmp/CodeScribe.backend.{out,err}.log"
 echo "    Settings: $SETTINGS_PATH"
 echo "    Health check: curl -s http://${HOST}:${PORT}/healthz | jq"

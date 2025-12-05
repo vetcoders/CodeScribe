@@ -1,4 +1,4 @@
-# VistaScribe runtime dependencies (Python >=3.12, macOS arm64)
+# CodeScribe runtime dependencies (Python >=3.12, macOS arm64)
 # This list is intentionally lean and reflects actual runtime imports in the app.
 # Tools that prefer requirements.txt over pyproject.toml can use this file.
 

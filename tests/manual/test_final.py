@@ -6,7 +6,7 @@ import os
 
 from dotenv import load_dotenv
 
-import vistascribe.client as client
+import codescribe.client as client
 
 load_dotenv()
 

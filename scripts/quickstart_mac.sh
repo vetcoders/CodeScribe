@@ -10,7 +10,7 @@
 #   --format 0|1                        # enable/disable formatting
 #   --llm-id <path|hf-repo>
 #   --active                            # use uv --active (silences VIRTUAL_ENV warning)
-#   --daemon [--log FILE]               # run tray/backend in background (default log: VistaScribe.log)
+#   --daemon [--log FILE]               # run tray/backend in background (default log: CodeScribe.log)
 #   --with-backend                      # start backend alongside tray (same as --mode both)
 #   --no-models                         # skip model downloader
 #   --dev | --verbose                   # enable DEV diagnostics, debug logs; run in foreground
@@ -54,12 +54,12 @@ mkdir -p "$PID_DIR"
 # Known ports/patterns we manage (clean stop + guard before each start)
 PORT_GUARD_PORTS=(8237 7237 6237 5237)
 PROCESS_PATTERNS=(
-  "VistaScribeTray"
-  "VistaScribeServer"
-  "python -m vistascribe.main"
-  "python -m vistascribe.vistascribe_server"
+  "CodeScribeTray"
+  "CodeScribeServer"
+  "python -m codescribe.main"
+  "python -m codescribe.codescribe_server"
 )
-PRECOMMIT_SENTINEL=".git/hooks/.vistascribe-pre-commit.v1"
+PRECOMMIT_SENTINEL=".git/hooks/.codescribe-pre-commit.v1"
 
 ensure_precommit_hooks() {
   if git -C . config --get core.hooksPath >/dev/null 2>&1; then
@@ -118,7 +118,7 @@ LLM_ID="${LLM_ID:-}"
 UV_ACTIVE=0
 # Default: run in background with logging (nohup + disown)
 DAEMON=1
-LOG_FILE="$LOG_DIR/VistaScribe.log"
+LOG_FILE="$LOG_DIR/CodeScribe.log"
 SKIP_MODELS=0
 PERSIST_ENVS=()
 WITH_BACKEND=0
@@ -195,15 +195,15 @@ collect_running_processes() {
 }
 
 ensure_processes_stopped() {
-  stop_by_name tray "python -m vistascribe.main"
-  stop_by_name server "python -m vistascribe.vistascribe_server"
+  stop_by_name tray "python -m codescribe.main"
+  stop_by_name server "python -m codescribe.codescribe_server"
   kill_patterns TERM "${PROCESS_PATTERNS[@]}"
   sleep 1
   kill_patterns KILL "${PROCESS_PATTERNS[@]}"
   local leftovers
   leftovers=$(collect_running_processes || true)
   if [[ -n "$leftovers" ]]; then
-    echo "[!] Could not stop existing VistaScribe processes:" >&2
+    echo "[!] Could not stop existing CodeScribe processes:" >&2
     while IFS='|' read -r pid cmd; do
       [[ -z "$pid" ]] && continue
       echo "    pid $pid → ${cmd:-unknown}" >&2
@@ -257,7 +257,7 @@ ensure_ports_available() {
   fi
   while IFS=$'\t' read -r port pid cmd; do
     [[ -z "$port" ]] && continue
-    if [[ "$cmd" == *"VistaScribe"* || "$cmd" == *"vistascribe"* ]]; then
+    if [[ "$cmd" == *"CodeScribe"* || "$cmd" == *"codescribe"* ]]; then
       graceful_kill "$pid" "port-$port"
     fi
   done <<<"$snapshot"
@@ -266,7 +266,7 @@ ensure_ports_available() {
   if [[ -z "$snapshot" ]]; then
     return 0
   fi
-  echo "[!] Required VistaScribe ports are already in use:" >&2
+  echo "[!] Required CodeScribe ports are already in use:" >&2
   while IFS=$'\t' read -r port pid cmd; do
     [[ -z "$port" ]] && continue
     echo "    port $port ← pid $pid (${cmd:-unknown})" >&2
@@ -326,20 +326,20 @@ lower_users() {
 
 # Optional fresh cleanup (run before building/updating the venv)
 if [[ "$FRESH" -eq 1 ]]; then
-  APP_SUPP_DIR="$HOME/.VistaScribe"
-  LA_PLIST="$HOME/Library/LaunchAgents/com.vistascribe.tray.plist"
-  APP_LOG="$HOME/Library/Logs/VistaScribe.app.log"
+  APP_SUPP_DIR="$HOME/.CodeScribe"
+  LA_PLIST="$HOME/Library/LaunchAgents/com.codescribe.tray.plist"
+  APP_LOG="$HOME/Library/Logs/CodeScribe.app.log"
   echo "==> Fresh cleanup plan (keeps .env & models):"
   echo "    - remove .pids/*.pid"
   echo "    - remove logs/*.log"
-  echo "    - remove logs/vistascribe-server.port"
+  echo "    - remove logs/codescribe-server.port"
   echo "    - remove '$APP_SUPP_DIR'"
   echo "    - unload & remove '$LA_PLIST' (if present)"
   echo "    - remove '$APP_LOG' (if present)"
   echo "    - remove Python caches (.venv, .ruff_cache, .mypy_cache, .pytest_cache)"
   echo "    - uv cache prune (global)"
   if [[ "$RESET_TCC_SELF" -eq 1 ]]; then
-    bundle="${TCC_BUNDLE_ID:-com.vistascribe.app}"
+    bundle="${TCC_BUNDLE_ID:-com.codescribe.app}"
     echo "    - reset TCC (Accessibility/Input/Mic) for bundle: $bundle"
   fi
   if [[ "$FRESH_YES" -ne 1 ]]; then
@@ -357,11 +357,11 @@ if [[ "$FRESH" -eq 1 ]]; then
     echo "==> Backed up .env to $backup_dir/.env.bak.$ts"
   fi
   # Stop any lingering processes one more time
-  stop_by_name tray "python -m vistascribe.main"
-  stop_by_name server "python -m vistascribe.vistascribe_server"
+  stop_by_name tray "python -m codescribe.main"
+  stop_by_name server "python -m codescribe.codescribe_server"
   rm -f .pids/*.pid 2>/dev/null || true
   rm -f logs/*.log 2>/dev/null || true
-  rm -f "$LOG_DIR/vistascribe-server.port" 2>/dev/null || true
+  rm -f "$LOG_DIR/codescribe-server.port" 2>/dev/null || true
   if [[ -f "$LA_PLIST" ]]; then
     launchctl unload -w "$LA_PLIST" >/dev/null 2>&1 || true
     rm -f "$LA_PLIST" || true
@@ -371,7 +371,7 @@ if [[ "$FRESH" -eq 1 ]]; then
   rm -rf .venv .ruff_cache .mypy_cache .pytest_cache .uv_cache 2>/dev/null || true
   uv cache prune --all >/dev/null 2>&1 || true
   if [[ "$RESET_TCC_SELF" -eq 1 ]]; then
-    bundle="${TCC_BUNDLE_ID:-com.vistascribe.app}"
+    bundle="${TCC_BUNDLE_ID:-com.codescribe.app}"
     echo "==> Resetting macOS permissions for $bundle…"
     /usr/bin/tccutil reset Accessibility "$bundle" || true
     /usr/bin/tccutil reset ListenEvent "$bundle" || true
@@ -407,10 +407,10 @@ if [[ "$STOP_ALL" -eq 1 ]]; then
 fi
 
 if [[ "$STOP_TRAY" -eq 1 ]]; then
-  stop_by_name tray "python -m vistascribe.main"
+  stop_by_name tray "python -m codescribe.main"
 fi
 if [[ "$STOP_BACK" -eq 1 ]]; then
-  stop_by_name server "python -m vistascribe.vistascribe_server"
+  stop_by_name server "python -m codescribe.codescribe_server"
 fi
 if [[ "$STOP_TRAY" -eq 1 || "$STOP_BACK" -eq 1 ]]; then
   echo "==> Stopped as requested."
@@ -496,9 +496,9 @@ if pairs:
 PY
 fi
 
-CMD=(uv run ${UV_ACTIVE:+--active} python -m vistascribe.main)
-SERVER_OUT="$LOG_DIR/vistascribe-server.out.log"
-SERVER_ERR="$LOG_DIR/vistascribe-server.err.log"
+CMD=(uv run ${UV_ACTIVE:+--active} python -m codescribe.main)
+SERVER_OUT="$LOG_DIR/codescribe-server.out.log"
+SERVER_ERR="$LOG_DIR/codescribe-server.err.log"
 
 ENVVARS=(WHISPER_DIR="$WHISPER_DIR" FORMAT_ENABLED="$FORMAT_ENABLED")
 if [[ "$DAEMON" -eq 1 ]]; then
@@ -514,26 +514,26 @@ fi
 ensure_clean_start "$NEEDS_BACKEND"
 
 if [[ "${MODE}" == "backend" ]]; then
-  echo "Starting VistaScribeServer (HTTP API)"
+  echo "Starting CodeScribeServer (HTTP API)"
   if [[ "$DAEMON" -eq 1 ]]; then
     echo "==> Daemon mode: log → $SERVER_OUT"
     nohup env "${ENVVARS[@]}" \
-      uv run ${UV_ACTIVE:+--active} python -m vistascribe.vistascribe_server start >> "$SERVER_OUT" 2>> "$SERVER_ERR" &
+      uv run ${UV_ACTIVE:+--active} python -m codescribe.codescribe_server start >> "$SERVER_OUT" 2>> "$SERVER_ERR" &
     server_pid=$!
     disown "$server_pid" || true
     write_pid server "$server_pid"
-    echo "VistaScribeServer pid: $server_pid (log: $SERVER_OUT)"
+    echo "CodeScribeServer pid: $server_pid (log: $SERVER_OUT)"
     sleep 1
-    if [[ -f "$LOG_DIR/vistascribe-server.port" ]]; then
-      port_msg=$(cat "$LOG_DIR/vistascribe-server.port")
+    if [[ -f "$LOG_DIR/codescribe-server.port" ]]; then
+      port_msg=$(cat "$LOG_DIR/codescribe-server.port")
       echo "→ Listening on port: $port_msg"
     else
       echo "[!] Server did not write the port file; check log: $SERVER_OUT"
     fi
-    echo "Use 'uv run python -m vistascribe.vistascribe_server status' to inspect the state."
+    echo "Use 'uv run python -m codescribe.codescribe_server status' to inspect the state."
   else
     env "${ENVVARS[@]}" \
-      uv run ${UV_ACTIVE:+--active} python -m vistascribe.vistascribe_server start
+      uv run ${UV_ACTIVE:+--active} python -m codescribe.codescribe_server start
   fi
   exit 0
 fi
@@ -542,16 +542,16 @@ echo "Starting the tray application"
 
 # If mode is both or --with-backend, start backend in background first
 if [[ "$MODE" == "both" || "$WITH_BACKEND" -eq 1 ]]; then
-  echo "==> Launching VistaScribeServer in the background"
+  echo "==> Launching CodeScribeServer in the background"
   nohup env "${ENVVARS[@]}" \
-    uv run ${UV_ACTIVE:+--active} python -m vistascribe.vistascribe_server start >> "$SERVER_OUT" 2>> "$SERVER_ERR" &
+    uv run ${UV_ACTIVE:+--active} python -m codescribe.codescribe_server start >> "$SERVER_OUT" 2>> "$SERVER_ERR" &
   back_pid=$!
   disown "$back_pid" || true
   write_pid server "$back_pid"
-  echo "VistaScribeServer pid: $back_pid (log: $SERVER_OUT)"
+  echo "CodeScribeServer pid: $back_pid (log: $SERVER_OUT)"
   sleep 1
-  if [[ -f "$LOG_DIR/vistascribe-server.port" ]]; then
-    port_msg=$(cat "$LOG_DIR/vistascribe-server.port")
+  if [[ -f "$LOG_DIR/codescribe-server.port" ]]; then
+    port_msg=$(cat "$LOG_DIR/codescribe-server.port")
     echo "→ Listening on port: $port_msg"
   else
     echo "[!] Server did not write the port file; check log: $SERVER_OUT"

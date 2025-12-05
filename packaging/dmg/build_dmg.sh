@@ -1,9 +1,9 @@
 #!/bin/bash
 # build_dmg.sh
 #
-# Purpose: Build a simple DMG for VistaScribe distribution.
-# - Includes the packaged VistaScribe.app, an Applications alias, and a short README.
-# - Creates VistaScribe-<version>-<timestamp>.dmg in packaging/dmg/
+# Purpose: Build a simple DMG for CodeScribe distribution.
+# - Includes the packaged CodeScribe.app, an Applications alias, and a short README.
+# - Creates CodeScribe-<version>-<timestamp>.dmg in packaging/dmg/
 #
 # Requirements: hdiutil (macOS), optional: create-dmg (not required)
 
@@ -20,16 +20,16 @@ if [[ -f "$ROOT_DIR/pyproject.toml" ]]; then
   [[ -n "${VLINE:-}" ]] && VERSION="$VLINE"
 fi
 STAMP=$(date +%Y%m%d_%H%M%S)
-DMG_NAME="VistaScribe-${VERSION}-${STAMP}.dmg"
+DMG_NAME="CodeScribe-${VERSION}-${STAMP}.dmg"
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
 # Copy app if built
-APP_SRC="${ROOT_DIR}/packaging/dist/VistaScribe.app"
+APP_SRC="${ROOT_DIR}/packaging/dist/CodeScribe.app"
 if [[ -d "$APP_SRC" ]]; then
   echo "[i] Adding app bundle: $APP_SRC"
-  cp -R "$APP_SRC" "$STAGE_DIR/VistaScribe.app"
+  cp -R "$APP_SRC" "$STAGE_DIR/CodeScribe.app"
 else
   echo "[!] App bundle not found at $APP_SRC — aborting."
   echo "    Build it first with: packaging/appwrap/build_wrapper_app.sh"
@@ -41,15 +41,15 @@ ln -sf /Applications "$STAGE_DIR/Applications"
 
 # Minimal README inside DMG
 cat >"$STAGE_DIR/README-INSTALL.txt" <<'TXT'
-VistaScribe — Installation
+CodeScribe — Installation
 ==========================
 
-1) Drag "VistaScribe.app" onto the "Applications" alias.
-2) Launch VistaScribe from /Applications.
+1) Drag "CodeScribe.app" onto the "Applications" alias.
+2) Launch CodeScribe from /Applications.
    • The tray will request Microphone, Accessibility, and Input Monitoring on first run.
    • A bundled Whisper model is preloaded; you can switch models later via Tray ▸ Models.
    • When you choose Quit… the app will ask whether to keep the background server running.
-3) Check ~/Library/Logs/VistaScribe.app.log if you need to troubleshoot startup.
+3) Check ~/Library/Logs/CodeScribe.app.log if you need to troubleshoot startup.
 
 For background-server workflows and advanced settings, see README.md in the repo.
 TXT
@@ -57,7 +57,7 @@ TXT
 # Create DMG
 DMG_PATH="${OUT_DIR}/${DMG_NAME}"
 rm -f "$DMG_PATH"
-hdiutil create -volname "VistaScribe" -srcfolder "$STAGE_DIR" -ov -format UDZO "$DMG_PATH"
+hdiutil create -volname "CodeScribe" -srcfolder "$STAGE_DIR" -ov -format UDZO "$DMG_PATH"
 
 # Optional: clear quarantine for local/internal testing (DMG_UNQUARANTINE=1)
 if [[ "${DMG_UNQUARANTINE:-0}" == "1" ]]; then

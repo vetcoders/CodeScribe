@@ -16,7 +16,7 @@ if SRC.exists():
         sys.path.insert(0, src_str)
 
 if TOOLS_SITE.exists():
-    spec = importlib.util.spec_from_file_location("_vistascribe_tools_sitecustomize", TOOLS_SITE)
+    spec = importlib.util.spec_from_file_location("_codescribe_tools_sitecustomize", TOOLS_SITE)
     if spec and spec.loader:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

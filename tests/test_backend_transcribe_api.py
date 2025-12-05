@@ -5,8 +5,8 @@ import wave
 import pytest
 from fastapi.testclient import TestClient
 
-import vistascribe.backend as backend
-from vistascribe.settings_store import reset_settings_for_tests
+import codescribe.backend as backend
+from codescribe.settings_store import reset_settings_for_tests
 
 
 def make_wav_bytes(duration_ms=10, sr=16000):
@@ -28,7 +28,7 @@ def temp_settings(monkeypatch, tmp_path):
     def _write(data: dict):
         path = tmp_path / "settings.json"
         path.write_text(json.dumps(data), encoding="utf-8")
-        monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(path))
+        monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(path))
         reset_settings_for_tests()
         return path
 

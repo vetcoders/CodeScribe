@@ -1,14 +1,14 @@
 import json
 from pathlib import Path
 
-from vistascribe.config import (
+from codescribe.config import (
     Config,
     load_config,
     save_config,
     serialize_env,
     update_env_vars,
 )
-from vistascribe.settings_store import reset_settings_for_tests
+from codescribe.settings_store import reset_settings_for_tests
 
 
 def _write_settings(tmp_path, monkeypatch, **data):
@@ -20,7 +20,7 @@ def _write_settings(tmp_path, monkeypatch, **data):
     }
     content.update(data)
     path.write_text(json.dumps(content), encoding="utf-8")
-    monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(path))
     reset_settings_for_tests()
 
 

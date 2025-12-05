@@ -1,6 +1,6 @@
 # MLX toolkit cheat sheet (audio • whisper • lm • vlm)
 
-This page collects practical, copy‑pasteable commands for the MLX launchers that are often useful when working with VistaScribe locally. It’s meant as a quick reference so you don’t have to hunt for `--help` every time.
+This page collects practical, copy‑pasteable commands for the MLX launchers that are often useful when working with CodeScribe locally. It’s meant as a quick reference so you don’t have to hunt for `--help` every time.
 
 Notes
 - Commands here are thin entry points that ship with the MLX ecosystem. They load heavy models — don’t run them inside the tray process.
@@ -30,7 +30,7 @@ Common flags (from `--help`): `--voice`, `--speed`, `--gender [male|female]`, `-
 
 Tip: The server prints warm‑up logs (“Warming up STT/VAD model”). Keep it running in a separate terminal if you plan to do multiple TTS calls.
 
-VistaScribe helper: You can call a thin wrapper that prefers HTTP (if TTS_SERVER_URL is set) and falls back to CLI in a separate process:
+CodeScribe helper: You can call a thin wrapper that prefers HTTP (if TTS_SERVER_URL is set) and falls back to CLI in a separate process:
 
 ```python
 from tts import say
@@ -40,7 +40,7 @@ asyncio.run(say("Hello! This is a speech synthesis demo.", play=True))
 
 ## MLX‑Whisper (STT)
 
-VistaScribe already uses `mlx_whisper` for local STT. For ad‑hoc transcription outside the app you can call it programmatically or via Python module entry points. Example Python usage:
+CodeScribe already uses `mlx_whisper` for local STT. For ad‑hoc transcription outside the app you can call it programmatically or via Python module entry points. Example Python usage:
 
 ```python
 import mlx_whisper as whisper
@@ -51,7 +51,7 @@ result = whisper.transcribe("sample.wav", path_or_hf_repo="./models/whisper-larg
 print(result["text"])
 ```
 
-Model dirs work both as absolute paths and repo‑relative paths. On macOS some absolute paths are case‑sensitive in MLX; VistaScribe normalizes `/Users` → `/users` to avoid issues.
+Model dirs work both as absolute paths and repo‑relative paths. On macOS some absolute paths are case‑sensitive in MLX; CodeScribe normalizes `/Users` → `/users` to avoid issues.
 
 ## MLX‑LM (text LLMs)
 
@@ -64,7 +64,7 @@ uv run mlx_lm.generate \
   --max-tokens 128 --temp 0.2
 ```
 
-Open a local HTTP server (useful for experimentation; separate from VistaScribe’s own backend):
+Open a local HTTP server (useful for experimentation; separate from CodeScribe’s own backend):
 
 ```bash
 uv run mlx_lm.server --host 127.0.0.1 --port 8320 --model mlx-community/Llama-3.2-3B-Instruct-4bit
@@ -111,15 +111,15 @@ uv run mlx_embeddings --help
 uv run mlx_embeddings --model <MODEL> --input "The quick brown fox jumps over the lazy dog"
 ```
 
-## How this maps to VistaScribe
+## How this maps to CodeScribe
 
-- Local STT (Whisper): handled in‑process by VistaScribe with lazy loading to keep the tray light. You can point to a remote STT backend via `WHISPER_SERVER_URL`.
+- Local STT (Whisper): handled in‑process by CodeScribe with lazy loading to keep the tray light. You can point to a remote STT backend via `WHISPER_SERVER_URL`.
 - Local formatting (LLM): also lazy‑loaded; or you can point to a remote formatter via `LLM_SERVER_URL`.
-- TTS: not required by VistaScribe, but you can run `mlx_audio.server` for optional voice playback features. We will expose a thin optional client guarded by `TTS_SERVER_URL` in a later step.
+- TTS: not required by CodeScribe, but you can run `mlx_audio.server` for optional voice playback features. We will expose a thin optional client guarded by `TTS_SERVER_URL` in a later step.
 
 Default behavior: formatting is enabled with the `light_plus` strategy unless you set `FORMAT_ENABLED=0` or change the strategy in the app.
 
-Environment variables used in VistaScribe today
+Environment variables used in CodeScribe today
 - WHISPER_SERVER_URL: if set, audio is sent to that FastAPI endpoint instead of local Whisper.
 - LLM_SERVER_URL: if set, formatting requests go to that server instead of local MLX‑LM.
 - WHISPER_DIR / WHISPER_VARIANT: local model selection (e.g., `whisper-large-v3-turbo`).
@@ -138,8 +138,8 @@ Lightweight Polish ASR models you can try:
 - bardsai/whisper-small-pl — https://huggingface.co/bardsai/whisper-small-pl
 - Collection (overview): https://huggingface.co/collections/bardsai/polish-whisper-659dec07b65ee9ee1fbbcc63
 
-Using them with VistaScribe:
-- VistaScribe expects a local MLX‑format directory for Whisper (what `mlx_whisper.load_model(path)` loads).
+Using them with CodeScribe:
+- CodeScribe expects a local MLX‑format directory for Whisper (what `mlx_whisper.load_model(path)` loads).
 - Place the converted model under `models/whisper-medium-pl` (or `models/whisper-small-pl`).
 - Set `WHISPER_VARIANT=medium-pl` (or `small-pl`) and/or `WHISPER_DIR` to the directory.
 - Remote mode (`WHISPER_SERVER_URL`) bypasses local models.

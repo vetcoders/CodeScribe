@@ -10,8 +10,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import unused_port
 
-import vistascribe.client as client
-from vistascribe.settings_store import VistaSettings
+import codescribe.client as client
+from codescribe.settings_store import VistaSettings
 
 
 def _write_silence(path: Path, duration_ms: int = 20, sr: int = 16_000) -> None:

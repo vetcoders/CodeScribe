@@ -11,7 +11,7 @@ os.environ["FORMAT_STRATEGY"] = "ollama"
 os.environ["OLLAMA_MODEL"] = "gpt-oss:120b"
 os.environ["AGENT_NAME"] = "El Niño"
 
-import vistascribe.llm as llm
+import codescribe.llm as llm
 
 
 async def test_prompt():

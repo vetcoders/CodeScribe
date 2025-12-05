@@ -15,7 +15,7 @@ os.environ["MAX_NEW_TOKENS"] = "8192"
 os.environ["AGENT_NAME"] = "El Niño"
 
 # Import after setting env
-import vistascribe.llm as llm
+import codescribe.llm as llm
 
 
 async def test_agent():

@@ -13,12 +13,12 @@ lint:
 	@echo "Running Ruff lint..."
 	@uv run ruff check .
 	@echo "Running Mypy..."
-	@uv run mypy src/vistascribe
+	@uv run mypy src/codescribe
 
 # Security scan using Bandit (only on source code, ignoring venv/tests)
 security:
 	@echo "Running Bandit..."
-	@uv run bandit -ll -c pyproject.toml -r src/vistascribe
+	@uv run bandit -ll -c pyproject.toml -r src/codescribe
 
 # Run tests using Pytest
 test:

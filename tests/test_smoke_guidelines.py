@@ -12,16 +12,16 @@ def test_math_sanity():
 
 import json
 
-from vistascribe.settings_store import reset_settings_for_tests
+from codescribe.settings_store import reset_settings_for_tests
 
 
 def test_config_roundtrip_minimal(monkeypatch, tmp_path):
     # Demonstrates importing a light, pure-Python module from this repo
-    from vistascribe.config import Config, load_config, serialize_env  # local imports
+    from codescribe.config import Config, load_config, serialize_env  # local imports
 
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({"ai_formatting_enabled": True}), encoding="utf-8")
-    monkeypatch.setenv("VISTASCRIBE_SETTINGS_PATH", str(settings_path))
+    monkeypatch.setenv("CODESCRIBE_SETTINGS_PATH", str(settings_path))
     reset_settings_for_tests()
 
     cfg = load_config(

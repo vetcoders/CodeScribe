@@ -28,21 +28,22 @@ tmp/
 temp/
 
 # Local assets not tracked
-src/vistascribe/assets/lab/
-!src/vistascribe/assets/lab/app.js
-!src/vistascribe/assets/lab/styles.css
-!src/vistascribe/assets/lab/components/
-!src/vistascribe/assets/lab/controllers/
-!src/vistascribe/assets/lab/hooks/
-!src/vistascribe/assets/lab/lib/
+src/codescribe/assets/lab/
+!src/codescribe/assets/lab/app.js
+!src/codescribe/assets/lab/styles.css
+!src/codescribe/assets/lab/components/
+!src/codescribe/assets/lab/controllers/
+!src/codescribe/assets/lab/hooks/
+!src/codescribe/assets/lab/lib/
 /.archive
 /.codescribe
 /.codex
 /.gemini
 /extracted_frames
-/src/VistaScribe.egg-info
+/src/CodeScribe.egg-info
 /.gemini-clipboard
-/VistaScribe.egg-info
-.vista_scribe.lock
+/CodeScribe.egg-info
+.codescribe.lock
 /$HOME
 /.fastembed_cache
+CLAUDE.md

@@ -6757,7 +6757,7 @@ wheels = [
 ]
 
 [[package]]
-name = "vistascribe"
+name = "codescribe"
 version = "0.4.3"
 source = { editable = "." }
 dependencies = [
