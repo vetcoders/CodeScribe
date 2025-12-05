@@ -1,0 +1,67 @@
+[package]
+name = "codescribe"
+version = "0.5.0"
+edition = "2021"
+description = "Speech-to-text tray app for macOS - Rust frontend"
+authors = ["Loctree <contact@loctree.io>"]
+license = "BSD-4-Clause"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# System tray
+tray-icon = "0.19"
+muda = "0.15"  # Menu for tray
+
+# Global hotkeys
+rdev = "0.5"
+
+# Audio recording
+cpal = "0.15"
+hound = "3.5"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+
+# Clipboard
+arboard = "3"
+
+# Key simulation for paste
+enigo = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config/paths
+directories = "5"
+shellexpand = "3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Async channels
+crossbeam-channel = "0.5"
+
+# Time utilities
+chrono = "0.4"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS specific - for better hotkey support if rdev fails
+core-foundation = "0.10"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

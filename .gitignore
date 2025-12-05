@@ -47,3 +47,4 @@ src/codescribe/assets/lab/
 /$HOME
 /.fastembed_cache
 CLAUDE.md
+/codescribe-rs/target
