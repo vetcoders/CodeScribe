@@ -26,4 +26,3 @@ fi
 
 open "$DEST"
 echo "[✓] Installed and launched."
-

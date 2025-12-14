@@ -28,4 +28,3 @@ Notes:
 - WS mode for immediate `transcript.final` delivery.
 - Diff-based live paste under caret.
 - Optional encoding (m4a/flac) before upload (currently raw PCM → base64 in NDJSON).
-

@@ -8,19 +8,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+def file_hash(path: Path) -> str | None:
+    """Return SHA-256 hash of file contents, or None if file not found."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
 MESSAGE = (
     "We've found a formatting issue, but it was automatically repaired by the Ruff "
     "pre-commit checks. Anyway it is advised to recheck your files for potential issues. "
     "If you are sure you feel comfortable committing the files once again, it should easily pass."
 )
-
-
-def file_hash(path: Path) -> str | None:
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
-        return None
-    return hashlib.sha256(data).hexdigest()
 
 
 def main(argv: list[str]) -> int:

@@ -10,14 +10,20 @@ from __future__ import annotations
 
 from dotenv import load_dotenv
 
-from .path_utils import repo_root
+from .path_utils import repo_root, user_data_root
 
-# Ensure local .env is loaded before any runtime modules read os.environ
-_env_path = repo_root() / ".env"
-if _env_path.exists():
-    load_dotenv(dotenv_path=_env_path)
+# Load .env files in order: repo defaults first, then user overrides
+# 1. Load repo .env (development defaults)
+_repo_env = repo_root() / ".env"
+if _repo_env.exists():
+    load_dotenv(dotenv_path=_repo_env)
 else:
     load_dotenv()
+
+# 2. Load user data .env (~/.CodeScribe/.env) - overrides repo settings
+_user_env = user_data_root() / ".env"
+if _user_env.exists():
+    load_dotenv(dotenv_path=_user_env, override=True)
 
 from .app.runtime import CodeScribe, acquire_lock, run
 

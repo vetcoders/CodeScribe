@@ -16,4 +16,3 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
 fi
 
 exec node ./vs-stream-client.mjs "$@"
-

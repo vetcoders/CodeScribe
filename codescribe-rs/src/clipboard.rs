@@ -5,7 +5,7 @@
 // Note: Some functions are not yet wired up to main.rs (pending integration)
 #![allow(dead_code)]
 //
-// Dependencies: arboard (clipboard access), enigo (keyboard simulation)
+// Dependencies: arboard (clipboard access), core-graphics (keyboard simulation)
 //
 // Key Components:
 // - paste_and_restore: Smart paste with clipboard snapshot and restoration
@@ -14,17 +14,24 @@
 // - paste: Paste without simulation
 // - ClipboardSnapshot: Captures and restores all clipboard formats
 //
-// Design Rationale: Uses arboard for cross-platform clipboard access and enigo
-// for keyboard event simulation. Implements clipboard save/restore pattern to
-// preserve user's clipboard after paste operations. Includes configurable delay
-// for clipboard restoration to avoid race conditions.
+// Design Rationale: Uses arboard for cross-platform clipboard access and
+// CGEvent (via core-graphics) for keyboard event simulation. This avoids
+// the TSMGetInputSourceProperty crash on macOS 26.2 that occurs with enigo
+// when called from background threads. Implements clipboard save/restore
+// pattern to preserve user's clipboard after paste operations.
 
 use anyhow::{Context, Result};
 use arboard::{Clipboard, ImageData};
-use enigo::{Enigo, Key, Keyboard, Settings};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
+
+/// macOS virtual key code for 'V' key
+const KEYCODE_V: CGKeyCode = 9;
+/// macOS virtual key code for Right Arrow
+const KEYCODE_RIGHT_ARROW: CGKeyCode = 124;
 
 /// Delay in milliseconds before restoring the original clipboard content
 /// Can be overridden via RESTORE_CLIPBOARD_DELAY_MS environment variable
@@ -188,6 +195,55 @@ pub fn copy(text: &str) -> Result<()> {
     set_clipboard(text)
 }
 
+/// Simulates a key press using CGEvent (thread-safe, no TSM issues)
+///
+/// # Arguments
+/// * `keycode` - macOS virtual key code
+/// * `key_down` - true for key down, false for key up
+/// * `flags` - modifier flags (e.g., CGEventFlags::CGEventFlagCommand)
+fn simulate_key_event(keycode: CGKeyCode, key_down: bool, flags: CGEventFlags) -> Result<()> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .ok()
+        .context("Failed to create CGEventSource")?;
+
+    let event = CGEvent::new_keyboard_event(source, keycode, key_down)
+        .ok()
+        .context("Failed to create keyboard event")?;
+
+    event.set_flags(flags);
+    event.post(CGEventTapLocation::HID);
+
+    Ok(())
+}
+
+/// Simulates Cmd+V keystroke using CGEvent
+///
+/// This is thread-safe and doesn't use TSM APIs that crash on macOS 26.2.
+fn simulate_cmd_v() -> Result<()> {
+    let cmd_flag = CGEventFlags::CGEventFlagCommand;
+
+    // Key down: V with Cmd modifier
+    simulate_key_event(KEYCODE_V, true, cmd_flag)?;
+    thread::sleep(Duration::from_millis(10));
+
+    // Key up: V with Cmd modifier
+    simulate_key_event(KEYCODE_V, false, cmd_flag)?;
+
+    Ok(())
+}
+
+/// Simulates Right Arrow keystroke using CGEvent
+fn simulate_right_arrow() -> Result<()> {
+    // Key down: Right Arrow (no modifiers)
+    simulate_key_event(KEYCODE_RIGHT_ARROW, true, CGEventFlags::empty())?;
+    thread::sleep(Duration::from_millis(5));
+
+    // Key up: Right Arrow
+    simulate_key_event(KEYCODE_RIGHT_ARROW, false, CGEventFlags::empty())?;
+
+    Ok(())
+}
+
 /// Simple paste function - just sets clipboard and simulates Cmd+V
 ///
 /// Does NOT restore the previous clipboard content. Use paste_and_restore()
@@ -206,23 +262,8 @@ pub fn paste(text: &str) -> Result<()> {
 
     set_clipboard(text).context("Failed to set clipboard for paste")?;
 
-    let mut enigo =
-        Enigo::new(&Settings::default()).context("Failed to initialize keyboard simulator")?;
-
-    // Simulate Cmd+V
-    enigo
-        .key(Key::Meta, enigo::Direction::Press)
-        .context("Failed to press Cmd key")?;
-    thread::sleep(Duration::from_millis(10));
-
-    enigo
-        .key(Key::Unicode('v'), enigo::Direction::Click)
-        .context("Failed to press V key")?;
-    thread::sleep(Duration::from_millis(10));
-
-    enigo
-        .key(Key::Meta, enigo::Direction::Release)
-        .context("Failed to release Cmd key")?;
+    // Simulate Cmd+V using CGEvent (thread-safe)
+    simulate_cmd_v().context("Failed to simulate Cmd+V")?;
 
     Ok(())
 }
@@ -277,33 +318,15 @@ pub fn paste_text_smart(text: &str, restore: bool) -> Result<()> {
     set_clipboard(text).context("Failed to set clipboard for paste")?;
     info!("Text successfully copied to clipboard");
 
-    // 3. Simulate Cmd+V keypress
-    let mut enigo =
-        Enigo::new(&Settings::default()).context("Failed to initialize keyboard simulator")?;
-
-    enigo
-        .key(Key::Meta, enigo::Direction::Press)
-        .context("Failed to press Cmd key")?;
-    thread::sleep(Duration::from_millis(10));
-
-    enigo
-        .key(Key::Unicode('v'), enigo::Direction::Click)
-        .context("Failed to press V key")?;
-    thread::sleep(Duration::from_millis(10));
-
-    enigo
-        .key(Key::Meta, enigo::Direction::Release)
-        .context("Failed to release Cmd key")?;
-
+    // 3. Simulate Cmd+V keypress using CGEvent (thread-safe)
+    simulate_cmd_v().context("Failed to simulate Cmd+V")?;
     info!("Command+V keypress simulated successfully");
 
     // 4. Wait for paste to settle
     thread::sleep(Duration::from_millis(50));
 
     // 5. Simulate Right Arrow to deselect pasted text
-    enigo
-        .key(Key::RightArrow, enigo::Direction::Click)
-        .context("Failed to press Right Arrow key")?;
+    simulate_right_arrow().context("Failed to simulate Right Arrow")?;
     debug!("Cleared selection (moved cursor to end)");
 
     // 6. Optional: restore clipboard snapshot after delay

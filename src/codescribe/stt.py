@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # MLX Whisper (local fallback)
-from .path_utils import normalize_model_path, repo_root
+from .path_utils import normalize_model_path, repo_root, user_data_root
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,17 @@ whisper = None  # type: ignore
 load_model = None  # type: ignore
 
 # --- setup ---
-# Load .env from repo root if possible, else fall back to CWD
-_env_path = repo_root() / ".env"
-if _env_path.exists():
-    load_dotenv(dotenv_path=_env_path)
+# Load .env files: repo defaults first, then user overrides
+_repo_env = repo_root() / ".env"
+if _repo_env.exists():
+    load_dotenv(dotenv_path=_repo_env)
 else:
     load_dotenv()
+
+# Load user data .env (~/.CodeScribe/.env) - overrides repo settings
+_user_env = user_data_root() / ".env"
+if _user_env.exists():
+    load_dotenv(dotenv_path=_user_env, override=True)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -244,7 +249,7 @@ async def transcribe(
 
     # Prepare a file path. If bytes provided, persist to a temp WAV/bytes file.
     temp_path = None
-    if isinstance(input_data, (bytes, bytearray)):
+    if isinstance(input_data, bytes | bytearray):
         try:
             import tempfile
 
@@ -346,6 +351,10 @@ async def transcribe(
                     language=lang,
                     condition_on_previous_text=False,  # Critical for short clips!
                     initial_prompt=medical_prompt,
+                    # Anti-hallucination filters (improves transcription quality)
+                    compression_ratio_threshold=2.0,  # Lower = stricter (default 2.4)
+                    no_speech_threshold=0.5,  # Higher = stricter (default 0.6)
+                    logprob_threshold=-0.5,  # Higher = stricter (default -1.0)
                 )
                 # Log detected language for debugging
                 if isinstance(result, dict):

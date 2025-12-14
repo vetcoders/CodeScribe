@@ -44,13 +44,13 @@ async fn process_recording(&self, ...) -> Result<()> {
     let audio_path = tokio::task::spawn_blocking(|| {
         let mut recorder = Recorder::new()?;
         recorder.start()?;
-        
+
         // Block until stop signal (via channel or flag)
         // For now, could use a simple sleep or stdin
-        
+
         recorder.stop()
     }).await??;
-    
+
     // Continue with transcription...
     let raw_text = client::transcribe(&audio_path, None).await?;
     // ...
@@ -74,4 +74,3 @@ Create a dedicated thread that owns the Recorder and communicates via channels. 
 - `/Users/maciejgad/hosted/Loctree-Repos/Codescribe/codescribe-rs/src/controller.rs` - Main integration
 - `/Users/maciejgad/hosted/Loctree-Repos/Codescribe/codescribe-rs/IMPLEMENTATION_NOTES.md` - Architecture notes
 - `/Users/maciejgad/hosted/Loctree-Repos/Codescribe/codescribe-rs/CONTROLLER_INTEGRATION_STATUS.md` - This file
-

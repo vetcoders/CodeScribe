@@ -53,4 +53,3 @@ if $APPLY; then
 else
   echo "(dry-run) Nothing removed. Re-run with --apply to clean."
 fi
-

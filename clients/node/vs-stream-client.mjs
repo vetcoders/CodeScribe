@@ -84,12 +84,12 @@ function startFFmpeg(samplerate) {
     '-f', 's16le', '-' // raw PCM
   ];
   const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  
+
   // Capture stderr for debugging
   ff.stderr.on('data', (d) => {
     console.error(`[ffmpeg] ${d.toString().trim()}`);
   });
-  
+
   ff.on('exit', (code) => {
     if (code !== 0 && code !== null) {
       console.error(`[ffmpeg] exited with code ${code}. Check microphone permissions.`);
@@ -172,4 +172,3 @@ main().catch((e) => {
   console.error('[vs-stream] fatal:', e?.stack || e);
   exit(1);
 });
-

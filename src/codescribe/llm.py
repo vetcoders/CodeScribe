@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 from .formatting import apply_light_plus
 from .formatting.vocabulary import get_soft_lexicon_context
-from .path_utils import repo_root
+from .path_utils import repo_root, user_data_root
 from .settings_store import VistaSettings, get_settings, update_settings
 
 # Optional CodeScribe context injection (assistive mode memory)
@@ -29,12 +29,17 @@ try:  # pragma: no cover - available only in dev trays
 except ImportError:  # pragma: no cover
     HAS_CODESCRIBE = False
 
-# Load .env from repo root if possible, else fall back to CWD
-_env_path = repo_root() / ".env"
-if _env_path.exists():
-    load_dotenv(dotenv_path=_env_path)
+# Load .env files: repo defaults first, then user overrides
+_repo_env = repo_root() / ".env"
+if _repo_env.exists():
+    load_dotenv(dotenv_path=_repo_env)
 else:
     load_dotenv()
+
+# Load user data .env (~/.CodeScribe/.env) - overrides repo settings
+_user_env = user_data_root() / ".env"
+if _user_env.exists():
+    load_dotenv(dotenv_path=_user_env, override=True)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),

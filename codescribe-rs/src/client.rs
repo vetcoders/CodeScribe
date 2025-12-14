@@ -74,12 +74,12 @@ fn get_client() -> &'static Client {
 /// Tries ports in order: 8238, 8237, 7237, 6237, 5237
 /// Returns the first responding server URL or None
 ///
-/// Retries each port up to 3 times with 200ms delay to handle race conditions
+/// Retries each port up to 5 times with 500ms delay to handle race conditions
 /// where backend just started but isn't fully accepting connections yet.
 async fn discover_server() -> Option<String> {
     let client = get_client();
-    const RETRIES_PER_PORT: u32 = 3;
-    const RETRY_DELAY_MS: u64 = 200;
+    const RETRIES_PER_PORT: u32 = 5;
+    const RETRY_DELAY_MS: u64 = 500;
 
     for port in PROBE_PORTS {
         for attempt in 1..=RETRIES_PER_PORT {
@@ -91,15 +91,22 @@ async fn discover_server() -> Option<String> {
 
             match client.get(&url).send().await {
                 Ok(response) if response.status().is_success() => {
+                    // Server is responding - accept even if model not loaded yet
+                    // (ok=false means server running but model initializing)
                     if let Ok(health) = response.json::<HealthResponse>().await {
+                        let base_url = format!("http://127.0.0.1:{}", port);
                         if health.ok {
-                            let base_url = format!("http://127.0.0.1:{}", port);
                             info!(
-                                "Discovered backend server at {} (attempt {})",
+                                "Discovered backend server at {} (fully ready, attempt {})",
                                 base_url, attempt
                             );
-                            return Some(base_url);
+                        } else {
+                            info!(
+                                "Discovered backend server at {} (model loading, attempt {})",
+                                base_url, attempt
+                            );
                         }
+                        return Some(base_url);
                     }
                 }
                 Ok(response) => {
@@ -150,8 +157,8 @@ async fn get_server_url() -> Result<String> {
 /// Check if backend is healthy
 ///
 /// Returns:
-/// - `Ok(true)` if backend responds with {"ok": true}
-/// - `Ok(false)` if backend responds but is unhealthy
+/// - `Ok(true)` if backend responds with {"ok": true} (model loaded)
+/// - `Ok(false)` if backend responds but model still loading
 /// - `Err(_)` if cannot connect or parse response
 pub async fn check_health() -> Result<bool> {
     let base_url = get_server_url().await?;
@@ -171,6 +178,10 @@ pub async fn check_health() -> Result<bool> {
         .json()
         .await
         .context("Failed to parse health check response")?;
+
+    if !health.ok {
+        info!("Backend responding but model still loading");
+    }
 
     Ok(health.ok)
 }

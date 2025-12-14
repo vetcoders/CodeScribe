@@ -30,8 +30,8 @@ reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
 # Clipboard
 arboard = "3"
 
-# Key simulation for paste
-enigo = "0.2"
+# Key simulation for paste: Using core-graphics CGEvent directly (enigo removed)
+# enigo crashes on macOS 26.2 due to TSMGetInputSourceProperty called from wrong thread
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -67,6 +67,7 @@ lazy_static = "1.4"
 
 # Image processing (for tray icon)
 image = { version = "0.25", default-features = false, features = ["png"] }
+walkdir = "2.5.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS specific - for better hotkey support if rdev fails

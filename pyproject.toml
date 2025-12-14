@@ -284,7 +284,7 @@ testpaths = [
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
-exclude = "(^\\.venv($|/)|/\\.venv/|site-packages/)"
+exclude = "(^\\.venv($|/)|/\\.venv/|site-packages/|tools/sitecustomize\\.py)"
 mypy_path = ["src"]
 
 [[tool.mypy.overrides]]
@@ -311,3 +311,10 @@ targets = ["src/codescribe"]
 
 [tool.bandit.assert_used]
 skips = ["*_test.py", "test_*.py"]
+
+[tool.codespell]
+# Polish words intentionally used in medical/veterinary prompts
+# Also ignore phonetic variants and common abbreviations
+ignore-words-list = "tekst,serwer,diety,charakter,sodu,ket,grup,palce,rady,tabel,instal,postgresq,promis,promiss,embeding,limt,tru,nam,technik,proces,bulder,momemt,cze,hsa,ot,mis,ans"
+# Skip dictionary/lexicon files which contain intentional mispronunciation variants for STT
+skip = ".venv,*.lock,models,outputs,logs,*.jsonl,src/codescribe/assets"

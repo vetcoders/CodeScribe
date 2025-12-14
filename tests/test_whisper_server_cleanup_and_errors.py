@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 def setup_fake_whisper(module, return_value):
     class FakeWhisper:
         @staticmethod
-        def transcribe(path):
+        def transcribe(path, **kwargs):
             # Ensure the temp file exists when transcribe is called
             assert os.path.exists(path)
             return return_value

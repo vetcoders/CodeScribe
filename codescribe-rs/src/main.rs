@@ -8,6 +8,7 @@ mod client;
 mod clipboard;
 mod config;
 mod controller;
+mod history;
 mod hotkeys;
 mod permissions;
 mod sound;
@@ -47,9 +48,12 @@ async fn main() -> Result<()> {
     } else {
         Level::INFO
     };
+    // Disable ANSI colors when not a TTY (daemon mode)
+    let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
     FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_target(false)
+        .with_ansi(use_ansi)
         .compact()
         .init();
 
@@ -144,8 +148,57 @@ async fn main() -> Result<()> {
                         }
                         tray::TrayMenuEvent::CopyLatestToClipboard => {
                             info!("Copy latest to clipboard requested");
-                            // TODO: Implement history tracking to get latest transcript
-                            warn!("History feature not yet implemented");
+                            if let Some(entry) = history::latest_entry() {
+                                match std::fs::read_to_string(&entry.path) {
+                                    Ok(text) => {
+                                        if let Err(e) = clipboard::copy(&text) {
+                                            error!("Failed to copy to clipboard: {}", e);
+                                        } else {
+                                            info!(
+                                                "Copied latest transcript to clipboard ({} chars)",
+                                                text.len()
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to read history entry: {}", e);
+                                    }
+                                }
+                            } else {
+                                warn!("No history entries found");
+                            }
+                        }
+                        tray::TrayMenuEvent::OpenHistoryFolder => {
+                            info!("Opening history folder");
+                            history::open_history_folder();
+                        }
+                        tray::TrayMenuEvent::SelectHistoryEntry(index) => {
+                            info!("Selecting history entry at index {}", index);
+                            let entries = history::recent_entries(10);
+                            if let Some(entry) = entries.get(index) {
+                                match std::fs::read_to_string(&entry.path) {
+                                    Ok(text) => {
+                                        if let Err(e) = clipboard::copy(&text) {
+                                            error!("Failed to copy to clipboard: {}", e);
+                                        } else {
+                                            info!(
+                                                "Copied history entry {} to clipboard ({} chars)",
+                                                index,
+                                                text.len()
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to read history entry: {}", e);
+                                    }
+                                }
+                            } else {
+                                warn!("History entry at index {} not found", index);
+                            }
+                        }
+                        tray::TrayMenuEvent::ToggleHistory => {
+                            info!("Toggle history save requested (always enabled for now)");
+                            // History saving is always enabled in current implementation
                         }
                         _ => {
                             info!("Unhandled menu event: {:?}", event);

@@ -629,9 +629,7 @@ def _try_move_badge_to_caret() -> bool:
                         int(getattr(try_range, "location", 0))
                         if hasattr(try_range, "location")
                         else int(
-                            try_range[0]
-                            if isinstance(try_range, (list, tuple)) and try_range
-                            else 0
+                            try_range[0] if isinstance(try_range, list | tuple) and try_range else 0
                         )
                     )
                 zero_range = (start, 0)

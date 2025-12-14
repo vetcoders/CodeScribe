@@ -42,6 +42,16 @@ impl HoldMods {
             Self::CtrlCmd => "ctrl_cmd",
         }
     }
+
+    /// Human-readable label for menu display
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Ctrl => "Ctrl only (Formatting)",
+            Self::CtrlAlt => "Ctrl+Option",
+            Self::CtrlShift => "Ctrl+Shift (AI)",
+            Self::CtrlCmd => "Ctrl+Command",
+        }
+    }
 }
 
 impl FromStr for HoldMods {
@@ -74,6 +84,15 @@ impl ToggleTrigger {
             Self::DoubleOption => "double_option",
             Self::DoubleRightOption => "double_ralt",
             Self::None => "none",
+        }
+    }
+
+    /// Human-readable label for menu display
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::DoubleOption => "double option",
+            Self::DoubleRightOption => "double right option",
+            Self::None => "disabled",
         }
     }
 }
@@ -708,8 +727,8 @@ impl Config {
 
     /// Parse .env file into HashMap.
     fn parse_env_file(path: &PathBuf) -> anyhow::Result<HashMap<String, String>> {
-        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
         // Path comes from Config::env_path() which is hardcoded to ~/.codescribe/.env
+        // nosemgrep: tainted-path
         let contents = fs::read_to_string(path)?;
         let mut vars = HashMap::new();
 
@@ -738,8 +757,8 @@ impl Config {
 
     /// Write HashMap to .env file.
     fn write_env_file(path: &PathBuf, vars: &HashMap<String, String>) -> anyhow::Result<()> {
-        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path
         // Path comes from Config::env_path() which is hardcoded to ~/.codescribe/.env
+        // nosemgrep: tainted-path
         let mut file = fs::File::create(path)?;
 
         writeln!(file, "# CodeScribe Configuration")?;

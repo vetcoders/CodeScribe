@@ -38,19 +38,28 @@ impl BackendServer {
             });
         }
 
+        // Check if models exist, download if not
+        ensure_models_exist()?;
+
         // Find the whisper_server.py script
         let script_path = find_whisper_server()?;
         info!("Starting Python backend from: {}", script_path.display());
 
         // Spawn the Python process
+        // Use whisper-small by default for faster startup and better quality with anti-hallucination filters
+        let whisper_variant =
+            std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "small".to_string());
         let process = Command::new("uv")
             .args(["run", "python", script_path.to_str().unwrap()])
             .env("PORT", port.to_string())
             .env("HOST", "127.0.0.1")
+            .env("WHISPER_VARIANT", &whisper_variant)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .context("Failed to spawn Python backend - is 'uv' installed?")?;
+
+        info!("Using Whisper variant: {}", whisper_variant);
 
         info!("Python backend spawned with PID: {}", process.id());
 
@@ -161,6 +170,55 @@ impl Drop for BackendServer {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Ensure whisper models are downloaded
+fn ensure_models_exist() -> Result<()> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+
+    // Use WHISPER_VARIANT env var, default to "small" for faster startup
+    let variant = std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "small".to_string());
+    let models_dir = repo_root.join(format!("models/whisper-{}", variant));
+
+    if models_dir.exists() {
+        debug!("Whisper models found at {}", models_dir.display());
+        return Ok(());
+    }
+
+    info!("Whisper model '{}' not found, downloading...", variant);
+    info!("This may take a few minutes on first run.");
+
+    // Run the download script
+    let script_path = repo_root.join("scripts/get_models.py");
+    if !script_path.exists() {
+        return Err(anyhow::anyhow!(
+            "Model download script not found. Please run from the CodeScribe directory."
+        ));
+    }
+
+    let output = Command::new("uv")
+        .args([
+            "run",
+            "python",
+            script_path.to_str().unwrap(),
+            "--whisper",
+            &variant,
+        ])
+        .current_dir(&repo_root)
+        .output()
+        .context("Failed to run model download script")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("Model download failed: {}", stderr);
+        return Err(anyhow::anyhow!(
+            "Failed to download whisper models: {}",
+            stderr
+        ));
+    }
+
+    info!("Whisper model '{}' downloaded successfully", variant);
+    Ok(())
 }
 
 /// Find the whisper_server.py script

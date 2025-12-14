@@ -49,3 +49,5 @@ src/codescribe/assets/lab/
 CLAUDE.md
 /codescribe-rs/target
 /.loctree
+/.ai-agents
+/codescribe-rs/.loctree

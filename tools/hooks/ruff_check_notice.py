@@ -12,18 +12,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+def file_hash(path: Path) -> str | None:
+    """Return SHA-256 hash of file contents, or None if file not found."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
 MESSAGE = (
     "We've found lint issues, but they were automatically repaired by the Ruff "
     "pre-commit checks. Anyway it is advised to recheck your files for potential issues. "
     "If you are sure you feel comfortable committing the files once again, it should easily pass."
 )
-
-
-def file_hash(path: Path) -> str | None:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except FileNotFoundError:
-        return None
 
 
 def run_ruff(files: list[Path]) -> int:

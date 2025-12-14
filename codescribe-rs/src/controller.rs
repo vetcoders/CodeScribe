@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::tray::{update_tray_status, TrayStatus};
+use codescribe::{hide_hold_badge, show_hold_badge};
 
 // TODO: Re-enable when implementing recorder
 use crate::audio::Recorder;
@@ -298,8 +299,8 @@ impl RecordingController {
                 crate::sound::play_sound("Tink");
             }
 
-            // TODO: Show hold badge UI
-            debug!("Would show hold badge");
+            // Show red dot indicator near cursor/caret
+            show_hold_badge();
 
             // Transition to REC_HOLD
             *state.write().await = State::RecHold;
@@ -344,8 +345,8 @@ impl RecordingController {
             crate::sound::play_sound("Tink");
         }
 
-        // TODO: Show hold badge UI
-        debug!("Would show hold badge");
+        // Show red dot indicator near cursor/caret
+        show_hold_badge();
 
         // Transition to REC_TOGGLE
         *self.state.write().await = State::RecToggle;
@@ -407,8 +408,8 @@ impl RecordingController {
         *self.assistive_mode.write().await = false;
         *self.session_id.write().await = None;
 
-        // TODO: Hide hold badge UI
-        debug!("Would hide hold badge");
+        // Hide red dot indicator
+        hide_hold_badge();
 
         // Update tray icon based on result
         match &result {
@@ -490,6 +491,10 @@ impl RecordingController {
         crate::clipboard::paste_text(&formatted_text).context("Failed to paste text")?;
 
         info!("Text pasted successfully");
+
+        // Save to history
+        let entry = crate::history::save_entry(&formatted_text);
+        info!("Transcript saved to history: {}", entry.path.display());
 
         Ok(())
     }

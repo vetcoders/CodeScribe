@@ -19,14 +19,19 @@ from __future__ import annotations
 # CRITICAL: Load .env FIRST before any other imports that read os.environ
 from dotenv import load_dotenv
 
-from .path_utils import repo_root
+from .path_utils import repo_root, user_data_root
 
-# Load .env from repo root if possible, else fall back to CWD
-_env_path = repo_root() / ".env"
-if _env_path.exists():
-    load_dotenv(dotenv_path=_env_path)
+# Load .env files: repo defaults first, then user overrides
+_repo_env = repo_root() / ".env"
+if _repo_env.exists():
+    load_dotenv(dotenv_path=_repo_env)
 else:
     load_dotenv()
+
+# Load user data .env (~/.CodeScribe/.env) - overrides repo settings
+_user_env = user_data_root() / ".env"
+if _user_env.exists():
+    load_dotenv(dotenv_path=_user_env, override=True)
 
 import asyncio
 import base64
@@ -269,6 +274,10 @@ async def _run_whisper_transcription(audio_path: str, *, language: str | None) -
                     language=language,
                     condition_on_previous_text=False,
                     initial_prompt=MEDICAL_PROMPT,
+                    # Anti-hallucination filters (improves transcription quality)
+                    compression_ratio_threshold=2.0,  # Lower = stricter (default 2.4)
+                    no_speech_threshold=0.5,  # Higher = stricter (default 0.6)
+                    logprob_threshold=-0.5,  # Higher = stricter (default -1.0)
                 )
             except TypeError:
                 return _legacy_whisper_transcribe(
@@ -306,6 +315,10 @@ def _legacy_whisper_transcribe(audio_path: str, *, language: str | None) -> dict
     kwargs: dict[str, Any] = {
         "condition_on_previous_text": False,
         "initial_prompt": MEDICAL_PROMPT,
+        # Anti-hallucination filters (improves transcription quality)
+        "compression_ratio_threshold": 2.0,  # Lower = stricter (default 2.4)
+        "no_speech_threshold": 0.5,  # Higher = stricter (default 0.6)
+        "logprob_threshold": -0.5,  # Higher = stricter (default -1.0)
     }
     if language:
         kwargs["language"] = language

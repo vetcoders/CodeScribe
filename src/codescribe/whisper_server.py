@@ -4,19 +4,24 @@ whisper_server.py — Separate FastAPI server for MLX Whisper.
 
 Endpoints:
 - GET  /healthz
-- POST /transcribe  (multipart file: audio)
+- POST /transcribe  (multipart file: audio, optional: language)
 
 This module intentionally keeps the logic minimal for integration. If mlx_whisper
 is unavailable, /healthz ok=False and /transcribe returns 500.
+
+Supports:
+- Language specification (pl, en, auto)
+- Custom vocabulary via initial_prompt from JSONL dictionaries
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 try:
@@ -43,9 +48,25 @@ def _configure_logging() -> None:
 app = FastAPI(title="CodeScribe-whisper")
 
 REPO_ROOT = str(repo_root())
-_whisper_dir = os.environ.get("WHISPER_DIR") or os.path.join(
-    REPO_ROOT, "models", "whisper-large-v3-turbo"
-)
+
+# Whisper model selection: prefer WHISPER_DIR if set, otherwise use WHISPER_VARIANT
+# Default to "small" for faster startup and lower memory usage
+_variant = os.environ.get("WHISPER_VARIANT", "small").strip().lower()
+if os.environ.get("WHISPER_DIR"):
+    _whisper_dir = os.environ["WHISPER_DIR"]
+else:
+    # Search for model in order of preference
+    _candidates = [
+        os.path.join(REPO_ROOT, "models", f"whisper-{_variant}"),
+    ]
+    # Fallback candidates if preferred variant not found
+    for v in ("small", "medium", "large-v3-turbo", "large-v3"):
+        if v != _variant:
+            _candidates.append(os.path.join(REPO_ROOT, "models", f"whisper-{v}"))
+    _whisper_dir = next(
+        (c for c in _candidates if os.path.isdir(c)),
+        os.path.join(REPO_ROOT, "models", "whisper-small"),  # Final fallback
+    )
 WHISPER_DIR = normalize_model_path(_whisper_dir)
 
 MAX_UPLOAD_MB = int(os.environ.get("WHISPER_MAX_UPLOAD_MB", "20"))
@@ -74,13 +95,91 @@ if whisper is not None and load_whisper is not None:
         _whisper_model = None
 
 
+def _load_dictionary_terms(dict_path: str, max_terms: int = 100) -> list[str]:
+    """Load terms from JSONL dictionary file."""
+    terms: list[str] = []
+    if not os.path.exists(dict_path):
+        return terms
+    try:
+        with open(dict_path, encoding="utf-8") as f:
+            for line in f:
+                if len(terms) >= max_terms:
+                    break
+                try:
+                    entry = json.loads(line.strip())
+                    if "term" in entry:
+                        terms.append(entry["term"])
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        logger.warning(f"Failed to load dictionary {dict_path}: {e}")
+    return terms
+
+
+def _build_initial_prompt() -> str:
+    """Build initial_prompt from available dictionaries for better transcription accuracy."""
+    assets_dir = os.path.join(REPO_ROOT, "assets")
+
+    # Try multiple dictionary locations
+    dict_paths = [
+        os.path.join(assets_dir, "veterinary.jsonl"),
+        os.path.join(assets_dir, "programming.jsonl"),
+        os.path.join(REPO_ROOT, "src", "codescribe", "assets", "veterinary.jsonl"),
+        os.path.join(REPO_ROOT, "src", "codescribe", "assets", "programming.jsonl"),
+    ]
+
+    all_terms = []
+    for path in dict_paths:
+        terms = _load_dictionary_terms(path, max_terms=50)
+        if terms:
+            logger.info(f"Loaded {len(terms)} terms from {os.path.basename(path)}")
+            all_terms.extend(terms)
+
+    if not all_terms:
+        # Fallback: common Polish veterinary/programming terms
+        all_terms = [
+            "pacjent",
+            "diagnoza",
+            "leczenie",
+            "badanie",
+            "temperatura",
+            "API",
+            "endpoint",
+            "serwer",
+            "backend",
+            "frontend",
+            "transcribe",
+            "transkrypcja",
+            "Whisper",
+            "model",
+        ]
+
+    # Create prompt with terms (Whisper uses this as context)
+    return ", ".join(all_terms[:100])
+
+
+# Pre-load initial prompt at startup
+_initial_prompt: str = _build_initial_prompt()
+if _initial_prompt:
+    logger.info(f"Initial prompt loaded with {len(_initial_prompt.split(', '))} terms")
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": _whisper_model is not None}
 
 
 @app.post("/transcribe")
-async def transcribe(audio: UploadFile = File(...)):  # noqa: B008
+async def transcribe(
+    audio: UploadFile = File(...),  # noqa: B008
+    language: str | None = Form(None),
+):
+    """Transcribe audio file with optional language specification.
+
+    Args:
+        audio: Audio file (WAV, MP3, M4A, etc.)
+        language: Language code (pl, en, auto, or None for auto-detection)
+    """
     if _whisper_model is None or whisper is None:
         return JSONResponse(status_code=500, content={"error": "Whisper not initialized"})
     filename = (audio.filename or "audio.wav").strip()
@@ -96,8 +195,6 @@ async def transcribe(audio: UploadFile = File(...)):  # noqa: B008
                 raise HTTPException(status_code=413, detail="Audio file too large")
     path = None
     try:
-        # Let mlx_whisper transcribe from file path when possible.
-        # For simplicity in this stub, save to a temp file and ensure cleanup.
         import tempfile
 
         total = 0
@@ -112,10 +209,32 @@ async def transcribe(audio: UploadFile = File(...)):  # noqa: B008
                 tmp.write(chunk)
             path = tmp.name
 
-        res = whisper.transcribe(path)
+        # Build transcription kwargs
+        transcribe_kwargs = {
+            "path_or_hf_repo": WHISPER_DIR,
+            # Anti-hallucination filters (improves transcription quality)
+            "compression_ratio_threshold": 2.0,  # Lower = stricter (default 2.4)
+            "no_speech_threshold": 0.5,  # Higher = stricter (default 0.6)
+            "logprob_threshold": -0.5,  # Higher = stricter (default -1.0)
+            "condition_on_previous_text": False,
+        }
+
+        # Add language if specified (None or "auto" means auto-detect)
+        if language and language.lower() not in ("auto", "none", ""):
+            transcribe_kwargs["language"] = language.lower()
+            logger.info(f"Using language: {language}")
+
+        # Add initial_prompt for better accuracy with domain-specific terms
+        if _initial_prompt:
+            transcribe_kwargs["initial_prompt"] = _initial_prompt
+
+        logger.info(f"Transcribing {filename} with kwargs: {list(transcribe_kwargs.keys())}")
+        res = whisper.transcribe(path, **transcribe_kwargs)
+
         if not res or not isinstance(res, dict) or ("text" not in res):
             raise ValueError("Whisper transcription returned empty result")
         text = (res.get("text") or "").strip()
+        logger.info(f"Transcription result: {len(text)} chars")
         return {"text": text}
     except Exception as e:
         logger.exception("Transcription failed")

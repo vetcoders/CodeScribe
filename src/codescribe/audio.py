@@ -143,7 +143,7 @@ class Recorder:
             device_index = device_info.get("index")
             if device_index is None:
                 default_device = sd.default.device
-                if isinstance(default_device, (tuple, list)) and default_device:
+                if isinstance(default_device, tuple | list) and default_device:
                     device_index = default_device[0]
             if device_index is None:
                 raise RuntimeError("No input device available for recording")

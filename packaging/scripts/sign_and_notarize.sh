@@ -48,4 +48,3 @@ if [[ -n "$PROFILE" ]]; then
 fi
 
 echo "[✓] Done."
-

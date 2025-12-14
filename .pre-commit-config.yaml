@@ -81,6 +81,7 @@ repos:
         exclude: |
           (?x)^(
             assets/|
+            codescribe-rs/|
             dist/|
             models/|
             logs/|
@@ -88,7 +89,7 @@ repos:
             .*\.lock$
           )
 
-  # Optional typing (kept forgiving; won’t block on macOS-only stubs)
+  # Optional typing (kept forgiving; won't block on macOS-only stubs)
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.13.0
     hooks:
@@ -102,5 +103,6 @@ repos:
           "--follow-imports=silent",
           "--install-types",
           "--non-interactive",
-          "--exclude", "(^tests/|^packaging/|^dist/|^assets/|^\\.venv/)"
+          "--exclude", "(^tests/|^packaging/|^dist/|^assets/|^\\.venv/|sitecustomize\\.py)"
         ]
+        exclude: (sitecustomize\.py|^tests/|^tools/)

@@ -16,6 +16,9 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tracing::{debug, info};
 use tray_icon::{menu::MenuEvent, Icon, TrayIconBuilder};
 
+// Re-export config enums for menu use (single source of truth)
+pub use crate::config::{HoldMods, Language, ToggleTrigger};
+
 /// Embedded CodeScribe logo icon (resized for menu bar)
 /// Place icon.png in codescribe-rs/assets/ directory
 const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.png");
@@ -160,53 +163,11 @@ pub enum TrayMenuEvent {
     OpenMicrophoneSettings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    Auto,
-    Polish,
-    English,
-}
-
+// FormattingProvider is tray-specific (maps to config::AiProvider)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormattingProvider {
     Harmony,
     Ollama,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HoldMods {
-    Ctrl,
-    CtrlOption,
-    CtrlShift,
-    CtrlCommand,
-}
-
-impl HoldMods {
-    fn label(&self) -> &str {
-        match self {
-            HoldMods::Ctrl => "Ctrl only (Formatting)",
-            HoldMods::CtrlOption => "Ctrl+Option",
-            HoldMods::CtrlShift => "Ctrl+Shift (AI)",
-            HoldMods::CtrlCommand => "Ctrl+Command",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToggleTrigger {
-    DoubleOption,
-    DoubleRightOption,
-    Disabled,
-}
-
-impl ToggleTrigger {
-    fn label(&self) -> &str {
-        match self {
-            ToggleTrigger::DoubleOption => "double option",
-            ToggleTrigger::DoubleRightOption => "double right option",
-            ToggleTrigger::Disabled => "disabled",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,11 +532,11 @@ fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
     else if event_id == &menu_ids.hold_ctrl {
         send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Ctrl));
     } else if event_id == &menu_ids.hold_ctrl_opt {
-        send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::CtrlOption));
+        send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::CtrlAlt));
     } else if event_id == &menu_ids.hold_ctrl_shift {
         send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::CtrlShift));
     } else if event_id == &menu_ids.hold_ctrl_cmd {
-        send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::CtrlCommand));
+        send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::CtrlCmd));
     } else if event_id == &menu_ids.hold_exclusive {
         send_menu_event(TrayMenuEvent::ToggleHoldExclusive);
     } else if event_id == &menu_ids.toggle_double_opt {
@@ -585,7 +546,7 @@ fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
             ToggleTrigger::DoubleRightOption,
         ));
     } else if event_id == &menu_ids.toggle_disabled {
-        send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::Disabled));
+        send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::None));
     }
     // History submenu
     else if event_id == &menu_ids.history_save {
@@ -766,9 +727,9 @@ mod tests {
     #[test]
     fn test_hold_mods_labels() {
         assert_eq!(HoldMods::Ctrl.label(), "Ctrl only (Formatting)");
-        assert_eq!(HoldMods::CtrlOption.label(), "Ctrl+Option");
+        assert_eq!(HoldMods::CtrlAlt.label(), "Ctrl+Option");
         assert_eq!(HoldMods::CtrlShift.label(), "Ctrl+Shift (AI)");
-        assert_eq!(HoldMods::CtrlCommand.label(), "Ctrl+Command");
+        assert_eq!(HoldMods::CtrlCmd.label(), "Ctrl+Command");
     }
 
     #[test]
@@ -778,6 +739,6 @@ mod tests {
             ToggleTrigger::DoubleRightOption.label(),
             "double right option"
         );
-        assert_eq!(ToggleTrigger::Disabled.label(), "disabled");
+        assert_eq!(ToggleTrigger::None.label(), "disabled");
     }
 }
