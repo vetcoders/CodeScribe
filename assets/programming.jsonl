@@ -121,3 +121,12 @@
 {"term": "passthrough", "mispronunciations": ["pastrzu", "pastru", "passtru", "passtrough", "pass thru"], "category": "infra"}
 {"term": "invoke hell", "mispronunciations": ["invox hell", "invoks hel", "invox hel"], "category": "infra"}
 {"term": "Clippy", "mispronunciations": ["trippy", "klippy", "klipi"], "category": "rust"}
+{"term": "CORS", "mispronunciations": ["course", "kors", "cors"], "category": "web"}
+{"term": "Rust", "mispronunciations": ["wraz", "rast", "rust"], "category": "lang"}
+{"term": "ConfigMap", "mispronunciations": ["config map", "configmapa", "config mapa"], "category": "k8s"}
+{"term": "hook", "mispronunciations": ["hug", "huk", "hok"], "category": "react"}
+{"term": "feature branch", "mispronunciations": ["fetcher branch", "ficzer branch", "ficzer brancz"], "category": "git"}
+{"term": "force flag", "mispronunciations": ["sforcelag", "forcelag", "fors flag"], "category": "git"}
+{"term": "JWT", "mispronunciations": ["JVT", "dżejwiti", "jwti"], "category": "auth"}
+{"term": "guardrails", "mispronunciations": ["guardialis", "guardrejs", "gwardrejls"], "category": "ai"}
+{"term": "mock", "mispronunciations": ["MOC", "moc", "mok"], "category": "testing"}
