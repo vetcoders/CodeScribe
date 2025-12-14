@@ -25,7 +25,7 @@ cpal = "0.15"
 hound = "3.5"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
 
 # Clipboard
 arboard = "3"

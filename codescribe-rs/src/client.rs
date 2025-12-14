@@ -22,7 +22,8 @@ use tracing::{debug, info, warn};
 static SERVER_URL: OnceLock<String> = OnceLock::new();
 
 /// Ports to probe for backend server (in order of preference)
-const PROBE_PORTS: &[u16] = &[8237, 7237, 6237, 5237];
+/// 8238 is the default Python whisper_server port
+const PROBE_PORTS: &[u16] = &[8238, 8237, 7237, 6237, 5237];
 
 /// Maximum retry attempts for transient errors
 const MAX_RETRIES: u32 = 3;

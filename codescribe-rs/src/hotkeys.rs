@@ -235,6 +235,7 @@ mod macos {
             state.assistive_mode = shift_now;
             state.hold_event_sent = false;
 
+            tracing::debug!("Ctrl pressed - sending Hold Down event");
             // Send Hold Down immediately for responsiveness
             let _ = state.tx.send(HotkeyEvent::Hold {
                 action: HoldAction::Down,
@@ -244,15 +245,20 @@ mod macos {
         } else if !ctrl_now && state.ctrl_down {
             // Ctrl just released
             state.ctrl_down = false;
+            tracing::debug!("Ctrl released");
 
             // Only send Up if we sent Down and held long enough
             if state.hold_event_sent {
                 if let Some(ts) = state.ctrl_down_ts {
-                    if ts.elapsed() >= Duration::from_millis(MIN_HOLD_DURATION_MS) {
+                    let elapsed = ts.elapsed();
+                    if elapsed >= Duration::from_millis(MIN_HOLD_DURATION_MS) {
+                        tracing::debug!("Ctrl held for {:?} - sending Hold Up event", elapsed);
                         let _ = state.tx.send(HotkeyEvent::Hold {
                             action: HoldAction::Up,
                             assistive: state.assistive_mode,
                         });
+                    } else {
+                        tracing::debug!("Ctrl held for {:?} - too short, ignoring", elapsed);
                     }
                 }
             }
@@ -263,26 +269,34 @@ mod macos {
         if option_now && !state.option_down {
             // Option just pressed
             state.option_down = true;
+            tracing::debug!("Option pressed");
         } else if !option_now && state.option_down {
             // Option just released
             state.option_down = false;
+            tracing::debug!("Option released");
 
             // Don't trigger toggle if other modifiers were held
             if !ctrl_now && !cmd_now {
                 let now = Instant::now();
 
                 if let Some(last_tap) = state.last_option_tap_ts {
-                    if now.duration_since(last_tap) <= Duration::from_millis(DOUBLE_TAP_INTERVAL_MS)
-                    {
+                    let interval = now.duration_since(last_tap);
+                    if interval <= Duration::from_millis(DOUBLE_TAP_INTERVAL_MS) {
                         // Double-tap detected!
+                        tracing::debug!(
+                            "Option double-tap detected ({:?}) - sending Toggle",
+                            interval
+                        );
                         let _ = state.tx.send(HotkeyEvent::Toggle);
                         state.last_option_tap_ts = None;
                     } else {
                         // Too slow, start new sequence
+                        tracing::debug!("Option tap too slow ({:?}), resetting", interval);
                         state.last_option_tap_ts = Some(now);
                     }
                 } else {
                     // First tap
+                    tracing::debug!("Option first tap");
                     state.last_option_tap_ts = Some(now);
                 }
             }

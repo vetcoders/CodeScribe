@@ -3,6 +3,7 @@
 //! Rust frontend that communicates with Python backend (FastAPI + MLX Whisper)
 
 mod audio;
+mod backend;
 mod client;
 mod clipboard;
 mod config;
@@ -57,17 +58,26 @@ async fn main() -> Result<()> {
     // Check and request macOS permissions (Accessibility, Microphone)
     permissions::request_all_permissions();
 
-    // Check if Python backend is running
-    match client::check_health().await {
-        Ok(true) => info!("Python backend is healthy"),
-        Ok(false) => {
-            info!(
-                "Python backend not responding - please start it with: ./CodeScribe start backend"
-            );
+    // Start Python backend server
+    info!("Starting Python backend server...");
+    let _backend = match backend::BackendServer::start() {
+        Ok(server) => {
+            info!("Python backend started on port {}", server.port());
+            Some(server)
         }
         Err(e) => {
-            info!("Could not reach backend: {}", e);
+            error!("Failed to start Python backend: {}", e);
+            error!("Transcription will not work without the backend.");
+            error!("Ensure 'uv' is installed and whisper_server.py is accessible.");
+            None
         }
+    };
+
+    // Verify backend is healthy
+    match client::check_health().await {
+        Ok(true) => info!("Python backend health check passed"),
+        Ok(false) => warn!("Python backend health check failed"),
+        Err(e) => warn!("Could not verify backend health: {}", e),
     }
 
     // Create channel for hotkey events
@@ -148,14 +158,16 @@ async fn main() -> Result<()> {
         info!("Menu event loop terminated");
     });
 
-    // Spawn async task to handle hotkey events
+    // Spawn blocking task to handle hotkey events (rx.recv() is blocking)
     let controller_clone = Arc::clone(&controller);
-    tokio::spawn(async move {
+    std::thread::spawn(move || {
         info!("Hotkey event loop started");
+        let rt = tokio::runtime::Handle::current();
         loop {
             // Receive hotkey event from channel (blocking)
             match rx.recv() {
                 Ok(raw_event) => {
+                    info!("Received hotkey event: {:?}", raw_event);
                     // Convert hotkeys::HotkeyEvent to controller::HotkeyEvent
                     let controller_event = match raw_event {
                         hotkeys::HotkeyEvent::Hold { action, assistive } => {
@@ -176,8 +188,10 @@ async fn main() -> Result<()> {
                         },
                     };
 
-                    // Handle the event
-                    if let Err(e) = controller_clone.handle_hotkey_event(controller_event).await {
+                    // Handle the event (block_on since we're in std::thread, not tokio)
+                    let result =
+                        rt.block_on(controller_clone.handle_hotkey_event(controller_event));
+                    if let Err(e) = result {
                         error!("Error handling hotkey event: {}", e);
                     }
                 }
