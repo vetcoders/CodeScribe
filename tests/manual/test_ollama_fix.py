@@ -5,8 +5,8 @@ import pytest
 import requests
 from dotenv import load_dotenv
 
-from tests.helpers.ollama import ensure_host_and_model, extract_response_text
 from codescribe.llm import _ollama_generate
+from tests.helpers.ollama import ensure_host_and_model, extract_response_text
 
 load_dotenv()
 

@@ -92,8 +92,7 @@ def _explicit_url_candidate() -> str | None:
         return None
     if not _remote_allowed(candidate):
         logging.error(
-            "Remote CodeScribeServer URLs are disabled. "
-            "Set ALLOW_REMOTE_CODESCRIBE=1 to override."
+            "Remote CodeScribeServer URLs are disabled. Set ALLOW_REMOTE_CODESCRIBE=1 to override."
         )
         return None
     return candidate

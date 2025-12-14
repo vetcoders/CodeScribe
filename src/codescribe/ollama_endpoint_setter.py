@@ -29,6 +29,7 @@ def _set_ollama_endpoint(self, _sender):
                 import requests
 
                 try:
+                    # nosemgrep: request-with-http - Ollama runs locally without HTTPS
                     resp = requests.get(f"{new_endpoint}/api/tags", timeout=2)
                     if resp.status_code == 200:
                         rumps.notification(

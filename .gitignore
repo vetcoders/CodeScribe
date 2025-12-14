@@ -48,3 +48,4 @@ src/codescribe/assets/lab/
 /.fastembed_cache
 CLAUDE.md
 /codescribe-rs/target
+/.loctree

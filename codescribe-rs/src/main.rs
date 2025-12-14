@@ -8,30 +8,62 @@ mod clipboard;
 mod config;
 mod controller;
 mod hotkeys;
+mod permissions;
+mod sound;
 mod tray;
 
 use anyhow::Result;
+use clap::Parser;
 use crossbeam_channel::unbounded;
 use std::sync::Arc;
-use tracing::{error, info, Level};
+use tokio::sync::RwLock;
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+
+/// CodeScribe - Speech-to-text tray app for macOS
+///
+/// Hold Ctrl to record, release to transcribe.
+/// Double-tap Option to toggle recording.
+/// Requires Python backend running (MLX Whisper).
+#[derive(Parser)]
+#[command(name = "codescribe")]
+#[command(version)]
+#[command(author = "Loctree <contact@loctree.io>")]
+#[command(about = "Speech-to-text tray app for macOS", long_about = None)]
+struct Cli {
+    /// Enable verbose/debug logging
+    #[arg(short, long)]
+    verbose: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     // Initialize logging
+    let log_level = if cli.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_max_level(log_level)
         .with_target(false)
         .compact()
         .init();
 
     info!("CodeScribe starting...");
 
+    // Check and request macOS permissions (Accessibility, Microphone)
+    permissions::request_all_permissions();
+
     // Check if Python backend is running
     match client::check_health().await {
         Ok(true) => info!("Python backend is healthy"),
         Ok(false) => {
-            info!("Python backend not responding - please start it with: ./CodeScribe start backend");
+            info!(
+                "Python backend not responding - please start it with: ./CodeScribe start backend"
+            );
         }
         Err(e) => {
             info!("Could not reach backend: {}", e);
@@ -41,15 +73,80 @@ async fn main() -> Result<()> {
     // Create channel for hotkey events
     let (tx, rx) = unbounded::<hotkeys::HotkeyEvent>();
 
-    // Start hotkey listener in background thread
-    info!("Starting hotkey listener...");
-    let required_modifiers = hotkeys::ModifierFlags::ctrl_only();
-    let exclusive_mode = true;
-    hotkeys::start(tx, required_modifiers, exclusive_mode)
-        .map_err(|e| anyhow::anyhow!("Failed to start hotkey listener: {}", e))?;
+    // Get menu event receiver before starting tray
+    let menu_rx = tray::menu_event_receiver().expect("Failed to initialize menu event channel");
 
-    // Create controller
-    let controller = Arc::new(controller::RecordingController::new());
+    // Create HotkeyManager on main thread (required for macOS)
+    // This uses global-hotkey which properly handles macOS threading
+    info!("Initializing global hotkeys...");
+    let hotkey_manager = match hotkeys::HotkeyManager::new(tx) {
+        Ok(manager) => {
+            info!("Global hotkeys registered successfully");
+            Some(manager)
+        }
+        Err(e) => {
+            error!("Failed to initialize hotkeys: {}", e);
+            error!("Continuing in tray-only mode (hotkeys disabled)");
+            None
+        }
+    };
+
+    // Create shared config state for menu event handling
+    let shared_config = Arc::new(RwLock::new(config::Config::load()));
+
+    // Create controller with shared config
+    let controller = Arc::new(controller::RecordingController::with_config(Arc::clone(
+        &shared_config,
+    )));
+
+    // Spawn async task to handle menu events
+    let config_clone = Arc::clone(&shared_config);
+    tokio::spawn(async move {
+        info!("Menu event loop started");
+        loop {
+            match menu_rx.recv() {
+                Ok(event) => {
+                    info!("Received menu event: {:?}", event);
+                    match event {
+                        tray::TrayMenuEvent::Quit => {
+                            info!("Quit event received - exiting application");
+                            std::process::exit(0);
+                        }
+                        tray::TrayMenuEvent::ToggleHotkeys => {
+                            info!("Toggle hotkeys requested (not yet implemented)");
+                            // TODO: Wire up hotkey enable/disable
+                        }
+                        tray::TrayMenuEvent::SetLanguage(lang) => {
+                            let new_lang = match lang {
+                                tray::Language::Auto => config::Language::Auto,
+                                tray::Language::Polish => config::Language::Polish,
+                                tray::Language::English => config::Language::English,
+                            };
+                            info!("Setting language to: {:?}", new_lang);
+                            let mut cfg = config_clone.write().await;
+                            cfg.whisper_language = new_lang;
+                            if let Err(e) = cfg.save_to_env("WHISPER_LANGUAGE", new_lang.as_str()) {
+                                error!("Failed to save language setting: {}", e);
+                            }
+                        }
+                        tray::TrayMenuEvent::CopyLatestToClipboard => {
+                            info!("Copy latest to clipboard requested");
+                            // TODO: Implement history tracking to get latest transcript
+                            warn!("History feature not yet implemented");
+                        }
+                        _ => {
+                            info!("Unhandled menu event: {:?}", event);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Menu channel closed: {}", e);
+                    break;
+                }
+            }
+        }
+        info!("Menu event loop terminated");
+    });
 
     // Spawn async task to handle hotkey events
     let controller_clone = Arc::clone(&controller);
@@ -93,9 +190,10 @@ async fn main() -> Result<()> {
         info!("Hotkey event loop terminated");
     });
 
-    // Run the tray application (blocking)
+    // Run the tray application with hotkey manager (blocking)
+    // Both tray and hotkeys run on main thread with shared event loop
     info!("Starting system tray...");
-    tray::run()?;
+    tray::run_with_hotkeys(hotkey_manager)?;
 
     info!("CodeScribe shutting down...");
     Ok(())

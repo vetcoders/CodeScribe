@@ -216,8 +216,8 @@ pub async fn transcribe(path: &Path, language: Option<&str>) -> Result<String> {
     let base_url = get_server_url().await?;
     let url = format!("{}/transcribe", base_url);
 
-    // Read file into memory
-    let mut file = File::open(path)
+    // Read file into memory (path comes from internal recorder, not user input)
+    let mut file = File::open(path) // nosemgrep: tainted-path
         .await
         .context("Failed to open audio file")?;
 
@@ -232,12 +232,13 @@ pub async fn transcribe(path: &Path, language: Option<&str>) -> Result<String> {
         .unwrap_or("recording.wav");
 
     // Build multipart form
+    // Backend expects "audio" field, not "file"
     let file_part = Part::bytes(buffer)
         .file_name(filename.to_string())
         .mime_str("audio/wav")
         .context("Failed to set MIME type")?;
 
-    let mut form = Form::new().part("file", file_part);
+    let mut form = Form::new().part("audio", file_part);
 
     if let Some(lang) = language {
         form = form.text("language", lang.to_string());
@@ -267,7 +268,10 @@ pub async fn transcribe(path: &Path, language: Option<&str>) -> Result<String> {
         .await
         .context("Failed to parse transcription response")?;
 
-    info!("Transcription successful, length: {} chars", transcribe_response.text.len());
+    info!(
+        "Transcription successful, length: {} chars",
+        transcribe_response.text.len()
+    );
 
     Ok(transcribe_response.text)
 }

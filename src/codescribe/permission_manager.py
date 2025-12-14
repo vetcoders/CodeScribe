@@ -174,10 +174,7 @@ class PermissionManager:
     def _open_input_monitoring_settings(self, _sender) -> None:
         self._open_privacy_anchor(
             "Privacy_ListenEvent",
-            (
-                "Open System Settings → Privacy & Security → Input Monitoring and "
-                "enable CodeScribe."
-            ),
+            ("Open System Settings → Privacy & Security → Input Monitoring and enable CodeScribe."),
         )
 
     def _open_accessibility(self, _sender) -> None:

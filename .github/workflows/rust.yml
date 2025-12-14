@@ -1,0 +1,116 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main, master, develop]
+    paths:
+      - 'codescribe-rs/**'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'codescribe-rs/**'
+      - '.github/workflows/rust.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: codescribe-rs
+
+jobs:
+  check:
+    name: Check & Lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codescribe-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('codescribe-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy -- -D warnings
+
+      - name: Check compilation
+        run: cargo check
+
+  test:
+    name: Tests
+    runs-on: macos-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codescribe-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('codescribe-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --verbose
+
+  build:
+    name: Release Build
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            codescribe-rs/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('codescribe-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: codescribe-macos
+          path: codescribe-rs/target/release/codescribe
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/secrets
+            p/owasp-top-ten
+            p/r2c-security-audit

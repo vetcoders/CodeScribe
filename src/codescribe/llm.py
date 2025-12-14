@@ -195,6 +195,7 @@ async def _format_with_harmony(text: str, assistive: bool, settings: VistaSettin
         )
         out = _extract_response_text(response)
         if out:
+            # nosemgrep: python-logger-credential-disclosure - false positive
             logger.debug(
                 "Harmony formatting ok (tokens_in=%s, tokens_out≈%s)",
                 _count_tokens(payload),
