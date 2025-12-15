@@ -72,9 +72,10 @@ walkdir = "2.5.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS specific - for better hotkey support if rdev fails
 core-foundation = "0.10"
-# UI utilities (hold badge, caret tracking)
-cocoa = "0.26"
 core-graphics = "0.25"
+# UI utilities (hold badge, caret tracking) - modern objc2-* crates
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSColor", "NSEvent", "NSBezierPath", "NSGraphics", "NSResponder"] }
+# Legacy objc for runtime declarations (ClassDecl) and msg_send! macro
 objc = "0.2"
 # Grand Central Dispatch for main thread operations
 dispatch = "0.2"

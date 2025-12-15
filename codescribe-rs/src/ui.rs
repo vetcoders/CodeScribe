@@ -7,28 +7,33 @@
 
 // Allow Apple-style constant naming (kAX* prefixes) for Accessibility API
 #![allow(non_upper_case_globals)]
-// Allow deprecated cocoa crate until migration to objc2 (tracked separately)
-#![allow(deprecated)]
 
-use cocoa::appkit::{NSBackingStoreType, NSColor, NSWindowCollectionBehavior, NSWindowStyleMask};
-use cocoa::base::{id, nil, NO, YES};
-use cocoa::foundation::{NSPoint, NSRect, NSSize};
 use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
+use objc2_app_kit::{
+    NSBackingStoreType, NSColor, NSEvent, NSWindowCollectionBehavior, NSWindowStyleMask,
+};
+use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-// Accessibility API bindings
+// Type alias for Objective-C object pointers (compatible with objc crate msg_send!)
+type Id = *mut Object;
+
+// Accessibility API bindings (use raw pointers compatible with C FFI)
+type AXId = *mut std::ffi::c_void;
+
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-    fn AXUIElementCopyAttributeValue(element: id, attribute: id, value: *mut id) -> i32;
-    fn AXUIElementCreateSystemWide() -> id;
-    fn AXValueGetValue(value: id, type_: i32, value_ptr: *mut std::ffi::c_void) -> bool;
-    fn CFRelease(cf: id);
+    fn AXUIElementCopyAttributeValue(element: AXId, attribute: AXId, value: *mut AXId) -> i32;
+    fn AXUIElementCreateSystemWide() -> AXId;
+    fn AXValueGetValue(value: AXId, type_: i32, value_ptr: *mut std::ffi::c_void) -> bool;
+    fn CFRelease(cf: AXId);
 }
 
 // AX constants
@@ -46,7 +51,7 @@ const kAXValueCGSizeType: i32 = 2;
 const kAXValueCFRangeType: i32 = 3;
 
 // Window level constants
-const NS_STATUS_WINDOW_LEVEL: i32 = 25;
+const NS_STATUS_WINDOW_LEVEL: i64 = 25;
 
 /// Configuration for the hold badge
 #[derive(Debug, Clone)]
@@ -95,11 +100,11 @@ pub fn focused_element_accepts_text() -> bool {
             return false;
         }
 
-        let mut focused_element: id = nil;
+        let mut focused_element: AXId = ptr::null_mut();
         let attr_name = CFString::new(kAXFocusedUIElementAttribute);
         let result = AXUIElementCopyAttributeValue(
             system_wide,
-            attr_name.as_concrete_TypeRef() as id,
+            attr_name.as_concrete_TypeRef() as AXId,
             &mut focused_element,
         );
 
@@ -110,11 +115,11 @@ pub fn focused_element_accepts_text() -> bool {
         }
 
         // Get role attribute
-        let mut role_value: id = nil;
+        let mut role_value: AXId = ptr::null_mut();
         let role_attr = CFString::new(kAXRoleAttribute);
         let role_result = AXUIElementCopyAttributeValue(
             focused_element,
-            role_attr.as_concrete_TypeRef() as id,
+            role_attr.as_concrete_TypeRef() as AXId,
             &mut role_value,
         );
 
@@ -145,11 +150,11 @@ pub fn get_caret_position() -> Option<(f64, f64)> {
             return None;
         }
 
-        let mut focused_element: id = nil;
+        let mut focused_element: AXId = ptr::null_mut();
         let attr_name = CFString::new(kAXFocusedUIElementAttribute);
         let result = AXUIElementCopyAttributeValue(
             system_wide,
-            attr_name.as_concrete_TypeRef() as id,
+            attr_name.as_concrete_TypeRef() as AXId,
             &mut focused_element,
         );
 
@@ -160,11 +165,11 @@ pub fn get_caret_position() -> Option<(f64, f64)> {
         }
 
         // Get selected text range
-        let mut range_value: id = nil;
+        let mut range_value: AXId = ptr::null_mut();
         let range_attr = CFString::new(kAXSelectedTextRangeAttribute);
         let range_result = AXUIElementCopyAttributeValue(
             focused_element,
-            range_attr.as_concrete_TypeRef() as id,
+            range_attr.as_concrete_TypeRef() as AXId,
             &mut range_value,
         );
 
@@ -199,19 +204,19 @@ pub fn get_caret_position() -> Option<(f64, f64)> {
         }
 
         // Try to get position and size of the focused element
-        let mut position_value: id = nil;
+        let mut position_value: AXId = ptr::null_mut();
         let position_attr = CFString::new(kAXPositionAttribute);
         let position_result = AXUIElementCopyAttributeValue(
             focused_element,
-            position_attr.as_concrete_TypeRef() as id,
+            position_attr.as_concrete_TypeRef() as AXId,
             &mut position_value,
         );
 
-        let mut size_value: id = nil;
+        let mut size_value: AXId = ptr::null_mut();
         let size_attr = CFString::new(kAXSizeAttribute);
         let size_result = AXUIElementCopyAttributeValue(
             focused_element,
-            size_attr.as_concrete_TypeRef() as id,
+            size_attr.as_concrete_TypeRef() as AXId,
             &mut size_value,
         );
 
@@ -232,12 +237,6 @@ pub fn get_caret_position() -> Option<(f64, f64)> {
         }
 
         // Extract position
-        #[repr(C)]
-        struct CGPoint {
-            x: f64,
-            y: f64,
-        }
-
         let mut position = CGPoint { x: 0.0, y: 0.0 };
         let position_ok = AXValueGetValue(
             position_value,
@@ -248,12 +247,6 @@ pub fn get_caret_position() -> Option<(f64, f64)> {
         CFRelease(position_value);
 
         // Extract size
-        #[repr(C)]
-        struct CGSize {
-            width: f64,
-            height: f64,
-        }
-
         let mut size = CGSize {
             width: 0.0,
             height: 0.0,
@@ -272,19 +265,14 @@ pub fn get_caret_position() -> Option<(f64, f64)> {
 
         // Estimate caret position (top-left of element + small offset)
         // For better accuracy, we'd need to parse the text layout, but this is a reasonable approximation
-        Some((position.x + 5.0, position.y + size.height / 2.0))
+        Some((position.x, position.y + size.height / 2.0))
     }
 }
 
 /// Get the current mouse cursor position in screen coordinates
 pub fn get_cursor_position() -> (f64, f64) {
-    unsafe {
-        // Use NSEvent.mouseLocation for getting current cursor position
-        let ns_event_class = Class::get("NSEvent").unwrap();
-        let mouse_location: NSPoint = msg_send![ns_event_class, mouseLocation];
-
-        (mouse_location.x, mouse_location.y)
-    }
+    let mouse_location = NSEvent::mouseLocation();
+    (mouse_location.x, mouse_location.y)
 }
 
 /// Get the best available position for the badge (caret or cursor)
@@ -293,7 +281,7 @@ fn get_badge_position() -> (f64, f64) {
 }
 
 /// Create the hold badge window
-unsafe fn create_badge_window(config: &HoldBadgeConfig) -> id {
+unsafe fn create_badge_window(config: &HoldBadgeConfig) -> Id {
     let ns_window = Class::get("NSWindow").unwrap();
     let ns_view = Class::get("NSView").unwrap();
 
@@ -302,35 +290,43 @@ unsafe fn create_badge_window(config: &HoldBadgeConfig) -> id {
     let adjusted_x = x + config.offset.0;
     let adjusted_y = y + config.offset.1;
 
-    // Create window frame
-    let frame = NSRect::new(
-        NSPoint::new(adjusted_x, adjusted_y),
-        NSSize::new(config.diameter, config.diameter),
-    );
+    // Create window frame using CGRect
+    let frame = CGRect {
+        origin: CGPoint {
+            x: adjusted_x,
+            y: adjusted_y,
+        },
+        size: CGSize {
+            width: config.diameter,
+            height: config.diameter,
+        },
+    };
 
     // Create window
-    let window: id = msg_send![ns_window, alloc];
-    let window: id = msg_send![
+    let window: Id = msg_send![ns_window, alloc];
+    let style_mask = NSWindowStyleMask::Borderless;
+    let backing = NSBackingStoreType::Buffered;
+    let window: Id = msg_send![
         window,
         initWithContentRect: frame
-        styleMask: NSWindowStyleMask::NSBorderlessWindowMask
-        backing: NSBackingStoreType::NSBackingStoreBuffered as u64
-        defer: NO
+        styleMask: style_mask
+        backing: backing
+        defer: false
     ];
 
     // Configure window
-    let _: () = msg_send![window, setOpaque: NO];
-    let _: () = msg_send![window, setBackgroundColor: NSColor::clearColor(nil)];
-    let _: () = msg_send![window, setIgnoresMouseEvents: YES];
+    let clear_color = NSColor::clearColor();
+    let clear_color_ptr = &*clear_color as *const _ as Id;
+    let _: () = msg_send![window, setOpaque: false];
+    let _: () = msg_send![window, setBackgroundColor: clear_color_ptr];
+    let _: () = msg_send![window, setIgnoresMouseEvents: true];
     let _: () = msg_send![window, setLevel: NS_STATUS_WINDOW_LEVEL];
-    let _: () = msg_send![
-        window,
-        setCollectionBehavior: NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
-    ];
+    let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces;
+    let _: () = msg_send![window, setCollectionBehavior: collection_behavior];
 
     // Create content view
-    let content_view: id = msg_send![ns_view, alloc];
-    let content_view: id = msg_send![content_view, initWithFrame: frame];
+    let content_view: Id = msg_send![ns_view, alloc];
+    let content_view: Id = msg_send![content_view, initWithFrame: frame];
     let _: () = msg_send![window, setContentView: content_view];
 
     // Create badge view (custom drawing)
@@ -341,7 +337,7 @@ unsafe fn create_badge_window(config: &HoldBadgeConfig) -> id {
 }
 
 /// Create the circular badge view
-unsafe fn create_badge_view(config: &HoldBadgeConfig) -> id {
+unsafe fn create_badge_view(config: &HoldBadgeConfig) -> Id {
     // Try to get existing class first
     let badge_class = if let Some(existing_class) = Class::get("HoldBadgeView") {
         existing_class
@@ -351,63 +347,82 @@ unsafe fn create_badge_view(config: &HoldBadgeConfig) -> id {
         let mut decl = objc::declare::ClassDecl::new("HoldBadgeView", superclass)
             .expect("Failed to create HoldBadgeView class");
 
-        extern "C" fn draw_rect(_this: &Object, _cmd: objc::runtime::Sel, rect: NSRect) {
+        // Use a simple struct for the rect parameter that's compatible with objc Encode
+        extern "C" fn draw_rect(
+            _this: &Object,
+            _cmd: objc::runtime::Sel,
+            rect_ptr: *const std::ffi::c_void,
+        ) {
             unsafe {
+                // Interpret the rect_ptr as CGRect
+                let rect = *(rect_ptr as *const CGRect);
+
                 let ns_bezier_path = Class::get("NSBezierPath").unwrap();
-                let path: id = msg_send![ns_bezier_path, bezierPath];
+                let path: Id = msg_send![ns_bezier_path, bezierPath];
 
                 // Draw circle
                 let center_x = rect.size.width / 2.0;
                 let center_y = rect.size.height / 2.0;
                 let radius = rect.size.width / 2.0;
 
-                let center = NSPoint::new(center_x, center_y);
+                let center = CGPoint {
+                    x: center_x,
+                    y: center_y,
+                };
                 let _: () = msg_send![
                     path,
                     appendBezierPathWithArcWithCenter: center
                     radius: radius
-                    startAngle: 0.0
-                    endAngle: 360.0
+                    startAngle: 0.0_f64
+                    endAngle: 360.0_f64
                 ];
 
                 // Set fill color (red with 80% opacity)
-                let color: id = NSColor::colorWithCalibratedRed_green_blue_alpha_(
-                    nil, 1.0, // R
+                let color = NSColor::colorWithCalibratedRed_green_blue_alpha(
+                    1.0, // R
                     0.0, // G
                     0.0, // B
                     0.8, // A
                 );
-                let _: () = msg_send![color, setFill];
+                let color_ptr = &*color as *const _ as Id;
+                let _: () = msg_send![color_ptr, setFill];
                 let _: () = msg_send![path, fill];
             }
         }
 
+        // Register with raw pointer type (objc runtime handles the actual struct passing)
         decl.add_method(
             sel!(drawRect:),
-            draw_rect as extern "C" fn(&Object, objc::runtime::Sel, NSRect),
+            draw_rect as extern "C" fn(&Object, objc::runtime::Sel, *const std::ffi::c_void),
         );
 
         decl.register()
     };
 
     // Create the view
-    let view: id = msg_send![badge_class, alloc];
-    let frame = NSRect::new(
-        NSPoint::new(0.0, 0.0),
-        NSSize::new(config.diameter, config.diameter),
-    );
-    let view: id = msg_send![view, initWithFrame: frame];
+    let view: Id = msg_send![badge_class, alloc];
+    let frame = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: config.diameter,
+            height: config.diameter,
+        },
+    };
+    let view: Id = msg_send![view, initWithFrame: frame];
 
     view
 }
 
 /// Update the badge window position
-unsafe fn update_badge_position(window: id, config: &HoldBadgeConfig) {
+unsafe fn update_badge_position(window: Id, config: &HoldBadgeConfig) {
     let (x, y) = get_badge_position();
     let adjusted_x = x + config.offset.0;
     let adjusted_y = y + config.offset.1;
 
-    let new_origin = NSPoint::new(adjusted_x, adjusted_y);
+    let new_origin = CGPoint {
+        x: adjusted_x,
+        y: adjusted_y,
+    };
     let _: () = msg_send![window, setFrameOrigin: new_origin];
 }
 
@@ -423,7 +438,7 @@ fn show_hold_badge_impl(config: HoldBadgeConfig) {
 
         // Hide existing badge if any
         if let Some(window_ptr) = state.window {
-            let window = window_ptr as id;
+            let window = window_ptr as Id;
             let _: () = msg_send![window, close];
             state.window = None;
         }
@@ -451,7 +466,7 @@ fn show_hold_badge_impl(config: HoldBadgeConfig) {
                 if let Some(window_ptr) = state.window {
                     // Position updates also need main thread
                     Queue::main().exec_async(move || {
-                        let window = window_ptr as id;
+                        let window = window_ptr as Id;
                         let state = BADGE_STATE.lock().unwrap();
                         update_badge_position(window, &state.config);
                     });
@@ -483,7 +498,7 @@ pub fn hide_hold_badge() {
     Queue::main().exec_async(|| unsafe {
         let mut state = BADGE_STATE.lock().unwrap();
         if let Some(window_ptr) = state.window {
-            let window = window_ptr as id;
+            let window = window_ptr as Id;
             let _: () = msg_send![window, close];
             state.window = None;
         }
