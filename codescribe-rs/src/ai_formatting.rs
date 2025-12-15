@@ -164,28 +164,99 @@ pub fn has_repetition_loop(text: &str) -> bool {
     false
 }
 
+/// Strip punctuation from a word for comparison (but keep the original)
+fn normalize_word(word: &str) -> String {
+    word.trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
+}
+
+/// Clean up trailing punctuation from repeated patterns
+/// For comma-separated repetitions, remove the comma: "roku, roku, roku" -> "roku"
+/// For period-separated repetitions, keep the period: "jest. jest. jest." -> "jest."
+fn clean_pattern_punctuation(words: &[&str]) -> Vec<String> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    let mut cleaned: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+
+    // Check if last word has trailing punctuation
+    if let Some(last) = cleaned.last_mut() {
+        // Only remove commas from repeated patterns (they're just separators)
+        // Keep periods (they mark sentence endings)
+        if last.ends_with(',') {
+            *last = last.trim_end_matches(',').to_string();
+        }
+    }
+
+    cleaned
+}
+
 /// Simple local repetition cleanup (no AI needed)
+/// Removes repeated words AND repeated phrases (1-3 word patterns)
+/// Handles comma-separated repetitions like "w tym roku, w tym roku, w tym roku"
 pub fn remove_simple_repetitions(text: &str) -> String {
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.is_empty() {
         return text.to_string();
     }
 
-    let mut result: Vec<&str> = Vec::new();
+    let mut result: Vec<String> = Vec::new();
     let mut i = 0;
 
     while i < words.len() {
-        // Check for consecutive same words
-        let mut repeat_count = 1;
-        while i + repeat_count < words.len()
-            && words[i + repeat_count].to_lowercase() == words[i].to_lowercase()
-        {
-            repeat_count += 1;
+        // Try to match phrase patterns (3-word, 2-word, then 1-word)
+        let mut best_pattern_len = 1;
+        let mut best_repeat_count = 1;
+
+        for pattern_len in (1..=3).rev() {
+            if i + pattern_len > words.len() {
+                continue;
+            }
+
+            // Normalize words for comparison (strip punctuation, lowercase)
+            let pattern: Vec<String> = words[i..i + pattern_len]
+                .iter()
+                .map(|w| normalize_word(w))
+                .collect();
+
+            let mut repeat_count = 1;
+            let mut j = i + pattern_len;
+
+            while j + pattern_len <= words.len() {
+                let next: Vec<String> = words[j..j + pattern_len]
+                    .iter()
+                    .map(|w| normalize_word(w))
+                    .collect();
+
+                if pattern == next {
+                    repeat_count += 1;
+                    j += pattern_len;
+                } else {
+                    break;
+                }
+            }
+
+            // Prefer longer patterns with more repeats
+            if repeat_count >= 2
+                && (pattern_len > best_pattern_len || repeat_count > best_repeat_count)
+            {
+                best_pattern_len = pattern_len;
+                best_repeat_count = repeat_count;
+            }
         }
 
-        // Keep only one occurrence
-        result.push(words[i]);
-        i += repeat_count;
+        // Add the pattern once, clean up punctuation if it was repeated
+        let pattern_words = &words[i..i + best_pattern_len];
+        if best_repeat_count >= 2 {
+            // Pattern was repeated - clean trailing punctuation
+            result.extend(clean_pattern_punctuation(pattern_words));
+        } else {
+            // Not repeated - keep as is
+            result.extend(pattern_words.iter().map(|w| w.to_string()));
+        }
+
+        i += best_pattern_len * best_repeat_count;
     }
 
     result.join(" ")
@@ -334,6 +405,7 @@ mod tests {
 
     #[test]
     fn test_remove_simple_repetitions() {
+        // Basic word repetitions
         assert_eq!(
             remove_simple_repetitions("Wielki Wielki Wielki problem"),
             "Wielki problem"
@@ -343,6 +415,27 @@ mod tests {
             "Kali bogini"
         );
         assert_eq!(remove_simple_repetitions("test test test"), "test");
+
+        // Comma-separated repetitions (real-world case)
+        assert_eq!(
+            remove_simple_repetitions(
+                "W tym momencie, w tym roku, w tym roku, w tym roku, w tym roku"
+            ),
+            "W tym momencie, w tym roku"
+        );
+
+        // Period-separated repetitions
+        assert_eq!(
+            remove_simple_repetitions("To jest. To jest. To jest."),
+            "To jest."
+        );
+
+        // Multi-word phrase repetitions
+        assert_eq!(
+            remove_simple_repetitions("to jest to jest to jest test"),
+            "to jest test"
+        );
+
         // Should preserve normal text
         assert_eq!(
             remove_simple_repetitions("normalny tekst bez powtórzeń"),

@@ -112,3 +112,4 @@
 {"term": "throughput", "mispronunciations": ["trufput", "tru put", "trupud"], "category": "net"}
 {"term": "retry", "mispronunciations": ["ri traj", "rej try"], "category": "net"}
 {"term": "multipart/form-data", "mispronunciations": ["multi part form data", "multi part formdejta", "multipart form data"], "category": "net"}
+{"term": "loctree", "mispronunciations": ["lokty", "loktri", "lok tri"], "category": "tools"}

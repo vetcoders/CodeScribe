@@ -104,9 +104,6 @@ pub fn set_exclusive_mode(enabled: bool) {
 /// Double-tap interval for toggle detection (milliseconds)
 const DOUBLE_TAP_INTERVAL_MS: u64 = 450;
 
-/// Minimum hold duration to distinguish from accidental tap (milliseconds)
-const MIN_HOLD_DURATION_MS: u64 = 150;
-
 // --- Types ---
 
 /// Represents the action of a hold gesture
@@ -409,25 +406,18 @@ mod macos {
         } else if !combo_active && state.hold_active {
             // Hold combo just deactivated
             state.hold_active = false;
-            tracing::debug!("Hold combo deactivated");
 
-            // Only send Up if we sent Down and held long enough
+            // ALWAYS send Up event so controller can cancel pending actions
+            // Controller will decide what to do based on state
             if state.hold_event_sent {
                 if let Some(ts) = state.hold_active_ts {
                     let elapsed = ts.elapsed();
-                    if elapsed >= Duration::from_millis(MIN_HOLD_DURATION_MS) {
-                        tracing::debug!(
-                            "Hold combo held for {:?} - sending Hold Up event",
-                            elapsed
-                        );
-                        let _ = state.tx.send(HotkeyEvent::Hold {
-                            action: HoldAction::Up,
-                            assistive: state.assistive_mode,
-                        });
-                    } else {
-                        tracing::debug!("Hold combo held for {:?} - too short, ignoring", elapsed);
-                    }
+                    tracing::debug!("Hold combo released after {:?}", elapsed);
                 }
+                let _ = state.tx.send(HotkeyEvent::Hold {
+                    action: HoldAction::Up,
+                    assistive: state.assistive_mode,
+                });
             }
             state.hold_active_ts = None;
         }

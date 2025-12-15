@@ -988,18 +988,36 @@ async def set_model(variant: str = Body(..., embed=True)):  # noqa: B008  # Fast
                 "error": f"Model '{variant}' not found. Download it first via get_models.py",
             }
 
-        # Update global state
-        whisper_model = None  # Force reload on next transcription
-        WHISPER_DIR = path
+        # Normalize the path before loading
+        normalized_path = normalize_model_path(path)
+        if normalized_path is None:
+            normalized_path = path  # Fall back to original if normalization fails
+
+        # Actually load the new model (not just set to None!)
+        try:
+            new_model = load_whisper(normalized_path)
+        except Exception as load_error:
+            # Justification: _sanitize_log() removes \n \r \t \x00 to prevent log injection
+            logger.error(
+                f"Failed to load model '{_sanitize_log(variant)}': {_sanitize_log(str(load_error))}"
+            )  # nosemgrep
+            return {
+                "ok": False,
+                "error": f"Failed to load model: {load_error}",
+            }
+
+        # Update global state only after successful load
+        whisper_model = new_model
+        WHISPER_DIR = normalized_path
         _variant = variant
-        os.environ["WHISPER_DIR"] = path
+        os.environ["WHISPER_DIR"] = normalized_path
         os.environ["WHISPER_VARIANT"] = variant
 
         # Justification: _sanitize_log() removes \n \r \t \x00 to prevent log injection
         logger.info(
-            f"Whisper model switched to: {_sanitize_log(variant)} at {_sanitize_log(path)}"
+            f"Whisper model switched to: {_sanitize_log(variant)} at {_sanitize_log(normalized_path)}"
         )  # nosemgrep
-        return {"ok": True, "variant": variant, "path": path}
+        return {"ok": True, "variant": variant, "path": normalized_path, "loaded": True}
     except Exception as e:
         # Justification: _sanitize_log() removes \n \r \t \x00 to prevent log injection
         logger.error(f"Failed to switch model: {_sanitize_log(str(e))}")  # nosemgrep

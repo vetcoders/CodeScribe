@@ -659,10 +659,11 @@ fn build_menu() -> Result<(Menu, MenuIds)> {
         history_menu.append(&placeholder_entry)?;
     } else {
         for (i, entry) in recent_entries.iter().take(5).enumerate() {
-            // Truncate label for menu display
+            // Truncate label for menu display (UTF-8 safe)
             let label = entry.label();
-            let display = if label.len() > 40 {
-                format!("{}...", &label[..37])
+            let display = if label.chars().count() > 40 {
+                let truncated: String = label.chars().take(37).collect();
+                format!("{}...", truncated)
             } else {
                 label.to_string()
             };
