@@ -68,18 +68,33 @@ struct ModelMenuItems {
     label: MenuItem,
 }
 
-// Thread-local storage for model menu items
-// CheckMenuItem contains Rc (not Send/Sync), but tray runs on main thread only
+// Thread-local storage for model menu items (CheckMenuItem contains Rc, not Send/Sync)
+// Updates are done via MODEL_UPDATE_CHANNEL from other threads
 thread_local! {
     static MODEL_MENU_ITEMS: RefCell<Option<ModelMenuItems>> = const { RefCell::new(None) };
 }
 
+/// Channel for model selection updates from async tasks
+static MODEL_UPDATE_CHANNEL: OnceLock<Sender<String>> = OnceLock::new();
+
 /// Update the model selection in the menu
 ///
 /// Variant should be one of: "small", "medium", "large-v3", "large-v3-turbo"
+/// Thread-safe: can be called from any thread (sends via channel to main thread)
 pub fn update_model_selection(variant: &str) {
+    if let Some(sender) = MODEL_UPDATE_CHANNEL.get() {
+        if let Err(e) = sender.send(variant.to_string()) {
+            debug!("Failed to send model update: {}", e);
+        }
+    } else {
+        debug!("Model update channel not initialized");
+    }
+}
+
+/// Actually update the model menu items (must be called on main thread)
+fn apply_model_selection(variant: &str) {
     MODEL_MENU_ITEMS.with(|items_cell| {
-        if let Some(ref items) = *items_cell.borrow() {
+        if let Some(items) = items_cell.borrow().as_ref() {
             // Uncheck all models
             items.small.set_checked(false);
             items.medium.set_checked(false);
@@ -105,7 +120,7 @@ pub fn update_model_selection(variant: &str) {
             };
             items.label.set_text(label_text);
 
-            debug!("Model selection updated to: {}", variant);
+            info!("Model selection updated to: {}", variant);
         }
     });
 }
@@ -575,7 +590,7 @@ fn build_menu() -> Result<(Menu, MenuIds)> {
 
     menu.append(&models_menu)?;
 
-    // Store model menu items in thread-local for dynamic updates
+    // Store model menu items for dynamic updates (main thread only)
     MODEL_MENU_ITEMS.with(|items_cell| {
         *items_cell.borrow_mut() = Some(ModelMenuItems {
             small: model_small,
@@ -1124,6 +1139,12 @@ pub fn run_with_hotkeys(hotkey_manager: Option<crate::hotkeys::HotkeyManager>) -
         .set(status_tx)
         .map_err(|_| anyhow::anyhow!("Status channel already initialized"))?;
 
+    // Create channel for model selection updates (from async tasks to main thread)
+    let (model_tx, model_rx): (Sender<String>, Receiver<String>) = unbounded();
+    MODEL_UPDATE_CHANNEL
+        .set(model_tx)
+        .map_err(|_| anyhow::anyhow!("Model update channel already initialized"))?;
+
     // Build event loop (must be on main thread for macOS)
     let event_loop = EventLoopBuilder::new().build();
 
@@ -1198,6 +1219,11 @@ pub fn run_with_hotkeys(hotkey_manager: Option<crate::hotkeys::HotkeyManager>) -
                 info!("Status channel closed, exiting");
                 *control_flow = ControlFlow::Exit;
             }
+        }
+
+        // Check for model selection updates (from async tasks)
+        if let Ok(variant) = model_rx.try_recv() {
+            apply_model_selection(&variant);
         }
 
         // Check for menu events (non-blocking)
