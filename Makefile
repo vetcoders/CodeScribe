@@ -1,7 +1,7 @@
 # CodeScribe - Unified Build System
 # Speech-to-text tray app for macOS (Rust) + Python backend
 
-.PHONY: all build install start stop restart status logs logs-app logs-backend logs-follow config \
+.PHONY: all build release install bundle install-app start stop restart status logs logs-app logs-backend logs-follow config \
         bump bump-patch bump-minor bump-major version \
         lint format test security check clean help \
         backend-start backend-stop
@@ -29,6 +29,22 @@ install:
 	@echo "Installing CodeScribe..."
 	@cd codescribe-rs && cargo install --path . --force
 	@echo "✅ Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
+
+bundle: install
+	@echo "Creating macOS app bundle..."
+	@mkdir -p codescribe-rs/bundle/CodeScribe.app/Contents/{MacOS,Resources}
+	@cp codescribe-rs/bundle/CodeScribe.app/Contents/Info.plist codescribe-rs/bundle/CodeScribe.app/Contents/ 2>/dev/null || true
+	@cp codescribe-rs/assets/AppIcon.icns codescribe-rs/bundle/CodeScribe.app/Contents/Resources/
+	@VERSION=$$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*"\(.*\)"/\1/'); \
+	sed -i '' "s/<string>0\.[0-9]*\.[0-9]*</<string>$$VERSION</g" codescribe-rs/bundle/CodeScribe.app/Contents/Info.plist
+	@echo "✅ Bundle ready: codescribe-rs/bundle/CodeScribe.app"
+
+install-app: bundle
+	@echo "Installing to /Applications..."
+	@rm -rf /Applications/CodeScribe.app
+	@cp -R codescribe-rs/bundle/CodeScribe.app /Applications/
+	@echo "✅ Installed: /Applications/CodeScribe.app"
+	@echo "   You can now launch CodeScribe from Spotlight or Launchpad"
 
 # ============================================================================
 # Run
@@ -203,7 +219,9 @@ help:
 	@echo "Build & Install:"
 	@echo "  make build         Build debug binary"
 	@echo "  make release       Build release binary"
-	@echo "  make install       Install to ~/.cargo/bin"
+	@echo "  make install       Install CLI to ~/.cargo/bin"
+	@echo "  make bundle        Create CodeScribe.app bundle"
+	@echo "  make install-app   Install to /Applications"
 	@echo ""
 	@echo "Run:"
 	@echo "  make start         Start CodeScribe + backend"
