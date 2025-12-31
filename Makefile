@@ -1,10 +1,10 @@
 # CodeScribe - Unified Build System
 # Speech-to-text tray app for macOS (Rust) + Python backend
 
-.PHONY: all build install start stop restart status logs config \
+.PHONY: all build install start stop restart status logs logs-app logs-backend logs-follow config \
         bump bump-patch bump-minor bump-major version \
         lint format test security check clean help \
-        backend-start backend-stop backend-logs
+        backend-start backend-stop
 
 SHELL := /bin/bash
 VERSION_FILE := codescribe-rs/Cargo.toml
@@ -35,8 +35,8 @@ install:
 # ============================================================================
 
 start: backend-start
-	@codescribe &
-	@echo "✅ CodeScribe started"
+	@nohup codescribe > /tmp/codescribe.log 2>&1 & disown
+	@echo "✅ CodeScribe started (logs: /tmp/codescribe.log)"
 
 stop:
 	@pkill -f "^codescribe$$" 2>/dev/null || true
@@ -55,10 +55,20 @@ status:
 	@curl -s http://127.0.0.1:8237/healthz 2>/dev/null || echo "Backend not responding"
 
 logs:
-	@cat /tmp/codescribe-backend.log 2>/dev/null | tail -50 || echo "No logs"
+	@echo "=== Backend Logs (last 30) ==="
+	@cat /tmp/codescribe-backend.log 2>/dev/null | tail -30 || echo "No backend logs"
+	@echo ""
+	@echo "=== App Logs (last 30) ==="
+	@cat /tmp/codescribe.log 2>/dev/null | tail -30 || echo "No app logs"
+
+logs-backend:
+	@tail -100 /tmp/codescribe-backend.log 2>/dev/null || echo "No backend logs"
+
+logs-app:
+	@tail -100 /tmp/codescribe.log 2>/dev/null || echo "No app logs"
 
 logs-follow:
-	@tail -f /tmp/codescribe-backend.log 2>/dev/null || echo "No logs"
+	@tail -f /tmp/codescribe.log /tmp/codescribe-backend.log 2>/dev/null || echo "No logs"
 
 # ============================================================================
 # Configuration
@@ -125,12 +135,16 @@ backend-start:
 	else \
 		echo "Starting Python backend..."; \
 		nohup uv run python -m codescribe.backend > /tmp/codescribe-backend.log 2>&1 & \
-		sleep 2; \
-		if curl -s http://127.0.0.1:8237/healthz >/dev/null 2>&1; then \
-			echo "✅ Backend started on :8237"; \
-		else \
-			echo "❌ Backend failed. Check: cat /tmp/codescribe-backend.log"; \
-		fi; \
+		for i in 1 2 3 4 5 6 7 8 9 10; do \
+			sleep 1; \
+			if curl -s http://127.0.0.1:8237/healthz >/dev/null 2>&1; then \
+				echo "✅ Backend started on :8237 ($$i sec)"; \
+				exit 0; \
+			fi; \
+			printf "."; \
+		done; \
+		echo ""; \
+		echo "⏳ Backend still starting (Whisper loading). Continuing..."; \
 	fi
 
 backend-stop:
@@ -196,7 +210,10 @@ help:
 	@echo "  make stop          Stop all processes"
 	@echo "  make restart       Restart everything"
 	@echo "  make status        Show status"
-	@echo "  make logs          Show backend logs"
+	@echo "  make logs          Show all logs (app + backend)"
+	@echo "  make logs-app      Show app logs only"
+	@echo "  make logs-backend  Show backend logs only"
+	@echo "  make logs-follow   Tail all logs"
 	@echo ""
 	@echo "Configuration:"
 	@echo "  make config        Edit ~/.codescribe/.env"
@@ -216,6 +233,5 @@ help:
 	@echo "  make check         Full CI pipeline"
 	@echo ""
 	@echo "Backend:"
-	@echo "  make backend-start Start Python backend"
-	@echo "  make backend-stop  Stop Python backend"
-	@echo "  make backend-logs  Show backend logs"
+	@echo "  make backend-start Start Python backend only"
+	@echo "  make backend-stop  Stop Python backend only"
