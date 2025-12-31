@@ -494,7 +494,8 @@ impl RecordingController {
         // Format the text - use AI if enabled and configured, otherwise simple cleanup
         // In assistive mode (Ctrl+Shift), ALWAYS use AI for intelligent responses
         let ai_formatting_enabled = self.config.read().await.ai_formatting_enabled;
-        let should_use_ai = (ai_formatting_enabled || assistive) && crate::ai_formatting::has_api_key();
+        let should_use_ai =
+            (ai_formatting_enabled || assistive) && crate::ai_formatting::has_api_key();
 
         let formatted_text = if should_use_ai {
             info!(

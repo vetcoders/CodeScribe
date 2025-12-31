@@ -367,7 +367,15 @@ pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) ->
 
     // Try each provider in chain
     for provider in PROVIDER_CHAIN {
-        match call_provider(provider, &user_message, system_prompt, max_tokens, assistive).await {
+        match call_provider(
+            provider,
+            &user_message,
+            system_prompt,
+            max_tokens,
+            assistive,
+        )
+        .await
+        {
             Ok(formatted) => {
                 info!(
                     "Formatted via {} ({} -> {} chars, assistive={})",
@@ -518,8 +526,10 @@ async fn call_ollama(
         anyhow::bail!("Ollama HTTP {} - {}", status, body);
     }
 
-    let ollama_response: OllamaResponse =
-        response.json().await.context("Failed to parse Ollama response")?;
+    let ollama_response: OllamaResponse = response
+        .json()
+        .await
+        .context("Failed to parse Ollama response")?;
 
     let formatted = ollama_response
         .message
