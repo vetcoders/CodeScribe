@@ -62,7 +62,8 @@ bundle_whisper_model() {
   return 0
 }
 
-BUNDLE_VARIANTS=(${BUNDLE_VARIANTS:-medium large-v3-turbo small-mlx small})
+# Priority: Q8 quantized models first (smaller, same quality)
+BUNDLE_VARIANTS=(${BUNDLE_VARIANTS:-medium-mlx-q8 large-v3-turbo-mlx-q8 small-mlx-q8 medium large-v3-turbo small})
 
 # Info.plist
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
@@ -118,9 +119,9 @@ APP_DIR="$(cd -- "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$HOME/Library/Logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/CodeScribe.app.log"
-MODELS_DIR="$APP_DIR/Contents/Resources/Models"
-ASSETS_DIR="$APP_DIR/Contents/Resources/assets"
-PYTHON_DIR="$APP_DIR/Contents/Resources/python"
+MODELS_DIR="$APP_DIR/Resources/Models"
+ASSETS_DIR="$APP_DIR/Resources/assets"
+PYTHON_DIR="$APP_DIR/Resources/python"
 
 # Ensure uv and brew binaries are on PATH when launched from Finder
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -150,7 +151,7 @@ if [[ -z "${WHISPER_DIR:-}" ]]; then
 fi
 
 # Run the Rust binary (it will start Python backend automatically via uv)
-cd "$APP_DIR/Contents/MacOS"
+cd "$APP_DIR/MacOS"
 exec ./CodeScribe.bin >> "$LOG_FILE" 2>&1
 LAUNCH
 chmod +x "$APP_DIR/Contents/MacOS/CodeScribe"

@@ -41,20 +41,22 @@ impl BackendServer {
         // Check if models exist, download if not
         ensure_models_exist()?;
 
-        // Find the backend.py script
-        let script_path = find_backend_script()?;
-        info!("Starting Python backend from: {}", script_path.display());
-
         // Determine the working directory for uv (needs pyproject.toml)
-        // If CODESCRIBE_PYTHON_DIR is set, use it as the working directory
-        // Otherwise, use the directory containing backend.py
+        // Priority: CODESCRIBE_PYTHON_DIR (bundled mode) > find script > fallback
         let working_dir = if let Ok(python_dir) = std::env::var("CODESCRIBE_PYTHON_DIR") {
-            PathBuf::from(python_dir)
+            let bundled = PathBuf::from(&python_dir);
+            if bundled.join("pyproject.toml").exists() {
+                info!("Using bundled Python backend at: {}", bundled.display());
+                bundled
+            } else {
+                warn!(
+                    "CODESCRIBE_PYTHON_DIR set but no pyproject.toml found: {}",
+                    bundled.display()
+                );
+                find_backend_working_dir()?
+            }
         } else {
-            script_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::env::current_dir().unwrap())
+            find_backend_working_dir()?
         };
 
         debug!("Using working directory: {}", working_dir.display());
@@ -195,22 +197,50 @@ impl Drop for BackendServer {
 
 /// Ensure whisper models are downloaded
 fn ensure_models_exist() -> Result<()> {
-    // Determine repo root (development mode) or data directory (bundled mode)
+    // First check if WHISPER_DIR is set (bundled mode with embedded models)
+    if let Ok(whisper_dir) = std::env::var("WHISPER_DIR") {
+        let whisper_path = PathBuf::from(&whisper_dir);
+        if whisper_path.exists() {
+            info!("Using bundled Whisper model at: {}", whisper_path.display());
+            return Ok(());
+        }
+        warn!(
+            "WHISPER_DIR set but path doesn't exist: {}",
+            whisper_path.display()
+        );
+    }
+
+    // Determine paths based on execution context
     let exe_path = std::env::current_exe()?;
     let exe_dir = exe_path.parent().unwrap_or(&exe_path);
 
     // Check if running from .app bundle
-    let is_bundled = exe_dir.join("../Resources/python/codescribe").exists();
+    let is_bundled = exe_dir.join("../Resources/python").exists();
 
-    let repo_root = if is_bundled {
-        // In bundled mode, use user data directory
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string())).join(".CodeScribe")
-    } else {
-        // Development mode
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
-    };
+    // Check bundled models directory
+    if is_bundled {
+        let bundled_models = exe_dir.join("../Resources/Models");
+        if bundled_models.exists() {
+            // Look for any whisper model
+            if let Ok(entries) = std::fs::read_dir(&bundled_models) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("whisper-") && entry.path().is_dir() {
+                        info!("Found bundled Whisper model: {}", entry.path().display());
+                        // Set WHISPER_DIR for the Python backend to use
+                        std::env::set_var("WHISPER_DIR", entry.path());
+                        let variant = name_str.trim_start_matches("whisper-");
+                        std::env::set_var("WHISPER_VARIANT", variant);
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
 
-    // Use WHISPER_VARIANT env var, default to "small" for faster startup
+    // Development mode: look in repo models directory
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let variant = std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "small".to_string());
     let models_dir = repo_root.join(format!("models/whisper-{}", variant));
 
@@ -261,56 +291,41 @@ fn ensure_models_exist() -> Result<()> {
     Ok(())
 }
 
-/// Find the backend.py script (or the directory containing the codescribe package)
-fn find_backend_script() -> Result<PathBuf> {
-    // Check environment variable override first
-    if let Ok(custom_path) = std::env::var("CODESCRIBE_PYTHON_DIR") {
-        let script_path = PathBuf::from(&custom_path).join("backend.py");
-        if script_path.exists() {
-            debug!(
-                "Found backend.py via CODESCRIBE_PYTHON_DIR: {}",
-                script_path.display()
-            );
-            return Ok(script_path);
-        }
-    }
-
+/// Find a directory with pyproject.toml for running the Python backend
+fn find_backend_working_dir() -> Result<PathBuf> {
     // Try relative to executable first
     let exe_path = std::env::current_exe()?;
     let exe_dir = exe_path.parent().unwrap_or(&exe_path);
 
     // Possible locations (in order of preference)
     let candidates = [
-        // .app bundle: Contents/MacOS/../Resources/python/backend.py
-        exe_dir.join("../Resources/python/backend.py"),
+        // .app bundle: Contents/MacOS/../Resources/python/
+        exe_dir.join("../Resources/python"),
         // Development: relative to cargo project
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../backend.py"),
-        // Installed alongside binary
-        exe_dir.join("backend.py"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."),
         // Current working directory
-        std::env::current_dir()?.join("backend.py"),
+        std::env::current_dir()?,
         // Parent of current directory (monorepo structure)
-        std::env::current_dir()?.join("../backend.py"),
-        // Absolute fallback for development
-        PathBuf::from("/Users/maciejgad/hosted/Loctree-Repos/Codescribe/backend.py"),
+        std::env::current_dir()?.join(".."),
     ];
 
     for path in &candidates {
-        let normalized = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if normalized.exists() {
-            debug!("Found backend.py at: {}", normalized.display());
+        let pyproject = path.join("pyproject.toml");
+        if pyproject.exists() {
+            let normalized = path.canonicalize().unwrap_or_else(|_| path.clone());
+            debug!("Found pyproject.toml at: {}", normalized.display());
             return Ok(normalized);
         }
     }
 
     // List what we tried
-    error!("Could not find backend.py. Tried:");
+    error!("Could not find pyproject.toml. Tried:");
     for path in &candidates {
         error!("  - {}", path.display());
     }
 
     Err(anyhow::anyhow!(
-        "backend.py not found. Ensure you're running from the CodeScribe directory."
+        "pyproject.toml not found. Ensure you're running from the CodeScribe directory."
     ))
 }
 
@@ -319,9 +334,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_find_backend_script() {
+    fn test_find_backend_working_dir() {
         // This will fail in CI but should work locally
-        let result = find_backend_script();
+        let result = find_backend_working_dir();
         // Just check it doesn't panic
         let _ = result;
     }
