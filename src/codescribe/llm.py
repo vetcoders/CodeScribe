@@ -8,7 +8,6 @@ or api.openai.com) or a local Ollama daemon.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from collections.abc import Iterable
@@ -94,6 +93,39 @@ except Exception:  # pragma: no cover
 _harmony_client: AsyncOpenAI | None = None
 _harmony_cfg: tuple[str, str] | None = None  # (base_url, api_key)
 
+_ollama_client: AsyncOpenAI | None = None
+_ollama_cfg: str | None = None  # base_url
+
+# --- Session tracking for conversation continuity (previous_response_id) ------
+_response_ids: dict[str, str] = {}  # "assistive" | "format" | "chat" -> response_id
+
+
+def get_previous_response_id(session_type: str) -> str | None:
+    """Get the last response ID for a session type to continue conversation."""
+    return _response_ids.get(session_type)
+
+
+def set_previous_response_id(session_type: str, response_id: str | None) -> None:
+    """Store the response ID for future conversation continuity."""
+    if response_id:
+        _response_ids[session_type] = response_id
+        logger.debug(
+            "Stored response_id: %s -> %s",
+            session_type,
+            response_id[:16] if response_id else "none",
+        )
+    elif session_type in _response_ids:
+        del _response_ids[session_type]
+
+
+def clear_session(session_type: str | None = None) -> None:
+    """Clear stored conversation context. Call when starting fresh."""
+    if session_type:
+        _response_ids.pop(session_type, None)
+    else:
+        _response_ids.clear()
+    logger.debug("Cleared session: %s", session_type or "all")
+
 
 def _harmony_base_url() -> str:
     base = os.environ.get("HARMONY_BASE_URL") or os.environ.get("LLM_SERVER_URL")
@@ -131,9 +163,34 @@ def _get_harmony_client() -> AsyncOpenAI:
     return _harmony_client
 
 
+def _get_ollama_client() -> AsyncOpenAI:
+    """Get AsyncOpenAI client configured for Ollama's /v1/responses endpoint."""
+    global _ollama_client, _ollama_cfg
+    if AsyncOpenAI is None:
+        raise RuntimeError("openai python package not available")
+    host = (os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+    base = f"{host}/v1"  # Ollama's OpenAI-compatible endpoint
+    if _ollama_client is None or _ollama_cfg != base:
+        # Ollama doesn't require API key, but OpenAI client needs something
+        _ollama_client = AsyncOpenAI(api_key="ollama", base_url=base)
+        _ollama_cfg = base
+    return _ollama_client
+
+
 def _extract_response_text(resp: Any) -> str:
+    """Extract text from response (ignores response_id)."""
+    text, _ = _extract_response_with_id(resp)
+    return text
+
+
+def _extract_response_with_id(resp: Any) -> tuple[str, str | None]:
+    """Extract text and response_id from a /v1/responses response object."""
     if resp is None:
-        return ""
+        return "", None
+
+    # Get response ID for conversation continuity
+    response_id = getattr(resp, "id", None)
+
     text_chunks: list[str] = []
     output = getattr(resp, "output", None)
     if isinstance(output, Iterable):
@@ -141,16 +198,20 @@ def _extract_response_text(resp: Any) -> str:
             item_type = getattr(item, "type", None)
             if item_type == "message":
                 for content in getattr(item, "content", []) or []:
-                    if getattr(content, "type", None) == "text":
+                    content_type = getattr(content, "type", None)
+                    # Handle both "text" and "output_text" types
+                    if content_type in ("text", "output_text"):
                         txt = getattr(content, "text", "")
                         if txt:
                             text_chunks.append(txt)
     if text_chunks:
-        return "\n".join(text_chunks).strip()
+        return "\n".join(text_chunks).strip(), response_id
+
     text = getattr(resp, "output_text", None)
     if text:
-        return str(text).strip()
-    return ""
+        return str(text).strip(), response_id
+
+    return "", response_id
 
 
 def _detect_agent_call(text: str) -> bool:
@@ -214,6 +275,7 @@ async def _format_with_harmony(text: str, assistive: bool, settings: VistaSettin
 
 
 def _ollama_payload(text: str, assistive: bool, settings: VistaSettings) -> dict[str, Any]:
+    """Legacy payload builder for /api/generate (fallback for non-responses API)."""
     host = os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434"
     model = os.environ.get("OLLAMA_MODEL") or os.environ.get("LLM_ID") or "qwen2.5:3b-instruct"
     temperature = float(os.environ.get("TEMPERATURE", "0.2"))
@@ -241,20 +303,64 @@ def _ollama_payload(text: str, assistive: bool, settings: VistaSettings) -> dict
 
 
 async def _format_with_ollama(text: str, assistive: bool, settings: VistaSettings) -> str | None:
-    import requests  # local import to avoid import cost when unused
-
-    payload = _ollama_payload(text, assistive, settings)
+    """Format text using Ollama's /v1/responses endpoint with conversation continuity."""
     try:
-        resp = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: requests.post(payload["url"], json=payload["json"], timeout=60)
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        txt = (data.get("response") or data.get("output") or "").strip()
-        return txt or None
+        client = _get_ollama_client()
     except Exception as exc:
-        logger.error(f"Ollama formatting failed: {exc}")
-    return None
+        logger.error(f"Ollama client not ready: {exc}")
+        return None
+
+    model = os.environ.get("OLLAMA_MODEL") or os.environ.get("LLM_ID") or "qwen2.5:3b-instruct"
+    session_type = "assistive" if assistive else "format"
+
+    # Build prompt and messages
+    prompt = AGENT_PROMPT if assistive else FORMAT_PROMPT
+    lexicon_ctx = get_soft_lexicon_context(max_entries=50) if assistive else ""
+    if lexicon_ctx:
+        prompt = prompt + "\nKontekst słownika: " + lexicon_ctx
+    payload_text = _inject_codescribe(text, assistive)
+    max_tokens = settings.ai_assistive_max_tokens if assistive else settings.ai_max_tokens
+
+    # Check for previous conversation context
+    prev_response_id = get_previous_response_id(session_type)
+
+    # Build input messages - skip system prompt if continuing conversation
+    input_messages: list[dict[str, str]] = []
+    if not prev_response_id:
+        input_messages.append({"role": "system", "content": prompt})
+    input_messages.append({"role": "user", "content": payload_text})
+
+    try:
+        # Build kwargs for responses.create
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "input": cast(list[Any], input_messages),
+            "max_output_tokens": max_tokens,
+        }
+        if prev_response_id:
+            kwargs["previous_response_id"] = prev_response_id
+            logger.debug("Continuing Ollama session: %s -> %s", session_type, prev_response_id[:16])
+
+        response = await client.responses.create(**kwargs)  # type: ignore[attr-defined]
+        out, new_response_id = _extract_response_with_id(response)
+
+        # Store response_id for next request
+        set_previous_response_id(session_type, new_response_id)
+
+        if out:
+            logger.debug(
+                "Ollama formatting ok (session=%s, tokens_in=%s, tokens_out≈%s)",
+                session_type,
+                _count_tokens(payload_text),
+                _count_tokens(out),
+            )
+            return out
+        return None
+    except (APIConnectionError, APIError) as exc:
+        logger.error(f"Ollama formatting error: {exc}")
+        # Clear session on error to start fresh
+        set_previous_response_id(session_type, None)
+        return None
 
 
 def _normalize_chat_messages(messages: list[dict[str, str]] | None) -> list[dict[str, str]]:
@@ -300,39 +406,47 @@ async def _chat_with_harmony(messages: list[dict[str, str]], settings: VistaSett
 
 
 async def _chat_with_ollama(messages: list[dict[str, str]], settings: VistaSettings) -> str:
-    import requests  # local import for optional dependency
-
-    host = (os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+    """Chat with Ollama using /v1/responses endpoint with conversation continuity."""
+    client = _get_ollama_client()
     model = (
         os.environ.get("OLLAMA_CHAT_MODEL")
         or os.environ.get("OLLAMA_MODEL")
         or os.environ.get("LLM_ID")
         or "qwen2.5:3b-instruct"
     )
-    temperature = float(os.environ.get("OLLAMA_CHAT_TEMPERATURE", "0.2"))
-    payload = {
+    session_type = "chat"
+    max_tokens = settings.ai_assistive_max_tokens
+
+    # Check for previous conversation context
+    prev_response_id = get_previous_response_id(session_type)
+
+    # Build input messages - skip system if continuing conversation
+    input_messages: list[dict[str, str]] = []
+    for msg in messages:
+        # Skip system messages if we have previous context
+        if msg["role"] == "system" and prev_response_id:
+            continue
+        input_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    # Build kwargs for responses.create
+    kwargs: dict[str, Any] = {
         "model": model,
-        "messages": messages,
-        "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": settings.ai_assistive_max_tokens,
-        },
+        "input": cast(Any, input_messages),
+        "max_output_tokens": max_tokens,
     }
-    url = host + "/api/chat"
-    loop = asyncio.get_event_loop()
+    if prev_response_id:
+        kwargs["previous_response_id"] = prev_response_id
+        logger.debug("Continuing Ollama chat session: %s", prev_response_id[:16])
 
-    def _do_request() -> str:
-        resp = requests.post(url, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            msg = data.get("message") or {}
-            text = msg.get("content") or data.get("response") or ""
-            return str(text)
-        return ""
+    response = await client.responses.create(**kwargs)  # type: ignore[attr-defined]
+    out, new_response_id = _extract_response_with_id(response)
 
-    return await loop.run_in_executor(None, _do_request)
+    # Store response_id for next request
+    set_previous_response_id(session_type, new_response_id)
+
+    if out:
+        return out
+    return ""
 
 
 async def run_chat_session(

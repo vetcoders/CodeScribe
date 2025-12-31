@@ -492,14 +492,17 @@ impl RecordingController {
         }
 
         // Format the text - use AI if enabled and configured, otherwise simple cleanup
+        // In assistive mode (Ctrl+Shift), ALWAYS use AI for intelligent responses
         let ai_formatting_enabled = self.config.read().await.ai_formatting_enabled;
-        let formatted_text = if ai_formatting_enabled && crate::ai_formatting::has_api_key() {
+        let should_use_ai = (ai_formatting_enabled || assistive) && crate::ai_formatting::has_api_key();
+
+        let formatted_text = if should_use_ai {
             info!(
                 "Formatting transcript via AI (enabled={}, assistive={})",
                 ai_formatting_enabled, assistive
             );
             let lang_str = language_opt.map(String::from);
-            crate::ai_formatting::format_text(&raw_text, lang_str.as_deref()).await
+            crate::ai_formatting::format_text(&raw_text, lang_str.as_deref(), assistive).await
         } else if has_repetition {
             // Simple local cleanup if AI not available but we have repetitions
             info!("AI formatting not available, using local repetition cleanup");

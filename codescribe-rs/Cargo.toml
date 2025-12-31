@@ -1,6 +1,6 @@
 [package]
 name = "codescribe"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Speech-to-text tray app for macOS - Rust frontend"
 authors = ["Loctree <contact@loctree.io>"]

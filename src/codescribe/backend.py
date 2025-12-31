@@ -150,12 +150,70 @@ _ALLOWED_AUDIO_MIME = {
     "audio/mp4",
 }
 
-MEDICAL_PROMPT = (
-    "Polski tekst weterynaryjny: diagnoza chorób zwierząt, objawy kliniczne, "
-    "leczenie farmakologiczne, badania laboratoryjne, RTG, USG, szczepienia, "
-    "odrobaczanie, wizyty kontrolne, wyniki badań krwi, temperatura ciała, "
-    "receptury leków, dawkowanie, rokowanie, zalecenia pielęgnacyjne."
-)
+
+def _build_initial_prompt() -> str:
+    """Build initial_prompt from dictionary files for better transcription accuracy.
+
+    Loads terms from veterinary.jsonl and programming.jsonl to help Whisper
+    recognize domain-specific vocabulary.
+    """
+    terms: list[str] = []
+
+    # Find dictionary files
+    dict_files = [
+        _asset_path("veterinary.jsonl"),
+        _asset_path("programming.jsonl"),
+    ]
+
+    for dict_path in dict_files:
+        if not dict_path.exists():
+            continue
+        try:
+            with open(dict_path, encoding="utf-8") as f:
+                for line in f:
+                    if len(terms) >= 100:  # Limit prompt size
+                        break
+                    try:
+                        entry = json.loads(line.strip())
+                        term = entry.get("term", "").strip()
+                        if term and term not in terms:
+                            terms.append(term)
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            logger.warning(f"Failed to load dictionary {dict_path}: {e}")
+
+    if not terms:
+        # Fallback to hardcoded terms
+        terms = [
+            # Medical
+            "diagnoza",
+            "leczenie",
+            "badanie",
+            "temperatura",
+            "RTG",
+            "USG",
+            "szczepienie",
+            "odrobaczanie",
+            "dawkowanie",
+            "rokowanie",
+            # Programming
+            "API",
+            "backend",
+            "frontend",
+            "endpoint",
+            "WebSocket",
+            "JSON",
+            "Rust",
+            "TypeScript",
+            "Docker",
+            "GitHub",
+            "loctree",
+            "VistaScribe",
+        ]
+
+    # Build prompt with context
+    return "Polski tekst techniczny i weterynaryjny: " + ", ".join(terms[:100]) + "."
 
 
 @dataclass
@@ -202,6 +260,10 @@ def _asset_path(name: str) -> Path:
             return candidate
     return candidates[0]
 
+
+# Build initial prompt from dictionaries at startup
+INITIAL_PROMPT = _build_initial_prompt()
+logger.info(f"Initial prompt loaded with {len(INITIAL_PROMPT.split(', '))} terms")
 
 LAB_ASSETS_DIR = _asset_path("lab")
 if LAB_ASSETS_DIR.exists():
@@ -328,7 +390,7 @@ async def _run_whisper_transcription(audio_path: str, *, language: str | None) -
                     verbose=True,
                     language=language,
                     condition_on_previous_text=False,
-                    initial_prompt=MEDICAL_PROMPT,
+                    initial_prompt=INITIAL_PROMPT,
                     # Anti-hallucination filters (improves transcription quality)
                     compression_ratio_threshold=2.0,  # Lower = stricter (default 2.4)
                     no_speech_threshold=0.5,  # Higher = stricter (default 0.6)
@@ -369,7 +431,7 @@ def _legacy_whisper_transcribe(audio_path: str, *, language: str | None) -> dict
 
     kwargs: dict[str, Any] = {
         "condition_on_previous_text": False,
-        "initial_prompt": MEDICAL_PROMPT,
+        "initial_prompt": INITIAL_PROMPT,
         # Anti-hallucination filters (improves transcription quality)
         "compression_ratio_threshold": 2.0,  # Lower = stricter (default 2.4)
         "no_speech_threshold": 0.5,  # Higher = stricter (default 0.6)
@@ -862,6 +924,334 @@ async def websocket_transcribe(ws: WebSocket):
     except WebSocketDisconnect:
         return
     except Exception as exc:
+        await send({"type": "error", "message": str(exc)})
+        with contextlib.suppress(Exception):
+            await ws.close()
+
+
+# --- Voice Chat Pipeline (STT → Sentence Buffer → LLM Stream) ---
+
+
+@dataclass
+class VoiceChatSession:
+    """State for voice chat sessions with sentence buffering."""
+
+    session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    language: str | None = DEFAULT_STREAM_LANGUAGE
+    sample_rate: int = 16000
+    encoding: str = "pcm16"
+    audio_buffer: bytearray = field(default_factory=bytearray)
+    sentence_buffer: str = ""
+    conversation_history: list = field(default_factory=list)
+    previous_response_id: str | None = None
+
+
+def _detect_sentence_boundary(text: str) -> tuple[str | None, str]:
+    """Detect sentence boundary. Returns (complete_sentence, remaining_buffer).
+
+    Returns complete sentence when we find terminal punctuation followed by space or end.
+    """
+    # Look for sentence-ending punctuation
+    import re
+
+    # Match sentence ending: . ! ? followed by space or end of string
+    match = re.search(r"([.!?])(?:\s+|$)", text)
+    if match:
+        end_pos = match.end()
+        complete = text[:end_pos].strip()
+        remaining = text[end_pos:].strip()
+        return complete, remaining
+    return None, text
+
+
+async def _stream_llm_response(
+    sentence: str,
+    session: VoiceChatSession,
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+) -> None:
+    """Stream LLM response tokens back to client."""
+    import httpx
+
+    host = (os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+    model = os.environ.get("OLLAMA_MODEL") or "qwen2.5:3b-instruct"
+    url = f"{host}/v1/responses"
+
+    # Build input messages
+    input_messages: list[dict[str, Any]] = []
+
+    # Add system prompt only on first message
+    if not session.previous_response_id:
+        system_prompt = (
+            "Jesteś asystentem głosowym. Odpowiadaj zwięźle i naturalnie po polsku. "
+            "Możesz używać kaomoji, ale nigdy emoji."
+        )
+        input_messages.append({"role": "system", "content": system_prompt})
+
+    # Add user message
+    input_messages.append({"role": "user", "content": [{"type": "input_text", "text": sentence}]})
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "input": input_messages,
+        "stream": True,
+        "max_output_tokens": 2048,
+    }
+
+    # Add previous_response_id for conversation continuity
+    if session.previous_response_id:
+        payload["previous_response_id"] = session.previous_response_id
+        logger.debug("Continuing voice chat: %s", session.previous_response_id[:16])
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+                full_text = ""
+                new_response_id = None
+
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+
+                    # Parse SSE format
+                    if line.startswith("event:"):
+                        continue
+                    if line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        if not data_str:
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        event_type = data.get("type", "")
+
+                        # Extract response ID from any event
+                        if "response" in data and isinstance(data["response"], dict):
+                            new_response_id = data["response"].get("id")
+
+                        # Handle delta events (streaming tokens)
+                        if event_type == "response.output_text.delta":
+                            delta = data.get("delta", "")
+                            if delta:
+                                full_text += delta
+                                await send(
+                                    {
+                                        "type": "llm.delta",
+                                        "delta": delta,
+                                        "session_id": session.session_id,
+                                    }
+                                )
+
+                        # Handle completion
+                        elif event_type == "response.completed":
+                            resp = data.get("response", {})
+                            new_response_id = resp.get("id")
+                            await send(
+                                {
+                                    "type": "llm.done",
+                                    "text": full_text,
+                                    "response_id": new_response_id,
+                                    "session_id": session.session_id,
+                                }
+                            )
+
+                # Store response ID for next turn
+                if new_response_id:
+                    session.previous_response_id = new_response_id
+                    logger.debug("Voice chat response_id stored: %s", new_response_id[:16])
+
+    except Exception as exc:
+        logger.error(f"LLM streaming error: {exc}")
+        await send({"type": "llm.error", "message": str(exc)})
+
+
+async def _handle_voice_chat_message(
+    msg: dict[str, Any],
+    session: VoiceChatSession,
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+) -> bool:
+    """Process voice chat messages. Returns True to end session."""
+
+    mtype = msg.get("type")
+
+    if mtype == "chunk":
+        # Handle audio chunk (same as transcribe)
+        b64 = msg.get("audio_base64")
+        if not isinstance(b64, str):
+            await send({"type": "error", "message": "audio_base64 required"})
+            return False
+        try:
+            chunk = base64.b64decode(b64)
+        except Exception:
+            await send({"type": "error", "message": "invalid base64"})
+            return False
+
+        session.audio_buffer.extend(chunk)
+        await send({"type": "ack", "received_bytes": len(session.audio_buffer)})
+
+        # On last chunk, transcribe and potentially trigger LLM
+        if msg.get("last") is True:
+            await _process_voice_chat_audio(session, send)
+        return False
+
+    if mtype == "flush":
+        # Force transcription and check for complete sentences
+        await _process_voice_chat_audio(session, send)
+        return False
+
+    if mtype == "end":
+        # Transcribe remaining audio
+        if session.audio_buffer:
+            await _process_voice_chat_audio(session, send, force_llm=True)
+        return True
+
+    if mtype == "set":
+        if "language" in msg:
+            session.language = str(msg.get("language") or "").strip().lower() or None
+        if "sample_rate" in msg:
+            try:
+                session.sample_rate = int(msg.get("sample_rate", 16000))
+            except (TypeError, ValueError):
+                session.sample_rate = 16000
+        await send(
+            {
+                "type": "ack",
+                "language": session.language,
+                "sample_rate": session.sample_rate,
+            }
+        )
+        return False
+
+    if mtype == "reset":
+        # Reset conversation context
+        session.sentence_buffer = ""
+        session.conversation_history.clear()
+        session.previous_response_id = None
+        await send({"type": "ack", "message": "conversation reset"})
+        return False
+
+    await send({"type": "error", "message": f"unknown type: {mtype}"})
+    return False
+
+
+async def _process_voice_chat_audio(
+    session: VoiceChatSession,
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+    force_llm: bool = False,
+) -> None:
+    """Transcribe audio buffer and process through sentence buffer → LLM."""
+
+    if not session.audio_buffer:
+        return
+
+    # Transcribe the audio
+    stream_session = StreamSession(
+        session_id=session.session_id,
+        language=session.language,
+        sample_rate=session.sample_rate,
+        encoding=session.encoding,
+        buffer=session.audio_buffer,
+    )
+
+    result = await _transcribe_stream_buffer(stream_session)
+    text = (result.get("text") or "").strip()
+    session.audio_buffer.clear()
+
+    if not text:
+        return
+
+    # Send transcript to client
+    await send(
+        {
+            "type": "transcript",
+            "text": text,
+            "session_id": session.session_id,
+        }
+    )
+
+    # Add to sentence buffer
+    session.sentence_buffer += " " + text if session.sentence_buffer else text
+
+    # Check for complete sentences
+    complete_sentence, remaining = _detect_sentence_boundary(session.sentence_buffer)
+
+    if complete_sentence or force_llm:
+        sentence_to_send = complete_sentence or session.sentence_buffer.strip()
+        session.sentence_buffer = remaining if complete_sentence else ""
+
+        if sentence_to_send:
+            logger.info("Voice chat sentence complete: %s", sentence_to_send[:50])
+            await send(
+                {
+                    "type": "sentence.complete",
+                    "text": sentence_to_send,
+                    "session_id": session.session_id,
+                }
+            )
+
+            # Stream LLM response
+            await _stream_llm_response(sentence_to_send, session, send)
+
+
+@app.websocket("/ws/voice-chat")
+async def websocket_voice_chat(ws: WebSocket):
+    """WebSocket endpoint for real-time voice chat with sentence buffering.
+
+    Flow:
+    1. Client sends audio chunks (type: "chunk", audio_base64: "...")
+    2. Server transcribes and buffers until sentence boundary
+    3. Complete sentences trigger LLM streaming response
+    4. LLM tokens streamed back as "llm.delta" events
+
+    Client messages:
+    - {"type": "chunk", "audio_base64": "...", "last": true/false}
+    - {"type": "flush"} - force transcription
+    - {"type": "end"} - end session, process remaining
+    - {"type": "set", "language": "pl"} - configure
+    - {"type": "reset"} - clear conversation context
+
+    Server messages:
+    - {"type": "ack", "received_bytes": N}
+    - {"type": "transcript", "text": "..."}
+    - {"type": "sentence.complete", "text": "..."}
+    - {"type": "llm.delta", "delta": "..."} - streaming token
+    - {"type": "llm.done", "text": "...", "response_id": "..."}
+    - {"type": "error", "message": "..."}
+    """
+    if whisper_model is None:
+        await ws.close(code=1011, reason="Whisper not initialized")
+        return
+
+    await ws.accept()
+    session = VoiceChatSession()
+    logger.info(
+        "voice-chat session=%s lang=%s sample_rate=%s",
+        session.session_id,
+        session.language,
+        session.sample_rate,
+    )
+
+    async def send(msg: dict[str, Any]) -> None:
+        await ws.send_json(msg)
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                await send({"type": "error", "message": "invalid JSON"})
+                continue
+            should_close = await _handle_voice_chat_message(msg, session, send)
+            if should_close:
+                await ws.close()
+                break
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        logger.exception("Voice chat error")
         await send({"type": "error", "message": str(exc)})
         with contextlib.suppress(Exception):
             await ws.close()

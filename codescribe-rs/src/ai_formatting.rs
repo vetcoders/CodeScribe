@@ -55,6 +55,33 @@ const LIBRAXIS: ProviderConfig = ProviderConfig {
 /// Fallback chain: OpenAI -> Libraxis
 const PROVIDER_CHAIN: &[ProviderConfig] = &[OPENAI, LIBRAXIS];
 
+/// Ollama request format
+#[derive(Debug, Serialize)]
+struct OllamaRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    stream: bool,
+    options: OllamaOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaOptions {
+    temperature: f32,
+    num_predict: u32,
+}
+
+/// Ollama response format
+#[derive(Debug, Deserialize)]
+struct OllamaResponse {
+    message: Option<OllamaMessage>,
+    response: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaMessage {
+    content: String,
+}
+
 /// Chat completion request (OpenAI-compatible)
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -86,7 +113,7 @@ struct ResponseMessage {
     content: String,
 }
 
-/// System prompt for text formatting
+/// System prompt for text formatting (normal mode)
 const FORMATTING_SYSTEM_PROMPT: &str = r#"You are a text formatting assistant. Your task is to clean up speech-to-text transcriptions.
 
 Rules:
@@ -106,6 +133,26 @@ Example output: "Wielki problem."
 Example input: "Kali Kali Kali Kali bogini"
 Example output: "Kali, bogini."
 "#;
+
+/// System prompt for assistive mode (contextual AI assistant)
+const ASSISTIVE_SYSTEM_PROMPT: &str = r#"Jesteś asystentem kontekstowym dla programisty i weterynarza. Pomagasz przy transkrypcjach i zadaniach.
+
+Twoje zadania:
+1. Rozumiesz kontekst i intencję użytkownika
+2. Odpowiadasz konkretnie i pomocnie
+3. Formatujesz odpowiedzi czytelnie
+4. Możesz planować, sugerować, wyjaśniać
+5. Używaj kaomoji jeśli pasuje, ale nigdy emoji
+
+Zachowuj się jak kolega-programista który rozumie co użytkownik chce osiągnąć.
+Odpowiadaj w tym samym języku co użytkownik (zwykle polski).
+"#;
+
+/// Max tokens for normal formatting
+const FORMATTING_MAX_TOKENS: u32 = 2048;
+
+/// Max tokens for assistive mode (higher for complex responses)
+const ASSISTIVE_MAX_TOKENS: u32 = 4096;
 
 /// Check if text has repetition loop (Whisper hallucination)
 pub fn has_repetition_loop(text: &str) -> bool {
@@ -267,12 +314,13 @@ pub fn remove_simple_repetitions(text: &str) -> String {
 /// # Arguments
 /// * `text` - Raw text from transcription
 /// * `language` - Optional language hint (e.g., "pl", "en")
+/// * `assistive` - If true, use assistive mode (AI assistant) instead of simple formatting
 ///
 /// # Returns
 /// Formatted text or original if all providers fail
-pub async fn format_text(text: &str, language: Option<&str>) -> String {
-    // Skip very short texts
-    if text.len() < 10 {
+pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) -> String {
+    // Skip very short texts (but not in assistive mode - user might say "help")
+    if text.len() < 10 && !assistive {
         return text.to_string();
     }
 
@@ -291,15 +339,42 @@ pub async fn format_text(text: &str, language: Option<&str>) -> String {
         cleaned.clone()
     };
 
-    // Try each provider in chain
-    for provider in PROVIDER_CHAIN {
-        match call_provider(provider, &user_message).await {
+    // Select prompt and max tokens based on mode
+    let (system_prompt, max_tokens) = if assistive {
+        info!("Using assistive mode (AI assistant)");
+        (ASSISTIVE_SYSTEM_PROMPT, ASSISTIVE_MAX_TOKENS)
+    } else {
+        (FORMATTING_SYSTEM_PROMPT, FORMATTING_MAX_TOKENS)
+    };
+
+    // Try Ollama first if configured as AI_PROVIDER
+    if has_ollama() {
+        match call_ollama(&user_message, system_prompt, max_tokens, assistive).await {
             Ok(formatted) => {
                 info!(
-                    "Formatted via {} ({} -> {} chars)",
+                    "Formatted via Ollama ({} -> {} chars, assistive={})",
+                    text.len(),
+                    formatted.len(),
+                    assistive
+                );
+                return formatted;
+            }
+            Err(e) => {
+                warn!("Ollama failed: {}, trying other providers", e);
+            }
+        }
+    }
+
+    // Try each provider in chain
+    for provider in PROVIDER_CHAIN {
+        match call_provider(provider, &user_message, system_prompt, max_tokens, assistive).await {
+            Ok(formatted) => {
+                info!(
+                    "Formatted via {} ({} -> {} chars, assistive={})",
                     provider.name,
                     text.len(),
-                    formatted.len()
+                    formatted.len(),
+                    assistive
                 );
                 return formatted;
             }
@@ -316,7 +391,13 @@ pub async fn format_text(text: &str, language: Option<&str>) -> String {
 }
 
 /// Call a single AI provider
-async fn call_provider(provider: &ProviderConfig, user_message: &str) -> Result<String> {
+async fn call_provider(
+    provider: &ProviderConfig,
+    user_message: &str,
+    system_prompt: &str,
+    max_tokens: u32,
+    assistive: bool,
+) -> Result<String> {
     let api_key =
         env::var(provider.api_key_env).context(format!("{} not set", provider.api_key_env))?;
 
@@ -324,23 +405,32 @@ async fn call_provider(provider: &ProviderConfig, user_message: &str) -> Result<
         anyhow::bail!("{} is empty", provider.api_key_env);
     }
 
+    // Use higher temperature for assistive mode (more creative responses)
+    let temperature = if assistive { 0.3 } else { 0.1 };
+
     let request = ChatRequest {
         model: provider.model.to_string(),
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: FORMATTING_SYSTEM_PROMPT.to_string(),
+                content: system_prompt.to_string(),
             },
             ChatMessage {
                 role: "user",
                 content: user_message.to_string(),
             },
         ],
-        max_tokens: 2048,
-        temperature: 0.1, // Low temperature for consistent formatting
+        max_tokens,
+        temperature,
     };
 
-    debug!("Calling {} for formatting", provider.name);
+    debug!(
+        "Calling {} for {} (max_tokens={}, temp={})",
+        provider.name,
+        if assistive { "assistive" } else { "formatting" },
+        max_tokens,
+        temperature
+    );
 
     let response = get_client()
         .post(provider.endpoint)
@@ -365,16 +455,102 @@ async fn call_provider(provider: &ProviderConfig, user_message: &str) -> Result<
         .map(|c| c.message.content.trim().to_string())
         .ok_or_else(|| anyhow::anyhow!("No response content"))?;
 
-    // Sanity check - formatted shouldn't be empty or much longer than original
-    if formatted.is_empty() || formatted.len() > user_message.len() * 2 {
+    // Sanity check - in assistive mode, allow longer responses
+    let max_len_multiplier = if assistive { 5 } else { 2 };
+    if formatted.is_empty() || formatted.len() > user_message.len() * max_len_multiplier {
         anyhow::bail!("Invalid response length");
     }
 
     Ok(formatted)
 }
 
+/// Call Ollama for text formatting/assistive mode
+async fn call_ollama(
+    user_message: &str,
+    system_prompt: &str,
+    max_tokens: u32,
+    assistive: bool,
+) -> Result<String> {
+    let host = env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    let model = env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5:3b-instruct".to_string());
+    let endpoint = format!("{}/api/chat", host.trim_end_matches('/'));
+
+    // Use higher temperature for assistive mode
+    let temperature = if assistive { 0.3 } else { 0.1 };
+
+    let request = OllamaRequest {
+        model,
+        messages: vec![
+            ChatMessage {
+                role: "system",
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user",
+                content: user_message.to_string(),
+            },
+        ],
+        stream: false,
+        options: OllamaOptions {
+            temperature,
+            num_predict: max_tokens,
+        },
+    };
+
+    debug!(
+        "Calling Ollama for {} (max_tokens={}, temp={})",
+        if assistive { "assistive" } else { "formatting" },
+        max_tokens,
+        temperature
+    );
+
+    let response = get_client()
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .context("Ollama request failed")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Ollama HTTP {} - {}", status, body);
+    }
+
+    let ollama_response: OllamaResponse =
+        response.json().await.context("Failed to parse Ollama response")?;
+
+    let formatted = ollama_response
+        .message
+        .map(|m| m.content)
+        .or(ollama_response.response)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    if formatted.is_empty() {
+        anyhow::bail!("Empty Ollama response");
+    }
+
+    Ok(formatted)
+}
+
+/// Check if Ollama is configured
+fn has_ollama() -> bool {
+    // Check if AI_PROVIDER is set to ollama
+    env::var("AI_PROVIDER")
+        .map(|p| p.to_lowercase() == "ollama")
+        .unwrap_or(false)
+}
+
 /// Check if any AI provider is configured
 pub fn has_api_key() -> bool {
+    // Ollama doesn't need an API key
+    if has_ollama() {
+        return true;
+    }
+
     for provider in PROVIDER_CHAIN {
         if env::var(provider.api_key_env)
             .map(|k| !k.is_empty())
