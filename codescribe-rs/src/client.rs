@@ -1,7 +1,9 @@
 //! HTTP client for communicating with CodeScribe Python backend (FastAPI + MLX Whisper)
+//! or external WhisperX servers.
 //!
 //! Features:
 //! - Automatic server discovery across multiple ports
+//! - Support for external WhisperX servers (8443, 8444, 8445)
 //! - Health checks with caching
 //! - Multipart file upload for transcription
 //! - Retry logic with exponential backoff
@@ -16,7 +18,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Cached server URL after successful discovery
 static SERVER_URL: OnceLock<String> = OnceLock::new();
@@ -188,8 +190,25 @@ pub async fn check_health() -> Result<bool> {
 /// println!("Transcript: {}", transcript);
 /// ```
 pub async fn transcribe(path: &Path, language: Option<&str>) -> Result<String> {
+    // Check if Libraxis Cloud STT is configured via WHISPER_SERVER_URL
+    // Format: https://api.libraxis.cloud (requires VOICE_API_KEY)
+    let external_url = std::env::var("WHISPER_SERVER_URL").ok();
+    let api_key = std::env::var("VOICE_API_KEY").ok();
+
+    let is_libraxis_cloud = external_url
+        .as_ref()
+        .is_some_and(|url| url.contains("libraxis.cloud") || url.contains("api.libraxis"));
+
+    if is_libraxis_cloud {
+        let base_url = external_url.unwrap();
+        let key = api_key.context("VOICE_API_KEY required for Libraxis Cloud STT")?;
+        return transcribe_libraxis_cloud(path, language, &base_url, &key).await;
+    }
+
+    // Local Python backend uses /transcribe with "audio" field
     let base_url = get_server_url().await?;
     let url = format!("{}/transcribe", base_url);
+    let field_name = "audio";
 
     // Read file into memory (path comes from internal recorder, not user input)
     let mut file = File::open(path) // nosemgrep: tainted-path
@@ -207,34 +226,37 @@ pub async fn transcribe(path: &Path, language: Option<&str>) -> Result<String> {
         .unwrap_or("recording.wav");
 
     // Build multipart form
-    // Backend expects "audio" field, not "file"
     let file_part = Part::bytes(buffer)
         .file_name(filename.to_string())
         .mime_str("audio/wav")
         .context("Failed to set MIME type")?;
 
-    let mut form = Form::new().part("audio", file_part);
+    let mut form = Form::new().part(field_name, file_part);
 
     if let Some(lang) = language {
         form = form.text("language", lang.to_string());
     }
 
-    debug!("Sending transcription request for {}", filename);
+    info!("Sending transcription request to {} for {}", url, filename);
 
     // Single request (Form cannot be cloned for retry)
-    let response = get_client()
-        .post(&url)
-        .multipart(form)
-        .send()
-        .await
-        .context("Failed to send transcription request")?;
+    let response = match get_client().post(&url).multipart(form).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("HTTP request failed: {:?}", e);
+            anyhow::bail!("Failed to send transcription request: {}", e);
+        }
+    };
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    info!("Transcription response status: {}", status);
+
+    if !status.is_success() {
         let body = response
             .text()
             .await
             .unwrap_or_else(|_| "(no body)".to_string());
+        error!("Transcription failed - status: {}, body: {}", status, body);
         anyhow::bail!("Transcription failed with status {}: {}", status, body);
     }
 
@@ -245,6 +267,88 @@ pub async fn transcribe(path: &Path, language: Option<&str>) -> Result<String> {
 
     info!(
         "Transcription successful, length: {} chars",
+        transcribe_response.text.len()
+    );
+
+    Ok(transcribe_response.text)
+}
+
+/// Transcribe audio using Libraxis Cloud API (OpenAI-compatible endpoint)
+///
+/// Uses /v1/audio/transcriptions endpoint with x-api-key header
+async fn transcribe_libraxis_cloud(
+    path: &Path,
+    language: Option<&str>,
+    base_url: &str,
+    api_key: &str,
+) -> Result<String> {
+    info!("Using Libraxis Cloud STT: {}", base_url);
+
+    let url = format!("{}/v1/audio/transcriptions", base_url.trim_end_matches('/'));
+
+    // Read file into memory
+    let mut file = File::open(path)
+        .await
+        .context("Failed to open audio file")?;
+
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)
+        .await
+        .context("Failed to read audio file")?;
+
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("recording.wav");
+
+    // Build multipart form (OpenAI-compatible format)
+    let file_part = Part::bytes(buffer)
+        .file_name(filename.to_string())
+        .mime_str("audio/wav")
+        .context("Failed to set MIME type")?;
+
+    let mut form = Form::new()
+        .part("file", file_part)
+        .text("model", "whisper-large-v3");
+
+    if let Some(lang) = language {
+        form = form.text("language", lang.to_string());
+    }
+
+    debug!(
+        "Sending transcription request to Libraxis Cloud for {}",
+        filename
+    );
+
+    let response = get_client()
+        .post(&url)
+        .header("x-api-key", api_key)
+        .multipart(form)
+        .send()
+        .await
+        .context("Failed to send transcription request to Libraxis Cloud")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "(no body)".to_string());
+        anyhow::bail!(
+            "Libraxis Cloud transcription failed with status {}: {}",
+            status,
+            body
+        );
+    }
+
+    // Libraxis Cloud returns OpenAI-compatible response
+    let transcribe_response: TranscribeResponse = response
+        .json()
+        .await
+        .context("Failed to parse Libraxis Cloud transcription response")?;
+
+    info!(
+        "Libraxis Cloud transcription successful, length: {} chars",
         transcribe_response.text.len()
     );
 

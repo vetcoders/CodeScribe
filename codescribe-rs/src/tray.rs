@@ -65,6 +65,7 @@ struct ModelMenuItems {
     medium: CheckMenuItem,
     large_v3: CheckMenuItem,
     large_v3_turbo: CheckMenuItem,
+    large_v3_q8: CheckMenuItem,
     label: MenuItem,
 }
 
@@ -100,6 +101,7 @@ fn apply_model_selection(variant: &str) {
             items.medium.set_checked(false);
             items.large_v3.set_checked(false);
             items.large_v3_turbo.set_checked(false);
+            items.large_v3_q8.set_checked(false);
 
             // Check the selected model
             match variant {
@@ -107,6 +109,7 @@ fn apply_model_selection(variant: &str) {
                 "medium" => items.medium.set_checked(true),
                 "large-v3" => items.large_v3.set_checked(true),
                 "large-v3-turbo" => items.large_v3_turbo.set_checked(true),
+                "large-v3-q8" | "large-v3-mlx-q8" => items.large_v3_q8.set_checked(true),
                 _ => debug!("Unknown model variant: {}", variant),
             }
 
@@ -116,6 +119,7 @@ fn apply_model_selection(variant: &str) {
                 "medium" => "Whisper: Medium",
                 "large-v3" => "Whisper: Large v3",
                 "large-v3-turbo" => "Whisper: Large v3 Turbo",
+                "large-v3-q8" | "large-v3-mlx-q8" => "Whisper: Large v3 Q8",
                 _ => variant,
             };
             items.label.set_text(label_text);
@@ -315,7 +319,12 @@ pub enum TrayMenuEvent {
     // Top-level actions
     ToggleHotkeys,
     StartAtLogin(bool),
+    /// User clicked Quit - show confirmation dialog
     Quit,
+    /// Close tray AND stop backend server
+    QuitCloseAll,
+    /// Close tray but leave backend server running
+    QuitLeaveServer,
 
     // Language submenu
     SetLanguage(Language),
@@ -426,6 +435,7 @@ pub enum WhisperModel {
     Medium,
     LargeV3,
     LargeV3Turbo,
+    LargeV3Q8,
 }
 
 impl WhisperModel {
@@ -436,6 +446,7 @@ impl WhisperModel {
             WhisperModel::Medium => "Medium",
             WhisperModel::LargeV3 => "Large v3",
             WhisperModel::LargeV3Turbo => "Large v3 Turbo",
+            WhisperModel::LargeV3Q8 => "Large v3 Q8",
         }
     }
 
@@ -446,6 +457,7 @@ impl WhisperModel {
             WhisperModel::Medium => "whisper-medium",
             WhisperModel::LargeV3 => "whisper-large-v3",
             WhisperModel::LargeV3Turbo => "whisper-large-v3-turbo",
+            WhisperModel::LargeV3Q8 => "whisper-large-v3-mlx-q8",
         }
     }
 }
@@ -467,6 +479,7 @@ struct MenuIds {
     model_medium: MenuId,
     model_large_v3: MenuId,
     model_large_v3_turbo: MenuId,
+    model_large_v3_q8: MenuId,
     model_open_folder: MenuId,
 
     // Formatting submenu
@@ -547,12 +560,14 @@ fn build_menu() -> Result<(Menu, MenuIds)> {
     let models_menu = Submenu::new("Models", true);
 
     // Current Whisper model label (read from env or default)
-    let current_whisper = std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "small".to_string());
+    let current_whisper =
+        std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "large-v3-q8".to_string());
     let current_label = match current_whisper.as_str() {
         "small" => "Small",
         "medium" => "Medium",
         "large-v3" => "Large v3",
         "large-v3-turbo" => "Large v3 Turbo",
+        "large-v3-q8" | "large-v3-mlx-q8" => "Large v3 Q8",
         _ => &current_whisper,
     };
     let whisper_label = MenuItem::new(format!("Whisper: {}", current_label), false, None);
@@ -584,11 +599,19 @@ fn build_menu() -> Result<(Menu, MenuIds)> {
         None,
     );
     let model_large_v3_turbo_id = model_large_v3_turbo.id().clone();
+    let model_large_v3_q8 = CheckMenuItem::new(
+        "Use Whisper: Large v3 Q8",
+        true,
+        current_whisper == "large-v3-q8" || current_whisper == "large-v3-mlx-q8",
+        None,
+    );
+    let model_large_v3_q8_id = model_large_v3_q8.id().clone();
 
     models_menu.append(&model_small)?;
     models_menu.append(&model_medium)?;
     models_menu.append(&model_large_v3)?;
     models_menu.append(&model_large_v3_turbo)?;
+    models_menu.append(&model_large_v3_q8)?;
     models_menu.append(&PredefinedMenuItem::separator())?;
 
     // Open Models Folder
@@ -605,6 +628,7 @@ fn build_menu() -> Result<(Menu, MenuIds)> {
             medium: model_medium,
             large_v3: model_large_v3,
             large_v3_turbo: model_large_v3_turbo,
+            large_v3_q8: model_large_v3_q8,
             label: whisper_label,
         });
     });
@@ -893,6 +917,7 @@ fn build_menu() -> Result<(Menu, MenuIds)> {
             model_medium: model_medium_id,
             model_large_v3: model_large_v3_id,
             model_large_v3_turbo: model_large_v3_turbo_id,
+            model_large_v3_q8: model_large_v3_q8_id,
             model_open_folder: model_open_folder_id,
             fmt_toggle: fmt_toggle_id,
             fmt_harmony: fmt_harmony_id,
@@ -986,14 +1011,22 @@ fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         send_menu_event(TrayMenuEvent::SetLanguage(Language::English));
     }
     // Models submenu (Whisper model selection)
+    // Note: We apply radio behavior immediately to prevent multiple checkmarks
     else if event_id == &menu_ids.model_small {
+        apply_model_selection("small");
         send_menu_event(TrayMenuEvent::SetWhisperModel(WhisperModel::Small));
     } else if event_id == &menu_ids.model_medium {
+        apply_model_selection("medium");
         send_menu_event(TrayMenuEvent::SetWhisperModel(WhisperModel::Medium));
     } else if event_id == &menu_ids.model_large_v3 {
+        apply_model_selection("large-v3");
         send_menu_event(TrayMenuEvent::SetWhisperModel(WhisperModel::LargeV3));
     } else if event_id == &menu_ids.model_large_v3_turbo {
+        apply_model_selection("large-v3-turbo");
         send_menu_event(TrayMenuEvent::SetWhisperModel(WhisperModel::LargeV3Turbo));
+    } else if event_id == &menu_ids.model_large_v3_q8 {
+        apply_model_selection("large-v3-mlx-q8");
+        send_menu_event(TrayMenuEvent::SetWhisperModel(WhisperModel::LargeV3Q8));
     } else if event_id == &menu_ids.model_open_folder {
         send_menu_event(TrayMenuEvent::OpenModelsFolder);
         // Open models folder in Finder
@@ -1106,13 +1139,13 @@ fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
     // Tools submenu
     else if event_id == &menu_ids.tools_voice_lab {
         send_menu_event(TrayMenuEvent::OpenVoiceLab);
-        // Open Voice Lab in browser (backend /tester endpoint)
+        // Open Voice Lab in browser (backend /lab endpoint)
         #[cfg(target_os = "macos")]
         {
             use std::process::Command;
             let backend_url = std::env::var("CODESCRIBE_BACKEND_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8237".to_string());
-            let lab_url = format!("{}/tester", backend_url);
+            let lab_url = format!("{}/lab", backend_url);
             info!("Opening Voice Lab: {}", lab_url);
             let _ = Command::new("open").arg(&lab_url).spawn();
         }
@@ -1125,7 +1158,7 @@ fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
             let backend_url = std::env::var("CODESCRIBE_BACKEND_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8237".to_string());
             // Teacher mode uses the same Lab UI but with calibration wizard
-            let teacher_url = format!("{}/tester#calibrate", backend_url);
+            let teacher_url = format!("{}/lab#calibrate", backend_url);
             info!("Opening Calibration Teacher: {}", teacher_url);
             let _ = Command::new("open").arg(&teacher_url).spawn();
         }

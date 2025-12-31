@@ -144,7 +144,8 @@ def _harmony_base_url() -> str:
 
 
 def _harmony_api_key() -> str | None:
-    for key_name in ("HARMONY_API_KEY", "LIBRAXIS_API_KEY", "OPENAI_API_KEY"):
+    # Unified: LLM_API_KEY is the canonical key, with legacy fallbacks
+    for key_name in ("LLM_API_KEY", "HARMONY_API_KEY", "LIBRAXIS_API_KEY", "OPENAI_API_KEY"):
         token = os.environ.get(key_name)
         if token:
             return token.strip()

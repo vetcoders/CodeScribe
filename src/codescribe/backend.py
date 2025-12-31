@@ -21,6 +21,14 @@ from dotenv import load_dotenv
 
 from .path_utils import repo_root, user_data_root
 
+# Set process title for easier debugging (optional dependency)
+try:
+    from setproctitle import setproctitle
+
+    setproctitle("CodeScribeServer")
+except ImportError:
+    pass  # setproctitle is optional
+
 # Load .env files: repo defaults first, then user overrides
 _repo_env = repo_root() / ".env"
 if _repo_env.exists():
@@ -395,10 +403,14 @@ async def _run_whisper_transcription(audio_path: str, *, language: str | None) -
                     language=language,
                     condition_on_previous_text=False,
                     initial_prompt=INITIAL_PROMPT,
+                    # Word-level timestamps for proper segment timing
+                    word_timestamps=True,
                     # Anti-hallucination filters (improves transcription quality)
                     compression_ratio_threshold=2.0,  # Lower = stricter (default 2.4)
                     no_speech_threshold=0.5,  # Higher = stricter (default 0.6)
                     logprob_threshold=-0.5,  # Higher = stricter (default -1.0)
+                    # Skip hallucinated silent periods (requires word_timestamps)
+                    hallucination_silence_threshold=0.5,
                 )
             except TypeError:
                 return _legacy_whisper_transcribe(
@@ -436,10 +448,14 @@ def _legacy_whisper_transcribe(audio_path: str, *, language: str | None) -> dict
     kwargs: dict[str, Any] = {
         "condition_on_previous_text": False,
         "initial_prompt": INITIAL_PROMPT,
+        # Word-level timestamps for proper segment timing
+        "word_timestamps": True,
         # Anti-hallucination filters (improves transcription quality)
         "compression_ratio_threshold": 2.0,  # Lower = stricter (default 2.4)
         "no_speech_threshold": 0.5,  # Higher = stricter (default 0.6)
         "logprob_threshold": -0.5,  # Higher = stricter (default -1.0)
+        # Skip hallucinated silent periods (requires word_timestamps)
+        "hallucination_silence_threshold": 0.5,
     }
     if language:
         kwargs["language"] = language
@@ -727,8 +743,16 @@ async def transcribe_stream_endpoint(request: Request):
 @app.post("/transcribe")
 async def transcribe_endpoint(  # noqa: B008  # FastAPI pattern
     request: Request,
-    audio: UploadFile = File(...),  # noqa: B008  # FastAPI requires call here
+    audio: UploadFile | None = File(None),  # noqa: B008  # FastAPI requires call here
+    file: UploadFile | None = File(None),  # noqa: B008  # Alias for compatibility with OpenAI API
+    response_format: str | None = Form(None),  # noqa: B008  # OpenAI API: json, text, srt, verbose_json, vtt
+    language: str | None = Form(None),  # noqa: B008  # Language hint for transcription
+    model: str | None = Form(None),  # noqa: B008  # Model name (ignored, we use local whisper)
 ):
+    # Accept either 'audio' or 'file' parameter (OpenAI uses 'file', we prefer 'audio')
+    audio = audio or file
+    if audio is None:
+        return JSONResponse(status_code=422, content={"error": "Missing audio or file parameter"})
     if whisper_model is None:
         return JSONResponse(status_code=500, content={"error": "Whisper not initialized"})
 
@@ -787,8 +811,8 @@ async def transcribe_endpoint(  # noqa: B008  # FastAPI pattern
         else:
             final_path = temp_path
 
-        # Language preference (support WHISPER_LANGUAGE env var like stt.py)
-        lang = os.environ.get("WHISPER_LANGUAGE", "").strip().lower() or None
+        # Language preference: request param > env var > auto-detect
+        lang = language or os.environ.get("WHISPER_LANGUAGE", "").strip().lower() or None
 
         transcription = await _transcribe_audio_file(final_path, language=lang)
         text = (transcription.get("text") or "").strip()
@@ -806,13 +830,46 @@ async def transcribe_endpoint(  # noqa: B008  # FastAPI pattern
         )
 
         # Log detected language for debugging
+        detected_lang = "unknown"
         if isinstance(transcription, dict):
-            detected = transcription.get("language", "unknown")
+            detected_lang = transcription.get("language", "unknown")
             # Justification: _sanitize_log() removes \n \r \t \x00 to prevent log injection
-            logger.info(f"Whisper detected language: {_sanitize_log(detected)}")  # nosemgrep
+            logger.info(f"Whisper detected language: {_sanitize_log(detected_lang)}")  # nosemgrep
 
         # Apply Light+ formatting (vocabulary fixes, punctuation, capitalization)
         text = apply_light_plus(text)
+
+        # OpenAI API compatibility: return full response for verbose_json
+        if response_format == "verbose_json":
+            # Build OpenAI-compatible verbose_json response
+            segments = transcription.get("segments", [])
+            # Convert MLX Whisper segments to OpenAI format
+            openai_segments = []
+            for i, seg in enumerate(segments):
+                openai_seg = {
+                    "id": i,
+                    "seek": int(seg.get("start", 0) * 100),  # OpenAI uses centiseconds for seek
+                    "start": seg.get("start", 0.0),
+                    "end": seg.get("end", 0.0),
+                    "text": seg.get("text", "").strip(),
+                    "tokens": seg.get("tokens", []),
+                    "temperature": seg.get("temperature", 0.0),
+                    "avg_logprob": seg.get("avg_logprob", 0.0),
+                    "compression_ratio": seg.get("compression_ratio", 1.0),
+                    "no_speech_prob": seg.get("no_speech_prob", 0.0),
+                }
+                # Add word-level timestamps if available
+                if "words" in seg:
+                    openai_seg["words"] = seg["words"]
+                openai_segments.append(openai_seg)
+
+            return {
+                "task": "transcribe",
+                "language": detected_lang,
+                "duration": stats.get("duration_sec", 0.0),
+                "text": text,
+                "segments": openai_segments,
+            }
 
         return {"text": text}
     except Exception as e:
@@ -855,12 +912,31 @@ async def format_endpoint(req: FormatRequest, request: Request):
 @app.post("/stt_and_format")
 async def stt_and_format(
     request: Request,
-    audio: UploadFile = File(...),  # noqa: B008  # FastAPI pattern
+    audio: UploadFile | None = File(None),  # noqa: B008  # FastAPI pattern
+    file: UploadFile | None = File(None),  # noqa: B008  # Alias for OpenAI API compatibility
     instruction: str | None = Form(None),
+    response_format: str | None = Form(None),  # noqa: B008  # OpenAI API: json, text, srt, verbose_json, vtt
+    language: str | None = Form(None),  # noqa: B008  # Language hint for transcription
+    model: str | None = Form(None),  # noqa: B008  # Model name (ignored, we use local whisper)
 ):
-    t = await transcribe_endpoint(request=request, audio=audio)
+    # Accept either 'audio' or 'file' parameter
+    audio = audio or file
+    if audio is None:
+        return JSONResponse(status_code=422, content={"error": "Missing audio or file parameter"})
+    t = await transcribe_endpoint(
+        request=request,
+        audio=audio,
+        response_format=response_format,
+        language=language,
+        model=model,
+    )
     if isinstance(t, JSONResponse):
         return t
+
+    # For verbose_json, return the full transcription response (with segments)
+    if response_format == "verbose_json":
+        return t
+
     txt = t.get("text", "")
     settings = get_settings()
     if not settings.ai_formatting_enabled:
@@ -1418,8 +1494,8 @@ async def set_model(variant: str = Body(..., embed=True)):  # noqa: B008  # Fast
         return {"ok": False, "error": str(e)}
 
 
-@app.get("/tester")
-async def tester():
+@app.get("/lab")
+async def lab_ui():
     """Serve the Voice & Chat Lab (spectrogram + chat)."""
     try:
         path = _asset_path("voice_chat_lab.html")
@@ -1558,9 +1634,9 @@ async def lab_learn(req: LearnRequest):
     topic_slug = sanitize_topic(req.topic)
     settings = get_settings()
     ai_available = settings.ai_formatting_enabled and bool(
-        os.environ.get("HARMONY_API_KEY")
-        or os.environ.get("LIBRAXIS_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
+        os.environ.get("LLM_API_KEY")
+        or os.environ.get("HARMONY_API_KEY")  # legacy fallback
+        or os.environ.get("OPENAI_API_KEY")  # legacy fallback
     )
 
     ai_entries: list[dict[str, Any]] = []

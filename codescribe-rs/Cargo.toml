@@ -1,6 +1,6 @@
 [package]
 name = "codescribe"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 description = "Speech-to-text tray app for macOS - Rust frontend"
 authors = ["Loctree <contact@loctree.io>"]
@@ -54,6 +54,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 anyhow = "1"
 thiserror = "2"
+
+# OpenAI Harmony format for /v1/responses API
+openai-harmony = "0.0.8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

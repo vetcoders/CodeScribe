@@ -1,8 +1,9 @@
 name: Tests
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ main, master, functional ]
+    branches: [ main, develop, functional ]
   pull_request:
 
 concurrency:

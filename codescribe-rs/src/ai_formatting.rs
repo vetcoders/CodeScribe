@@ -1,10 +1,13 @@
 //! AI-powered text formatting service
 //!
-//! Uses OpenAI (primary) and Libraxis (fallback) for:
+//! Uses LibraxisAI Responses API (/v1/responses) for:
 //! - Text formatting and grammar correction
 //! - Punctuation and capitalization
 //! - Anti-repetition filtering (fixes Whisper loops like "Wielki, Wielki...")
 //! - Language-specific formatting
+//!
+//! Supports both cloud providers (via /v1/responses) and local Ollama (/api/chat).
+//! Authentication: `Authorization: Bearer <key>` + `x-api-key: <key>` (dual-header)
 
 use anyhow::{Context, Result};
 use reqwest::Client;
@@ -36,24 +39,16 @@ pub struct ProviderConfig {
     pub model: &'static str,
 }
 
-/// OpenAI provider (primary)
-const OPENAI: ProviderConfig = ProviderConfig {
-    name: "OpenAI",
-    endpoint: "https://api.openai.com/v1/chat/completions",
-    api_key_env: "OPENAI_API_KEY",
-    model: "gpt-4o-mini",
-};
-
-/// Libraxis provider (fallback)
+/// LibraxisAI provider (primary - uses /v1/responses API)
 const LIBRAXIS: ProviderConfig = ProviderConfig {
-    name: "Libraxis",
-    endpoint: "https://api.libraxis.cloud/v1/chat/completions",
-    api_key_env: "LIBRAXIS_API_KEY",
+    name: "LibraxisAI",
+    endpoint: "https://api.libraxis.cloud/v1/responses",
+    api_key_env: "LLM_API_KEY",
     model: "chat",
 };
 
-/// Fallback chain: OpenAI -> Libraxis
-const PROVIDER_CHAIN: &[ProviderConfig] = &[OPENAI, LIBRAXIS];
+/// Provider chain (LibraxisAI only - no legacy OpenAI)
+const PROVIDER_CHAIN: &[ProviderConfig] = &[LIBRAXIS];
 
 /// Ollama request format
 #[derive(Debug, Serialize)]
@@ -82,34 +77,57 @@ struct OllamaMessage {
     content: String,
 }
 
-/// Chat completion request (OpenAI-compatible)
+/// Responses API request format (/v1/responses)
 #[derive(Debug, Serialize)]
-struct ChatRequest {
+struct ResponsesRequest {
     model: String,
-    messages: Vec<ChatMessage>,
-    max_tokens: u32,
-    temperature: f32,
+    input: Vec<InputItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
+/// Input item for Responses API
+#[derive(Debug, Serialize)]
+struct InputItem {
+    #[serde(rename = "type")]
+    item_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+}
+
+/// Responses API response format
+#[derive(Debug, Deserialize)]
+struct ResponsesResponse {
+    id: String,
+    output: Vec<OutputItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutputItem {
+    #[serde(rename = "type")]
+    item_type: String,
+    #[serde(default)]
+    content: Option<Vec<ContentPart>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContentPart {
+    #[serde(rename = "type")]
+    part_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Legacy chat message (for Ollama compatibility)
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: &'static str,
-    content: String,
-}
-
-/// Chat completion response (OpenAI-compatible)
-#[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ResponseMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponseMessage {
     content: String,
 }
 
@@ -398,7 +416,7 @@ pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) ->
     cleaned
 }
 
-/// Call a single AI provider
+/// Call a single AI provider using /v1/responses API
 async fn call_provider(
     provider: &ProviderConfig,
     user_message: &str,
@@ -416,33 +434,32 @@ async fn call_provider(
     // Use higher temperature for assistive mode (more creative responses)
     let temperature = if assistive { 0.3 } else { 0.1 };
 
-    let request = ChatRequest {
+    // Build Responses API request
+    let request = ResponsesRequest {
         model: provider.model.to_string(),
-        messages: vec![
-            ChatMessage {
-                role: "system",
-                content: system_prompt.to_string(),
-            },
-            ChatMessage {
-                role: "user",
-                content: user_message.to_string(),
-            },
-        ],
-        max_tokens,
-        temperature,
+        input: vec![InputItem {
+            item_type: "message",
+            role: Some("user"),
+            content: Some(user_message.to_string()),
+        }],
+        instructions: Some(system_prompt.to_string()),
+        max_output_tokens: Some(max_tokens),
+        temperature: Some(temperature),
     };
 
     debug!(
-        "Calling {} for {} (max_tokens={}, temp={})",
+        "Calling {} /v1/responses for {} (max_tokens={}, temp={})",
         provider.name,
         if assistive { "assistive" } else { "formatting" },
         max_tokens,
         temperature
     );
 
+    // Dual-header authentication (both Bearer and x-api-key for compatibility)
     let response = get_client()
         .post(provider.endpoint)
         .header("Authorization", format!("Bearer {}", api_key))
+        .header("x-api-key", &api_key)
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
@@ -455,32 +472,51 @@ async fn call_provider(
         anyhow::bail!("HTTP {} - {}", status, body);
     }
 
-    let chat_response: ChatResponse = response.json().await.context("Failed to parse response")?;
+    let responses_result: ResponsesResponse =
+        response.json().await.context("Failed to parse response")?;
 
-    let formatted = chat_response
-        .choices
-        .first()
-        .map(|c| c.message.content.trim().to_string())
-        .ok_or_else(|| anyhow::anyhow!("No response content"))?;
+    // Extract text from output array
+    let formatted = responses_result
+        .output
+        .iter()
+        .filter(|o| o.item_type == "message")
+        .filter_map(|o| o.content.as_ref())
+        .flatten()
+        .filter(|c| c.part_type == "output_text" || c.part_type == "text")
+        .filter_map(|c| c.text.as_deref())
+        .collect::<Vec<_>>()
+        .join("")
+        .trim()
+        .to_string();
+
+    if formatted.is_empty() {
+        anyhow::bail!("No text content in response (id: {})", responses_result.id);
+    }
 
     // Sanity check - in assistive mode, allow longer responses
     let max_len_multiplier = if assistive { 5 } else { 2 };
-    if formatted.is_empty() || formatted.len() > user_message.len() * max_len_multiplier {
-        anyhow::bail!("Invalid response length");
+    if formatted.len() > user_message.len() * max_len_multiplier {
+        anyhow::bail!("Response too long");
     }
 
+    debug!("Response id: {}", responses_result.id);
     Ok(formatted)
 }
 
-/// Call Ollama for text formatting/assistive mode
+/// Call Ollama/local LLM for text formatting/assistive mode
 async fn call_ollama(
     user_message: &str,
     system_prompt: &str,
     max_tokens: u32,
     assistive: bool,
 ) -> Result<String> {
-    let host = env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-    let model = env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen2.5:3b-instruct".to_string());
+    // Unified naming: LLM_HOST, LLM_MODEL (with legacy OLLAMA_* fallback)
+    let host = env::var("LLM_HOST")
+        .or_else(|_| env::var("OLLAMA_HOST"))
+        .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    let model = env::var("LLM_MODEL")
+        .or_else(|_| env::var("OLLAMA_MODEL"))
+        .unwrap_or_else(|_| "qwen3:8b".to_string());
     let endpoint = format!("{}/api/chat", host.trim_end_matches('/'));
 
     // Use higher temperature for assistive mode
@@ -546,12 +582,14 @@ async fn call_ollama(
     Ok(formatted)
 }
 
-/// Check if Ollama is configured
+/// Check if local LLM (Ollama) is configured
 fn has_ollama() -> bool {
-    // Check if AI_PROVIDER is set to ollama
-    env::var("AI_PROVIDER")
-        .map(|p| p.to_lowercase() == "ollama")
-        .unwrap_or(false)
+    // Check if LLM_HOST points to localhost (Ollama)
+    let host = env::var("LLM_HOST")
+        .or_else(|_| env::var("OLLAMA_HOST"))
+        .unwrap_or_default();
+
+    host.contains("127.0.0.1") || host.contains("localhost")
 }
 
 /// Check if any AI provider is configured

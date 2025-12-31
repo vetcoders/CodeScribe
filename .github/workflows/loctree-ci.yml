@@ -1,10 +1,10 @@
 name: Loctree CI
 
 on:
-  push:
-    branches: [main, develop, codescribe-foundation]
+  workflow_dispatch:
   pull_request:
-    branches: [main, develop]
+    types: [ opened, reopened ]
+    branches: [ main, develop ]
 
 jobs:
   loctree-analysis:
@@ -35,21 +35,21 @@ jobs:
 
       - name: Analyze Rust crate (codescribe-rs)
         run: |
-          loctree codescribe-rs/src -A --ext rs \
+          loct codescribe-rs/src -A --ext rs \
             --circular \
             --dead \
             --confidence high
 
       - name: Analyze Python backend
         run: |
-          loctree src/codescribe -A --ext py \
+          loct src/codescribe -A --ext py \
             --circular \
             --dead \
             --confidence high
 
       - name: Check for circular imports (Rust)
         run: |
-          OUTPUT=$(loctree codescribe-rs/src -A --circular --json 2>/dev/null || true)
+          OUTPUT=$(loct codescribe-rs/src -A --circular --json 2>/dev/null || true)
           CYCLES=$(echo "$OUTPUT" | jq -r '.cycles // [] | length' 2>/dev/null || echo "0")
           if [ "$CYCLES" != "0" ] && [ "$CYCLES" != "" ]; then
             echo "::warning::Found $CYCLES circular import(s) in codescribe-rs"
@@ -57,7 +57,7 @@ jobs:
 
       - name: Check for circular imports (Python)
         run: |
-          OUTPUT=$(loctree src/codescribe -A --circular --json 2>/dev/null || true)
+          OUTPUT=$(loct src/codescribe -A --circular --json 2>/dev/null || true)
           CYCLES=$(echo "$OUTPUT" | jq -r '.cycles // [] | length' 2>/dev/null || echo "0")
           if [ "$CYCLES" != "0" ] && [ "$CYCLES" != "" ]; then
             echo "::warning::Found $CYCLES circular import(s) in Python backend"
@@ -65,9 +65,9 @@ jobs:
 
       - name: Generate HTML reports
         run: |
-          loctree codescribe-rs/src -A --ext rs \
+          loct codescribe-rs/src -A --ext rs \
             --report rust-report.html --graph || true
-          loctree src/codescribe -A --ext py \
+          loct src/codescribe -A --ext py \
             --report python-report.html --graph || true
 
       - name: Upload analysis reports

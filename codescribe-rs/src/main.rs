@@ -9,6 +9,7 @@ mod client;
 mod clipboard;
 mod config;
 mod controller;
+mod dialog;
 mod history;
 mod hotkeys;
 mod launchd;
@@ -33,8 +34,28 @@ use tracing_subscriber::FmtSubscriber;
 fn pid_file_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
-        .join(".codescribe")
+        .join(".CodeScribe")
         .join("codescribe.pid")
+}
+
+/// Check if a PID belongs to a CodeScribe process
+fn is_codescribe_process(pid: u32) -> bool {
+    // Get process command name
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let comm = String::from_utf8_lossy(&output.stdout);
+            let comm = comm.trim().to_lowercase();
+            // Check if it's our process (codescribe binary or Python backend)
+            return comm.contains("codescribe")
+                || comm.contains("codescribeserver")
+                || comm.contains("uvicorn");
+        }
+    }
+    false
 }
 
 /// Check if another instance is running and acquire lock
@@ -59,10 +80,27 @@ fn acquire_pid_lock() -> Result<(), String> {
                 .status();
 
             if status.map(|s| s.success()).unwrap_or(false) {
-                return Err(format!(
-                    "CodeScribe is already running (PID {}). Use 'make stop' to stop it.",
+                // Process exists - but is it actually CodeScribe?
+                if is_codescribe_process(existing_pid) {
+                    return Err(format!(
+                        "CodeScribe is already running (PID {}). Use 'make stop' to stop it.",
+                        existing_pid
+                    ));
+                } else {
+                    // PID was reused by another process - stale lock, remove it
+                    warn!(
+                        "Stale PID file found (PID {} is now a different process), removing",
+                        existing_pid
+                    );
+                    fs::remove_file(&pid_path).ok();
+                }
+            } else {
+                // Process doesn't exist - stale lock, remove it
+                debug!(
+                    "Stale PID file found (process {} not running), removing",
                     existing_pid
-                ));
+                );
+                fs::remove_file(&pid_path).ok();
             }
         }
     }
@@ -266,18 +304,70 @@ async fn main() -> Result<()> {
                     info!("Received menu event: {:?}", event);
                     match event {
                         tray::TrayMenuEvent::Quit => {
-                            info!("Quit event received - cleaning up...");
-                            // Check if recording is in progress
-                            if controller_for_menu.is_recording().await {
-                                warn!("Recording in progress - forcing reset");
-                                controller_for_menu.reset().await;
-                            } else if controller_for_menu.is_busy().await {
-                                warn!("Processing in progress - forcing reset");
+                            info!("Quit event received - showing confirmation dialog...");
+                            // Call dialog from blocking task - NSAlert handles threading internally
+                            let choice = tokio::task::spawn_blocking(dialog::show_quit_dialog)
+                                .await
+                                .unwrap_or(dialog::QuitChoice::Cancel);
+
+                            match choice {
+                                dialog::QuitChoice::CloseAll => {
+                                    info!("User chose Close All - stopping backend and exiting...");
+                                    // Check if recording is in progress
+                                    if controller_for_menu.is_recording().await {
+                                        warn!("Recording in progress - forcing reset");
+                                        controller_for_menu.reset().await;
+                                    } else if controller_for_menu.is_busy().await {
+                                        warn!("Processing in progress - forcing reset");
+                                        controller_for_menu.reset().await;
+                                    }
+                                    // Stop the backend server
+                                    backend::BackendServer::kill_existing_on_port(8237);
+                                    // Release PID lock before exit
+                                    release_pid_lock();
+                                    info!("Exiting application (backend stopped)");
+                                    std::process::exit(0);
+                                }
+                                dialog::QuitChoice::LeaveServerRunning => {
+                                    info!("User chose Leave Server Running - exiting tray only...");
+                                    // Check if recording is in progress
+                                    if controller_for_menu.is_recording().await {
+                                        warn!("Recording in progress - forcing reset");
+                                        controller_for_menu.reset().await;
+                                    } else if controller_for_menu.is_busy().await {
+                                        warn!("Processing in progress - forcing reset");
+                                        controller_for_menu.reset().await;
+                                    }
+                                    // Release PID lock before exit (but don't stop backend)
+                                    release_pid_lock();
+                                    info!("Exiting application (backend still running)");
+                                    std::process::exit(0);
+                                }
+                                dialog::QuitChoice::Cancel => {
+                                    info!("User cancelled quit");
+                                    // Do nothing, continue running
+                                }
+                            }
+                        }
+                        tray::TrayMenuEvent::QuitCloseAll => {
+                            info!("QuitCloseAll event - stopping backend and exiting...");
+                            if controller_for_menu.is_recording().await
+                                || controller_for_menu.is_busy().await
+                            {
                                 controller_for_menu.reset().await;
                             }
-                            // Release PID lock before exit
+                            backend::BackendServer::kill_existing_on_port(8237);
                             release_pid_lock();
-                            info!("Exiting application");
+                            std::process::exit(0);
+                        }
+                        tray::TrayMenuEvent::QuitLeaveServer => {
+                            info!("QuitLeaveServer event - exiting tray only...");
+                            if controller_for_menu.is_recording().await
+                                || controller_for_menu.is_busy().await
+                            {
+                                controller_for_menu.reset().await;
+                            }
+                            release_pid_lock();
                             std::process::exit(0);
                         }
                         tray::TrayMenuEvent::ToggleHotkeys => {
@@ -364,6 +454,7 @@ async fn main() -> Result<()> {
                                 tray::WhisperModel::Medium => "medium",
                                 tray::WhisperModel::LargeV3 => "large-v3",
                                 tray::WhisperModel::LargeV3Turbo => "large-v3-turbo",
+                                tray::WhisperModel::LargeV3Q8 => "large-v3-mlx-q8",
                             };
                             // Skip if model is already set (CheckMenuItem sends event on menu show)
                             let current = std::env::var("WHISPER_VARIANT").unwrap_or_default();
@@ -381,11 +472,16 @@ async fn main() -> Result<()> {
                                     info!("Whisper model switched to: {}", variant);
                                     // Update environment for next restart
                                     std::env::set_var("WHISPER_VARIANT", variant);
-                                    // Refresh tray menu to show updated model selection
-                                    tray::update_model_selection(variant);
+                                    // Note: Menu checkmarks already updated synchronously in handle_menu_event
                                 }
                                 Err(e) => {
                                     error!("Failed to switch Whisper model: {}", e);
+                                    // Revert menu to previous state on error
+                                    let current =
+                                        std::env::var("WHISPER_VARIANT").unwrap_or_default();
+                                    if !current.is_empty() {
+                                        tray::update_model_selection(&current);
+                                    }
                                 }
                             }
                         }

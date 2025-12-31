@@ -1,9 +1,10 @@
 name: Lint (Ruff)
 
 on:
-  push:
-    branches: [ main, master ]
+  workflow_dispatch:
   pull_request:
+    types: [ opened, reopened ]
+    branches: [ main, develop ]
 
 jobs:
   ruff:

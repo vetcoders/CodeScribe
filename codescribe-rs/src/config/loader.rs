@@ -207,7 +207,7 @@ impl Config {
 
     /// Parse .env file into HashMap.
     pub fn parse_env_file(path: &PathBuf) -> anyhow::Result<HashMap<String, String>> {
-        // Path comes from Config::env_path() which is hardcoded to ~/.codescribe/.env
+        // Path comes from Config::env_path() which is hardcoded to ~/.CodeScribe/.env
         // nosemgrep: tainted-path
         let contents = fs::read_to_string(path)?;
         let mut vars = HashMap::new();
@@ -237,7 +237,7 @@ impl Config {
 
     /// Write HashMap to .env file.
     pub fn write_env_file(path: &PathBuf, vars: &HashMap<String, String>) -> anyhow::Result<()> {
-        // Path comes from Config::env_path() which is hardcoded to ~/.codescribe/.env
+        // Path comes from Config::env_path() which is hardcoded to ~/.CodeScribe/.env
         // nosemgrep: tainted-path
         let mut file = fs::File::create(path)?;
 
@@ -258,10 +258,13 @@ impl Config {
         Ok(())
     }
 
-    /// Get the configuration directory path (`$HOME/.codescribe`).
+    /// Get the configuration directory path (`$HOME/.CodeScribe`).
     ///
     /// Can be overridden with `CODESCRIBE_DATA_DIR` or `CODESCRIBE_APP_DIR`
     /// environment variables.
+    ///
+    /// **IMPORTANT**: This MUST match Python's `path_utils.user_data_root()` which uses
+    /// `.CodeScribe` (uppercase C) to ensure both frontend and backend share the same config.
     pub fn config_dir() -> PathBuf {
         // Check for environment variable overrides
         if let Ok(custom) = std::env::var("CODESCRIBE_DATA_DIR") {
@@ -272,10 +275,10 @@ impl Config {
             return PathBuf::from(shellexpand::tilde(&custom).into_owned());
         }
 
-        // Default to $HOME/.codescribe (lowercase!)
+        // Default to $HOME/.CodeScribe (uppercase C - matches Python path_utils.py)
         BaseDirs::new()
-            .map(|dirs| dirs.home_dir().join(".codescribe"))
-            .unwrap_or_else(|| PathBuf::from(".codescribe"))
+            .map(|dirs| dirs.home_dir().join(".CodeScribe"))
+            .unwrap_or_else(|| PathBuf::from(".CodeScribe"))
     }
 
     /// Get the full path to the .env file.

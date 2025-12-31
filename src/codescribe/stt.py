@@ -133,20 +133,22 @@ def _ensure_local_model_loaded() -> bool:
 
 
 # Language preference (None = auto). Read from env on startup if provided.
-LANGUAGE_CODE = (
-    os.environ.get("WHISPER_LANGUAGE") or os.environ.get("LANGUAGE") or ""
-).strip().lower() or None
+_raw_lang = (os.environ.get("WHISPER_LANGUAGE") or os.environ.get("LANGUAGE") or "").strip().lower()
+# "auto" is a UI label only - MLX Whisper expects None for auto-detect
+LANGUAGE_CODE = None if _raw_lang in ("auto", "") else _raw_lang
 
 # Serialize local MLX transcriptions to avoid concurrent Metal command buffers
 _LOCAL_STT_LOCK: asyncio.Lock | None = None
 
 
 def set_language(code: str | None):
-    """Set preferred language code ('pl', 'en', or None for auto)."""
+    """Set preferred language code ('pl', 'en', 'auto', or None for auto)."""
     global LANGUAGE_CODE
     if code:
         code = code.strip().lower()
-        if code not in ("pl", "en"):
+        if code in ("auto", ""):
+            code = None  # auto-detect
+        elif code not in ("pl", "en"):
             logging.warning(f"Unsupported language code '{code}', falling back to auto")
             code = None
     LANGUAGE_CODE = code
@@ -246,6 +248,8 @@ async def transcribe(
     """
     mime = (mime or "audio/wav").strip().lower()
     lang = (lang or LANGUAGE_CODE) or None
+    if lang == "auto":
+        lang = None  # MLX Whisper expects None for auto-detect, not "auto" string
 
     # Prepare a file path. If bytes provided, persist to a temp WAV/bytes file.
     temp_path = None

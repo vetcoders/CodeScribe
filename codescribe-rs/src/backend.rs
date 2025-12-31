@@ -18,6 +18,33 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Interval between health check attempts
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Path to backend PID file for fallback cleanup
+fn backend_pid_file_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(home)
+        .join(".CodeScribe")
+        .join("backend.pid")
+}
+
+/// Check if a PID belongs to a CodeScribe backend process
+fn is_codescribe_backend(pid: &str) -> bool {
+    // Get process command name
+    let output = Command::new("ps").args(["-p", pid, "-o", "comm="]).output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let comm = String::from_utf8_lossy(&output.stdout);
+            let comm = comm.trim().to_lowercase();
+            // Check if it's our backend (Python/uvicorn/CodeScribeServer)
+            return comm.contains("python")
+                || comm.contains("uvicorn")
+                || comm.contains("codescribe")
+                || comm.contains("uv");
+        }
+    }
+    false
+}
+
 /// Manages the Python backend server process
 pub struct BackendServer {
     process: Option<Child>,
@@ -29,14 +56,11 @@ impl BackendServer {
     pub fn start() -> Result<Self> {
         let port = DEFAULT_PORT;
 
-        // First check if a backend is already running
-        if Self::check_existing_backend(port) {
-            info!("Found existing backend on port {} - reusing it", port);
-            return Ok(Self {
-                process: None, // We don't own this process
-                port,
-            });
-        }
+        // Kill any zombie backend processes from previous runs
+        Self::kill_existing_on_port(port);
+
+        // Small delay to ensure port is released
+        std::thread::sleep(Duration::from_millis(100));
 
         // Check if models exist, download if not
         ensure_models_exist()?;
@@ -62,9 +86,9 @@ impl BackendServer {
         debug!("Using working directory: {}", working_dir.display());
 
         // Spawn the Python process with uvicorn running the full backend
-        // Use whisper-small by default for faster startup and better quality with anti-hallucination filters
+        // Use whisper-large-v3-mlx-q8 by default - best quality/performance on Apple Silicon
         let whisper_variant =
-            std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "small".to_string());
+            std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "large-v3-mlx-q8".to_string());
         let process = Command::new("uv")
             .args([
                 "run",
@@ -84,7 +108,17 @@ impl BackendServer {
 
         info!("Using Whisper variant: {}", whisper_variant);
 
-        info!("Python backend spawned with PID: {}", process.id());
+        let backend_pid = process.id();
+        info!("Python backend spawned with PID: {}", backend_pid);
+
+        // Save PID to file for fallback cleanup (in case lsof fails)
+        let pid_path = backend_pid_file_path();
+        if let Some(parent) = pid_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Err(e) = std::fs::write(&pid_path, backend_pid.to_string()) {
+            warn!("Failed to write backend PID file: {}", e);
+        }
 
         let server = Self {
             process: Some(process),
@@ -135,41 +169,15 @@ impl BackendServer {
         self.port
     }
 
-    /// Check if a backend is already running on the given port
-    fn check_existing_backend(port: u16) -> bool {
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        let health_url = format!("http://127.0.0.1:{}/healthz", port);
-        debug!("Checking for existing backend at {}", health_url);
-
-        match client.get(&health_url).send() {
-            Ok(response) if response.status().is_success() => {
-                debug!("Existing backend found and healthy on port {}", port);
-                true
-            }
-            _ => false,
-        }
-    }
-
     /// Stop the backend server
     pub fn stop(&mut self) {
         if let Some(mut process) = self.process.take() {
             info!("Stopping Python backend (PID: {})...", process.id());
 
-            // Try graceful shutdown first
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                let _ = Command::new("kill")
-                    .args(["-TERM", &process.id().to_string()])
-                    .exec();
-            }
+            // Try graceful shutdown first with SIGTERM
+            let _ = Command::new("kill")
+                .args(["-TERM", &process.id().to_string()])
+                .status();
 
             // Give it a moment to shut down gracefully
             std::thread::sleep(Duration::from_millis(500));
@@ -185,7 +193,97 @@ impl BackendServer {
                     let _ = process.wait();
                 }
             }
+
+            // Clean up PID file
+            std::fs::remove_file(backend_pid_file_path()).ok();
         }
+    }
+
+    /// Kill any existing backend processes on our port (cleanup zombie processes)
+    pub fn kill_existing_on_port(port: u16) {
+        info!("Checking for zombie backend processes on port {}...", port);
+
+        let mut killed_pids: Vec<String> = Vec::new();
+
+        // Method 1: Find processes listening on our port using lsof
+        let output = Command::new("lsof")
+            .args(["-ti", &format!(":{}", port)])
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let pids = String::from_utf8_lossy(&output.stdout);
+                for pid in pids.lines() {
+                    let pid = pid.trim();
+                    if !pid.is_empty() {
+                        // SAFETY: Only kill if it's actually our backend process
+                        if is_codescribe_backend(pid) {
+                            warn!("Killing zombie backend process: PID {}", pid);
+                            let _ = Command::new("kill").args(["-TERM", pid]).status();
+                            killed_pids.push(pid.to_string());
+                        } else {
+                            warn!(
+                                "Process {} on port {} is not a CodeScribe backend, skipping",
+                                pid, port
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Method 2: Fallback - check PID file (for cases where backend died before binding)
+        let pid_path = backend_pid_file_path();
+        if pid_path.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+                let pid = contents.trim();
+                if !pid.is_empty() && !killed_pids.contains(&pid.to_string()) {
+                    // Check if process is still running AND is our backend
+                    let check = Command::new("kill").args(["-0", pid]).status();
+                    if check.map(|s| s.success()).unwrap_or(false) && is_codescribe_backend(pid) {
+                        warn!("Killing orphan backend from PID file: {}", pid);
+                        let _ = Command::new("kill").args(["-TERM", pid]).status();
+                        killed_pids.push(pid.to_string());
+                    }
+                }
+            }
+            // Clean up PID file
+            std::fs::remove_file(&pid_path).ok();
+        }
+
+        // Give processes time to shutdown gracefully
+        if !killed_pids.is_empty() {
+            std::thread::sleep(Duration::from_millis(300));
+
+            // Force kill any that didn't respond to SIGTERM
+            for pid in &killed_pids {
+                let check = Command::new("kill").args(["-0", pid]).status();
+                if check.map(|s| s.success()).unwrap_or(false) {
+                    warn!("Process {} didn't stop gracefully, force killing", pid);
+                    let _ = Command::new("kill").args(["-9", pid]).status();
+                }
+            }
+
+            // Also kill children of those processes (multiprocessing workers)
+            for pid in &killed_pids {
+                let children = Command::new("pgrep").args(["-P", pid]).output();
+                if let Ok(output) = children {
+                    if output.status.success() {
+                        let child_pids = String::from_utf8_lossy(&output.stdout);
+                        for child_pid in child_pids.lines() {
+                            let child_pid = child_pid.trim();
+                            if !child_pid.is_empty() {
+                                info!("Killing child process: PID {}", child_pid);
+                                let _ = Command::new("kill").args(["-9", child_pid]).status();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Small delay to ensure processes are cleaned up
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -241,7 +339,9 @@ fn ensure_models_exist() -> Result<()> {
 
     // Development mode: look in repo models directory
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    let variant = std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "small".to_string());
+    // Use WHISPER_VARIANT env var, default to large-v3-mlx-q8 for best quality
+    let variant =
+        std::env::var("WHISPER_VARIANT").unwrap_or_else(|_| "large-v3-mlx-q8".to_string());
     let models_dir = repo_root.join(format!("models/whisper-{}", variant));
 
     if models_dir.exists() {
