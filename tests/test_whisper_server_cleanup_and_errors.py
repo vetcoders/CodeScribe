@@ -8,16 +8,17 @@ from fastapi.testclient import TestClient
 def setup_fake_whisper(module, return_value):
     class FakeWhisper:
         @staticmethod
-        def transcribe(path):
+        def transcribe(path, **kwargs):
             # Ensure the temp file exists when transcribe is called
             assert os.path.exists(path)
             return return_value
+
     module.whisper = FakeWhisper()
     module._whisper_model = object()  # mark as loaded
 
 
 def test_transcribe_deletes_tempfile(monkeypatch):
-    whisper_server = importlib.import_module("whisper_server")
+    whisper_server = importlib.import_module("codescribe.whisper_server")
     importlib.reload(whisper_server)
 
     # Configure fake whisper that returns a dict with text
@@ -40,7 +41,7 @@ def test_transcribe_deletes_tempfile(monkeypatch):
 
 
 def test_transcribe_none_result_returns_500_and_cleanup(monkeypatch):
-    whisper_server = importlib.import_module("whisper_server")
+    whisper_server = importlib.import_module("codescribe.whisper_server")
     importlib.reload(whisper_server)
 
     # Track removed paths

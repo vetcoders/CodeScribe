@@ -1,0 +1,31 @@
+name: Tests
+
+on:
+  pull_request:
+    types: [opened, reopened]
+    branches: [ main, develop ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Set PYTHONPATH
+        run: echo "PYTHONPATH=$(pwd)/src" >> $GITHUB_ENV
+
+      - name: Run full check suite
+        env:
+          CODESCRIBE_SETTINGS_PATH: ${{ runner.temp }}/settings.json
+        run: make check

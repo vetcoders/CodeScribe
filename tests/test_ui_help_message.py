@@ -2,7 +2,8 @@ import importlib
 
 
 def test_ui_help_message_is_english():
-    import ui as ui_mod
+    import codescribe.ui as ui_mod
+
     importlib.reload(ui_mod)
     msg = ui_mod.toggles_help_message("en")
     assert "Whisper automatically detects the language" in msg

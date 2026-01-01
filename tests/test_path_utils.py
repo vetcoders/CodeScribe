@@ -1,6 +1,6 @@
 import os
 
-import path_utils
+import codescribe.path_utils as path_utils
 
 
 def test_preserve_hf_repo_id_unchanged():
