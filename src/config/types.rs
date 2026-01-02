@@ -256,6 +256,12 @@ pub struct Config {
     /// Full LLM endpoint URL (e.g., https://api.libraxis.cloud/v1/responses)
     pub llm_endpoint: Option<String>,
 
+    /// API key for cloud LLM providers
+    pub llm_api_key: Option<String>,
+
+    /// API key for cloud STT providers
+    pub stt_api_key: Option<String>,
+
     // ===== Clipboard =====
     /// Whether to restore previous clipboard after paste
     #[serde(default = "default_restore_clipboard")]
@@ -316,6 +322,8 @@ impl Default for Config {
             ollama_host: default_ollama_host(),
             ollama_model: default_ollama_model(),
             llm_endpoint: None,
+            llm_api_key: None,
+            stt_api_key: None,
             restore_clipboard: default_restore_clipboard(),
             restore_clipboard_delay_ms: default_restore_clipboard_delay_ms(),
             start_at_login: false,

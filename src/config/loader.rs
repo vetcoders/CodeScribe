@@ -1,6 +1,7 @@
 //! Configuration loading and saving functionality.
 //!
-//! Handles loading from .env files, settings.json (legacy), and environment variables.
+//! Handles loading from .env file and environment variables.
+//! Single source of truth: ~/.CodeScribe/.env
 
 use directories::BaseDirs;
 use std::collections::HashMap;
@@ -16,11 +17,10 @@ impl Config {
     ///
     /// Priority order:
     /// 1. Environment variables
-    /// 2. .env file in config directory
-    /// 3. settings.json (legacy)
-    /// 4. Default values
+    /// 2. .env file in config directory (~/.CodeScribe/.env)
+    /// 3. Default values
     ///
-    /// If the files don't exist or are malformed, returns default configuration
+    /// If the .env file doesn't exist or is malformed, returns default configuration
     /// without raising an error.
     pub fn load() -> Self {
         // Ensure we have a user .env (copy from template if present)
@@ -33,16 +33,6 @@ impl Config {
         }
 
         let mut config = Self::default();
-
-        // Try loading from settings.json (legacy)
-        let json_path = Self::settings_path();
-        if json_path.exists() {
-            if let Ok(contents) = fs::read_to_string(&json_path) {
-                if let Ok(json_config) = serde_json::from_str::<Config>(&contents) {
-                    config = json_config;
-                }
-            }
-        }
 
         // Override with environment variables
         config.load_from_env();
@@ -81,7 +71,8 @@ impl Config {
 
         // AI Formatting
         if let Ok(val) = std::env::var("AI_FORMATTING_ENABLED") {
-            self.ai_formatting_enabled = val.parse().unwrap_or(false);
+            self.ai_formatting_enabled =
+                matches!(val.as_str(), "1" | "true" | "yes" | "on" | "enabled");
         }
         if let Ok(val) = std::env::var("AI_PROVIDER") {
             if let Ok(provider) = val.parse::<AiProvider>() {
@@ -140,24 +131,45 @@ impl Config {
             self.history_enabled = val.parse().unwrap_or(true);
         }
 
-        // Backends
-        if let Ok(val) = std::env::var("WHISPER_SERVER_URL") {
-            self.whisper_server_url = val;
-        }
-        if let Ok(val) = std::env::var("LLM_SERVER_URL") {
-            self.llm_server_url = val;
-        }
-        if let Ok(val) = std::env::var("OLLAMA_HOST") {
+        // Backends - LLM
+        // Priority: LLM_HOST (canonical) > OLLAMA_HOST (legacy)
+        if let Ok(val) = std::env::var("LLM_HOST") {
+            self.ollama_host = val;
+        } else if let Ok(val) = std::env::var("OLLAMA_HOST") {
             self.ollama_host = val;
         }
-        if let Ok(val) = std::env::var("OLLAMA_MODEL") {
+        // Priority: LLM_MODEL (canonical) > OLLAMA_MODEL (legacy)
+        if let Ok(val) = std::env::var("LLM_MODEL") {
             self.ollama_model = val;
+        } else if let Ok(val) = std::env::var("OLLAMA_MODEL") {
+            self.ollama_model = val;
+        }
+        // LLM_API_KEY for cloud providers
+        if let Ok(val) = std::env::var("LLM_API_KEY") {
+            self.llm_api_key = Some(val);
+        }
+        // Legacy LLM endpoints (still supported for backward compat)
+        if let Ok(val) = std::env::var("LLM_SERVER_URL") {
+            self.llm_server_url = val;
         }
         if let Ok(val) = std::env::var("LLM_ENDPOINT") {
             self.llm_endpoint = Some(val);
         }
+
+        // Backends - STT
+        // Priority: STT_ENDPOINT (canonical) > WHISPER_SERVER_URL (legacy)
         if let Ok(val) = std::env::var("STT_ENDPOINT") {
             self.stt_endpoint = Some(val);
+        } else if let Ok(val) = std::env::var("WHISPER_SERVER_URL") {
+            self.whisper_server_url = val.clone();
+            // Also set stt_endpoint if it looks like a full URL
+            if val.starts_with("http") {
+                self.stt_endpoint = Some(val);
+            }
+        }
+        // STT_API_KEY for cloud STT
+        if let Ok(val) = std::env::var("STT_API_KEY") {
+            self.stt_api_key = Some(val);
         }
 
         // Clipboard
@@ -360,15 +372,5 @@ impl Config {
         }
 
         Self::config_dir().join(".env")
-    }
-
-    /// Get the full path to the settings.json file (legacy).
-    pub fn settings_path() -> PathBuf {
-        // Check for custom settings path
-        if let Ok(custom) = std::env::var("CODESCRIBE_SETTINGS_PATH") {
-            return PathBuf::from(shellexpand::tilde(&custom).into_owned());
-        }
-
-        Self::config_dir().join("settings.json")
     }
 }

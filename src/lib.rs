@@ -10,7 +10,6 @@ pub mod audio;
 pub mod clipboard;
 pub mod config;
 pub mod conversation;
-pub mod settings;
 pub mod voice_chat;
 
 #[cfg(target_os = "macos")]
