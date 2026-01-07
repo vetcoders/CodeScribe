@@ -120,6 +120,76 @@ fn release_pid_lock() {
     fs::remove_file(pid_path).ok();
 }
 
+/// Handle --config flag: create default config and open in editor
+fn handle_config_command() -> Result<()> {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let config_dir = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+        .join(".codescribe");
+    let config_path = config_dir.join(".env");
+
+    // Create directory if needed
+    fs::create_dir_all(&config_dir)?;
+
+    // Create default config if missing
+    if !config_path.exists() {
+        let default_config = r#"# CodeScribe Configuration
+# Created by: codescribe --config
+
+# === STT (Speech-to-Text) ===
+STT_ENDPOINT=http://dragon:8100/v1/audio/transcriptions
+STT_API_KEY=your-api-key-here
+WHISPER_MODEL=mlx-community/whisper-large-v3-mlx
+WHISPER_LANGUAGE=pl
+
+# === LLM (AI Formatting/Assistive) ===
+LLM_ENDPOINT=http://dragon:1234/v1/responses
+LLM_API_KEY=your-api-key-here
+LLM_MODEL=gpt-oss-120b-mlx
+AI_FORMATTING_ENABLED=1
+
+# === TTS (Text-to-Speech) - future ===
+# TTS_ENDPOINT=http://dragon:8666/v1/synthesize
+# TTS_VOICE=MarekNeural
+
+# === Hotkeys ===
+HOLD_MODS=ctrl
+TOGGLE_TRIGGER=double_option
+
+# === Audio ===
+SOUND_VOLUME=0.25
+
+# === Logging ===
+LOG_LEVEL=INFO
+"#;
+        fs::write(&config_path, default_config)?;
+        println!("✅ Created default config: {}", config_path.display());
+    } else {
+        println!("📄 Config exists: {}", config_path.display());
+    }
+
+    // Open in editor
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| {
+            // Try common editors
+            for editor in &["code", "nvim", "vim", "nano"] {
+                if Command::new("which").arg(editor).output().map(|o| o.status.success()).unwrap_or(false) {
+                    return editor.to_string();
+                }
+            }
+            "nano".to_string()
+        });
+
+    println!("📝 Opening in: {}", editor);
+    Command::new(&editor)
+        .arg(&config_path)
+        .status()?;
+
+    Ok(())
+}
+
 /// CodeScribe - Speech-to-text tray app for macOS
 ///
 /// Hold Ctrl to record, release to transcribe.
@@ -134,11 +204,20 @@ struct Cli {
     /// Enable verbose/debug logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Open config file in editor (creates default if missing)
+    #[arg(long)]
+    config: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle --config flag: create/open config file and exit
+    if cli.config {
+        return handle_config_command();
+    }
 
     // Acquire PID lock (prevent multiple instances)
     if let Err(msg) = acquire_pid_lock() {

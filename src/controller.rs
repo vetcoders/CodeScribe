@@ -596,7 +596,7 @@ impl RecordingController {
             if should_use_ai {
                 info!("Assistive mode: formatting transcript via AI");
                 let lang_str = language_opt.map(String::from);
-                crate::ai_formatting::format_text(&raw_text, lang_str.as_deref(), false).await
+                crate::ai_formatting::format_text(&raw_text, lang_str.as_deref(), true).await
             } else if has_repetition {
                 info!("Assistive mode: AI not available, using local repetition cleanup");
                 crate::ai_formatting::remove_simple_repetitions(&raw_text)
