@@ -358,9 +358,11 @@ fn ensure_models_exist() -> Result<()> {
                     if name_str.starts_with("whisper-") && entry.path().is_dir() {
                         info!("Found bundled Whisper model: {}", entry.path().display());
                         // Set WHISPER_DIR for the Python backend to use
-                        std::env::set_var("WHISPER_DIR", entry.path());
+                        // SAFETY: Single-threaded during initialization, no concurrent access
+                        unsafe { std::env::set_var("WHISPER_DIR", entry.path()) };
                         let variant = name_str.trim_start_matches("whisper-");
-                        std::env::set_var("WHISPER_VARIANT", variant);
+                        // SAFETY: Single-threaded during initialization, no concurrent access
+                        unsafe { std::env::set_var("WHISPER_VARIANT", variant) };
                         return Ok(());
                     }
                 }

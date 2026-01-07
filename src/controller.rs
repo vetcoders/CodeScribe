@@ -36,6 +36,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 struct ValidatedAudioPath(PathBuf);
 
+#[allow(dead_code)] // read() prepared for future voice chat pipeline
 impl ValidatedAudioPath {
     /// Create a new ValidatedAudioPath after security validation.
     ///
@@ -553,14 +554,6 @@ impl RecordingController {
             crate::history::save_audio(audio_path.as_path(), recording_timestamp);
         }
 
-        // When assistive mode is enabled (Ctrl+Shift), use Voice Chat pipeline
-        if assistive {
-            info!("Assistive mode enabled - using Voice Chat pipeline");
-            return self
-                .process_voice_chat(&audio_path, recording_timestamp)
-                .await;
-        }
-
         // Normal transcription flow
         info!(
             "Transcribing audio file: {}",
@@ -592,30 +585,39 @@ impl RecordingController {
             warn!("Detected repetition loop in transcription - will clean up");
         }
 
-        // Format the text - use AI if enabled and configured, otherwise simple cleanup
-        let ai_formatting_enabled = self.config.read().await.ai_formatting_enabled;
-        let should_use_ai = ai_formatting_enabled && crate::ai_formatting::has_api_key();
+        // Determine final text based on assistive mode:
+        // - assistive=false (Ctrl only): raw transcript, only local repetition cleanup if needed
+        // - assistive=true (Ctrl+Shift): AI formatting if configured
+        let formatted_text = if assistive {
+            // AI mode: use AI formatting if enabled and configured
+            let ai_formatting_enabled = self.config.read().await.ai_formatting_enabled;
+            let should_use_ai = ai_formatting_enabled && crate::ai_formatting::has_api_key();
 
-        let formatted_text = if should_use_ai {
-            info!(
-                "Formatting transcript via AI (enabled={})",
-                ai_formatting_enabled
-            );
-            let lang_str = language_opt.map(String::from);
-            crate::ai_formatting::format_text(&raw_text, lang_str.as_deref(), false).await
+            if should_use_ai {
+                info!("Assistive mode: formatting transcript via AI");
+                let lang_str = language_opt.map(String::from);
+                crate::ai_formatting::format_text(&raw_text, lang_str.as_deref(), false).await
+            } else if has_repetition {
+                info!("Assistive mode: AI not available, using local repetition cleanup");
+                crate::ai_formatting::remove_simple_repetitions(&raw_text)
+            } else {
+                info!("Assistive mode: AI not configured, using raw text");
+                raw_text.clone()
+            }
         } else if has_repetition {
-            // Simple local cleanup if AI not available but we have repetitions
-            info!("AI formatting not available, using local repetition cleanup");
+            // Raw mode with repetition: only local cleanup
+            info!("Raw mode: applying local repetition cleanup");
             crate::ai_formatting::remove_simple_repetitions(&raw_text)
         } else {
-            info!("AI formatting disabled in config, using raw text");
+            // Raw mode: return transcript as-is
+            info!("Raw mode: using raw transcript");
             raw_text.clone()
         };
 
         info!(
-            "Final transcript ready ({} chars, formatted={})",
+            "Final transcript ready ({} chars, mode={})",
             formatted_text.len(),
-            ai_formatting_enabled
+            if assistive { "AI" } else { "raw" }
         );
 
         // Paste the text into the active application
@@ -642,6 +644,7 @@ impl RecordingController {
     /// 3. Streams LLM response tokens back
     ///
     /// The response is displayed in an overlay and copied to clipboard.
+    #[allow(dead_code)] // Prepared for voice chat feature
     async fn process_voice_chat(
         &self,
         audio_path: &ValidatedAudioPath,
@@ -807,6 +810,7 @@ impl RecordingController {
     }
 
     /// Fallback to standard assistive processing when voice chat fails.
+    #[allow(dead_code)] // Called from process_voice_chat (voice chat feature)
     async fn fallback_assistive_processing(
         &self,
         audio_path: &ValidatedAudioPath,

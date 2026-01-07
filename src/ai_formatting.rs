@@ -486,10 +486,12 @@ async fn call_llm_endpoint(
         codescribe::conversation::set_response_id(responses_result.id.clone());
     }
 
-    // Sanity check - in assistive mode, allow longer responses
-    let max_len_multiplier = if assistive { 5 } else { 2 };
-    if formatted.len() > user_message.len() * max_len_multiplier {
-        anyhow::bail!("Response too long");
+    // Sanity check - only for formatting mode (assistive can return any length)
+    if !assistive {
+        let max_len_multiplier = 2;
+        if formatted.len() > user_message.len() * max_len_multiplier {
+            anyhow::bail!("Response too long");
+        }
     }
 
     debug!("Response id: {}", responses_result.id);

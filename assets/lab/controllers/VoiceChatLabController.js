@@ -1,23 +1,50 @@
 const MAX_PROGRESS = 10 * 1024 * 1024;
 const SYSTEM_PROMPT = "You are CodeScribe's AI assistant. Answer clearly and concisely.";
 
-function computeDefaultWsUrl() {
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.host}/ws/transcribe`;
+// ============================================================================
+// LibraxisAI Cloud Endpoints (standalone mode - no Python backend needed)
+// ============================================================================
+const LIBRAXIS_CLOUD = {
+  sttWs: "wss://api.libraxis.cloud/v1/audio/transcribe",
+  sttNdjson: "https://api.libraxis.cloud/v1/audio/transcribe:stream",
+  sttMultipart: "https://api.libraxis.cloud/stt/v1/transcribe",
+  responses: "https://api.libraxis.cloud/v1/responses",
+  model: "chat",
+};
+
+function loadApiKey() {
+  try {
+    return localStorage.getItem("codescribe_api_key") || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveApiKey(key) {
+  try {
+    if (key) {
+      localStorage.setItem("codescribe_api_key", key);
+    } else {
+      localStorage.removeItem("codescribe_api_key");
+    }
+  } catch {
+    // localStorage not available
+  }
 }
 
 export class VoiceChatLabController extends EventTarget {
   constructor() {
     super();
+    const savedApiKey = loadApiKey();
     this.state = {
       endpoints: {
-        transcribeUrl: "/transcribe",
-        sttAndFormatUrl: "/stt_and_format",
-        ndjsonUrl: "/stream/transcribe",
-        wsUrl: computeDefaultWsUrl(),
-        responsesUrl: "/demo/chat",
-        apiKey: "",
-        model: "gpt-4o-mini",
+        transcribeUrl: LIBRAXIS_CLOUD.sttMultipart,
+        sttAndFormatUrl: LIBRAXIS_CLOUD.sttMultipart,
+        ndjsonUrl: LIBRAXIS_CLOUD.sttNdjson,
+        wsUrl: LIBRAXIS_CLOUD.sttWs,
+        responsesUrl: LIBRAXIS_CLOUD.responses,
+        apiKey: savedApiKey,
+        model: LIBRAXIS_CLOUD.model,
       },
       responsesStream: true,
       chatThreadId: null,
@@ -85,6 +112,10 @@ export class VoiceChatLabController extends EventTarget {
   setEndpointField(key, value) {
     this._setState((prev) => {
       const nextValue = value ?? prev.endpoints[key];
+      // Persist API key to localStorage
+      if (key === "apiKey") {
+        saveApiKey(nextValue);
+      }
       return {
         ...prev,
         endpoints: { ...prev.endpoints, [key]: nextValue },
@@ -181,10 +212,16 @@ ${linesOut}` : summaryText,
   }
 
   async init() {
-    await Promise.allSettled([this.fetchLabConfig(), this.fetchHealth()]);
+    // Standalone mode - no backend needed, endpoints already set to LibraxisAI cloud
+    this._setState({ provider: "libraxis-cloud" });
+    console.log("[Lab] Standalone mode - using LibraxisAI cloud endpoints");
   }
 
+  // Legacy fetchLabConfig - kept for reference but not used in standalone mode
   async fetchLabConfig() {
+    // Skip in standalone mode - endpoints are hardcoded to LibraxisAI cloud
+    return;
+    /* Legacy code for Python backend:
     try {
       const resp = await fetch("/lab/config");
       const cfg = await resp.json();
@@ -206,17 +243,12 @@ ${linesOut}` : summaryText,
     } catch (error) {
       console.warn("lab-config", error);
     }
+    */
   }
 
   async fetchHealth() {
-    try {
-      const resp = await fetch("/healthz");
-      const health = await resp.json();
-      const provider = health?.ai?.provider || "local";
-      this._setState({ provider });
-    } catch {
-      this._setState({ provider: "unknown" });
-    }
+    // Skip in standalone mode - no local backend
+    return;
   }
 
   attachCanvas(canvas) {
@@ -284,7 +316,11 @@ ${linesOut}` : summaryText,
       this.setEndpointOutput(`Uploading ${this.selectedFile.name} → ${endpoint}…`);
       const form = new FormData();
       form.append("audio", this.selectedFile, this.selectedFile.name || "clip.wav");
-      const resp = await fetch(endpoint, { method: "POST", body: form });
+      const headers = {};
+      if (this.state.endpoints.apiKey) {
+        headers["x-api-key"] = this.state.endpoints.apiKey;
+      }
+      const resp = await fetch(endpoint, { method: "POST", headers, body: form });
       const text = await resp.text();
       let summary = text;
       try {
@@ -346,10 +382,14 @@ ${linesOut}` : summaryText,
       );
       lines.push(JSON.stringify({ type: "end" }));
       const payload = `${lines.join("\n")}\n`;
-      const target = this.state.endpoints.ndjsonUrl || "/stream/transcribe";
+      const target = this.state.endpoints.ndjsonUrl || LIBRAXIS_CLOUD.sttNdjson;
+      const headers = { "Content-Type": "application/x-ndjson" };
+      if (this.state.endpoints.apiKey) {
+        headers["x-api-key"] = this.state.endpoints.apiKey;
+      }
       const resp = await fetch(target, {
         method: "POST",
-        headers: { "Content-Type": "application/x-ndjson" },
+        headers,
         body: payload,
       });
       const bodyText = await resp.text();
@@ -397,8 +437,12 @@ ${linesOut}` : summaryText,
       const blob = await this.captureWebmBlob(5000);
       const form = new FormData();
       form.append("audio", blob, "lab.webm");
-      const target = this.state.endpoints.sttAndFormatUrl || "/stt_and_format";
-      const resp = await fetch(target, { method: "POST", body: form });
+      const target = this.state.endpoints.sttAndFormatUrl || LIBRAXIS_CLOUD.sttMultipart;
+      const headers = {};
+      if (this.state.endpoints.apiKey) {
+        headers["x-api-key"] = this.state.endpoints.apiKey;
+      }
+      const resp = await fetch(target, { method: "POST", headers, body: form });
       const text = await resp.text();
       let summary = text;
       try {
@@ -456,10 +500,20 @@ ${linesOut}` : summaryText,
     });
     this.fullTranscript = "";
 
-    const wsUrl = (this.state.endpoints.wsUrl || computeDefaultWsUrl()).trim() || computeDefaultWsUrl();
+    const wsUrl = (this.state.endpoints.wsUrl || LIBRAXIS_CLOUD.sttWs).trim();
     this.ws = new WebSocket(wsUrl);
     this.ws.onopen = () => {
       this.appendLog({ type: "socket", text: `connected: ${wsUrl}` });
+
+      // Send config with API key first (required by LibraxisAI)
+      const config = {
+        type: "config",
+        language: "pl",
+        api_key: this.state.endpoints.apiKey,
+      };
+      this.ws.send(JSON.stringify(config));
+      this.appendLog({ type: "socket", text: "sent config with api_key" });
+
       this.setStatus("streaming", "#66e0d0");
       this.flushTimer = setInterval(() => {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {

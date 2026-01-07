@@ -31,7 +31,7 @@ impl HoldMods {
     /// Human-readable label for menu display
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Ctrl => "Ctrl only (Formatting)",
+            Self::Ctrl => "Ctrl only (Raw)",
             Self::CtrlAlt => "Ctrl+Option",
             Self::CtrlShift => "Ctrl+Shift (AI)",
             Self::CtrlCmd => "Ctrl+Command",

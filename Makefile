@@ -7,7 +7,7 @@
         backend-start backend-stop
 
 SHELL := /bin/bash
-VERSION_FILE := codescribe-rs/Cargo.toml
+VERSION_FILE := Cargo.toml
 ENV_FILE := ~/.codescribe/.env
 EDITOR ?= $(shell command -v code || command -v nvim || command -v vim || echo nano)
 
@@ -19,30 +19,33 @@ all: check
 
 build:
 	@echo "Building Rust binary (debug)..."
-	@cd codescribe-rs && cargo build
+	@cargo build
 
 release:
 	@echo "Building Rust binary (release)..."
-	@cd codescribe-rs && cargo build --release
+	@cargo build --release
 
 install:
 	@echo "Installing CodeScribe..."
-	@cd codescribe-rs && cargo install --path . --force
+	@cargo install --path . --force
+	@mkdir -p ~/.codescribe
+	@pwd > ~/.codescribe/repo_path
 	@echo "✅ Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
+	@echo "   Repo path saved: $$(pwd)"
 
 bundle: install
 	@echo "Creating macOS app bundle..."
-	@mkdir -p codescribe-rs/bundle/CodeScribe.app/Contents/{MacOS,Resources}
-	@cp codescribe-rs/bundle/CodeScribe.app/Contents/Info.plist codescribe-rs/bundle/CodeScribe.app/Contents/ 2>/dev/null || true
-	@cp codescribe-rs/assets/AppIcon.icns codescribe-rs/bundle/CodeScribe.app/Contents/Resources/
+	@mkdir -p bundle/CodeScribe.app/Contents/{MacOS,Resources}
+	@cp bundle/CodeScribe.app/Contents/Info.plist bundle/CodeScribe.app/Contents/ 2>/dev/null || true
+	@cp assets/AppIcon.icns bundle/CodeScribe.app/Contents/Resources/
 	@VERSION=$$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*"\(.*\)"/\1/'); \
-	sed -i '' "s/<string>0\.[0-9]*\.[0-9]*</<string>$$VERSION</g" codescribe-rs/bundle/CodeScribe.app/Contents/Info.plist
-	@echo "✅ Bundle ready: codescribe-rs/bundle/CodeScribe.app"
+	sed -i '' "s/<string>0\.[0-9]*\.[0-9]*</<string>$$VERSION</g" bundle/CodeScribe.app/Contents/Info.plist
+	@echo "✅ Bundle ready: bundle/CodeScribe.app"
 
 install-app: bundle
 	@echo "Installing to /Applications..."
 	@rm -rf /Applications/CodeScribe.app
-	@cp -R codescribe-rs/bundle/CodeScribe.app /Applications/
+	@cp -R bundle/CodeScribe.app /Applications/
 	@echo "✅ Installed: /Applications/CodeScribe.app"
 	@echo "   You can now launch CodeScribe from Spotlight or Launchpad"
 
@@ -178,25 +181,25 @@ format:
 	@echo "Formatting Python..."
 	@uv run ruff format .
 	@echo "Formatting Rust..."
-	@cd codescribe-rs && cargo fmt
+	@cargo fmt
 
 lint:
 	@echo "=== Python Lint ==="
 	@uv run ruff check .
-	@uv run mypy src/codescribe
+	@uv run mypy server/src/codescribe
 	@echo "=== Rust Lint ==="
-	@cd codescribe-rs && cargo fmt -- --check
-	@cd codescribe-rs && cargo clippy -- -D warnings
+	@cargo fmt -- --check
+	@cargo clippy -- -D warnings
 
 security:
 	@echo "Running Bandit..."
-	@uv run bandit -ll -c pyproject.toml -r src/codescribe
+	@uv run bandit -ll -c pyproject.toml -r server/src/codescribe
 
 test:
 	@echo "=== Python Tests ==="
 	@uv run pytest
 	@echo "=== Rust Tests ==="
-	@cd codescribe-rs && cargo test
+	@cargo test
 
 check: lint security test
 
@@ -205,7 +208,7 @@ check: lint security test
 # ============================================================================
 
 clean:
-	@cd codescribe-rs && cargo clean
+	@cargo clean
 	@rm -rf .pytest_cache .ruff_cache .mypy_cache
 	@find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 	@echo "✅ Cleaned"

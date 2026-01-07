@@ -504,6 +504,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "directories",
+ "dirs",
  "dispatch",
  "dotenvy",
  "futures-util",

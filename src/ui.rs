@@ -30,7 +30,7 @@ type Id = *mut Object;
 type AXId = *mut std::ffi::c_void;
 
 #[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn AXUIElementCopyAttributeValue(element: AXId, attribute: AXId, value: *mut AXId) -> i32;
     fn AXUIElementCreateSystemWide() -> AXId;
     fn AXValueGetValue(value: AXId, type_: i32, value_ptr: *mut std::ffi::c_void) -> bool;
@@ -333,7 +333,8 @@ unsafe fn create_badge_window(config: &HoldBadgeConfig) -> Id {
     let _: () = msg_send![content_view, setWantsLayer: true];
 
     // Create badge view (circular red indicator)
-    let badge_view = create_badge_view(config);
+    // SAFETY: create_badge_view is unsafe, called from unsafe fn
+    let badge_view = unsafe { create_badge_view(config) };
     let _: () = msg_send![content_view, addSubview: badge_view];
 
     // Force the view to display
@@ -368,14 +369,18 @@ unsafe fn create_badge_view(config: &HoldBadgeConfig) -> Id {
 
     // Configure the layer to draw a circle
     // Set background color from config (default: red with 80% opacity)
-    let cg_color = create_cg_color(
-        config.color.0,
-        config.color.1,
-        config.color.2,
-        config.color.3,
-    );
+    // SAFETY: FFI calls to CoreGraphics
+    let cg_color = unsafe {
+        create_cg_color(
+            config.color.0,
+            config.color.1,
+            config.color.2,
+            config.color.3,
+        )
+    };
     let _: () = msg_send![layer, setBackgroundColor: cg_color];
-    CGColorRelease(cg_color);
+    // SAFETY: Releasing CGColor we just created
+    unsafe { CGColorRelease(cg_color) };
 
     // Make it circular by setting corner radius to half the diameter
     let corner_radius = config.diameter / 2.0;
@@ -389,7 +394,7 @@ unsafe fn create_badge_view(config: &HoldBadgeConfig) -> Id {
 
 // CGColor functions
 #[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn CGColorCreate(
         space: *const std::ffi::c_void,
         components: *const f64,
@@ -400,13 +405,13 @@ extern "C" {
 }
 
 /// Create a CGColor from RGBA components
-unsafe fn create_cg_color(r: f64, g: f64, b: f64, a: f64) -> *const std::ffi::c_void {
+unsafe fn create_cg_color(r: f64, g: f64, b: f64, a: f64) -> *const std::ffi::c_void { unsafe {
     let color_space = CGColorSpaceCreateDeviceRGB();
     let components: [f64; 4] = [r, g, b, a];
     let color = CGColorCreate(color_space, components.as_ptr());
     CGColorSpaceRelease(color_space);
     color
-}
+}}
 
 /// Update the badge window position
 unsafe fn update_badge_position(window: Id, config: &HoldBadgeConfig) {

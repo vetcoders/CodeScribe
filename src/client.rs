@@ -10,14 +10,16 @@
 //! - Proper error handling and logging
 
 use anyhow::{Context, Result};
+use futures_util::{SinkExt, StreamExt};
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 /// Maximum retry attempts for transcription requests
@@ -45,6 +47,43 @@ struct HealthResponse {
 #[derive(Debug, Deserialize)]
 struct TranscribeResponse {
     text: String,
+}
+
+// ============================================================================
+// WebSocket STT Protocol Structures
+// ============================================================================
+
+/// WebSocket config message (sent first)
+#[derive(Serialize)]
+struct WsConfig {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    language: String,
+    api_key: String,
+}
+
+/// WebSocket end signal (sent after audio)
+#[derive(Serialize)]
+struct WsEnd {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+}
+
+/// WebSocket response message
+#[derive(Deserialize, Debug)]
+struct WsResponse {
+    #[serde(rename = "type")]
+    msg_type: String,
+    text: Option<String>,
+    error: Option<String>,
+}
+
+/// NDJSON chunk response
+#[derive(Deserialize, Debug)]
+struct NdjsonChunk {
+    text: Option<String>,
+    is_final: Option<bool>,
+    error: Option<String>,
 }
 
 /// Audio validation error type for pre-flight checks
@@ -235,6 +274,11 @@ async fn get_server_url() -> Result<String> {
 /// - `Ok(false)` if backend responds but model still loading
 /// - `Err(_)` if cannot connect or parse response
 pub async fn check_health() -> Result<bool> {
+    // Cloud mode: skip local backend check
+    if std::env::var("STT_ENDPOINT").is_ok() {
+        return Ok(true);
+    }
+
     let base_url = get_server_url().await?;
     let url = format!("{}/healthz", base_url);
 
@@ -464,15 +508,17 @@ async fn transcribe_request(url: &str, form: Form) -> Result<String> {
     Ok(transcribe_response.text)
 }
 
-/// Transcribe audio using external STT API (OpenAI-compatible endpoint)
+/// Transcribe audio using external STT API
 ///
-/// Uses the full endpoint URL directly with x-api-key header.
-/// Includes pre-flight validation and retry logic with exponential backoff.
+/// Supports multiple protocols based on endpoint URL:
+/// - `wss://` or `ws://` → WebSocket streaming (real-time partials)
+/// - URL ending with `:stream` → NDJSON streaming HTTP
+/// - Otherwise → OpenAI-compatible multipart upload
 ///
 /// # Arguments
 /// * `path` - Path to audio file
 /// * `language` - Optional language code
-/// * `endpoint_url` - Full URL to the transcription endpoint (not base URL)
+/// * `endpoint_url` - Full URL to the transcription endpoint
 /// * `api_key` - API key for authentication
 async fn transcribe_external(
     path: &Path,
@@ -482,8 +528,7 @@ async fn transcribe_external(
 ) -> Result<String> {
     info!("Using external STT endpoint: {}", endpoint_url);
 
-    // Path is already validated by caller (transcribe function validates at entry point)
-    // Read file into memory
+    // Read file into memory (shared by all protocols)
     let mut file = File::open(path)
         .await
         .context("Failed to open audio file")?;
@@ -500,46 +545,300 @@ async fn transcribe_external(
         anyhow::bail!("Audio validation failed: {}", validation_error);
     }
 
-    let filename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("recording.wav");
+    let lang = language.unwrap_or("pl");
 
+    // Dispatch based on protocol
+    if endpoint_url.starts_with("wss://") || endpoint_url.starts_with("ws://") {
+        // WebSocket streaming
+        transcribe_websocket(endpoint_url, api_key, buffer, lang).await
+    } else if endpoint_url.ends_with(":stream") {
+        // NDJSON streaming HTTP
+        transcribe_ndjson(endpoint_url, api_key, buffer, lang).await
+    } else {
+        // OpenAI-compatible multipart upload
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("recording.wav");
+        transcribe_multipart(endpoint_url, api_key, buffer, lang, filename).await
+    }
+}
+
+// ============================================================================
+// WebSocket Streaming STT
+// ============================================================================
+
+/// Transcribe audio via WebSocket streaming
+///
+/// Protocol:
+/// 1. Connect to WebSocket
+/// 2. Send config JSON: {"type": "config", "language": "...", "api_key": "..."}
+/// 3. Send audio as binary message
+/// 4. Send end signal: {"type": "end"}
+/// 5. Receive partial/final responses until final or close
+async fn transcribe_websocket(
+    url: &str,
+    api_key: &str,
+    audio_data: Vec<u8>,
+    language: &str,
+) -> Result<String> {
+    let start = Instant::now();
     info!(
-        "Sending transcription request to {} for {} ({} bytes)",
-        endpoint_url,
-        filename,
-        buffer.len()
+        "[WS STT] Connecting to {} ({} bytes, lang={})",
+        url,
+        audio_data.len(),
+        language
+    );
+
+    let (mut ws, response) = connect_async(url)
+        .await
+        .context("Failed to connect to WebSocket STT endpoint")?;
+
+    debug!(
+        "[WS STT] Connected in {:?}, status: {:?}",
+        start.elapsed(),
+        response.status()
+    );
+
+    // 1. Send config
+    let config = WsConfig {
+        msg_type: "config",
+        language: language.to_string(),
+        api_key: api_key.to_string(),
+    };
+    ws.send(Message::Text(serde_json::to_string(&config)?.into()))
+        .await
+        .context("Failed to send WebSocket config")?;
+
+    // 2. Send audio binary
+    info!(
+        "[WS STT] Sending {} bytes ({:.2} MB)",
+        audio_data.len(),
+        audio_data.len() as f64 / 1_000_000.0
+    );
+    ws.send(Message::Binary(audio_data.into()))
+        .await
+        .context("Failed to send audio data")?;
+
+    // 3. Signal end
+    let end = WsEnd { msg_type: "end" };
+    ws.send(Message::Text(serde_json::to_string(&end)?.into()))
+        .await
+        .context("Failed to send end signal")?;
+
+    // 4. Collect responses
+    let mut final_text = String::new();
+    let mut partial_count = 0u32;
+
+    while let Some(msg) = ws.next().await {
+        match msg? {
+            Message::Text(txt) => {
+                let resp: WsResponse = serde_json::from_str(&txt)
+                    .with_context(|| format!("Failed to parse WS response: {}", txt))?;
+
+                match resp.msg_type.as_str() {
+                    "partial" => {
+                        partial_count += 1;
+                        if let Some(t) = &resp.text {
+                            debug!("[WS STT] partial #{}: {} chars", partial_count, t.len());
+                            // TODO: callback for real-time UI updates
+                        }
+                    }
+                    "final" => {
+                        if let Some(t) = resp.text {
+                            final_text = t;
+                            info!(
+                                "[WS STT] Final: {} chars after {} partials",
+                                final_text.len(),
+                                partial_count
+                            );
+                        }
+                        break;
+                    }
+                    "error" => {
+                        let err_msg = resp.error.unwrap_or_else(|| "Unknown error".to_string());
+                        error!("[WS STT] Error: {}", err_msg);
+                        anyhow::bail!("WebSocket STT error: {}", err_msg);
+                    }
+                    other => {
+                        warn!("[WS STT] Unknown message type: {}", other);
+                    }
+                }
+            }
+            Message::Close(frame) => {
+                debug!("[WS STT] Connection closed: {:?}", frame);
+                break;
+            }
+            Message::Ping(data) => {
+                let _ = ws.send(Message::Pong(data)).await;
+            }
+            _ => {}
+        }
+    }
+
+    let _ = ws.close(None).await;
+    let duration_ms = start.elapsed().as_millis();
+
+    info!("[WS STT] Complete in {}ms: {} chars", duration_ms, final_text.len());
+
+    if final_text.is_empty() {
+        anyhow::bail!("No transcription received from WebSocket STT");
+    }
+
+    Ok(final_text)
+}
+
+// ============================================================================
+// NDJSON Streaming HTTP STT
+// ============================================================================
+
+/// Transcribe audio via NDJSON streaming HTTP
+///
+/// Protocol:
+/// 1. POST raw audio with Content-Type and x-api-key header
+/// 2. Stream response, parse newline-delimited JSON chunks
+/// 3. Return text from final chunk (is_final: true)
+async fn transcribe_ndjson(
+    url: &str,
+    api_key: &str,
+    audio_data: Vec<u8>,
+    language: &str,
+) -> Result<String> {
+    let start = Instant::now();
+    info!(
+        "[NDJSON STT] POST {} ({} bytes, lang={})",
+        url,
+        audio_data.len(),
+        language
+    );
+
+    let response = get_client()
+        .post(url)
+        .header("x-api-key", api_key)
+        .header("Content-Type", "audio/wav")
+        .query(&[("language", language)])
+        .body(audio_data)
+        .send()
+        .await
+        .context("Failed to send NDJSON STT request")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        error!("[NDJSON STT] Error {}: {}", status, body);
+        anyhow::bail!("NDJSON STT request failed: {} - {}", status, body);
+    }
+
+    // Stream and parse NDJSON
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::new();
+    let mut final_text = String::new();
+    let mut partial_count = 0u32;
+
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.context("Failed to read NDJSON chunk")?;
+        buffer.extend_from_slice(&bytes);
+
+        // Process complete lines
+        while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buffer.drain(..=pos).collect();
+            let line_str = String::from_utf8_lossy(&line);
+            let line_str = line_str.trim();
+
+            if line_str.is_empty() {
+                continue;
+            }
+
+            if let Ok(chunk) = serde_json::from_str::<NdjsonChunk>(line_str) {
+                if let Some(err) = chunk.error {
+                    error!("[NDJSON STT] Error in stream: {}", err);
+                    anyhow::bail!("NDJSON STT error: {}", err);
+                }
+
+                if let Some(text) = chunk.text {
+                    if chunk.is_final.unwrap_or(false) {
+                        final_text = text;
+                        info!(
+                            "[NDJSON STT] Final: {} chars after {} partials",
+                            final_text.len(),
+                            partial_count
+                        );
+                    } else {
+                        partial_count += 1;
+                        debug!("[NDJSON STT] partial #{}: {} chars", partial_count, text.len());
+                    }
+                }
+            }
+        }
+    }
+
+    let duration_ms = start.elapsed().as_millis();
+    info!(
+        "[NDJSON STT] Complete in {}ms: {} chars",
+        duration_ms,
+        final_text.len()
+    );
+
+    if final_text.is_empty() {
+        anyhow::bail!("No transcription received from NDJSON STT");
+    }
+
+    Ok(final_text)
+}
+
+// ============================================================================
+// OpenAI-compatible Multipart Upload STT
+// ============================================================================
+
+/// Transcribe audio via OpenAI-compatible multipart upload
+///
+/// Standard HTTP POST with multipart/form-data:
+/// - file: audio file
+/// - model: whisper model name
+/// - language: optional language code
+async fn transcribe_multipart(
+    url: &str,
+    api_key: &str,
+    audio_data: Vec<u8>,
+    language: &str,
+    filename: &str,
+) -> Result<String> {
+    info!(
+        "[Multipart STT] POST {} ({} bytes, lang={})",
+        url,
+        audio_data.len(),
+        language
     );
 
     // Retry loop
     let mut last_error: Option<anyhow::Error> = None;
 
     for attempt in 1..=TRANSCRIPTION_MAX_RETRIES {
-        // Build multipart form fresh for each attempt (OpenAI-compatible format)
-        let file_part = Part::bytes(buffer.clone())
+        // Build multipart form fresh for each attempt
+        let file_part = Part::bytes(audio_data.clone())
             .file_name(filename.to_string())
             .mime_str("audio/wav")
             .context("Failed to set MIME type")?;
 
-        let mut form = Form::new()
-            .part("file", file_part)
-            .text("model", "whisper-large-v3");
+        // Model from env WHISPER_MODEL or default to non-turbo large-v3
+        let whisper_model = std::env::var("WHISPER_MODEL")
+            .unwrap_or_else(|_| "mlx-community/whisper-large-v3-mlx".to_string());
 
-        if let Some(lang) = language {
-            form = form.text("language", lang.to_string());
-        }
+        let form = Form::new()
+            .part("file", file_part)
+            .text("model", whisper_model)
+            .text("language", language.to_string());
 
         debug!(
-            "External STT transcription attempt {}/{} for {}",
+            "[Multipart STT] attempt {}/{} for {}",
             attempt, TRANSCRIPTION_MAX_RETRIES, filename
         );
 
-        match transcribe_external_request(endpoint_url, api_key, form).await {
+        match transcribe_multipart_request(url, api_key, form).await {
             Ok(text) => {
                 if attempt > 1 {
                     info!(
-                        "External STT transcription succeeded on attempt {}/{}",
+                        "[Multipart STT] succeeded on attempt {}/{}",
                         attempt, TRANSCRIPTION_MAX_RETRIES
                     );
                 }
@@ -548,7 +847,7 @@ async fn transcribe_external(
             Err(e) => {
                 let is_retryable = is_retryable_error(&e);
                 warn!(
-                    "External STT transcription attempt {}/{} failed: {} (retryable: {})",
+                    "[Multipart STT] attempt {}/{} failed: {} (retryable: {})",
                     attempt, TRANSCRIPTION_MAX_RETRIES, e, is_retryable
                 );
 
@@ -557,7 +856,7 @@ async fn transcribe_external(
 
                     let delay_ms = TRANSCRIPTION_RETRY_DELAY_MS * attempt as u64;
                     info!(
-                        "Retrying external STT transcription in {}ms (attempt {}/{})",
+                        "[Multipart STT] retrying in {}ms (attempt {}/{})",
                         delay_ms,
                         attempt + 1,
                         TRANSCRIPTION_MAX_RETRIES
@@ -572,11 +871,11 @@ async fn transcribe_external(
 
     let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
     Err(last_error
-        .unwrap_or_else(|| anyhow::anyhow!("External STT transcription failed after all retries")))
+        .unwrap_or_else(|| anyhow::anyhow!("Multipart STT transcription failed after all retries")))
 }
 
-/// Send a single external STT transcription request (used by retry loop)
-async fn transcribe_external_request(url: &str, api_key: &str, form: Form) -> Result<String> {
+/// Send a single multipart STT transcription request (used by retry loop)
+async fn transcribe_multipart_request(url: &str, api_key: &str, form: Form) -> Result<String> {
     let response = get_client()
         .post(url)
         .header("x-api-key", api_key)
@@ -750,9 +1049,11 @@ mod tests {
     #[test]
     fn test_validate_audio_too_large() {
         // Set a low limit for testing (1MB)
-        std::env::set_var("BACKEND_MAX_UPLOAD_MB", "1");
+        // SAFETY: Test code runs single-threaded
+        unsafe { std::env::set_var("BACKEND_MAX_UPLOAD_MB", "1") };
         let result = validate_audio(&vec![0u8; 2 * 1024 * 1024]); // 2MB > 1MB limit
-        std::env::remove_var("BACKEND_MAX_UPLOAD_MB");
+        // SAFETY: Test code runs single-threaded
+        unsafe { std::env::remove_var("BACKEND_MAX_UPLOAD_MB") };
 
         assert!(matches!(result, Err(AudioValidationError::TooLarge { .. })));
     }

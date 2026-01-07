@@ -56,3 +56,5 @@ CLAUDE.md
 .loctree/
 CONFIG_AUDIT.md
 /target
+/src/CodeScribe.egg-info
+/.claude

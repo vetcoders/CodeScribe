@@ -36,7 +36,7 @@ pub enum PermissionStatus {
 pub fn check_accessibility() -> PermissionStatus {
     // Use AXIsProcessTrusted() from ApplicationServices
     // This returns true if the app has Accessibility permission
-    extern "C" {
+    unsafe extern "C" {
         fn AXIsProcessTrusted() -> bool;
     }
 
@@ -61,7 +61,7 @@ pub fn check_accessibility() -> PermissionStatus {
 #[cfg(target_os = "macos")]
 pub fn request_accessibility() -> bool {
     // Use AXIsProcessTrustedWithOptions() to show the system prompt
-    extern "C" {
+    unsafe extern "C" {
         fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
     }
 

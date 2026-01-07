@@ -225,7 +225,7 @@ mod macos {
     ) -> CGEventRef;
 
     #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CGEventTapCreate(
             tap: u32,
             place: u32,
@@ -242,7 +242,7 @@ mod macos {
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CFMachPortCreateRunLoopSource(
             allocator: *const c_void,
             port: CFMachPortRef,

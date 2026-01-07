@@ -12,6 +12,7 @@ mod controller;
 mod dialog;
 mod history;
 mod hotkeys;
+mod lab_server;
 mod launchd;
 mod permissions;
 mod sound;
@@ -206,49 +207,74 @@ async fn main() -> Result<()> {
 
     info!("CodeScribe starting...");
 
-    // Load environment variables from .env file
-    match dotenvy::dotenv() {
-        Ok(path) => debug!("Loaded environment from: {}", path.display()),
-        Err(_) => debug!("No .env file found, using system environment"),
+    // Load environment variables from ~/.codescribe/.env
+    let env_path = std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".codescribe").join(".env"))
+        .ok()
+        .filter(|p| p.exists());
+
+    if let Some(path) = env_path {
+        match dotenvy::from_path(&path) {
+            Ok(()) => info!("Loaded config from: {}", path.display()),
+            Err(e) => warn!("Failed to load {}: {}", path.display(), e),
+        }
+    } else {
+        // Fallback to cwd .env
+        match dotenvy::dotenv() {
+            Ok(path) => debug!("Loaded environment from: {}", path.display()),
+            Err(_) => debug!("No .env file found, using system environment"),
+        }
     }
 
     // Check and request macOS permissions (Accessibility, Microphone)
     permissions::request_all_permissions();
 
-    // Start Python backend server
-    // Must use spawn_blocking because BackendServer::start() uses reqwest::blocking
-    info!("Starting Python backend server...");
-    let _backend = match tokio::task::spawn_blocking(backend::BackendServer::start).await {
-        Ok(Ok(server)) => {
-            info!("Python backend started on port {}", server.port());
-            Some(server)
-        }
-        Ok(Err(e)) => {
-            error!("Failed to start Python backend: {}", e);
-            error!("Transcription will not work without the backend.");
-            error!("Ensure 'uv' is installed and the codescribe package is accessible.");
-            None
-        }
-        Err(e) => {
-            error!("Backend startup task panicked: {}", e);
-            None
+    // Check if using cloud STT (STT_ENDPOINT set) or local Python backend
+    let using_cloud = std::env::var("STT_ENDPOINT").is_ok();
+
+    let _backend = if using_cloud {
+        info!("Using cloud STT endpoint - skipping local Python backend");
+        None
+    } else {
+        // Start Python backend server (local mode)
+        // Must use spawn_blocking because BackendServer::start() uses reqwest::blocking
+        info!("Starting Python backend server...");
+        match tokio::task::spawn_blocking(backend::BackendServer::start).await {
+            Ok(Ok(server)) => {
+                info!("Python backend started on port {}", server.port());
+                Some(server)
+            }
+            Ok(Err(e)) => {
+                error!("Failed to start Python backend: {}", e);
+                error!("Transcription will not work without the backend.");
+                error!("Set STT_ENDPOINT for cloud mode or ensure 'uv' is installed.");
+                None
+            }
+            Err(e) => {
+                error!("Backend startup task panicked: {}", e);
+                None
+            }
         }
     };
 
-    // Longer delay to let backend fully initialize (MLX models take time to load)
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Local backend initialization (skip for cloud mode)
+    if !using_cloud {
+        // Longer delay to let backend fully initialize (MLX models take time to load)
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    // Verify backend is healthy
-    match client::check_health().await {
-        Ok(true) => info!("Python backend health check passed"),
-        Ok(false) => warn!("Python backend health check failed"),
-        Err(e) => warn!("Could not verify backend health: {}", e),
-    }
+        // Verify backend is healthy
+        match client::check_health().await {
+            Ok(true) => info!("Python backend health check passed"),
+            Ok(false) => warn!("Python backend health check failed"),
+            Err(e) => warn!("Could not verify backend health: {}", e),
+        }
 
-    // Sync WHISPER_VARIANT with backend's actual model
-    if let Ok(model_info) = client::get_current_model().await {
-        std::env::set_var("WHISPER_VARIANT", &model_info);
-        debug!("Synced WHISPER_VARIANT with backend: {}", model_info);
+        // Sync WHISPER_VARIANT with backend's actual model
+        if let Ok(model_info) = client::get_current_model().await {
+            // SAFETY: Startup phase, no concurrent access to env vars
+            unsafe { std::env::set_var("WHISPER_VARIANT", &model_info) };
+            debug!("Synced WHISPER_VARIANT with backend: {}", model_info);
+        }
     }
 
     // Create channel for hotkey events
@@ -480,7 +506,8 @@ async fn main() -> Result<()> {
                                 Ok(()) => {
                                     info!("Whisper model switched to: {}", variant);
                                     // Update environment for next restart
-                                    std::env::set_var("WHISPER_VARIANT", variant);
+                                    // SAFETY: Menu event handler, single-threaded context
+                                    unsafe { std::env::set_var("WHISPER_VARIANT", variant) };
                                     // Note: Menu checkmarks already updated synchronously in handle_menu_event
                                 }
                                 Err(e) => {
@@ -505,7 +532,8 @@ async fn main() -> Result<()> {
                                 .map(|v| v == "1" || v.to_lowercase() == "true")
                                 .unwrap_or(false);
                             let new_value = if current { "0" } else { "1" };
-                            std::env::set_var("FORMAT_ENABLED", new_value);
+                            // SAFETY: Menu event handler, single-threaded context
+                            unsafe { std::env::set_var("FORMAT_ENABLED", new_value) };
                             info!(
                                 "AI formatting {}",
                                 if new_value == "1" {
@@ -523,7 +551,8 @@ async fn main() -> Result<()> {
                                 tray::FormattingProvider::Ollama => "ollama",
                             };
                             info!("Setting formatting provider to: {}", provider_str);
-                            std::env::set_var("AI_PROVIDER", provider_str);
+                            // SAFETY: Menu event handler, single-threaded context
+                            unsafe { std::env::set_var("AI_PROVIDER", provider_str) };
                             // TODO: Refresh tray menu to show updated provider selection
                             // tray::update_formatting_provider(provider_str);
                         }
@@ -550,7 +579,8 @@ async fn main() -> Result<()> {
                                 tray::SoundType::Pop => "Pop",
                             };
                             info!("Setting sound type to: {}", sound_name);
-                            std::env::set_var("SOUND_TYPE", sound_name);
+                            // SAFETY: Menu event handler, single-threaded context
+                            unsafe { std::env::set_var("SOUND_TYPE", sound_name) };
                             // Play preview
                             sound::play_sound(sound_name);
                             // TODO: Refresh tray menu to show updated sound type
