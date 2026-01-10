@@ -15,6 +15,9 @@ use tokenizers::Tokenizer;
 use crate::audio_loader;
 use crate::whisper_model::Whisper as Model;
 
+/// Callback for streaming chunk results (called after each chunk is transcribed)
+pub type ChunkCallback<'a> = &'a dyn Fn(&str);
+
 /// Decoding parameters for Whisper transcription
 /// Based on OpenAI whisper / mlx_whisper / faster-whisper best practices
 #[derive(Clone, Debug)]
@@ -210,14 +213,17 @@ impl LocalWhisperEngine {
         let (samples, sample_rate) = audio_loader::load_audio_file(path)
             .context("Failed to load audio file")?;
 
+        let duration_secs = samples.len() as f32 / sample_rate as f32;
         tracing::debug!(
-            "Loaded audio file {:?}: {} samples @ {} Hz",
+            "Loaded audio file {:?}: {} samples @ {} Hz ({:.1}s)",
             path,
             samples.len(),
-            sample_rate
+            sample_rate,
+            duration_secs
         );
 
-        self.transcribe_with_language(&samples, sample_rate, language)
+        // Use chunking for all files - handles both short and long audio
+        self.transcribe_long_with_language(&samples, sample_rate, language)
     }
 
     pub fn detect_language_file(&mut self, path: &Path) -> Result<String> {
@@ -272,6 +278,18 @@ impl LocalWhisperEngine {
         sample_rate: u32,
         language: Option<&str>,
     ) -> Result<String> {
+        self.transcribe_long_streaming(audio, sample_rate, language, None)
+    }
+
+    /// Transcribe long audio with streaming callback
+    /// Callback is called after each chunk with cumulative transcription so far
+    pub fn transcribe_long_streaming(
+        &mut self,
+        audio: &[f32],
+        sample_rate: u32,
+        language: Option<&str>,
+        on_chunk: Option<ChunkCallback>,
+    ) -> Result<String> {
         let samples = audio_loader::resample_to_16k(audio, sample_rate);
         let debug_tokens = env::var("CODESCRIBE_DEBUG_TOKENS")
             .map(|v| v != "0" && v.to_lowercase() != "false")
@@ -282,22 +300,36 @@ impl LocalWhisperEngine {
             Some(l) => Some(l),
             None => {
                 detected_lang = self.detect_language_16k(&samples)?;
+                tracing::info!("Detected language: {}", detected_lang);
                 Some(detected_lang.as_str())
             }
         };
 
-        let chunk_samples = 16_000usize * 25;
-        let overlap = 16_000usize * 5;
+        let chunk_samples = 16_000usize * 25;  // 25 seconds
+        let overlap = 16_000usize * 5;          // 5 seconds overlap
         ensure!(chunk_samples > overlap, "chunk_samples must be > overlap");
         let step = chunk_samples - overlap;
 
+        let total_chunks = (samples.len().saturating_sub(1) / step) + 1;
         let mut out = String::new();
         let mut offset = 0usize;
+        let mut chunk_num = 0usize;
+
         while offset < samples.len() {
+            chunk_num += 1;
             let end = (offset + chunk_samples).min(samples.len());
             let chunk = &samples[offset..end];
+
+            tracing::debug!("Processing chunk {}/{} ({} samples)", chunk_num, total_chunks, chunk.len());
+
             let text = self.transcribe_samples_16k(chunk, language, debug_tokens)?;
             append_with_overlap_dedup(&mut out, &text);
+
+            // Call streaming callback with cumulative result
+            if let Some(ref callback) = on_chunk {
+                callback(out.trim());
+            }
+
             offset = offset.saturating_add(step);
         }
 
