@@ -147,7 +147,7 @@ impl LocalWhisperEngine {
 
         // Load mel filters
         if !mel_filters_path.exists() {
-             return Err(anyhow!("mel_filters.npz not found at {}. Please download it from OpenAI assets.", mel_filters_path.display()));
+            return Err(anyhow!("mel_filters.npz not found at {}. Please download it from OpenAI assets.", mel_filters_path.display()));
         }
 
         let n_mels = config.num_mel_bins;
@@ -181,6 +181,12 @@ impl LocalWhisperEngine {
         self.transcribe_with_language(&samples, sample_rate, language)
     }
 
+    pub fn detect_language_file(&mut self, path: &Path) -> Result<String> {
+        let (samples, sample_rate) = audio_loader::load_audio_file(path)
+            .context("Failed to load audio file")?;
+        self.detect_language(&samples, sample_rate)
+    }
+
     #[allow(dead_code)]
     pub fn transcribe_file(&mut self, path: &Path) -> Result<String> {
         self.transcribe_file_with_language(path, None)
@@ -204,20 +210,196 @@ impl LocalWhisperEngine {
             sample_rate
         );
 
+        let detected_lang;
+        let language = match language {
+            Some(l) => Some(l),
+            None => {
+                detected_lang = self.detect_language_16k(&samples)?;
+                Some(detected_lang.as_str())
+            }
+        };
+
+        self.transcribe_samples_16k(&samples, language, debug_tokens)
+    }
+
+    #[allow(dead_code)]
+    pub fn transcribe_long(&mut self, audio: &[f32], sample_rate: u32) -> Result<String> {
+        self.transcribe_long_with_language(audio, sample_rate, None)
+    }
+
+    pub fn transcribe_long_with_language(
+        &mut self,
+        audio: &[f32],
+        sample_rate: u32,
+        language: Option<&str>,
+    ) -> Result<String> {
+        let samples = audio_loader::resample_to_16k(audio, sample_rate);
+        let debug_tokens = env::var("CODESCRIBE_DEBUG_TOKENS")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false);
+
+        let detected_lang;
+        let language = match language {
+            Some(l) => Some(l),
+            None => {
+                detected_lang = self.detect_language_16k(&samples)?;
+                Some(detected_lang.as_str())
+            }
+        };
+
+        let chunk_samples = 16_000usize * 25;
+        let overlap = 16_000usize * 5;
+        ensure!(chunk_samples > overlap, "chunk_samples must be > overlap");
+        let step = chunk_samples - overlap;
+
+        let mut out = String::new();
+        let mut offset = 0usize;
+        while offset < samples.len() {
+            let end = (offset + chunk_samples).min(samples.len());
+            let chunk = &samples[offset..end];
+            let text = self.transcribe_samples_16k(chunk, language, debug_tokens)?;
+            append_with_overlap_dedup(&mut out, &text);
+            offset = offset.saturating_add(step);
+        }
+
+        Ok(out.trim().to_string())
+    }
+
+    pub fn detect_language(&mut self, audio: &[f32], sample_rate: u32) -> Result<String> {
+        let samples = audio_loader::resample_to_16k(audio, sample_rate);
+        self.detect_language_16k(&samples)
+    }
+
+    fn detect_language_16k(&mut self, samples_16k: &[f32]) -> Result<String> {
+        let max_samples = 16_000usize * 30;
+        let samples = &samples_16k[..samples_16k.len().min(max_samples)];
+        ensure!(!samples.is_empty(), "audio is empty");
+
+        self.model.reset_kv_cache();
+
+        let mel = whisper::audio::pcm_to_mel(&self.config, samples, &self.mel_filters);
+        let mel_len = mel.len();
+        let mel = Tensor::from_vec(
+            mel,
+            (
+                1,
+                self.config.num_mel_bins,
+                mel_len / self.config.num_mel_bins,
+            ),
+            &self.device,
+        )?;
+
+        let encoder_output = self.model.encoder.forward(&mel, true)?;
+
+        let start_token = self
+            .tokenizer
+            .token_to_id("<|startoftranscript|>")
+            .ok_or_else(|| anyhow!("Tokenizer missing <|startoftranscript|>"))?;
+
+        let token_tensor = Tensor::new(&[start_token], &self.device)?.unsqueeze(0)?;
+        let hidden = self
+            .model
+            .decoder
+            .forward(&token_tensor, &encoder_output, true)?;
+        let logits = self.model.decoder.final_linear(&hidden)?;
+        let (_b, seq_len, _vocab) = logits.dims3()?;
+        let last_logits = logits.i((.., seq_len - 1, ..))?.squeeze(0)?;
+        let logits_vec = last_logits.to_vec1::<f32>()?;
+
+        let candidates = self.language_token_candidates(logits_vec.len());
+        ensure!(
+            !candidates.is_empty(),
+            "No language token candidates available in tokenizer"
+        );
+
+        let mut best_lang = "en".to_string();
+        let mut best_score = f32::NEG_INFINITY;
+        for (token_id, lang) in candidates {
+            let idx = token_id as usize;
+            if idx >= logits_vec.len() {
+                continue;
+            }
+            let score = logits_vec[idx];
+            if score > best_score {
+                best_score = score;
+                best_lang = lang;
+            }
+        }
+
+        Ok(best_lang)
+    }
+
+    fn language_token_candidates(&self, vocab_size: usize) -> Vec<(u32, String)> {
+        // Whisper language tokens are typically in this range.
+        const LANG_TOKEN_START: u32 = 50_259;
+        const LANG_TOKEN_END: u32 = 50_358;
+
+        let mut out = Vec::new();
+        for id in LANG_TOKEN_START..=LANG_TOKEN_END {
+            if (id as usize) >= vocab_size {
+                break;
+            }
+            if let Some(tok) = self.tokenizer.id_to_token(id) {
+                if let Some(lang) = parse_language_token(&tok) {
+                    out.push((id, lang.to_string()));
+                }
+            }
+        }
+
+        if !out.is_empty() {
+            return out;
+        }
+
+        // Fallback: common languages only.
+        let fallback = [
+            "en", "pl", "de", "fr", "es", "it", "pt", "nl", "ru", "uk", "cs", "sk",
+        ];
+        for lang in fallback {
+            let tok = format!("<|{}|>", lang);
+            if let Some(id) = self.tokenizer.token_to_id(&tok) {
+                if (id as usize) < vocab_size {
+                    out.push((id, lang.to_string()));
+                }
+            }
+        }
+        out
+    }
+
+    fn transcribe_samples_16k(
+        &mut self,
+        samples_16k: &[f32],
+        language: Option<&str>,
+        debug_tokens: bool,
+    ) -> Result<String> {
+        ensure!(!samples_16k.is_empty(), "audio is empty");
+
         self.model.reset_kv_cache();
 
         // Convert to mel
-        let mel = whisper::audio::pcm_to_mel(&self.config, &samples, &self.mel_filters);
+        let mel = whisper::audio::pcm_to_mel(&self.config, samples_16k, &self.mel_filters);
         let mel_len = mel.len();
-        let mel = Tensor::from_vec(mel, (1, self.config.num_mel_bins, mel_len / self.config.num_mel_bins), &self.device)?;
+        let mel = Tensor::from_vec(
+            mel,
+            (
+                1,
+                self.config.num_mel_bins,
+                mel_len / self.config.num_mel_bins,
+            ),
+            &self.device,
+        )?;
 
         // Decode
-        // Tokenizer setup
-        let start_token = self.tokenizer.token_to_id("<|startoftranscript|>").unwrap();
-        let eot_token = self.tokenizer.token_to_id("<|endoftext|>").unwrap();
+        let start_token = self
+            .tokenizer
+            .token_to_id("<|startoftranscript|>")
+            .ok_or_else(|| anyhow!("Tokenizer missing <|startoftranscript|>"))?;
+        let eot_token = self
+            .tokenizer
+            .token_to_id("<|endoftext|>")
+            .ok_or_else(|| anyhow!("Tokenizer missing <|endoftext|>"))?;
         let nospeech_token = self.tokenizer.token_to_id("<|nospeech|>");
 
-        // Initial tokens: <|startoftranscript|> <|lang|>? <|transcribe|> <|notimestamps|> (optional)
+        // Initial tokens: <|startoftranscript|> <|lang|>? <|transcribe|> <|notimestamps|>
         let mut tokens = vec![start_token];
         if let Some(lang) = language {
             let lang_tok = format!("<|{}|>", lang.to_lowercase());
@@ -240,12 +422,15 @@ impl LocalWhisperEngine {
         // Decoder loop – allow up to the configured maximum target positions
         for step in 0..self.config.max_target_positions {
             let token_tensor = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-            let hidden = self.model.decoder.forward(&token_tensor, &encoder_output, true)?;
+            let hidden = self
+                .model
+                .decoder
+                .forward(&token_tensor, &encoder_output, true)?;
             let logits = self.model.decoder.final_linear(&hidden)?;
 
             // Greedy: pick max logit
             let (_b, seq_len, _vocab) = logits.dims3()?;
-            let last_logits = logits.i((.., seq_len-1, ..))?.squeeze(0)?;
+            let last_logits = logits.i((.., seq_len - 1, ..))?.squeeze(0)?;
             let mut logits_vec = last_logits.to_vec1::<f32>()?;
 
             // Avoid terminating immediately when nothing has been emitted yet
@@ -278,20 +463,12 @@ impl LocalWhisperEngine {
                 }
             }
 
-            let next_token = best_token;
-
-            if next_token == eot_token {
-                if all_tokens.is_empty() {
-                    // If we got EOT immediately, try to continue (maybe silence?)
-                    // But for now let's just break
-                    break;
-                } else {
-                    break;
-                }
+            if best_token == eot_token {
+                break;
             }
 
-            tokens.push(next_token);
-            all_tokens.push(next_token);
+            tokens.push(best_token);
+            all_tokens.push(best_token);
         }
 
         let text = self
@@ -300,6 +477,66 @@ impl LocalWhisperEngine {
             .map_err(|e| anyhow!("Tokenizer error: {}", e))?;
 
         Ok(text)
+    }
+}
+
+fn parse_language_token(token: &str) -> Option<&str> {
+    if !token.starts_with("<|") || !token.ends_with("|>") {
+        return None;
+    }
+    let inner = &token[2..token.len() - 2];
+    if inner.len() < 2 || inner.len() > 3 {
+        return None;
+    }
+    if inner.chars().all(|c| c.is_ascii_alphabetic()) {
+        Some(inner)
+    } else {
+        None
+    }
+}
+
+fn append_with_overlap_dedup(out: &mut String, segment: &str) {
+    let seg = segment.trim();
+    if seg.is_empty() {
+        return;
+    }
+
+    if out.trim().is_empty() {
+        out.push_str(seg);
+        return;
+    }
+
+    let out_trim = out.trim_end();
+    let out_words: Vec<&str> = out_trim.split_whitespace().collect();
+    let seg_words: Vec<&str> = seg.split_whitespace().collect();
+    if out_words.is_empty() || seg_words.is_empty() {
+        if !out.ends_with(' ') {
+            out.push(' ');
+        }
+        out.push_str(seg);
+        return;
+    }
+
+    let max_overlap = out_words.len().min(seg_words.len()).min(20);
+    let mut overlap = 0usize;
+    for k in (1..=max_overlap).rev() {
+        if out_words[out_words.len() - k..] == seg_words[..k] {
+            overlap = k;
+            break;
+        }
+    }
+
+    if !out.ends_with(' ') {
+        out.push(' ');
+    }
+
+    if overlap >= seg_words.len() {
+        return;
+    }
+    if overlap > 0 {
+        out.push_str(&seg_words[overlap..].join(" "));
+    } else {
+        out.push_str(seg);
     }
 }
 

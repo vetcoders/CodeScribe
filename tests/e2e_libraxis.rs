@@ -3,11 +3,11 @@
 //! Tests WebSocket and NDJSON streaming endpoints at api.libraxis.cloud
 //! Run with: cargo test --test e2e_libraxis -- --nocapture
 //!
-//! Required env vars:
+//! Required env vars (to actually run the tests):
 //!   LIBRAXIS_API_KEY - API key for authentication
+//!   TEST_AUDIO_FILE  - Path to test audio file (mp3/wav/webm)
 //!
-//! Optional env vars:
-//!   TEST_AUDIO_FILE - Path to test audio file (defaults to bundled test)
+//! If the required env vars are not set, the tests will be skipped.
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -20,9 +20,6 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 /// LibraxisAI API base URL
 const LIBRAXIS_API_BASE: &str = "api.libraxis.cloud";
 
-/// Default test audio file path
-const DEFAULT_TEST_AUDIO: &str =
-    "/Users/maciejgad/hosted/Vistas/audio-testowe/dialog_dialog_gizmo_boas_surgery_libraxis.mp3";
 
 /// WebSocket config message
 #[derive(Serialize)]
@@ -88,25 +85,29 @@ struct MessageContent {
     content: String,
 }
 
-/// Get API key from environment
-fn get_api_key() -> Result<String> {
+/// Get API key from environment (returns None when not configured).
+fn get_api_key() -> Option<String> {
     std::env::var("LIBRAXIS_API_KEY")
-        .or_else(|_| Ok("vista-ZnCro4vqiGZftc2CEMipT0CUzUjOpSN8uPE5ksOjuzU".to_string()))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
-/// Get test audio file path
-fn get_test_audio_path() -> PathBuf {
-    std::env::var("TEST_AUDIO_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_TEST_AUDIO))
+/// Get test audio file path (returns None when not configured or missing).
+fn get_test_audio_path() -> Option<PathBuf> {
+    let path = std::env::var("TEST_AUDIO_FILE").ok().map(PathBuf::from)?;
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 /// Load test audio file
-async fn load_test_audio() -> Result<Vec<u8>> {
-    let path = get_test_audio_path();
+async fn load_test_audio(path: &PathBuf) -> Result<Vec<u8>> {
     println!("Loading test audio from: {:?}", path);
 
-    let data = tokio::fs::read(&path)
+    let data = tokio::fs::read(path)
         .await
         .with_context(|| format!("Failed to read test audio file: {:?}", path))?;
 
@@ -442,8 +443,15 @@ async fn test_websocket_transcription() -> Result<()> {
     println!("TEST: WebSocket STT Transcription");
     println!("{}", "=".repeat(60));
 
-    let api_key = get_api_key()?;
-    let audio_data = load_test_audio().await?;
+    let Some(api_key) = get_api_key() else {
+        println!("Skipping: LIBRAXIS_API_KEY not set");
+        return Ok(());
+    };
+    let Some(audio_path) = get_test_audio_path() else {
+        println!("Skipping: TEST_AUDIO_FILE not set or file missing");
+        return Ok(());
+    };
+    let audio_data = load_test_audio(&audio_path).await?;
 
     let transcript = transcribe_websocket(audio_data, &api_key, "pl").await?;
 
@@ -467,8 +475,15 @@ async fn test_ndjson_transcription() -> Result<()> {
     println!("TEST: NDJSON Streaming Transcription");
     println!("{}", "=".repeat(60));
 
-    let api_key = get_api_key()?;
-    let audio_data = load_test_audio().await?;
+    let Some(api_key) = get_api_key() else {
+        println!("Skipping: LIBRAXIS_API_KEY not set");
+        return Ok(());
+    };
+    let Some(audio_path) = get_test_audio_path() else {
+        println!("Skipping: TEST_AUDIO_FILE not set or file missing");
+        return Ok(());
+    };
+    let audio_data = load_test_audio(&audio_path).await?;
 
     let transcript = transcribe_ndjson(audio_data, &api_key, "pl").await?;
 
@@ -492,7 +507,10 @@ async fn test_ai_formatting() -> Result<()> {
     println!("TEST: AI Formatting");
     println!("{}", "=".repeat(60));
 
-    let api_key = get_api_key()?;
+    let Some(api_key) = get_api_key() else {
+        println!("Skipping: LIBRAXIS_API_KEY not set");
+        return Ok(());
+    };
 
     // Test with sample unformatted text
     let raw_transcript = r#"no więc eee znaczy pies ma problem z eee z oddychaniem tak
@@ -523,8 +541,15 @@ async fn test_full_e2e_pipeline() -> Result<()> {
     println!("TEST: Full E2E Pipeline (Transcription + AI Formatting)");
     println!("{}", "=".repeat(60));
 
-    let api_key = get_api_key()?;
-    let audio_data = load_test_audio().await?;
+    let Some(api_key) = get_api_key() else {
+        println!("Skipping: LIBRAXIS_API_KEY not set");
+        return Ok(());
+    };
+    let Some(audio_path) = get_test_audio_path() else {
+        println!("Skipping: TEST_AUDIO_FILE not set or file missing");
+        return Ok(());
+    };
+    let audio_data = load_test_audio(&audio_path).await?;
 
     // Step 1: Transcribe via WebSocket (faster for real-time)
     println!("\n[Step 1] Transcribing audio...");
@@ -576,8 +601,15 @@ async fn test_compare_protocols() -> Result<()> {
     println!("TEST: Protocol Comparison (WebSocket vs NDJSON)");
     println!("{}", "=".repeat(60));
 
-    let api_key = get_api_key()?;
-    let audio_data = load_test_audio().await?;
+    let Some(api_key) = get_api_key() else {
+        println!("Skipping: LIBRAXIS_API_KEY not set");
+        return Ok(());
+    };
+    let Some(audio_path) = get_test_audio_path() else {
+        println!("Skipping: TEST_AUDIO_FILE not set or file missing");
+        return Ok(());
+    };
+    let audio_data = load_test_audio(&audio_path).await?;
 
     // Test WebSocket
     println!("\n[1/2] Testing WebSocket...");
