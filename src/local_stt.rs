@@ -15,12 +15,50 @@ use tokenizers::Tokenizer;
 use crate::audio_loader;
 use crate::whisper_model::Whisper as Model;
 
+/// Decoding parameters for Whisper transcription
+/// Based on OpenAI whisper / mlx_whisper / faster-whisper best practices
+#[derive(Clone, Debug)]
+pub struct DecodingParams {
+    /// Temperature for sampling (0.0 = greedy, higher = more random)
+    /// mlx_whisper default: 0
+    pub temperature: f32,
+    /// Prevent repetitions of n-grams with this size (0 = disabled)
+    /// faster-whisper default: 3
+    pub no_repeat_ngram_size: usize,
+    /// Suppress blank/silence tokens early
+    pub suppress_blank: bool,
+    /// No-speech probability threshold - if no_speech_prob > this, segment is silence
+    /// mlx_whisper default: 0.6
+    pub no_speech_threshold: f32,
+    /// Compression ratio threshold for hallucination detection
+    /// If gzip ratio > this, decoding failed (hallucination)
+    /// mlx_whisper default: 2.4
+    pub compression_ratio_threshold: f32,
+    /// Log probability threshold - if avg logprob < this, decoding failed
+    /// mlx_whisper default: -1.0
+    pub logprob_threshold: f32,
+}
+
+impl Default for DecodingParams {
+    fn default() -> Self {
+        Self {
+            temperature: 0.0,                  // greedy (mlx_whisper default)
+            no_repeat_ngram_size: 3,           // block 3-gram repetitions (faster-whisper)
+            suppress_blank: true,
+            no_speech_threshold: 0.6,          // mlx_whisper default
+            compression_ratio_threshold: 2.4,  // mlx_whisper default
+            logprob_threshold: -1.0,           // mlx_whisper default
+        }
+    }
+}
+
 pub struct LocalWhisperEngine {
     model: Model,
     tokenizer: Tokenizer,
     device: Device,
     config: Config,
     mel_filters: Vec<f32>,
+    pub decoding_params: DecodingParams,
 }
 
 impl LocalWhisperEngine {
@@ -160,6 +198,7 @@ impl LocalWhisperEngine {
             device,
             config,
             mel_filters,
+            decoding_params: DecodingParams::default(),
         })
     }
 
@@ -419,8 +458,11 @@ impl LocalWhisperEngine {
         // Run encoder once
         let encoder_output = self.model.encoder.forward(&mel, true)?;
 
-        // Decoder loop – allow up to the configured maximum target positions
-        for step in 0..self.config.max_target_positions {
+        // Decoder loop – allow up to the configured maximum target positions minus initial tokens
+        let max_new_tokens = self.config.max_target_positions.saturating_sub(tokens.len());
+        let ngram_size = self.decoding_params.no_repeat_ngram_size;
+
+        for step in 0..max_new_tokens {
             let token_tensor = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
             let hidden = self
                 .model
@@ -428,10 +470,31 @@ impl LocalWhisperEngine {
                 .forward(&token_tensor, &encoder_output, true)?;
             let logits = self.model.decoder.final_linear(&hidden)?;
 
-            // Greedy: pick max logit
+            // Get logits for last position
             let (_b, seq_len, _vocab) = logits.dims3()?;
             let last_logits = logits.i((.., seq_len - 1, ..))?.squeeze(0)?;
             let mut logits_vec = last_logits.to_vec1::<f32>()?;
+
+            // Apply no_repeat_ngram blocking (faster-whisper style)
+            // Block tokens that would create a repeated n-gram
+            // Need at least ngram_size tokens to have a potential repeat
+            if ngram_size > 0 && all_tokens.len() >= ngram_size {
+                // Look at last (ngram_size - 1) tokens as prefix
+                let prefix_start = all_tokens.len() + 1 - ngram_size;
+                let prefix = &all_tokens[prefix_start..];
+
+                // Find all earlier positions where this (n-1)-gram occurred
+                let search_end = all_tokens.len() - ngram_size + 1;
+                for i in 0..search_end {
+                    if all_tokens[i..i + ngram_size - 1] == *prefix {
+                        // Block the token that followed this n-gram
+                        let blocked_token = all_tokens[i + ngram_size - 1] as usize;
+                        if blocked_token < logits_vec.len() {
+                            logits_vec[blocked_token] = f32::NEG_INFINITY;
+                        }
+                    }
+                }
+            }
 
             // Avoid terminating immediately when nothing has been emitted yet
             let suppress_tokens = all_tokens.len() < 16;
@@ -446,6 +509,7 @@ impl LocalWhisperEngine {
                 }
             }
 
+            // Greedy: pick max logit
             let mut best_token = eot_token;
             let mut best_val = f32::NEG_INFINITY;
             for (idx, &val) in logits_vec.iter().enumerate() {
