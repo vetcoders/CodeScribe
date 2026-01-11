@@ -29,27 +29,35 @@
 
 ## Next Steps by Phase
 
-### Phase 3: Documentation & Audit (Current Session)
-- [ ] Create `docs/ARCHITECTURE.md` - full system diagram
-- [ ] Document IPC command → backend function mapping
-- [ ] Document hotkey → controller → STT flow
-- [ ] Identify gaps between UI buttons and backend calls
+### Phase 3: Documentation & Audit ✅ COMPLETED
+- [x] Create `docs/ARCHITECTURE.md` - full system diagram
+- [x] Document IPC command → backend function mapping
+- [x] Document hotkey → controller → STT flow
+- [x] Identify gaps between UI buttons and backend calls
 
-### Phase 4: Wire Core Flow (Next Session ~2-3h)
-1. **Start Streaming button** → `transcribe_audio` IPC
-   - Connect to `codescribe::local_stt::transcribe()`
-   - Stream audio from browser MediaRecorder → backend
+### Phase 4: Wire Core Flow ✅ COMPLETED
+1. **Recording IPC commands** - DONE
+   - Added `start_recording`, `stop_recording`, `is_recording` to `commands/recording.rs`
+   - Uses `codescribe::audio::Recorder` with TokioMutex for thread safety
 
-2. **Hotkeys integration**
-   - Option A: Tauri app spawns hotkey listener thread
-   - Option B: Separate hotkey daemon communicates via IPC
-   - Recommendation: Option A (single process)
+2. **Start Streaming button** - DONE
+   - Wired to `start_recording` IPC
+   - Auto-transcribes on stop via `stop_recording` → `transcribe_audio` chain
 
-3. **Settings persistence**
+3. **Settings persistence** - Already working
    - `save_config` IPC → `codescribe::config::Config::save_to_env()`
-   - Load on startup
+   - Load on startup ✅
 
-### Phase 5: Model Bundling (Next Session ~1-2h)
+### Phase 5: Hotkey Integration ✅ COMPLETED
+1. **Hotkeys integration** - DONE
+   - Created `hotkey_integration.rs` module
+   - CGEventTap spawned in Tauri setup via `start_hotkey_listener()`
+   - Events routed to start/stop recording → transcribe → paste
+   - Hold mode: hold Ctrl to record, release to transcribe
+   - Toggle mode: double-tap Option to toggle recording
+   - Assistive mode: Shift held during gesture for AI formatting
+
+### Phase 6: Model Bundling (Next Session ~1-2h)
 1. Download `whisper-large-v3-turbo-mlx-q8` (~800MB)
 2. Add to `tauri.conf.json` resources
 3. Modify `local_stt.rs` to load from bundle path

@@ -2,10 +2,12 @@
 # Built by M&K (c)2026 VetCoders
 
 [build]
-# Output directory for WASM build
+# Output directory for WASM build (relative to Trunk.toml)
 dist = "dist"
-# Target for WASM compilation
+# Target for WASM compilation (relative to Trunk.toml)
 target = "index.html"
+# Public URL path for assets
+public_url = "/"
 # Disable wasm-opt (incompatible with current rustc output)
 no_optimize = true
 

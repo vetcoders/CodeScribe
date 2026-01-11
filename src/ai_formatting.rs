@@ -416,7 +416,7 @@ async fn call_llm_endpoint(
 
     // Get previous_response_id for conversation continuity (only in assistive mode)
     let previous_response_id = if assistive {
-        codescribe::conversation::get_previous_response_id()
+        crate::conversation::get_previous_response_id()
     } else {
         None
     };
@@ -483,7 +483,7 @@ async fn call_llm_endpoint(
 
     // Store response_id for conversation continuity (only in assistive mode)
     if assistive {
-        codescribe::conversation::set_response_id(responses_result.id.clone());
+        crate::conversation::set_response_id(responses_result.id.clone());
     }
 
     // Sanity check - only for formatting mode (assistive can return any length)

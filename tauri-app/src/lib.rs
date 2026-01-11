@@ -5,6 +5,9 @@ mod ui;
 mod commands;
 
 #[cfg(not(target_arch = "wasm32"))]
+mod hotkey_integration;
+
+#[cfg(not(target_arch = "wasm32"))]
 mod state;
 
 #[cfg(target_arch = "wasm32")]
@@ -20,6 +23,7 @@ pub fn start_frontend() {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_backend() {
+    use std::sync::Arc;
     use tauri::{
         Manager,
         menu::{Menu, MenuItem},
@@ -28,11 +32,23 @@ pub fn run_backend() {
 
     let state = state::AppState::new().expect("failed to initialize AppState");
 
+    // Clone state for hotkey listener (shares internal Arcs)
+    let state_for_hotkeys = Arc::new(state.clone());
+
     tauri::Builder::default()
         .manage(state)
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
-        .setup(|app| {
+        .setup(move |app| {
+            // Start hotkey listener in background thread
+            if let Err(e) = hotkey_integration::start_hotkey_listener(
+                app.handle().clone(),
+                Arc::clone(&state_for_hotkeys),
+            ) {
+                eprintln!("Warning: Failed to start hotkey listener: {}", e);
+                // Continue anyway - GUI still works without hotkeys
+            }
+
             // Build tray menu
             let show = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
             let settings = MenuItem::with_id(app, "settings", "Settings...", true, None::<&str>)?;
@@ -95,6 +111,9 @@ pub fn run_backend() {
             commands::lexicon::get_lexicon_entries,
             commands::lexicon::list_lexicon_topics,
             commands::lexicon::save_lexicon_entry,
+            commands::recording::start_recording,
+            commands::recording::stop_recording,
+            commands::recording::is_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -85,6 +85,66 @@ fn SpectrogramPanel() -> impl IntoView {
     let (is_streaming, set_is_streaming) = signal(false);
     let (status_text, set_status_text) = signal("Ready".to_string());
     let (buffer_kb, set_buffer_kb) = signal(0.0f32);
+    let (transcript, set_transcript) = signal(String::new());
+    let (error, set_error) = signal(None::<String>);
+
+    let start_recording = move |_| {
+        set_error.set(None);
+        set_transcript.set(String::new());
+        set_status_text.set("Starting...".to_string());
+
+        leptos::task::spawn_local(async move {
+            let res: Result<(), String> = tauri::invoke("start_recording", NoArgs {}).await;
+            match res {
+                Ok(()) => {
+                    set_is_streaming.set(true);
+                    set_status_text.set("Recording...".to_string());
+                    set_buffer_kb.set(0.0);
+                }
+                Err(e) => {
+                    set_status_text.set("Error".to_string());
+                    set_error.set(Some(e));
+                }
+            }
+        });
+    };
+
+    let stop_recording = move |_| {
+        set_status_text.set("Stopping...".to_string());
+
+        leptos::task::spawn_local(async move {
+            let res: Result<Option<String>, String> = tauri::invoke("stop_recording", NoArgs {}).await;
+            set_is_streaming.set(false);
+
+            match res {
+                Ok(Some(audio_path)) => {
+                    set_status_text.set("Transcribing...".to_string());
+
+                    // Auto-transcribe the recorded audio
+                    let transcribe_res: Result<String, String> =
+                        tauri::invoke("transcribe_audio", TranscribeArgs { audio_path }).await;
+
+                    match transcribe_res {
+                        Ok(text) => {
+                            set_transcript.set(text);
+                            set_status_text.set("Done".to_string());
+                        }
+                        Err(e) => {
+                            set_status_text.set("Transcription failed".to_string());
+                            set_error.set(Some(e));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    set_status_text.set("No audio captured".to_string());
+                }
+                Err(e) => {
+                    set_status_text.set("Error".to_string());
+                    set_error.set(Some(e));
+                }
+            }
+        });
+    };
 
     view! {
         <section class="vista-panel">
@@ -101,21 +161,14 @@ fn SpectrogramPanel() -> impl IntoView {
             <div class="controls row" style="margin-top: 14px;">
                 <button
                     disabled=move || is_streaming.get()
-                    on:click=move |_| {
-                        set_is_streaming.set(true);
-                        set_status_text.set("Streaming...".to_string());
-                        set_buffer_kb.set(0.0);
-                    }
+                    on:click=start_recording
                 >
                     "Start streaming"
                 </button>
                 <button
                     class="secondary"
                     disabled=move || !is_streaming.get()
-                    on:click=move |_| {
-                        set_is_streaming.set(false);
-                        set_status_text.set("Stopped".to_string());
-                    }
+                    on:click=stop_recording
                 >
                     "Stop"
                 </button>
@@ -125,6 +178,17 @@ fn SpectrogramPanel() -> impl IntoView {
                 <progress max="100" value=move || (buffer_kb.get() / 100.0 * 100.0).min(100.0) as i32></progress>
                 <span>{move || format!("{:.1} KB buffered", buffer_kb.get())}</span>
             </div>
+
+            <Show when=move || error.get().is_some()>
+                <pre class="error">{move || error.get().unwrap_or_default()}</pre>
+            </Show>
+
+            <Show when=move || !transcript.get().is_empty()>
+                <div class="transcript-result">
+                    <strong>"Transcript: "</strong>
+                    <pre class="code">{move || transcript.get()}</pre>
+                </div>
+            </Show>
         </section>
     }
 }

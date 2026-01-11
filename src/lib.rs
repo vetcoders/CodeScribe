@@ -6,6 +6,7 @@
 // Allow unexpected cfgs from objc crate's msg_send! macro
 #![allow(unexpected_cfgs)]
 
+pub mod ai_formatting;
 pub mod audio;
 pub mod audio_loader;
 pub mod clipboard;
@@ -13,8 +14,12 @@ pub mod config;
 pub mod conversation;
 pub mod local_stt;
 pub mod models;
+pub mod sound;
 pub mod voice_chat;
 pub mod whisper_model;
+
+#[cfg(target_os = "macos")]
+pub mod hotkeys;
 
 #[cfg(target_os = "macos")]
 pub mod ui;

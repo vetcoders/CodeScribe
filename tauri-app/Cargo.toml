@@ -33,3 +33,6 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
 cpal = "0.16"
+tokio = { version = "1", features = ["sync"] }
+crossbeam-channel = "0.5"
+tracing = "0.1"
