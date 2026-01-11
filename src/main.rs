@@ -194,6 +194,203 @@ LOG_LEVEL=INFO
     Ok(())
 }
 
+/// Handle `codescribe transcribe <file>` command
+async fn handle_transcribe_command(
+    file: PathBuf,
+    language: Option<String>,
+    model: Option<String>,
+    format: bool,
+    llm_model: String,
+) -> Result<()> {
+    use std::time::Instant;
+
+    // Check file exists
+    if !file.exists() {
+        anyhow::bail!("File not found: {}", file.display());
+    }
+
+    // Find model directory
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let model_name = model.as_deref().unwrap_or("whisper-large-v3-turbo-mlx-q8");
+
+    let model_candidates = [
+        PathBuf::from(&home).join(".CodeScribe/models").join(model_name),
+        PathBuf::from("models").join(model_name),
+    ];
+
+    let model_path = model_candidates
+        .iter()
+        .find(|p| p.join("tokenizer.json").exists())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Model '{}' not found or incomplete. Required files: config.json, weights.safetensors, tokenizer.json, mel_filters.npz",
+                model_name
+            )
+        })?;
+
+    eprintln!("═══════════════════════════════════════════════════════════");
+    eprintln!("  CodeScribe Local Transcription");
+    eprintln!("═══════════════════════════════════════════════════════════");
+    eprintln!("  Audio: {}", file.display());
+    eprintln!("  Model: {}", model_path.display());
+    eprintln!(
+        "  Language: {}",
+        language.as_deref().unwrap_or("auto-detect")
+    );
+    if format {
+        eprintln!("  Format: {} (via Ollama)", llm_model);
+    }
+    eprintln!("───────────────────────────────────────────────────────────");
+
+    // Load model
+    eprintln!("  Loading Whisper model...");
+    let start = Instant::now();
+    let mut engine = local_stt::LocalWhisperEngine::new(model_path)?;
+    eprintln!("  Model loaded in {:?}", start.elapsed());
+
+    // Detect language if not specified
+    let lang = if let Some(l) = language {
+        l
+    } else {
+        eprintln!("  Detecting language...");
+        let start = Instant::now();
+        let detected = engine.detect_language_file(&file)?;
+        eprintln!("  Detected: {} ({:?})", detected, start.elapsed());
+        detected
+    };
+
+    // Transcribe
+    eprintln!("  Transcribing...");
+    let start = Instant::now();
+    let raw_text = engine.transcribe_file_with_language(&file, Some(&lang))?;
+    let transcribe_time = start.elapsed();
+
+    eprintln!("───────────────────────────────────────────────────────────");
+    eprintln!("  Transcription time: {:?}", transcribe_time);
+    eprintln!("  Raw characters: {}", raw_text.len());
+
+    // Format with AI if requested
+    let final_text = if format {
+        eprintln!("  Formatting with AI...");
+        let start = Instant::now();
+        match format_with_ollama(&raw_text, &llm_model, &lang).await {
+            Ok(formatted) => {
+                eprintln!("  Formatted in {:?}", start.elapsed());
+                eprintln!("  Formatted characters: {}", formatted.len());
+                formatted
+            }
+            Err(e) => {
+                eprintln!("  ⚠ Formatting failed: {} - using raw text", e);
+                raw_text
+            }
+        }
+    } else {
+        raw_text
+    };
+
+    eprintln!("  Words: {}", final_text.split_whitespace().count());
+    eprintln!("═══════════════════════════════════════════════════════════");
+    eprintln!();
+
+    // Output transcription to stdout (pipeable)
+    println!("{}", final_text);
+
+    Ok(())
+}
+
+/// Format transcription using Ollama LLM
+async fn format_with_ollama(text: &str, model: &str, lang: &str) -> Result<String> {
+    let host = std::env::var("LLM_HOST")
+        .or_else(|_| std::env::var("OLLAMA_HOST"))
+        .unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+
+    let endpoint = format!("{}/api/chat", host.trim_end_matches('/'));
+
+    let system_prompt = format!(
+        r#"You are a transcription formatter. Clean up and format the following speech-to-text transcription.
+
+Rules:
+- Fix punctuation, capitalization, and obvious speech recognition errors
+- Remove filler words (um, uh, like) and repetitions
+- Structure into clear paragraphs where appropriate
+- Keep the original meaning and language ({})
+- Use bullet points or numbered lists if the content is enumerating items
+- Do NOT add any commentary, just output the formatted text
+- Do NOT translate - keep the original language"#,
+        lang
+    );
+
+    #[derive(serde::Serialize)]
+    struct OllamaRequest {
+        model: String,
+        messages: Vec<OllamaMessage>,
+        stream: bool,
+        options: OllamaOptions,
+    }
+
+    #[derive(serde::Serialize)]
+    struct OllamaMessage {
+        role: &'static str,
+        content: String,
+    }
+
+    #[derive(serde::Serialize)]
+    struct OllamaOptions {
+        temperature: f32,
+        num_predict: u32,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OllamaResponse {
+        message: Option<OllamaMessageResponse>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OllamaMessageResponse {
+        content: String,
+    }
+
+    let request = OllamaRequest {
+        model: model.to_string(),
+        messages: vec![
+            OllamaMessage {
+                role: "system",
+                content: system_prompt,
+            },
+            OllamaMessage {
+                role: "user",
+                content: text.to_string(),
+            },
+        ],
+        stream: false,
+        options: OllamaOptions {
+            temperature: 0.1,
+            num_predict: 4096,
+        },
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Ollama HTTP {} - {}", status, body);
+    }
+
+    let ollama_response: OllamaResponse = response.json().await?;
+
+    ollama_response
+        .message
+        .map(|m| m.content.trim().to_string())
+        .ok_or_else(|| anyhow::anyhow!("Empty Ollama response"))
+}
+
 /// CodeScribe - Speech-to-text tray app for macOS
 ///
 /// Hold Ctrl to record, release to transcribe.
@@ -212,6 +409,34 @@ struct Cli {
     /// Open config file in editor (creates default if missing)
     #[arg(long)]
     config: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Transcribe an audio file using local Whisper (bypasses API limits)
+    Transcribe {
+        /// Path to audio file (wav, mp3, m4a)
+        file: PathBuf,
+
+        /// Language code (e.g., pl, en). Default: auto-detect
+        #[arg(short, long)]
+        language: Option<String>,
+
+        /// Whisper model to use (default: whisper-large-v3-turbo-mlx-q8)
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Format output using AI (Ollama with qwen3-coder:480b-cloud)
+        #[arg(short, long)]
+        format: bool,
+
+        /// LLM model for formatting (default: qwen3-coder:480b-cloud)
+        #[arg(long, default_value = "qwen3-coder:480b-cloud")]
+        llm: String,
+    },
 }
 
 #[tokio::main]
@@ -221,6 +446,15 @@ async fn main() -> Result<()> {
     // Handle --config flag: create/open config file and exit
     if cli.config {
         return handle_config_command();
+    }
+
+    // Handle subcommands
+    if let Some(command) = cli.command {
+        return match command {
+            Commands::Transcribe { file, language, model, format, llm } => {
+                handle_transcribe_command(file, language, model, format, llm).await
+            }
+        };
     }
 
     // Acquire PID lock (prevent multiple instances)

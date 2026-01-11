@@ -56,6 +56,18 @@ branch diffs you requested. Dates follow the Git history recorded in this repo.
 - **Graceful degradation** – fallback to LibraxisAI cloud if local model fails
 - **Long audio chunking** – 25s chunks with 5s overlap for files > 30s
 
+### E2E Pipeline Tests
+- **Comprehensive test suite** – `tests/e2e_pipeline.rs` with 15 tests covering:
+  - Audio loading and 16kHz resampling
+  - Configuration loading and defaults
+  - Model manager initialization and availability
+  - Local STT engine with Q8 model (graceful skip when incomplete)
+  - DecodingParams validation (mlx_whisper compatible)
+  - Full pipeline: Load → Detect Language → Transcribe → Result
+  - Benchmark: Multiple runs with timing statistics
+- **Pipeline modes documentation** – Toggle (hands-off), Hold (800ms delay), AI Assistive (Ctrl+Shift)
+- **Real-time output** – Tests present results visually during execution (`--nocapture`)
+
 ---
 
 - **Unified user data directory** – settings, transcript history, stats, and onboarding
