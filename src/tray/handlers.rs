@@ -6,17 +6,19 @@ use muda::MenuId;
 use std::process::Command;
 use tracing::{debug, info};
 
+use crate::config::{Config, HoldMods, ToggleTrigger};
 use crate::tray::menu::toggle_ai_formatting;
-use crate::tray::state::send_menu_event;
+use crate::tray::state::{send_menu_event, HOLD_MENU_ITEMS, TOGGLE_MENU_ITEMS};
 use crate::tray::types::{MenuIds, TrayMenuEvent};
 
 /// Handle menu item click and send appropriate event
 pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
+    // Top-level items
     if event_id == &menu_ids.ai_formatting {
         handle_toggle_ai_formatting();
     } else if event_id == &menu_ids.copy_last {
         handle_copy_last();
-    } else if event_id == &menu_ids.settings {
+    } else if event_id == &menu_ids.settings_edit_config {
         handle_open_settings();
     } else if event_id == &menu_ids.help {
         handle_open_help();
@@ -24,6 +26,34 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         handle_show_about();
     } else if event_id == &menu_ids.quit {
         send_menu_event(TrayMenuEvent::Quit);
+    }
+    // Hold Hotkeys submenu
+    else if event_id == &menu_ids.hold_ctrl {
+        handle_set_hold_mods(HoldMods::Ctrl);
+    } else if event_id == &menu_ids.hold_ctrl_opt {
+        handle_set_hold_mods(HoldMods::CtrlAlt);
+    } else if event_id == &menu_ids.hold_ctrl_shift {
+        handle_set_hold_mods(HoldMods::CtrlShift);
+    } else if event_id == &menu_ids.hold_ctrl_cmd {
+        handle_set_hold_mods(HoldMods::CtrlCmd);
+    } else if event_id == &menu_ids.hold_exclusive {
+        handle_toggle_hold_exclusive();
+    }
+    // Toggle trigger submenu
+    else if event_id == &menu_ids.toggle_double_opt {
+        handle_set_toggle_trigger(ToggleTrigger::DoubleOption);
+    } else if event_id == &menu_ids.toggle_double_ralt {
+        handle_set_toggle_trigger(ToggleTrigger::DoubleRightOption);
+    } else if event_id == &menu_ids.toggle_disabled {
+        handle_set_toggle_trigger(ToggleTrigger::None);
+    }
+    // History submenu
+    else if event_id == &menu_ids.history_save {
+        handle_toggle_history();
+    } else if event_id == &menu_ids.history_copy_latest {
+        handle_copy_latest_to_clipboard();
+    } else if event_id == &menu_ids.history_open_folder {
+        handle_open_history_folder();
     } else {
         debug!("Unknown menu event id: {:?}", event_id);
     }
@@ -32,7 +62,10 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
 /// Toggle AI Formatting state
 fn handle_toggle_ai_formatting() {
     let new_state = toggle_ai_formatting();
-    info!("AI Formatting toggled: {}", if new_state { "ON" } else { "OFF" });
+    info!(
+        "AI Formatting toggled: {}",
+        if new_state { "ON" } else { "OFF" }
+    );
 }
 
 /// Copy last transcript to clipboard
@@ -54,7 +87,113 @@ fn handle_copy_last() {
 }
 
 // ============================================================================
-// Handler Helper Functions
+// Hold Hotkeys Handlers
+// ============================================================================
+
+/// Set hold modifier keys and update menu checkmarks
+fn handle_set_hold_mods(mods: HoldMods) {
+    info!("Setting hold mods to: {:?}", mods);
+    send_menu_event(TrayMenuEvent::SetHoldMods(mods));
+
+    // Update menu checkmarks (radio behavior)
+    HOLD_MENU_ITEMS.with(|items_cell| {
+        if let Some(ref items) = *items_cell.borrow() {
+            items.ctrl.set_checked(mods == HoldMods::Ctrl);
+            items.ctrl_opt.set_checked(mods == HoldMods::CtrlAlt);
+            items.ctrl_shift.set_checked(mods == HoldMods::CtrlShift);
+            items.ctrl_cmd.set_checked(mods == HoldMods::CtrlCmd);
+            items.label.set_text(format!("Current: {}", mods.label()));
+        }
+    });
+
+    // Persist to config
+    let config = Config::load();
+    let _ = config.save_to_env("HOLD_MODS", mods.as_str());
+}
+
+/// Toggle hold exclusive mode
+fn handle_toggle_hold_exclusive() {
+    send_menu_event(TrayMenuEvent::ToggleHoldExclusive);
+
+    let config = Config::load();
+    let new_state = !config.hold_exclusive;
+    let _ = config.save_to_env("HOLD_EXCLUSIVE", if new_state { "1" } else { "0" });
+    info!(
+        "Hold exclusive toggled: {}",
+        if new_state { "ON" } else { "OFF" }
+    );
+}
+
+/// Set toggle trigger and update menu checkmarks
+fn handle_set_toggle_trigger(trigger: ToggleTrigger) {
+    info!("Setting toggle trigger to: {:?}", trigger);
+    send_menu_event(TrayMenuEvent::SetToggleTrigger(trigger));
+
+    // Update menu checkmarks (radio behavior)
+    TOGGLE_MENU_ITEMS.with(|items_cell| {
+        if let Some(ref items) = *items_cell.borrow() {
+            items
+                .double_opt
+                .set_checked(trigger == ToggleTrigger::DoubleOption);
+            items
+                .double_ralt
+                .set_checked(trigger == ToggleTrigger::DoubleRightOption);
+            items.disabled.set_checked(trigger == ToggleTrigger::None);
+            items.label.set_text(format!("Toggle: {}", trigger.label()));
+        }
+    });
+
+    // Persist to config
+    let config = Config::load();
+    let _ = config.save_to_env("TOGGLE_TRIGGER", trigger.as_str());
+}
+
+// ============================================================================
+// History Handlers
+// ============================================================================
+
+/// Toggle history saving
+fn handle_toggle_history() {
+    send_menu_event(TrayMenuEvent::ToggleHistory);
+
+    let config = Config::load();
+    let new_state = !config.history_enabled;
+    let _ = config.save_to_env("HISTORY_ENABLED", if new_state { "1" } else { "0" });
+    info!(
+        "History saving toggled: {}",
+        if new_state { "ON" } else { "OFF" }
+    );
+}
+
+/// Copy latest transcript to clipboard
+fn handle_copy_latest_to_clipboard() {
+    send_menu_event(TrayMenuEvent::CopyLatestToClipboard);
+
+    if let Some(last_entry) = crate::history::latest_entry() {
+        if let Ok(text) = std::fs::read_to_string(&last_entry.path) {
+            if let Err(e) = crate::clipboard::set_clipboard(&text) {
+                info!("Failed to copy to clipboard: {}", e);
+            } else {
+                info!(
+                    "Copied latest transcript to clipboard ({} chars)",
+                    text.len()
+                );
+            }
+        }
+    } else {
+        info!("No transcript history available");
+    }
+}
+
+/// Open history folder in Finder
+fn handle_open_history_folder() {
+    send_menu_event(TrayMenuEvent::OpenHistoryFolder);
+    crate::history::open_history_folder();
+    info!("Opening history folder");
+}
+
+// ============================================================================
+// Settings Handlers
 // ============================================================================
 
 /// Open settings file in $EDITOR

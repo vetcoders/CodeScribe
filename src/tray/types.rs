@@ -3,11 +3,14 @@
 //! Contains all enums and structs used by the tray system.
 
 use anyhow::Result;
-use muda::MenuId;
+use muda::{CheckMenuItem, MenuId, MenuItem};
 use tracing::debug;
 use tray_icon::Icon;
 
 use crate::tray::icons::{create_fallback_icon, load_custom_icon};
+
+// Re-export config enums for menu use (single source of truth)
+pub use crate::config::{HoldMods, ToggleTrigger};
 
 /// Status of the CodeScribe system, reflected in tray icon
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +61,6 @@ impl TrayStatus {
 }
 
 /// Menu events that can be sent to the main controller.
-/// Minimal set for simplified tray menu.
 #[derive(Debug, Clone)]
 pub enum TrayMenuEvent {
     /// Copy last transcript to clipboard
@@ -71,18 +73,118 @@ pub enum TrayMenuEvent {
     ShowAbout,
     /// User clicked Quit - clean shutdown
     Quit,
+
+    // Hold Hotkeys submenu
+    SetHoldMods(HoldMods),
+    ToggleHoldExclusive,
+    SetToggleTrigger(ToggleTrigger),
+
+    // History submenu
+    ToggleHistory,
+    CopyLatestToClipboard,
+    OpenHistoryFolder,
+    SelectHistoryEntry(usize),
+}
+
+/// Volume level presets
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeLevel {
+    Mute,   // 0%
+    Low,    // 25%
+    Medium, // 50%
+    High,   // 75%
+    Full,   // 100%
+}
+
+impl VolumeLevel {
+    /// Convert to f32 value (0.0 - 1.0)
+    #[allow(dead_code)]
+    pub fn as_f32(self) -> f32 {
+        match self {
+            VolumeLevel::Mute => 0.0,
+            VolumeLevel::Low => 0.25,
+            VolumeLevel::Medium => 0.5,
+            VolumeLevel::High => 0.75,
+            VolumeLevel::Full => 1.0,
+        }
+    }
+
+    /// Get display label
+    pub fn label(self) -> &'static str {
+        match self {
+            VolumeLevel::Mute => "Mute (0%)",
+            VolumeLevel::Low => "Low (25%)",
+            VolumeLevel::Medium => "Medium (50%)",
+            VolumeLevel::High => "High (75%)",
+            VolumeLevel::Full => "Full (100%)",
+        }
+    }
+}
+
+// ============================================================================
+// Menu Item Storage Structs
+// ============================================================================
+
+/// Model menu items for dynamic updates
+pub struct ModelMenuItems {
+    pub small: CheckMenuItem,
+    pub medium: CheckMenuItem,
+    pub large_v3: CheckMenuItem,
+    pub large_v3_turbo: CheckMenuItem,
+    pub large_v3_q8: CheckMenuItem,
+    pub label: MenuItem,
+}
+
+/// Hold Hotkeys menu items for radio-button behavior
+pub struct HoldMenuItems {
+    pub ctrl: CheckMenuItem,
+    pub ctrl_opt: CheckMenuItem,
+    pub ctrl_shift: CheckMenuItem,
+    pub ctrl_cmd: CheckMenuItem,
+    pub label: MenuItem,
+}
+
+/// Toggle Trigger menu items for radio-button behavior
+pub struct ToggleMenuItems {
+    pub double_opt: CheckMenuItem,
+    pub double_ralt: CheckMenuItem,
+    pub disabled: CheckMenuItem,
+    pub label: MenuItem,
+}
+
+/// History menu label for dynamic updates
+pub struct HistoryMenuItems {
+    pub latest_label: MenuItem,
 }
 
 // ============================================================================
 // Menu IDs Structure
 // ============================================================================
 
-/// Menu item IDs for tracking clickable items (minimal set)
+/// Menu item IDs for tracking all clickable items
 pub struct MenuIds {
+    // Top-level
     pub ai_formatting: MenuId,
     pub copy_last: MenuId,
-    pub settings: MenuId,
     pub help: MenuId,
     pub about: MenuId,
     pub quit: MenuId,
+
+    // Hold Hotkeys submenu
+    pub hold_ctrl: MenuId,
+    pub hold_ctrl_opt: MenuId,
+    pub hold_ctrl_shift: MenuId,
+    pub hold_ctrl_cmd: MenuId,
+    pub hold_exclusive: MenuId,
+    pub toggle_double_opt: MenuId,
+    pub toggle_double_ralt: MenuId,
+    pub toggle_disabled: MenuId,
+
+    // History submenu
+    pub history_save: MenuId,
+    pub history_copy_latest: MenuId,
+    pub history_open_folder: MenuId,
+
+    // Settings submenu
+    pub settings_edit_config: MenuId,
 }

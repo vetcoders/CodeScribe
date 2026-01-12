@@ -2,13 +2,27 @@
 //!
 //! Manages tray status updates from async tasks to the main thread.
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use tracing::debug;
 
 use crate::tray::menu::update_status_label;
-use crate::tray::types::{TrayMenuEvent, TrayStatus};
+use crate::tray::types::{
+    HistoryMenuItems, HoldMenuItems, ModelMenuItems, ToggleMenuItems, TrayMenuEvent, TrayStatus,
+};
+
+// ============================================================================
+// Thread-local Menu Item Storage
+// ============================================================================
+
+thread_local! {
+    pub static MODEL_MENU_ITEMS: RefCell<Option<ModelMenuItems>> = const { RefCell::new(None) };
+    pub static HOLD_MENU_ITEMS: RefCell<Option<HoldMenuItems>> = const { RefCell::new(None) };
+    pub static TOGGLE_MENU_ITEMS: RefCell<Option<ToggleMenuItems>> = const { RefCell::new(None) };
+    pub static HISTORY_MENU_ITEMS: RefCell<Option<HistoryMenuItems>> = const { RefCell::new(None) };
+}
 
 // ============================================================================
 // Global Channels

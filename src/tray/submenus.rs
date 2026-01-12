@@ -270,9 +270,9 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HoldMenuIds)> {
     ))
 }
 
-/// Build the History submenu
+/// Build the Recent Transcripts submenu (History)
 pub fn build_history_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> {
-    let history_menu = Submenu::new("History", true);
+    let history_menu = Submenu::new("Recent Transcripts", true);
 
     let recent_entries = crate::history::recent_entries(5);
     let latest_label = if let Some(entry) = recent_entries.first() {
@@ -307,7 +307,7 @@ pub fn build_history_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> {
 
     let history_copy_latest = MenuItem::new("Copy Latest to Clipboard", true, None);
     let history_copy_latest_id = history_copy_latest.id().clone();
-    let history_open_folder = MenuItem::new("Open History Folder", true, None);
+    let history_open_folder = MenuItem::new("Open Folder", true, None);
     let history_open_folder_id = history_open_folder.id().clone();
 
     history_menu.append(&history_copy_latest)?;

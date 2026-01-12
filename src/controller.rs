@@ -106,7 +106,7 @@ impl ValidatedAudioPath {
 }
 
 use crate::config::Config;
-use crate::local_stt::LocalWhisperEngine;
+use crate::whisper::LocalWhisperEngine;
 use crate::models::ModelManager;
 use crate::tray::{TrayStatus, update_tray_status};
 use crate::voice_chat::{VoiceChatClient, VoiceChatEvent};

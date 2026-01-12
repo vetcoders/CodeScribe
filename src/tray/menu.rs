@@ -1,18 +1,20 @@
 //! Main menu building logic for the tray menu
 //!
-//! Constructs a minimal tray menu with only essential items:
+//! Constructs the tray menu with nested Settings submenu:
 //! - Status line (dynamic)
-//! - Settings (opens config in editor)
-//! - Help (opens docs)
-//! - About (shows version)
+//! - AI Formatting toggle
+//! - Copy Last to Clipboard
+//! - Settings submenu (Hold Hotkeys, Recent Transcripts, Edit Config)
+//! - Help/About
 //! - Quit
 
 use std::cell::RefCell;
 
 use anyhow::Result;
-use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::config::Config;
+use crate::tray::submenus::{build_history_submenu, build_hold_hotkeys_submenu};
 use crate::tray::types::MenuIds;
 
 // Thread-local storage for menu items that need dynamic updates
@@ -21,19 +23,30 @@ thread_local! {
     pub static AI_FORMATTING_ITEM: RefCell<Option<CheckMenuItem>> = const { RefCell::new(None) };
 }
 
-/// Build the minimal tray menu
+/// Build the tray menu with nested Settings
 ///
 /// Menu structure:
 /// ```text
-/// [●] Status: Idle          ← DYNAMIC (updated via update_status_label)
-/// ─────────────────
-/// [✓] AI Formatting         ← CheckMenuItem (Shift+Ctrl triggers formatted mode)
-/// ─────────────────
-/// ⚙ Settings...             → Opens ~/.codescribe/.env in editor
-/// ? Help                    → Opens docs/README in browser
-/// ⓘ About                   → Shows version dialog
-/// ─────────────────
-/// ⏻ Quit
+/// Status: Done!
+/// ─────────────
+/// [✓] AI Formatting
+///     Copy Last to Clipboard
+/// ─────────────
+/// Settings ▸
+///     ├── Hold Hotkeys ▸
+///     │   ├── Ctrl only
+///     │   ├── Ctrl+Option
+///     │   ├── Ctrl+Shift
+///     │   └── Ctrl+Command
+///     ├── Recent Transcripts ▸
+///     │   ├── [5 entries]
+///     │   └── Open Folder
+///     └── Edit Config File
+/// ─────────────
+/// Help
+/// About
+/// ─────────────
+/// Quit
 /// ```
 pub fn build_menu() -> Result<(Menu, MenuIds)> {
     let menu = Menu::new();
@@ -69,38 +82,81 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     // 5. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 6. Settings
-    let settings_item = MenuItem::new("Settings...", true, None);
-    let settings_id = settings_item.id().clone();
-    menu.append(&settings_item)?;
+    // 6. Settings Submenu (nested)
+    let settings_menu = Submenu::new("Settings", true);
 
-    // 6. Help
+    // 6a. Hold Hotkeys submenu
+    let (hold_hotkeys_menu, hold_ids) = build_hold_hotkeys_submenu()?;
+    settings_menu.append(&hold_hotkeys_menu)?;
+
+    // 6b. Recent Transcripts submenu (History)
+    let (history_menu, history_save_id, history_copy_latest_id, history_open_folder_id) =
+        build_history_submenu()?;
+    settings_menu.append(&history_menu)?;
+
+    // 6c. Separator before Edit Config
+    settings_menu.append(&PredefinedMenuItem::separator())?;
+
+    // 6d. Edit Config File
+    let edit_config_item = MenuItem::new("Edit Config File", true, None);
+    let edit_config_id = edit_config_item.id().clone();
+    settings_menu.append(&edit_config_item)?;
+
+    menu.append(&settings_menu)?;
+
+    // 7. Help
     let help_item = MenuItem::new("Help", true, None);
     let help_id = help_item.id().clone();
     menu.append(&help_item)?;
 
-    // 7. About
+    // 8. About
     let about_item = MenuItem::new("About", true, None);
     let about_id = about_item.id().clone();
     menu.append(&about_item)?;
 
-    // 8. Separator
+    // 9. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 9. Quit
+    // 10. Quit
     let quit_item = MenuItem::new("Quit", true, None);
     let quit_id = quit_item.id().clone();
     menu.append(&quit_item)?;
+
+    // Destructure hold_ids tuple
+    let (
+        hold_ctrl_id,
+        hold_ctrl_opt_id,
+        hold_ctrl_shift_id,
+        hold_ctrl_cmd_id,
+        hold_exclusive_id,
+        toggle_double_opt_id,
+        toggle_double_ralt_id,
+        toggle_disabled_id,
+    ) = hold_ids;
 
     Ok((
         menu,
         MenuIds {
             ai_formatting: ai_formatting_id,
             copy_last: copy_last_id,
-            settings: settings_id,
             help: help_id,
             about: about_id,
             quit: quit_id,
+            // Hold Hotkeys submenu
+            hold_ctrl: hold_ctrl_id,
+            hold_ctrl_opt: hold_ctrl_opt_id,
+            hold_ctrl_shift: hold_ctrl_shift_id,
+            hold_ctrl_cmd: hold_ctrl_cmd_id,
+            hold_exclusive: hold_exclusive_id,
+            toggle_double_opt: toggle_double_opt_id,
+            toggle_double_ralt: toggle_double_ralt_id,
+            toggle_disabled: toggle_disabled_id,
+            // History submenu
+            history_save: history_save_id,
+            history_copy_latest: history_copy_latest_id,
+            history_open_folder: history_open_folder_id,
+            // Settings
+            settings_edit_config: edit_config_id,
         },
     ))
 }

@@ -15,7 +15,7 @@ mod history;
 mod hotkeys;
 mod lab_server;
 mod launchd;
-mod local_stt;
+mod whisper;
 mod models;
 mod permissions;
 mod sound;
@@ -250,7 +250,7 @@ async fn handle_transcribe_command(
     // Load model
     eprintln!("  Loading Whisper model...");
     let start = Instant::now();
-    let mut engine = local_stt::LocalWhisperEngine::new(model_path)?;
+    let mut engine = whisper::LocalWhisperEngine::new(model_path)?;
     eprintln!("  Model loaded in {:?}", start.elapsed());
 
     // Detect language if not specified
