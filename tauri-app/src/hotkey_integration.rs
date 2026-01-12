@@ -213,7 +213,7 @@ async fn handle_stop_recording(state: &AppState, assistive: bool) -> Result<(), 
         // Load engine if not already loaded
         if stt.engine.is_none() || stt.loaded_model.as_ref() != Some(&local_model) {
             let model_path = state.model_manager.get_model_path(&local_model);
-            match codescribe::local_stt::LocalWhisperEngine::new(&model_path) {
+            match codescribe::whisper::LocalWhisperEngine::new(&model_path) {
                 Ok(engine) => {
                     stt.engine = Some(engine);
                     stt.loaded_model = Some(local_model.clone());

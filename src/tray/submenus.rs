@@ -1,6 +1,9 @@
 //! Submenu building functions for the tray menu
 //!
 //! Each function builds a specific submenu and returns its IDs.
+//! Some functions are prepared for future use but not yet integrated into the main menu.
+
+#![allow(dead_code)]
 
 use anyhow::Result;
 use muda::{

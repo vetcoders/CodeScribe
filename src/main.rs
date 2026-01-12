@@ -676,11 +676,8 @@ async fn main() -> Result<()> {
                             std::io::Write::flush(&mut std::io::stderr()).ok();
                             std::process::exit(0);
                         }
-                        // These events are handled directly in handlers.rs
-                        tray::TrayMenuEvent::CopyLast
-                        | tray::TrayMenuEvent::OpenSettings
-                        | tray::TrayMenuEvent::OpenHelp
-                        | tray::TrayMenuEvent::ShowAbout => {
+                        // All other events are handled directly in handlers.rs
+                        _ => {
                             // Already handled in handlers.rs, just log
                             debug!("Menu action handled in tray handlers");
                         }

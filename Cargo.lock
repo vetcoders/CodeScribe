@@ -958,6 +958,7 @@ dependencies = [
 name = "codescribe-app"
 version = "0.6.0"
 dependencies = [
+ "anyhow",
  "codescribe",
  "console_error_panic_hook",
  "console_log",

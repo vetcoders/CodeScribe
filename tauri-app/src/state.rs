@@ -3,7 +3,7 @@ use codescribe::audio::Recorder;
 #[cfg(not(target_arch = "wasm32"))]
 use codescribe::config::Config;
 #[cfg(not(target_arch = "wasm32"))]
-use codescribe::local_stt::LocalWhisperEngine;
+use codescribe::whisper::LocalWhisperEngine;
 #[cfg(not(target_arch = "wasm32"))]
 use codescribe::models::ModelManager;
 

@@ -1,7 +1,7 @@
 use crate::state::AppState;
 
 use codescribe::config::Language;
-use codescribe::local_stt::LocalWhisperEngine;
+use codescribe::whisper::LocalWhisperEngine;
 use std::path::PathBuf;
 
 #[tauri::command]
@@ -56,7 +56,7 @@ pub async fn transcribe_audio(
             .unwrap_or(true);
 
         if need_reload {
-            stt.engine = Some(LocalWhisperEngine::new(&model_path2).map_err(|e| e.to_string())?);
+            stt.engine = Some(LocalWhisperEngine::new(&model_path2).map_err(|e: anyhow::Error| e.to_string())?);
             stt.loaded_model = Some(model_name2);
         }
 
@@ -66,10 +66,10 @@ pub async fn transcribe_audio(
             .ok_or_else(|| "engine missing".to_string())?;
         engine
             .transcribe_file_with_language(&audio_path, lang)
-            .map_err(|e| e.to_string())
+            .map_err(|e: anyhow::Error| e.to_string())
     });
 
-    handle.await.map_err(|e| e.to_string())?
+    handle.await.map_err(|e: tauri::Error| e.to_string())?
 }
 
 #[tauri::command]

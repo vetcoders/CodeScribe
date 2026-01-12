@@ -61,6 +61,8 @@ impl TrayStatus {
 }
 
 /// Menu events that can be sent to the main controller.
+/// Some variants are prepared for future use but handlers may not be implemented yet.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum TrayMenuEvent {
     /// Copy last transcript to clipboard
@@ -86,7 +88,8 @@ pub enum TrayMenuEvent {
     SelectHistoryEntry(usize),
 }
 
-/// Volume level presets
+/// Volume level presets (prepared for future Feedback submenu)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VolumeLevel {
     Mute,   // 0%
@@ -125,7 +128,8 @@ impl VolumeLevel {
 // Menu Item Storage Structs
 // ============================================================================
 
-/// Model menu items for dynamic updates
+/// Model menu items for dynamic updates (prepared for future Models submenu)
+#[allow(dead_code)]
 pub struct ModelMenuItems {
     pub small: CheckMenuItem,
     pub medium: CheckMenuItem,
@@ -153,6 +157,7 @@ pub struct ToggleMenuItems {
 }
 
 /// History menu label for dynamic updates
+#[allow(dead_code)]
 pub struct HistoryMenuItems {
     pub latest_label: MenuItem,
 }
