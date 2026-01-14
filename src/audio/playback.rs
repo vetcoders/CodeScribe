@@ -49,6 +49,7 @@ pub fn play_sound(_name: &str) {
 /// - macOS: Uses `afplay -v` with system sounds from `/System/Library/Sounds/`
 /// - Other platforms: No-op (silent)
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // Used by tauri-app
 pub fn play_sound_with_volume(name: &str, volume: f32) {
     use std::process::Command;
 
@@ -75,6 +76,7 @@ pub fn play_sound_with_volume(name: &str, volume: f32) {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)] // Used by tauri-app
 pub fn play_sound_with_volume(_name: &str, _volume: f32) {
     // No-op on non-macOS platforms
 }

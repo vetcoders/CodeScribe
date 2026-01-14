@@ -299,16 +299,19 @@ impl LocalWhisperEngine {
         self.transcribe_long_with_language(&samples, sample_rate, language)
     }
 
+    #[allow(dead_code)] // Used by tauri-app
     pub fn detect_language_file(&mut self, path: &Path) -> Result<String> {
         let (samples, sample_rate) =
             audio_loader::load_audio_file(path).context("Failed to load audio file")?;
         self.detect_language(&samples, sample_rate)
     }
 
+    #[allow(dead_code)] // Used by tauri-app
     pub fn transcribe_file(&mut self, path: &Path) -> Result<String> {
         self.transcribe_file_with_language(path, None)
     }
 
+    #[allow(dead_code)] // Used by tauri-app
     pub fn transcribe_with_language(
         &mut self,
         audio: &[f32],
@@ -339,6 +342,7 @@ impl LocalWhisperEngine {
         self.transcribe_samples_16k(&samples, language, debug_tokens)
     }
 
+    #[allow(dead_code)] // Used by tauri-app
     pub fn transcribe_long(&mut self, audio: &[f32], sample_rate: u32) -> Result<String> {
         self.transcribe_long_with_language(audio, sample_rate, None)
     }

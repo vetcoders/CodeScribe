@@ -52,7 +52,7 @@ pub mod voice_chat_ui;
 /// Initialize and transcribe with embedded model
 pub mod stt {
     pub use crate::whisper::{
-        init, is_initialized, transcribe, transcribe_file, transcribe_streaming,
+        init, transcribe, transcribe_file, transcribe_streaming,
         detect_language, get_model_path,
     };
     pub use crate::whisper::embedded::{is_embedded_available, get_embedded_data, EmbeddedModel};
@@ -62,14 +62,13 @@ pub mod stt {
 // Public API - Audio
 // ═══════════════════════════════════════════════════════════
 
-pub use audio::{Recorder, RecorderConfig, RecorderDiagnostics};
+pub use audio::Recorder;
 
 // ═══════════════════════════════════════════════════════════
 // Public API - AI & Context
 // ═══════════════════════════════════════════════════════════
 
 pub use config::{get_assistive_prompt_path, get_formatting_prompt_path, reset_to_defaults};
-pub use state::has_active_conversation;
 
 #[cfg(target_os = "macos")]
 pub use ui::{

@@ -10,12 +10,13 @@
 pub mod conversation;
 pub mod history;
 
-// Re-export main types
+// Re-export main types (public API for tauri-app)
+#[allow(unused_imports)] // Public API for external consumers
 pub use conversation::{
-    get_previous_response_id, has_active_conversation, reset_conversation,
-    set_response_id,
+    get_previous_response_id, reset_conversation, set_response_id,
 };
+#[allow(unused_imports)] // Public API for external consumers
 pub use history::{
-    HistoryEntry, clear_history, history_dir, latest_entry, open_audio_logs_folder,
-    open_history_folder, recent_entries, save_audio, save_entry, save_entry_with_timestamp,
+    HistoryEntry, latest_entry, open_history_folder, recent_entries, save_audio,
+    save_entry, save_entry_with_timestamp,
 };

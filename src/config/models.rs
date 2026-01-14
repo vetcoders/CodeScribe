@@ -111,6 +111,7 @@ impl ModelManager {
         Ok(out)
     }
 
+    #[allow(dead_code)] // Used by tauri-app
     pub fn models_dir(&self) -> &PathBuf {
         &self.models_dir
     }

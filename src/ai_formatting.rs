@@ -666,12 +666,9 @@ async fn call_llm_endpoint(
     // Use higher temperature for assistive mode (more creative responses)
     let temperature = if assistive { 0.3 } else { 0.1 };
 
-    // Get previous_response_id for conversation continuity (only in assistive mode)
-    let previous_response_id = if assistive {
-        crate::state::conversation::get_previous_response_id()
-    } else {
-        None
-    };
+    // Get previous_response_id for conversation continuity
+    // Even in formatting mode - helps LLM understand thematic context (e.g., "Rust" vs "roost")
+    let previous_response_id = crate::state::conversation::get_previous_response_id();
 
     // Build Responses API request
     let request = ResponsesRequest {
@@ -736,10 +733,8 @@ async fn call_llm_endpoint(
         anyhow::bail!("No text content in response (id: {})", responses_result.id);
     }
 
-    // Store response_id for conversation continuity (only in assistive mode)
-    if assistive {
-        crate::state::conversation::set_response_id(responses_result.id.clone());
-    }
+    // Store response_id for conversation continuity (all modes - thematic context)
+    crate::state::conversation::set_response_id(responses_result.id.clone());
 
     // Sanity check - only for formatting mode (assistive can return any length)
     if !assistive {
@@ -776,11 +771,8 @@ async fn call_llm_endpoint_streaming(
 
     let temperature = if assistive { 0.3 } else { 0.1 };
 
-    let previous_response_id = if assistive {
-        crate::state::conversation::get_previous_response_id()
-    } else {
-        None
-    };
+    // Get previous_response_id - thematic context helps even in formatting mode
+    let previous_response_id = crate::state::conversation::get_previous_response_id();
 
     let request = ResponsesRequest {
         model,
@@ -880,8 +872,8 @@ async fn call_llm_endpoint_streaming(
         anyhow::bail!("No text content in SSE stream");
     }
 
-    // Store response_id for conversation continuity
-    if assistive && !response_id.is_empty() {
+    // Store response_id for conversation continuity (all modes - thematic context)
+    if !response_id.is_empty() {
         crate::state::conversation::set_response_id(response_id.clone());
     }
 

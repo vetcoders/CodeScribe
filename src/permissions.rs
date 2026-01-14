@@ -102,6 +102,7 @@ pub fn check_microphone() -> PermissionStatus {
 /// Shows system dialog asking user to grant microphone access.
 /// The callback will be called with the result.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // Used by tauri-app
 pub fn request_microphone() -> bool {
     // For now, we'll just check if we can access the default input device
     // The actual permission dialog will be triggered when we first try to use the microphone
@@ -112,6 +113,7 @@ pub fn request_microphone() -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)] // Used by tauri-app
 pub fn request_microphone() -> bool {
     true
 }

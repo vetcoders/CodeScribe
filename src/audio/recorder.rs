@@ -102,6 +102,7 @@ pub struct RecorderConfig {
     /// Enable automatic silence detection
     pub auto_silence: bool,
     /// Block size for audio chunks
+    #[allow(dead_code)] // Reserved for future use
     pub block_size: usize,
 }
 

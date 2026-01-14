@@ -124,6 +124,7 @@ pub enum HotkeyEvent {
 }
 
 /// Modifier flags for hold gesture detection
+#[allow(dead_code)] // Used by tauri-app
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModifierFlags {
     pub ctrl: bool,
@@ -132,6 +133,7 @@ pub struct ModifierFlags {
     pub cmd: bool,
 }
 
+#[allow(dead_code)] // Used by tauri-app
 impl ModifierFlags {
     pub fn new() -> Self {
         Self {
@@ -677,19 +679,23 @@ mod macos {
 mod macos {
     use super::*;
 
+    #[allow(dead_code)]
     pub fn start_listener(_tx: Sender<HotkeyEvent>) -> Result<(), String> {
         tracing::warn!("Hotkey listener not supported on this platform");
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn enable() {
         tracing::warn!("Hotkey enable not supported on this platform");
     }
 
+    #[allow(dead_code)]
     pub fn disable() {
         tracing::warn!("Hotkey disable not supported on this platform");
     }
 
+    #[allow(dead_code)]
     pub fn is_enabled() -> bool {
         false
     }
@@ -700,6 +706,7 @@ mod macos {
 /// Enable hotkey processing (thread-safe, global)
 ///
 /// When enabled, modifier key events will be captured and sent to the event channel.
+#[allow(dead_code)] // Used by tauri-app
 pub fn enable_hotkeys() {
     macos::enable();
 }
@@ -708,11 +715,13 @@ pub fn enable_hotkeys() {
 ///
 /// When disabled, modifier key events will be ignored and no events will be sent.
 /// The CGEventTap remains running but skips processing.
+#[allow(dead_code)] // Used by tauri-app
 pub fn disable_hotkeys() {
     macos::disable();
 }
 
 /// Check if hotkeys are currently enabled (thread-safe, global)
+#[allow(dead_code)] // Used by tauri-app
 pub fn are_hotkeys_enabled() -> bool {
     macos::is_enabled()
 }
@@ -751,6 +760,7 @@ impl HotkeyManager {
 ///
 /// The actual hotkey handling is now done through HotkeyManager integrated
 /// with CGEventTap.
+#[allow(dead_code)] // Legacy API for backwards compatibility
 pub fn start(
     _tx: Sender<HotkeyEvent>,
     _required_modifiers: ModifierFlags,

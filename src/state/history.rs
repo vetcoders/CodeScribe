@@ -55,6 +55,7 @@ pub fn transcriptions_dir(date: &DateTime<Local>) -> PathBuf {
 
 /// Get the history directory, creating it if needed
 /// Note: Now an alias for transcriptions_dir with current date for backwards compatibility
+#[allow(dead_code)] // Used by tauri-app
 pub fn history_dir() -> PathBuf {
     transcriptions_dir(&Local::now())
 }
@@ -238,16 +239,19 @@ pub fn save_audio(src_path: &Path, timestamp: DateTime<Local>) -> Option<PathBuf
 ///
 /// Prefer using save_audio() with explicit timestamp for proper pairing with transcripts
 #[deprecated(note = "Use save_audio() with explicit timestamp instead")]
+#[allow(dead_code)] // Legacy API
 pub fn dump_audio(src_path: &Path, _reason: &str) -> Option<PathBuf> {
     save_audio(src_path, Local::now())
 }
 
 /// Open the transcriptions folder in Finder (alias for open_history_folder)
+#[allow(dead_code)] // Used by tauri-app
 pub fn open_audio_logs_folder() {
     open_history_folder();
 }
 
 /// Clear all history entries
+#[allow(dead_code)] // Used by tauri-app
 pub fn clear_history() {
     let dir = history_dir();
     if let Ok(day_dirs) = fs::read_dir(&dir) {
