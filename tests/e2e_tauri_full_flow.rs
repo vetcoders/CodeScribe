@@ -12,8 +12,8 @@
 //! Created by M&K (c)2026 VetCoders
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use codescribe::{ai_formatting, audio, state::history};
 use mockito::Matcher;
@@ -357,15 +357,21 @@ fn test_history_entries_independent() {
     assert!(entry3.path.exists());
 
     // Content should be preserved
-    assert!(std::fs::read_to_string(&entry1.path)
-        .unwrap()
-        .contains("First"));
-    assert!(std::fs::read_to_string(&entry2.path)
-        .unwrap()
-        .contains("Second"));
-    assert!(std::fs::read_to_string(&entry3.path)
-        .unwrap()
-        .contains("Third"));
+    assert!(
+        std::fs::read_to_string(&entry1.path)
+            .unwrap()
+            .contains("First")
+    );
+    assert!(
+        std::fs::read_to_string(&entry2.path)
+            .unwrap()
+            .contains("Second")
+    );
+    assert!(
+        std::fs::read_to_string(&entry3.path)
+            .unwrap()
+            .contains("Third")
+    );
 
     // Latest should be entry3
     let latest = history::latest_entry().expect("latest");

@@ -336,20 +336,20 @@ fn handle_format_last() {
             .enable_all()
             .build()
             .unwrap();
-            
+
         rt.block_on(async {
             if let Some(last_entry) = crate::state::history::latest_entry() {
-                 if let Ok(text) = std::fs::read_to_string(&last_entry.path) {
-                      let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Thinking);
-                      let formatted = crate::ai_formatting::format_text(&text, None, false).await;
-                      // Zapisujemy jako nowy wpis, pozostawiając oryginalny raw w historii
-                      crate::state::history::save_entry(&formatted);
-                      let _ = crate::clipboard::set_clipboard(&formatted);
+                if let Ok(text) = std::fs::read_to_string(&last_entry.path) {
+                    let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Thinking);
+                    let formatted = crate::ai_formatting::format_text(&text, None, false).await;
+                    // Zapisujemy jako nowy wpis, pozostawiając oryginalny raw w historii
+                    crate::state::history::save_entry(&formatted);
+                    let _ = crate::clipboard::set_clipboard(&formatted);
 
-                      let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Success);
-                      tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                      let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Idle);
-                 }
+                    let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Success);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Idle);
+                }
             } else {
                 info!("No transcript to format");
             }

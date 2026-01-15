@@ -24,7 +24,10 @@ mod data {
 pub fn is_embedded_available() -> bool {
     let cfg_set = cfg!(embed_model);
     let weights_size = data::WEIGHTS.len();
-    eprintln!("[DEBUG] Embedded check: cfg={}, weights_size={}", cfg_set, weights_size);
+    eprintln!(
+        "[DEBUG] Embedded check: cfg={}, weights_size={}",
+        cfg_set, weights_size
+    );
     cfg_set && weights_size > 0
 }
 
@@ -67,7 +70,10 @@ mod tests {
 
         if available {
             let model = get_embedded_data().unwrap();
-            println!("Model size: {:.1} MB", model.total_size() as f64 / 1_000_000.0);
+            println!(
+                "Model size: {:.1} MB",
+                model.total_size() as f64 / 1_000_000.0
+            );
         }
     }
 }

@@ -1,13 +1,14 @@
 use anyhow::{Result, anyhow};
-use std::fs::File;
 use std::path::Path;
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::conv::FromSample;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::probe::Hint;
 
+use crate::safe_path;
+
 pub fn load_audio_file(path: &Path) -> Result<(Vec<f32>, u32)> {
-    let src = File::open(path)?;
+    let src = safe_path::safe_open(path)?;
     let mss = MediaSourceStream::new(Box::new(src), Default::default());
 
     let mut hint = Hint::new();

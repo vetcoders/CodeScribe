@@ -234,8 +234,12 @@ impl Config {
         // Update the specific key
         env_vars.insert(key.to_string(), value.to_string());
 
-        // Write back to file
+        // Write back to file (persists for next app launch)
         Self::write_env_file(&env_path, &env_vars)?;
+
+        // Also update runtime env var (dotenvy doesn't override existing vars)
+        // SAFETY: Called from main thread during menu interaction, single-threaded context
+        unsafe { std::env::set_var(key, value) };
 
         Ok(())
     }

@@ -12,7 +12,6 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
@@ -27,8 +26,9 @@ use ndarray::Array2;
 use ndarray_npy::ReadNpyExt;
 use tokenizers::Tokenizer;
 
-use crate::audio::loader as audio_loader;
 use super::model::Whisper as Model;
+use crate::audio::loader as audio_loader;
+use crate::safe_path;
 
 use super::embedded::EmbeddedModel;
 use super::params::DecodingParams;
@@ -55,10 +55,7 @@ impl LocalWhisperEngine {
         let tokenizer_path = model_path.join("tokenizer.json");
         let mel_filters_path = model_path.join("mel_filters.npz");
 
-        let config_str = std::fs::read_to_string(&config_path).context(format!(
-            "Failed to read config from {}",
-            config_path.display()
-        ))?;
+        let config_str = safe_path::safe_read_to_string(&config_path)?;
 
         // Parse MLX config and map to Candle Config
         let mlx_config: serde_json::Value =
@@ -246,9 +243,8 @@ impl LocalWhisperEngine {
         let model = Model::load(&vb, config.clone()).context("Failed to create Whisper Model")?;
 
         // Load tokenizer from bytes
-        let tokenizer = Tokenizer::from_bytes(embedded.tokenizer).map_err(|e| {
-            anyhow!("Failed to load embedded tokenizer: {}", e)
-        })?;
+        let tokenizer = Tokenizer::from_bytes(embedded.tokenizer)
+            .map_err(|e| anyhow!("Failed to load embedded tokenizer: {}", e))?;
 
         // Load mel filters from bytes
         let mel_filters = load_mel_filters_from_bytes(embedded.mel_filters, n_mels as usize)
@@ -818,7 +814,7 @@ fn append_with_overlap_dedup(out: &mut String, segment: &str) {
 }
 
 fn load_mel_filters(path: &Path, n_mels: usize) -> Result<Vec<f32>> {
-    let file = File::open(path)?;
+    let file = safe_path::safe_open(path)?;
     load_mel_filters_from_reader(file, n_mels)
 }
 
@@ -829,7 +825,10 @@ fn load_mel_filters_from_bytes(data: &[u8], n_mels: usize) -> Result<Vec<f32>> {
 }
 
 /// Common mel filter loading logic
-fn load_mel_filters_from_reader<R: Read + std::io::Seek>(reader: R, n_mels: usize) -> Result<Vec<f32>> {
+fn load_mel_filters_from_reader<R: Read + std::io::Seek>(
+    reader: R,
+    n_mels: usize,
+) -> Result<Vec<f32>> {
     let mut zip = zip::ZipArchive::new(reader)?;
 
     let key = format!("mel_{}", n_mels);
@@ -1033,5 +1032,9 @@ fn build_varbuilder_from_tensors(
         tensor_map.insert(mapped_name, dequant);
     }
 
-    Ok(candle_nn::VarBuilder::from_tensors(tensor_map, DType::F32, device))
+    Ok(candle_nn::VarBuilder::from_tensors(
+        tensor_map,
+        DType::F32,
+        device,
+    ))
 }

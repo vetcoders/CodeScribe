@@ -93,8 +93,7 @@ impl ModelManager {
         }
 
         let mut out = Vec::new();
-        let entries =
-            fs::read_dir(&self.models_dir).context("Failed to read models directory")?;
+        let entries = fs::read_dir(&self.models_dir).context("Failed to read models directory")?;
         for entry in entries {
             let entry = entry.context("Failed to read models directory entry")?;
             let path = entry.path();

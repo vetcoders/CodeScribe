@@ -129,7 +129,11 @@ async fn e2e_sse_direct_call() {
         .await
         .expect("Request failed");
 
-    assert!(response.status().is_success(), "HTTP error: {}", response.status());
+    assert!(
+        response.status().is_success(),
+        "HTTP error: {}",
+        response.status()
+    );
 
     let mut stream = response.bytes_stream();
     let mut collected = String::new();

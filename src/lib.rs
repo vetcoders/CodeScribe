@@ -28,6 +28,7 @@ pub mod audio;
 pub mod clipboard;
 pub mod config;
 pub mod permissions;
+pub mod safe_path;
 pub mod state;
 pub mod voice_chat;
 pub mod whisper;
@@ -51,11 +52,10 @@ pub mod voice_chat_ui;
 
 /// Initialize and transcribe with embedded model
 pub mod stt {
+    pub use crate::whisper::embedded::{EmbeddedModel, get_embedded_data, is_embedded_available};
     pub use crate::whisper::{
-        init, transcribe, transcribe_file, transcribe_streaming,
-        detect_language, get_model_path,
+        detect_language, get_model_path, init, transcribe, transcribe_file, transcribe_streaming,
     };
-    pub use crate::whisper::embedded::{is_embedded_available, get_embedded_data, EmbeddedModel};
 }
 
 // ═══════════════════════════════════════════════════════════

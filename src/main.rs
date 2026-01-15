@@ -13,6 +13,7 @@ mod hotkeys;
 mod lab_server;
 mod launchd;
 mod permissions;
+mod safe_path;
 mod state;
 mod tray;
 mod voice_chat;

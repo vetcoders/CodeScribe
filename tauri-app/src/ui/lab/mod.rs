@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use serde_json::Value;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use crate::ui::tauri;
 
@@ -162,7 +162,8 @@ fn SpectrogramPanel() -> impl IntoView {
 
                     // Auto-transcribe with streaming - emits transcript_chunk events
                     let transcribe_res: Result<String, String> =
-                        tauri::invoke("transcribe_audio_streaming", TranscribeArgs { audio_path }).await;
+                        tauri::invoke("transcribe_audio_streaming", TranscribeArgs { audio_path })
+                            .await;
 
                     match transcribe_res {
                         Ok(text) => {

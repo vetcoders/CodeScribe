@@ -165,7 +165,11 @@ fn test_full_transcription() {
     let elapsed = start.elapsed();
 
     println!("Transcription time: {:?}", elapsed);
-    println!("Result ({} chars): {}", text.len(), &text[..text.len().min(200)]);
+    println!(
+        "Result ({} chars): {}",
+        text.len(),
+        &text[..text.len().min(200)]
+    );
 
     // Basic assertions
     assert!(!text.is_empty(), "Transcription should not be empty");

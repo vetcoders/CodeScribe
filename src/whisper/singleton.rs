@@ -36,7 +36,10 @@ fn resolve_model_path_fallback() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("CODESCRIBE_MODEL_PATH") {
         let p = PathBuf::from(&path);
         if p.join("tokenizer.json").exists() {
-            info!("DEV: Using model from CODESCRIBE_MODEL_PATH: {}", p.display());
+            info!(
+                "DEV: Using model from CODESCRIBE_MODEL_PATH: {}",
+                p.display()
+            );
             return Ok(p);
         }
         warn!("CODESCRIBE_MODEL_PATH set but model incomplete: {}", path);
@@ -46,9 +49,7 @@ fn resolve_model_path_fallback() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("Failed to get executable path")?;
     let exe_dir = exe.parent().context("Failed to get executable directory")?;
 
-    let bundled_path = exe_dir
-        .join("../Resources/models")
-        .join(DEFAULT_MODEL);
+    let bundled_path = exe_dir.join("../Resources/models").join(DEFAULT_MODEL);
 
     if bundled_path.join("tokenizer.json").exists() {
         let canonical = bundled_path.canonicalize().unwrap_or(bundled_path);
@@ -119,7 +120,9 @@ pub fn engine() -> Result<&'static Mutex<LocalWhisperEngine>> {
     if !is_initialized() {
         init()?;
     }
-    ENGINE.get().ok_or_else(|| anyhow!("Engine not initialized"))
+    ENGINE
+        .get()
+        .ok_or_else(|| anyhow!("Engine not initialized"))
 }
 
 /// Transcribe audio samples using the global engine
@@ -149,8 +152,8 @@ pub fn transcribe_streaming<'a>(
 
 /// Transcribe a file
 pub fn transcribe_file(path: &std::path::Path, language: Option<&str>) -> Result<String> {
-    let (samples, sample_rate) = crate::audio::load_audio_file(path)
-        .context("Failed to load audio file")?;
+    let (samples, sample_rate) =
+        crate::audio::load_audio_file(path).context("Failed to load audio file")?;
 
     transcribe(&samples, sample_rate, language)
 }

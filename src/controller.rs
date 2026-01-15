@@ -754,8 +754,10 @@ impl RecordingController {
         info!("Text pasted successfully");
 
         // Save to history with same timestamp as audio file
-        let entry =
-            crate::state::history::save_entry_with_timestamp(&formatted_text, Some(recording_timestamp));
+        let entry = crate::state::history::save_entry_with_timestamp(
+            &formatted_text,
+            Some(recording_timestamp),
+        );
         info!("Transcript saved: {}", entry.path.display());
 
         Ok(())

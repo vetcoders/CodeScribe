@@ -1,6 +1,6 @@
 use std::fs;
 
-use codescribe::{ai_formatting, state::history, config::prompts};
+use codescribe::{ai_formatting, config::prompts, state::history};
 
 use mockito::Matcher;
 use serial_test::serial;
@@ -31,7 +31,10 @@ fn e2e_prompts_are_file_backed_and_history_uses_config_dir() {
 
     // Overwrite formatting prompt and re-load
     fs::write(&formatting_path, "CUSTOM_FORMATTING_PROMPT").expect("write prompt");
-    assert_eq!(prompts::get_formatting_prompt().trim(), "CUSTOM_FORMATTING_PROMPT");
+    assert_eq!(
+        prompts::get_formatting_prompt().trim(),
+        "CUSTOM_FORMATTING_PROMPT"
+    );
 
     // Reset to defaults
     prompts::reset_to_defaults().expect("reset prompts");
@@ -40,7 +43,11 @@ fn e2e_prompts_are_file_backed_and_history_uses_config_dir() {
     // --- History: should respect config_dir override ---
     let e1 = history::save_entry("raw one two");
     assert!(e1.path.starts_with(tmp.path()));
-    assert!(fs::read_to_string(&e1.path).unwrap().contains("raw one two"));
+    assert!(
+        fs::read_to_string(&e1.path)
+            .unwrap()
+            .contains("raw one two")
+    );
 
     // Mimic tray behavior: read last, format, save as new entry
     let mut server = mockito::Server::new();
@@ -80,6 +87,14 @@ fn e2e_prompts_are_file_backed_and_history_uses_config_dir() {
 
     // New entry created, raw entry kept.
     assert_ne!(e1.path, e2.path);
-    assert!(fs::read_to_string(&e1.path).unwrap().contains("raw one two"));
-    assert!(fs::read_to_string(&e2.path).unwrap().contains("RAW ONE TWO."));
+    assert!(
+        fs::read_to_string(&e1.path)
+            .unwrap()
+            .contains("raw one two")
+    );
+    assert!(
+        fs::read_to_string(&e2.path)
+            .unwrap()
+            .contains("RAW ONE TWO.")
+    );
 }

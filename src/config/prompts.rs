@@ -86,7 +86,11 @@ fn load_or_create(filename: &str, default_content: &str) -> String {
     let path = prompts_dir().join(filename);
     if !path.exists() {
         if let Err(e) = fs::write(&path, default_content) {
-            warn!("Failed to write default prompt to {}: {}", path.display(), e);
+            warn!(
+                "Failed to write default prompt to {}: {}",
+                path.display(),
+                e
+            );
         } else {
             info!("Created default prompt file: {}", path.display());
         }
@@ -103,7 +107,11 @@ fn load_or_create(filename: &str, default_content: &str) -> String {
             }
         }
         Err(e) => {
-            warn!("Failed to read prompt from {}: {}, using default", path.display(), e);
+            warn!(
+                "Failed to read prompt from {}: {}, using default",
+                path.display(),
+                e
+            );
             default_content.to_string()
         }
     }
@@ -135,18 +143,22 @@ pub fn open_prompt_file(filename: &str) {
     } else if filename == "assistive.txt" {
         get_assistive_prompt();
     }
-    
+
     // Use macOS 'open' command
-    let _ = std::process::Command::new("open")
-        .arg(&path)
-        .spawn();
+    let _ = std::process::Command::new("open").arg(&path).spawn();
 }
 
 #[allow(dead_code)] // Used by tauri-app
 pub fn reset_to_defaults() -> std::io::Result<()> {
     ensure_prompts_dir()?;
-    fs::write(prompts_dir().join("formatting.txt"), DEFAULT_FORMATTING_PROMPT)?;
-    fs::write(prompts_dir().join("assistive.txt"), DEFAULT_ASSISTIVE_PROMPT)?;
+    fs::write(
+        prompts_dir().join("formatting.txt"),
+        DEFAULT_FORMATTING_PROMPT,
+    )?;
+    fs::write(
+        prompts_dir().join("assistive.txt"),
+        DEFAULT_ASSISTIVE_PROMPT,
+    )?;
     Ok(())
 }
 

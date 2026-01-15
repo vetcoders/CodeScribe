@@ -218,13 +218,14 @@ pub fn update_status_label(label: &str) {
 
 /// Toggle AI Formatting and persist to config
 pub fn toggle_ai_formatting() -> bool {
-    let new_state = AI_FORMATTING_ITEM.with(|cell| {
+    // Read current state from Config (source of truth - is_checked() unreliable on macOS)
+    let current_state = Config::load().ai_formatting_enabled;
+    let new_state = !current_state;
+
+    // Update checkbox visual
+    AI_FORMATTING_ITEM.with(|cell| {
         if let Some(ref item) = *cell.borrow() {
-            let new_state = !item.is_checked();
             item.set_checked(new_state);
-            new_state
-        } else {
-            false
         }
     });
 

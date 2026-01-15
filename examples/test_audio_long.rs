@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     for f in files {
         println!("=== {} ===", f.file_name().unwrap().to_string_lossy());
 
-        let (samples, sample_rate) = codescribe::audio_loader::load_audio_file(&f)?;
+        let (samples, sample_rate) = codescribe::audio::load_audio_file(&f)?;
         let duration_sec = samples.len() as f32 / sample_rate as f32;
         println!("Audio duration: {:.1}s", duration_sec);
 

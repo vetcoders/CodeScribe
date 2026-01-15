@@ -41,7 +41,10 @@ fn main() {
 
         if is_release && model_exists {
             // Release + model found → embed it
-            println!("cargo:warning=Embedding model from: {}", model_path.display());
+            println!(
+                "cargo:warning=Embedding model from: {}",
+                model_path.display()
+            );
             let content = format!(
                 r#"
                 pub static CONFIG: &[u8] = include_bytes!(r"{}");
@@ -56,7 +59,10 @@ fn main() {
             );
             fs::write(&dest_path, content).expect("Failed to write embedded_model_data.rs");
             println!("cargo:rustc-cfg=embed_model");
-            println!("cargo:rustc-env=CODESCRIBE_MODEL_DIR={}", model_path.display());
+            println!(
+                "cargo:rustc-env=CODESCRIBE_MODEL_DIR={}",
+                model_path.display()
+            );
         } else if is_release && !model_exists && !no_embed {
             // Release + no model + no opt-out → HARD FAIL
             eprintln!();

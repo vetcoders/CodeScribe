@@ -230,7 +230,11 @@ pub fn open_history_folder() {
 /// # Returns
 /// * `Some(PathBuf)` - Path to the saved audio file on success
 /// * `None` - If src_path doesn't exist or copy failed
-pub fn save_audio(src_path: &Path, timestamp: DateTime<Local>, transcript_text: Option<&str>) -> Option<PathBuf> {
+pub fn save_audio(
+    src_path: &Path,
+    timestamp: DateTime<Local>,
+    transcript_text: Option<&str>,
+) -> Option<PathBuf> {
     if !src_path.exists() {
         warn!("save_audio: source file does not exist: {:?}", src_path);
         return None;

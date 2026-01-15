@@ -14,10 +14,7 @@ fn get_required_env(keys: &[&str]) -> String {
             }
         }
     }
-    panic!(
-        "Missing required env var. Set one of: {}",
-        keys.join(", ")
-    );
+    panic!("Missing required env var. Set one of: {}", keys.join(", "));
 }
 
 /// E2E test that verifies Ollama conversation continuity using a real Ollama instance.
@@ -42,9 +39,7 @@ async fn e2e_ollama_memory_real_response_chajnik_query() {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if !enabled {
-        eprintln!(
-            "Skipping real Ollama E2E (set CODESCRIBE_E2E_OLLAMA=1 to enable)."
-        );
+        eprintln!("Skipping real Ollama E2E (set CODESCRIBE_E2E_OLLAMA=1 to enable).");
         return;
     }
 

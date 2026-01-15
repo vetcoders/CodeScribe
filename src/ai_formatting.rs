@@ -99,21 +99,37 @@ fn get_mode_config(specific_key: &str, default_key: &str, what: &str) -> Result<
 // ---- FORMATTING mode config ----
 
 fn get_formatting_endpoint() -> Result<String> {
-    get_mode_config("LLM_FORMATTING_ENDPOINT", "LLM_ENDPOINT", "LLM endpoint (formatting)")
+    get_mode_config(
+        "LLM_FORMATTING_ENDPOINT",
+        "LLM_ENDPOINT",
+        "LLM endpoint (formatting)",
+    )
 }
 
 fn get_formatting_model() -> Result<String> {
-    get_mode_config("LLM_FORMATTING_MODEL", "LLM_MODEL", "LLM model (formatting)")
+    get_mode_config(
+        "LLM_FORMATTING_MODEL",
+        "LLM_MODEL",
+        "LLM model (formatting)",
+    )
 }
 
 fn get_formatting_api_key() -> Result<String> {
-    get_mode_config("LLM_FORMATTING_API_KEY", "LLM_API_KEY", "LLM API key (formatting)")
+    get_mode_config(
+        "LLM_FORMATTING_API_KEY",
+        "LLM_API_KEY",
+        "LLM API key (formatting)",
+    )
 }
 
 // ---- ASSISTIVE mode config ----
 
 fn get_assistive_endpoint() -> Result<String> {
-    get_mode_config("LLM_ASSISTIVE_ENDPOINT", "LLM_ENDPOINT", "LLM endpoint (assistive)")
+    get_mode_config(
+        "LLM_ASSISTIVE_ENDPOINT",
+        "LLM_ENDPOINT",
+        "LLM endpoint (assistive)",
+    )
 }
 
 fn get_assistive_model() -> Result<String> {
@@ -121,16 +137,43 @@ fn get_assistive_model() -> Result<String> {
 }
 
 fn get_assistive_api_key() -> Result<String> {
-    get_mode_config("LLM_ASSISTIVE_API_KEY", "LLM_API_KEY", "LLM API key (assistive)")
+    get_mode_config(
+        "LLM_ASSISTIVE_API_KEY",
+        "LLM_API_KEY",
+        "LLM API key (assistive)",
+    )
+}
+
+/// Get temperature from env var. Returns None if empty/unset (skip parameter).
+/// Supports mode-specific: LLM_FORMATTING_TEMPERATURE, LLM_ASSISTIVE_TEMPERATURE
+/// Falls back to LLM_TEMPERATURE, then to default (0.1 formatting, 0.3 assistive)
+fn get_temperature(assistive: bool) -> Option<f32> {
+    let specific_key = if assistive {
+        "LLM_ASSISTIVE_TEMPERATURE"
+    } else {
+        "LLM_FORMATTING_TEMPERATURE"
+    };
+
+    // Try specific first, then fallback
+    for key in [specific_key, "LLM_TEMPERATURE"] {
+        if let Ok(val) = env::var(key) {
+            let val = val.trim();
+            if val.is_empty() {
+                // Explicitly empty = skip temperature
+                return None;
+            }
+            if let Ok(temp) = val.parse::<f32>() {
+                return Some(temp);
+            }
+        }
+    }
+
+    // Default: 0.1 for formatting (deterministic), 0.3 for assistive (creative)
+    Some(if assistive { 0.3 } else { 0.1 })
 }
 
 fn prune_memory(memory: &mut Vec<MemoryMessage>) {
-    while memory
-        .iter()
-        .map(|m| m.content.len())
-        .sum::<usize>()
-        > MAX_OLLAMA_MEMORY_CHARS
-    {
+    while memory.iter().map(|m| m.content.len()).sum::<usize>() > MAX_OLLAMA_MEMORY_CHARS {
         if memory.is_empty() {
             break;
         }
@@ -536,14 +579,14 @@ pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) ->
         if attempt > 0 {
             info!(
                 "Retry attempt {}/{} (waiting {:?})",
-                attempt,
-                max_retries,
-                retry_delay
+                attempt, max_retries, retry_delay
             );
             tokio::time::sleep(retry_delay).await;
-            
+
             // Append critical instruction
-            system_prompt.push_str("\n\nCRITICAL: You MUST format/enhance the text. Do NOT return raw input.");
+            system_prompt.push_str(
+                "\n\nCRITICAL: You MUST format/enhance the text. Do NOT return raw input.",
+            );
         }
 
         // Build user message with optional language hint
@@ -563,11 +606,17 @@ pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) ->
             {
                 Ok(Ok(formatted)) => Some(formatted),
                 Ok(Err(e)) => {
-                    warn!("Ollama failed (attempt {}): {}, trying other providers", attempt, e);
+                    warn!(
+                        "Ollama failed (attempt {}): {}, trying other providers",
+                        attempt, e
+                    );
                     None
                 }
                 Err(_) => {
-                    warn!("Ollama timed out after {:?} (attempt {})", attempt_timeout, attempt);
+                    warn!(
+                        "Ollama timed out after {:?} (attempt {})",
+                        attempt_timeout, attempt
+                    );
                     None
                 }
             }
@@ -604,7 +653,10 @@ pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) ->
                         warn!("LLM streaming failed (attempt {}): {}", attempt, e);
                     }
                     Err(_) => {
-                        warn!("LLM streaming timed out after {:?} (attempt {})", llm_timeout, attempt);
+                        warn!(
+                            "LLM streaming timed out after {:?} (attempt {})",
+                            llm_timeout, attempt
+                        );
                     }
                 }
             } else {
@@ -620,64 +672,69 @@ pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) ->
                         warn!("LLM endpoint failed (attempt {}): {}", attempt, e);
                     }
                     Err(_) => {
-                        warn!("LLM endpoint timed out after {:?} (attempt {})", llm_timeout, attempt);
+                        warn!(
+                            "LLM endpoint timed out after {:?} (attempt {})",
+                            llm_timeout, attempt
+                        );
                     }
                 }
             }
         }
 
         if let Some(formatted) = result_opt {
-             // Detect AI refusal responses (OpenAI content policy)
-             let formatted_lower = formatted.to_lowercase();
-             let is_refusal = formatted_lower.contains("i'm sorry")
-                 || formatted_lower.contains("i cannot")
-                 || formatted_lower.contains("i can't assist")
-                 || formatted_lower.contains("i can't help")
-                 || formatted_lower.contains("i'm not able")
-                 || formatted_lower.contains("as an ai");
+            // Detect AI refusal responses (OpenAI content policy)
+            let formatted_lower = formatted.to_lowercase();
+            let is_refusal = formatted_lower.contains("i'm sorry")
+                || formatted_lower.contains("i cannot")
+                || formatted_lower.contains("i can't assist")
+                || formatted_lower.contains("i can't help")
+                || formatted_lower.contains("i'm not able")
+                || formatted_lower.contains("as an ai");
 
-             if is_refusal {
-                 warn!("AI returned refusal response, returning raw input instead");
-                 return cleaned;
-             }
+            if is_refusal {
+                warn!("AI returned refusal response, returning raw input instead");
+                return cleaned;
+            }
 
-             // Analyze result quality
-             let cleaned_trim = cleaned.trim();
-             let formatted_trim = formatted.trim();
-             let content_match = is_effectively_same(&cleaned, &formatted);
+            // Analyze result quality
+            let cleaned_trim = cleaned.trim();
+            let formatted_trim = formatted.trim();
+            let content_match = is_effectively_same(&cleaned, &formatted);
 
-             let mut should_retry = false;
-             let mut raw_like = content_match;
+            let mut should_retry = false;
+            let mut raw_like = content_match;
 
-             if assistive {
-                 // Assistive should change/expand content
-                 // If it matches normalized content, it likely failed to enhance
-                 if content_match {
-                     warn!("Assistive mode returned content-matching output (not expanded)");
-                     should_retry = true;
-                 }
-             } else {
-                 // Formatting should preserve content but add structure
-                 // If output is identical to input
-                 if cleaned_trim == formatted_trim {
-                      // Check if input was arguably already formatted (has punctuation)
-                      let input_has_punct = cleaned_trim.ends_with('.') || cleaned_trim.ends_with('?') || cleaned_trim.ends_with('!');
-                      if !input_has_punct {
-                          warn!("Formatting mode returned raw echo");
-                          should_retry = true;
-                          raw_like = true;
-                      }
-                 }
-             }
-             
-             if should_retry {
-                 if attempt < max_retries {
-                     warn!("Triggering retry...");
-                     continue;
-                 } else {
-                     warn!("Max retries reached, accepting output.");
-                 }
-             }
+            if assistive {
+                // Assistive should change/expand content
+                // If it matches normalized content, it likely failed to enhance
+                if content_match {
+                    warn!("Assistive mode returned content-matching output (not expanded)");
+                    should_retry = true;
+                }
+            } else {
+                // Formatting should preserve content but add structure
+                // If output is identical to input
+                if cleaned_trim == formatted_trim {
+                    // Check if input was arguably already formatted (has punctuation)
+                    let input_has_punct = cleaned_trim.ends_with('.')
+                        || cleaned_trim.ends_with('?')
+                        || cleaned_trim.ends_with('!');
+                    if !input_has_punct {
+                        warn!("Formatting mode returned raw echo");
+                        should_retry = true;
+                        raw_like = true;
+                    }
+                }
+            }
+
+            if should_retry {
+                if attempt < max_retries {
+                    warn!("Triggering retry...");
+                    continue;
+                } else {
+                    warn!("Max retries reached, accepting output.");
+                }
+            }
 
             info!(
                 "Formatted via AI ({} -> {} chars, assistive={}, content_match={}, raw_like={})",
@@ -707,21 +764,36 @@ async fn call_llm_endpoint(
 ) -> Result<String> {
     // Mode-aware config: formatting vs assistive use different providers
     let (endpoint, model, api_key) = if assistive {
-        (get_assistive_endpoint()?, get_assistive_model()?, get_assistive_api_key()?)
+        (
+            get_assistive_endpoint()?,
+            get_assistive_model()?,
+            get_assistive_api_key()?,
+        )
     } else {
-        (get_formatting_endpoint()?, get_formatting_model()?, get_formatting_api_key()?)
+        (
+            get_formatting_endpoint()?,
+            get_formatting_model()?,
+            get_formatting_api_key()?,
+        )
     };
 
-    // Use higher temperature for assistive mode (more creative responses)
-    let temperature = if assistive { 0.3 } else { 0.1 };
+    // Temperature from env (None = skip parameter for models that don't support it)
+    let temperature = get_temperature(assistive);
 
-    // Get previous_response_id for conversation continuity
-    // Even in formatting mode - helps LLM understand thematic context (e.g., "Rust" vs "roost")
-    let previous_response_id = crate::state::conversation::get_previous_response_id();
+    // Determine AI mode for conversation tracking (separate streams per mode)
+    let ai_mode = if assistive {
+        crate::state::conversation::AiMode::Assistive
+    } else {
+        crate::state::conversation::AiMode::Formatting
+    };
+
+    // Get previous_response_id for this mode's conversation chain
+    let previous_response_id =
+        crate::state::conversation::get_previous_response_id_for_mode(ai_mode);
 
     // TRACE: full chain details for debugging (before model is moved)
     trace!(
-        "LLM request chain: endpoint={}, model={}, mode={}, temp={}, api_key={}...{}",
+        "LLM request chain: endpoint={}, model={}, mode={}, temp={:?}, api_key={}...{}",
         endpoint,
         model,
         if assistive { "assistive" } else { "formatting" },
@@ -730,7 +802,7 @@ async fn call_llm_endpoint(
         &api_key[api_key.len().saturating_sub(4)..]
     );
     debug!(
-        "Calling LLM endpoint {} for {} (temp={})",
+        "Calling LLM endpoint {} for {} (temp={:?})",
         endpoint,
         if assistive { "assistive" } else { "formatting" },
         temperature
@@ -748,9 +820,9 @@ async fn call_llm_endpoint(
         }],
         previous_response_id: previous_response_id.clone(),
         // Only send instructions on first request - Responses API preserves them via previous_response_id
-        instructions: if previous_response_id.is_some() { None } else { Some(system_prompt.to_string()) },
+        instructions: Some(system_prompt.to_string()),
         max_output_tokens: None,
-        temperature: Some(temperature),
+        temperature,
         stream: false,
     };
 
@@ -792,9 +864,13 @@ async fn call_llm_endpoint(
         anyhow::bail!("No text content in response (id: {})", responses_result.id);
     }
 
-    // Store response_id for conversation continuity (all modes - thematic context)
-    crate::state::conversation::set_response_id(responses_result.id.clone());
-    debug!("Response id: {}", responses_result.id);
+    // Store response_id for this mode's conversation chain (separate streams)
+    crate::state::conversation::set_response_id_for_mode(ai_mode, responses_result.id.clone());
+    debug!(
+        "Response id ({}): {}",
+        if assistive { "assistive" } else { "formatting" },
+        responses_result.id
+    );
     Ok(formatted)
 }
 
@@ -815,19 +891,36 @@ async fn call_llm_endpoint_streaming(
 
     // Mode-aware config: formatting vs assistive use different providers
     let (endpoint, model, api_key) = if assistive {
-        (get_assistive_endpoint()?, get_assistive_model()?, get_assistive_api_key()?)
+        (
+            get_assistive_endpoint()?,
+            get_assistive_model()?,
+            get_assistive_api_key()?,
+        )
     } else {
-        (get_formatting_endpoint()?, get_formatting_model()?, get_formatting_api_key()?)
+        (
+            get_formatting_endpoint()?,
+            get_formatting_model()?,
+            get_formatting_api_key()?,
+        )
     };
 
-    let temperature = if assistive { 0.3 } else { 0.1 };
+    // Temperature from env (None = skip parameter for models that don't support it)
+    let temperature = get_temperature(assistive);
 
-    // Get previous_response_id - thematic context helps even in formatting mode
-    let previous_response_id = crate::state::conversation::get_previous_response_id();
+    // Determine AI mode for conversation tracking (separate streams per mode)
+    let ai_mode = if assistive {
+        crate::state::conversation::AiMode::Assistive
+    } else {
+        crate::state::conversation::AiMode::Formatting
+    };
+
+    // Get previous_response_id for this mode's conversation chain
+    let previous_response_id =
+        crate::state::conversation::get_previous_response_id_for_mode(ai_mode);
 
     // TRACE: full chain details for debugging (before model is moved)
     trace!(
-        "SSE request chain: endpoint={}, model={}, mode={}, temp={}, api_key={}...{}",
+        "SSE request chain: endpoint={}, model={}, mode={}, temp={:?}, api_key={}...{}",
         endpoint,
         model,
         if assistive { "assistive" } else { "formatting" },
@@ -836,7 +929,7 @@ async fn call_llm_endpoint_streaming(
         &api_key[api_key.len().saturating_sub(4)..]
     );
     debug!(
-        "SSE streaming to {} for {} (temp={})",
+        "SSE streaming to {} for {} (temp={:?})",
         endpoint,
         if assistive { "assistive" } else { "formatting" },
         temperature
@@ -854,9 +947,9 @@ async fn call_llm_endpoint_streaming(
         }],
         previous_response_id: previous_response_id.clone(),
         // Only send instructions on first request - Responses API preserves them via previous_response_id
-        instructions: if previous_response_id.is_some() { None } else { Some(system_prompt.to_string()) },
+        instructions: Some(system_prompt.to_string()),
         max_output_tokens: None,
-        temperature: Some(temperature),
+        temperature,
         stream: true,
     };
 
@@ -935,23 +1028,23 @@ async fn call_llm_endpoint_streaming(
         anyhow::bail!("No text content in SSE stream");
     }
 
-    // Store response_id for conversation continuity (all modes - thematic context)
+    // Store response_id for this mode's conversation chain (separate streams)
     if !response_id.is_empty() {
-        crate::state::conversation::set_response_id(response_id.clone());
+        crate::state::conversation::set_response_id_for_mode(ai_mode, response_id.clone());
     }
 
-    debug!("SSE complete, response_id: {}", response_id);
+    debug!(
+        "SSE complete, response_id ({}): {}",
+        if assistive { "assistive" } else { "formatting" },
+        response_id
+    );
     Ok(formatted)
 }
 
 /// Call Ollama/local LLM for text formatting/assistive mode
 ///
 /// Uses mode-aware config. Ollama native API uses /api/chat endpoint format.
-async fn call_ollama(
-    user_message: &str,
-    system_prompt: &str,
-    assistive: bool,
-) -> Result<String> {
+async fn call_ollama(user_message: &str, system_prompt: &str, assistive: bool) -> Result<String> {
     // Mode-aware config
     let (host, model) = if assistive {
         (get_assistive_endpoint()?, get_assistive_model()?)

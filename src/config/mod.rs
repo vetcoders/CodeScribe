@@ -30,9 +30,9 @@ pub use types::Language;
 // Re-export prompts API (public API for tauri-app)
 #[allow(unused_imports)] // Public API for external consumers
 pub use prompts::{
-    get_assistive_prompt, get_assistive_prompt_path, get_formatting_prompt,
-    get_formatting_prompt_path, open_prompt_file, open_prompts_folder,
-    reset_to_defaults, DEFAULT_ASSISTIVE_PROMPT, DEFAULT_FORMATTING_PROMPT,
+    DEFAULT_ASSISTIVE_PROMPT, DEFAULT_FORMATTING_PROMPT, get_assistive_prompt,
+    get_assistive_prompt_path, get_formatting_prompt, get_formatting_prompt_path, open_prompt_file,
+    open_prompts_folder, reset_to_defaults,
 };
 
 #[cfg(test)]

@@ -34,4 +34,6 @@ pub use params::DecodingParams;
 
 // Re-export singleton functions at module level (main API)
 #[allow(unused_imports)] // Public API for external consumers
-pub use singleton::{detect_language, get_model_path, init, transcribe, transcribe_file, transcribe_streaming};
+pub use singleton::{
+    detect_language, get_model_path, init, transcribe, transcribe_file, transcribe_streaming,
+};

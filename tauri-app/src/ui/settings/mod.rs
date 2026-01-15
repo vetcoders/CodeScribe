@@ -145,8 +145,11 @@ pub fn SettingsView() -> impl IntoView {
             // Load formatting prompt
             let prompt_res: Result<String, String> = tauri::invoke(
                 "get_ai_prompt",
-                PromptTypeArgs { prompt_type: "formatting".to_string() },
-            ).await;
+                PromptTypeArgs {
+                    prompt_type: "formatting".to_string(),
+                },
+            )
+            .await;
             if let Ok(p) = prompt_res {
                 set_formatting_prompt.set(p);
             }

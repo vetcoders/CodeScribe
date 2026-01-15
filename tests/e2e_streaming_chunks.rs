@@ -8,8 +8,8 @@
 //! Created by M&K (c)2026 VetCoders
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use codescribe::audio;
 
@@ -70,7 +70,11 @@ fn test_streaming_callback_invoked() {
     let callback = move |text: &str| {
         callback_count_clone.fetch_add(1, Ordering::SeqCst);
         collected_clone.lock().unwrap().push(text.to_string());
-        println!("Chunk {}: {} chars", callback_count_clone.load(Ordering::SeqCst), text.len());
+        println!(
+            "Chunk {}: {} chars",
+            callback_count_clone.load(Ordering::SeqCst),
+            text.len()
+        );
     };
 
     let result = engine

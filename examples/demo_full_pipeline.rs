@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     // 2. Transcribe
     println!("\n[2/3] Transcribing audio...");
     let start = std::time::Instant::now();
-    let (samples, sample_rate) = codescribe::audio_loader::load_audio_file(&audio_file)?;
+    let (samples, sample_rate) = codescribe::audio::load_audio_file(&audio_file)?;
     let duration_sec = samples.len() as f32 / sample_rate as f32;
     println!("      Audio duration: {:.1}s", duration_sec);
 
