@@ -179,35 +179,41 @@ pub fn build_formatting_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> {
 pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HoldMenuIds)> {
     let hold_menu = Submenu::new("Hold Hotkeys", true);
 
-    let hold_current_label = MenuItem::new("Current: Ctrl only (Raw)", false, None);
+    // Read from Config (source of truth for initial state)
+    let config = crate::config::Config::load();
+    let current_mods = config.hold_mods;
+    let current_trigger = config.toggle_trigger;
+
+    let hold_current_label =
+        MenuItem::new(format!("Current: {}", current_mods.label()), false, None);
     hold_menu.append(&hold_current_label)?;
     hold_menu.append(&PredefinedMenuItem::separator())?;
 
     let hold_ctrl = CheckMenuItem::new(
         format!("Hold: {}", HoldMods::Ctrl.label()),
         true,
-        true,
+        current_mods == HoldMods::Ctrl,
         None,
     );
     let hold_ctrl_id = hold_ctrl.id().clone();
     let hold_ctrl_opt = CheckMenuItem::new(
         format!("Hold: {}", HoldMods::CtrlAlt.label()),
         true,
-        false,
+        current_mods == HoldMods::CtrlAlt,
         None,
     );
     let hold_ctrl_opt_id = hold_ctrl_opt.id().clone();
     let hold_ctrl_shift = CheckMenuItem::new(
         format!("Hold: {}", HoldMods::CtrlShift.label()),
         true,
-        false,
+        current_mods == HoldMods::CtrlShift,
         None,
     );
     let hold_ctrl_shift_id = hold_ctrl_shift.id().clone();
     let hold_ctrl_cmd = CheckMenuItem::new(
         format!("Hold: {}", HoldMods::CtrlCmd.label()),
         true,
-        false,
+        current_mods == HoldMods::CtrlCmd,
         None,
     );
     let hold_ctrl_cmd_id = hold_ctrl_cmd.id().clone();
@@ -218,18 +224,38 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HoldMenuIds)> {
     hold_menu.append(&hold_ctrl_cmd)?;
     hold_menu.append(&PredefinedMenuItem::separator())?;
 
-    let hold_exclusive = CheckMenuItem::new("Exclusive (ignore extra modifiers)", true, true, None);
+    let hold_exclusive = CheckMenuItem::new(
+        "Exclusive (ignore extra modifiers)",
+        true,
+        config.hold_exclusive,
+        None,
+    );
     let hold_exclusive_id = hold_exclusive.id().clone();
     hold_menu.append(&hold_exclusive)?;
     hold_menu.append(&PredefinedMenuItem::separator())?;
 
-    let toggle_label = MenuItem::new("Toggle: double option", false, None);
+    let toggle_label = MenuItem::new(format!("Toggle: {}", current_trigger.label()), false, None);
     hold_menu.append(&toggle_label)?;
-    let toggle_double_opt = CheckMenuItem::new("Use double Option (⌥⌥)", true, true, None);
+    let toggle_double_opt = CheckMenuItem::new(
+        "Use double Option (⌥⌥)",
+        true,
+        current_trigger == crate::config::ToggleTrigger::DoubleOption,
+        None,
+    );
     let toggle_double_opt_id = toggle_double_opt.id().clone();
-    let toggle_double_ralt = CheckMenuItem::new("Use double Right Option", true, false, None);
+    let toggle_double_ralt = CheckMenuItem::new(
+        "Use double Right Option",
+        true,
+        current_trigger == crate::config::ToggleTrigger::DoubleRightOption,
+        None,
+    );
     let toggle_double_ralt_id = toggle_double_ralt.id().clone();
-    let toggle_disabled = CheckMenuItem::new("Disable toggle", true, false, None);
+    let toggle_disabled = CheckMenuItem::new(
+        "Disable toggle",
+        true,
+        current_trigger == crate::config::ToggleTrigger::None,
+        None,
+    );
     let toggle_disabled_id = toggle_disabled.id().clone();
 
     hold_menu.append(&toggle_double_opt)?;

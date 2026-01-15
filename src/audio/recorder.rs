@@ -312,7 +312,8 @@ impl Recorder {
                     let rms_amplitude = calculate_rms_f32(data);
                     let rms_db = 20.0 * (rms_amplitude + 1e-9).log10();
 
-                    if auto_silence {
+                    // Only check silence if still recording (avoid spam after stop)
+                    if auto_silence && is_recording_data.load(Ordering::SeqCst) {
                         // Check for silence
                         if rms_db < silence_db {
                             silent_frames_clone.fetch_add(data.len(), Ordering::SeqCst);
