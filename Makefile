@@ -4,7 +4,8 @@
 .PHONY: all build release install install-no-embed config bundle install-app \
         start stop restart status logs logs-follow \
         bump bump-patch bump-minor bump-major version \
-        lint format test demo demo-raw demo-assistive check clean help \
+        lint format test test-e2e test-e2e-real test-sse test-formatting test-all \
+        demo demo-raw demo-assistive check clean help \
         tauri-dev tauri-build tauri-check \
         dmg dmg-signed dmg-full notarize download-model \
         hooks
@@ -161,7 +162,30 @@ test:
 	@echo "=== Unit Tests ==="
 	@cargo test --lib
 	@echo "=== Integration Tests ==="
-	@cargo test --test '*' || true
+	@cargo test --test '*' -- --skip e2e || true
+
+test-e2e:
+	@echo "=== E2E Tests (mock) ==="
+	@cargo test e2e --release -- --nocapture
+
+test-e2e-real:
+	@echo "=== E2E Tests (real API) ==="
+	@echo "Requires: LLM_API_KEY, LLM_ASSISTIVE_API_KEY"
+	@cargo test e2e --release -- --ignored --nocapture
+
+test-sse:
+	@echo "=== SSE Streaming Tests ==="
+	@cargo test e2e_sse --release -- --ignored --nocapture
+
+test-formatting:
+	@echo "=== AI Formatting Tests ==="
+	@cargo test formatting --release -- --nocapture
+
+test-all:
+	@echo "=== Full Test Suite ==="
+	@cargo test --lib
+	@cargo test --test '*' -- --nocapture || true
+	@echo "Done. Run 'make test-e2e-real' for real API tests."
 
 demo:
 	@echo "=== Full Pipeline Demo ==="
@@ -237,7 +261,12 @@ help:
 	@echo "Quality:"
 	@echo "  make lint            Run clippy + fmt check"
 	@echo "  make format          Format code"
-	@echo "  make test            Run tests"
+	@echo "  make test            Run unit + integration tests (skip E2E)"
+	@echo "  make test-e2e        Run E2E tests (mock)"
+	@echo "  make test-e2e-real   Run E2E tests with real API (needs LLM_*_API_KEY)"
+	@echo "  make test-sse        Run SSE streaming tests (real API)"
+	@echo "  make test-formatting Run AI formatting tests"
+	@echo "  make test-all        Run full test suite"
 	@echo "  make check           Full quality gate"
 	@echo "  make hooks           Install pre-commit + pre-push hooks"
 	@echo ""

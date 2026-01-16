@@ -44,11 +44,22 @@ Grant in: System Settings > Privacy & Security
 
 ## Hotkeys
 
-| Key                   | Action                             |
-|-----------------------|------------------------------------|
-| Hold **Ctrl**         | Start recording (hold-to-talk)     |
-| Release **Ctrl**      | Stop → finalize last chunk → paste |
-| Double-tap **Option** | Toggle recording (hands-free)      |
+| Key                       | Action                                      | AI Mode                |
+|---------------------------|---------------------------------------------|------------------------|
+| Hold **Ctrl**             | Record → paste raw transcript               | ALWAYS RAW (no AI)     |
+| Hold **Ctrl+Shift**       | Record → AI assistant response              | ALWAYS Assistive       |
+| Double-tap **Option**     | Toggle recording (hands-free)               | Respects AI toggle     |
+| Triple-tap **Option**     | Toggle AI Formatting on/off                 | Shows toast            |
+| **Shift** during Ctrl hold| Upgrade to Assistive mode mid-recording     | —                      |
+
+### Mode Behavior
+
+- **RAW mode (Ctrl)**: Fast dictation. Transcript is pasted as-is (only local repetition cleanup).
+  Ignores AI_FORMATTING_ENABLED setting.
+- **Toggle mode (Double Option)**: Respects the AI Formatting toggle. If enabled, sends to AI
+  for formatting. If disabled, pastes raw.
+- **Assistive mode (Ctrl+Shift)**: Full AI assistant. Model can answer questions, expand ideas,
+  or pass through dictation based on detected intent (KURIER/ASYSTENT system).
 
 ## Model
 
@@ -90,12 +101,59 @@ USE_LOCAL_STT=1
 # Whisper
 WHISPER_LANGUAGE=pl
 
-# AI formatting (optional)
+# AI formatting (optional) - separate providers for formatting vs assistive
 AI_FORMATTING_ENABLED=1
+
+# Formatting mode (fast, cheap) - for Ctrl Hold with AI toggle
+LLM_FORMATTING_ENDPOINT=https://api.libraxis.cloud/v1/responses
+LLM_FORMATTING_MODEL=gpt-5-mini
+LLM_FORMATTING_API_KEY=sk-xxx
+
+# Assistive mode (smart) - for Ctrl+Shift Hold
+LLM_ASSISTIVE_ENDPOINT=https://api.libraxis.cloud/v1/responses
+LLM_ASSISTIVE_MODEL=gpt-5.2
+LLM_ASSISTIVE_API_KEY=sk-xxx
+
+# Shared fallback (if mode-specific not set)
 LLM_ENDPOINT=https://api.openai.com/v1/responses
 LLM_MODEL=gpt-4.1-mini
 LLM_API_KEY=sk-proj-xxx
 ```
+
+### Custom Prompts
+
+Prompts are loaded from `~/.codescribe/prompts/` at each request (no restart needed):
+
+- `formatting.txt` - System prompt for formatting mode (punctuation, structure)
+- `assistive.txt` - System prompt for assistive mode (KURIER/ASYSTENT logic)
+
+Edit these files to customize AI behavior. Changes take effect immediately.
+
+## Quality Assurance
+
+### Local (recommended)
+
+```bash
+# Install pre-commit hooks (runs check/fmt on commit, clippy/semgrep on push)
+make hooks
+
+# Manual quality gate
+make check       # fmt + clippy + unit tests
+
+# E2E tests with real API
+make test-sse    # SSE streaming tests (requires ~/.codescribe/.env)
+```
+
+### CI (GitHub Actions)
+
+**Note:** Full build requires macOS + Swift 6.0 (CoreML, Metal). GitHub runners have Swift 5.10, so CI only runs:
+
+- **Format check** (`cargo fmt --check`) on Linux
+- **Semgrep** security scan on Linux
+
+Clippy and tests run **locally** via pre-commit hooks or `make check`.
+
+For full CI, configure a self-hosted macOS runner (Dragon recommended).
 
 ## Troubleshooting
 

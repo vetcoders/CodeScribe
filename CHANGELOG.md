@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.6.3] – 2026-01-16
+
+### Added
+- **New hotkey architecture** – Each hotkey now determines the processing mode:
+  - **Ctrl Hold** = ALWAYS RAW (fast dictation, no AI processing, ignores AI toggle)
+  - **Double Option** = respects AI_FORMATTING_ENABLED toggle setting
+  - **Ctrl+Shift Hold** = ALWAYS Assistive (AI assistant mode)
+- **Triple-tap Option** – Quick toggle for AI Formatting (shows toast notification)
+- **Shift upgrade mid-hold** – Adding Shift during Ctrl hold upgrades to Assistive mode
+- **KURIER/ASYSTENT prompt system** – Adaptive system prompts that detect user intent:
+  - KURIER: Pass-through mode for dictation (zero commentary)
+  - KURIER+REDAGUJ: Dictation with light editing on explicit request
+  - ASYSTENT: Full AI assistant mode for questions/help
+- **SSE streaming by default** – OpenAI/Libraxis endpoints now use SSE streaming for
+  immediate handshake and no timeout issues
+
+### Changed
+- **Timeout increased to 90s** – GPT-5.x with longer inputs needs more time
+- **Token limits removed** – All token limits set to 0 (API decides). Tokens are cheap,
+  lost notes are not.
+- **force_raw_mode flag** – New controller state flag for explicit RAW mode override
+
+### Fixed
+- **Timeout issues with GPT-5.2** – Streaming mode eliminates 30s timeout failures
+
 ## [v0.6.2] – 2026-01-16
 
 ### Added
@@ -197,7 +222,8 @@ Historical notes below predate the Keep a Changelog-style format used above.
   tests around the new controllers, and refreshed documentation to mirror the
   current tree/layout.
 
-[Unreleased]: https://github.com/VetCoders/CodeScribe/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/VetCoders/CodeScribe/compare/v0.6.3...HEAD
+[v0.6.3]: https://github.com/VetCoders/CodeScribe/compare/v0.6.2...v0.6.3
 [v0.6.2]: https://github.com/VetCoders/CodeScribe/compare/v0.6.1...v0.6.2
 [v0.6.1]: https://github.com/VetCoders/CodeScribe/compare/v0.6.0...v0.6.1
 [v0.6.0]: https://github.com/VetCoders/CodeScribe/compare/19e05ad...v0.6.0

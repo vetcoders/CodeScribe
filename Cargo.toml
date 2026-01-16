@@ -16,7 +16,7 @@ tracing = "0.1"
 
 [package]
 name = "codescribe"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 description = "Speech-to-text tray app for macOS - Pure Rust"
 authors = ["VetCoders <hello@vetcoders.io>"]
