@@ -1,7 +1,7 @@
 //! Configuration loading and saving functionality.
 //!
 //! Handles loading from .env file and environment variables.
-//! Single source of truth: ~/.CodeScribe/.env
+//! Single source of truth: ~/.codescribe/.env
 
 use directories::BaseDirs;
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ impl Config {
     ///
     /// Priority order:
     /// 1. Environment variables
-    /// 2. .env file in config directory (~/.CodeScribe/.env)
+    /// 2. .env file in config directory (~/.codescribe/.env)
     /// 3. Default values
     ///
     /// If the .env file doesn't exist or is malformed, returns default configuration
@@ -49,7 +49,7 @@ impl Config {
             }
         }
         if let Ok(val) = std::env::var("HOLD_EXCLUSIVE") {
-            self.hold_exclusive = val.parse().unwrap_or(false);
+            self.hold_exclusive = matches!(val.as_str(), "1" | "true" | "yes" | "on");
         }
         if let Ok(val) = std::env::var("TOGGLE_TRIGGER") {
             if let Ok(trigger) = val.parse::<ToggleTrigger>() {
@@ -115,7 +115,7 @@ impl Config {
 
         // Sound
         if let Ok(val) = std::env::var("BEEP_ON_START") {
-            self.beep_on_start = val.parse().unwrap_or(true);
+            self.beep_on_start = matches!(val.as_str(), "1" | "true" | "yes" | "on");
         }
         if let Ok(val) = std::env::var("SOUND_NAME") {
             self.sound_name = val;
@@ -124,6 +124,11 @@ impl Config {
             if let Ok(volume) = val.parse() {
                 self.sound_volume = volume;
             }
+        }
+
+        // Audio
+        if let Ok(val) = std::env::var("AUDIO_INPUT_DEVICE") {
+            self.audio_input_device = (!val.trim().is_empty()).then_some(val);
         }
 
         // History
@@ -172,6 +177,14 @@ impl Config {
             self.stt_api_key = Some(val);
         }
 
+        // Local STT (Pure Rust Whisper)
+        if let Ok(val) = std::env::var("USE_LOCAL_STT") {
+            self.use_local_stt = matches!(val.as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Ok(val) = std::env::var("LOCAL_MODEL") {
+            self.local_model = val;
+        }
+
         // Clipboard
         if let Ok(val) = std::env::var("RESTORE_CLIPBOARD") {
             self.restore_clipboard = val.parse().unwrap_or(true);
@@ -184,7 +197,7 @@ impl Config {
 
         // System
         if let Ok(val) = std::env::var("START_AT_LOGIN") {
-            self.start_at_login = val.parse().unwrap_or(false);
+            self.start_at_login = matches!(val.as_str(), "1" | "true" | "yes" | "on");
         }
 
         // Debugging
@@ -221,15 +234,19 @@ impl Config {
         // Update the specific key
         env_vars.insert(key.to_string(), value.to_string());
 
-        // Write back to file
+        // Write back to file (persists for next app launch)
         Self::write_env_file(&env_path, &env_vars)?;
+
+        // Also update runtime env var (dotenvy doesn't override existing vars)
+        // SAFETY: Called from main thread during menu interaction, single-threaded context
+        unsafe { std::env::set_var(key, value) };
 
         Ok(())
     }
 
     /// Parse .env file into HashMap.
     pub fn parse_env_file(path: &PathBuf) -> anyhow::Result<HashMap<String, String>> {
-        // Path comes from Config::env_path() which is hardcoded to ~/.CodeScribe/.env
+        // Path comes from Config::env_path() which is hardcoded to ~/.codescribe/.env
         // nosemgrep: tainted-path
         let contents = fs::read_to_string(path)?;
         let mut vars = HashMap::new();
@@ -259,7 +276,7 @@ impl Config {
 
     /// Write HashMap to .env file.
     pub fn write_env_file(path: &PathBuf, vars: &HashMap<String, String>) -> anyhow::Result<()> {
-        // Path comes from Config::env_path() which is hardcoded to ~/.CodeScribe/.env
+        // Path comes from Config::env_path() which is hardcoded to ~/.codescribe/.env
         // nosemgrep: tainted-path
         let mut file = fs::File::create(path)?;
 
@@ -342,13 +359,10 @@ impl Config {
         }
     }
 
-    /// Get the configuration directory path (`$HOME/.CodeScribe`).
+    /// Get the configuration directory path (`$HOME/.codescribe`).
     ///
     /// Can be overridden with `CODESCRIBE_DATA_DIR` or `CODESCRIBE_APP_DIR`
     /// environment variables.
-    ///
-    /// **IMPORTANT**: This MUST match Python's `path_utils.user_data_root()` which uses
-    /// `.CodeScribe` (uppercase C) to ensure both frontend and backend share the same config.
     pub fn config_dir() -> PathBuf {
         // Check for environment variable overrides
         if let Ok(custom) = std::env::var("CODESCRIBE_DATA_DIR") {
@@ -359,10 +373,10 @@ impl Config {
             return PathBuf::from(shellexpand::tilde(&custom).into_owned());
         }
 
-        // Default to $HOME/.CodeScribe (uppercase C - matches Python path_utils.py)
+        // Default to $HOME/.codescribe (lowercase - Unix convention)
         BaseDirs::new()
-            .map(|dirs| dirs.home_dir().join(".CodeScribe"))
-            .unwrap_or_else(|| PathBuf::from(".CodeScribe"))
+            .map(|dirs| dirs.home_dir().join(".codescribe"))
+            .unwrap_or_else(|| PathBuf::from(".codescribe"))
     }
 
     /// Get the full path to the .env file.

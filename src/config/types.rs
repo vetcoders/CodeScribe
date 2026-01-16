@@ -96,11 +96,11 @@ impl FromStr for ToggleTrigger {
 }
 
 /// Language options for Whisper transcription
+/// NOTE: No "Auto" - Whisper requires explicit language for reliable transcription
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     #[default]
-    Auto,
     Polish,
     English,
 }
@@ -108,7 +108,6 @@ pub enum Language {
 impl Language {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Auto => "auto",
             Self::Polish => "pl",
             Self::English => "en",
         }
@@ -120,9 +119,10 @@ impl FromStr for Language {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
             "pl" | "polish" => Ok(Self::Polish),
             "en" | "english" => Ok(Self::English),
+            // Legacy "auto" maps to Polish (default)
+            "auto" | "" => Ok(Self::Polish),
             _ => Err(format!("Unknown Language: {}", s)),
         }
     }
@@ -228,12 +228,24 @@ pub struct Config {
     #[serde(default = "default_sound_volume")]
     pub sound_volume: f32,
 
+    // ===== Audio =====
+    /// Preferred audio input device name (cpal) (optional)
+    pub audio_input_device: Option<String>,
+
     // ===== History =====
     /// Whether to keep transcription history
     #[serde(default = "default_history_enabled")]
     pub history_enabled: bool,
 
     // ===== Backends =====
+    /// Whether to use local STT instead of cloud
+    #[serde(default)]
+    pub use_local_stt: bool,
+
+    /// Local model name (tiny, base, small, large-v3)
+    #[serde(default = "default_local_model")]
+    pub local_model: String,
+
     /// Full STT endpoint URL (e.g., https://api.libraxis.cloud/stt/v1/transcribe)
     pub stt_endpoint: Option<String>,
 
@@ -299,7 +311,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hold_mods: HoldMods::default(),
-            hold_exclusive: false,
+            hold_exclusive: true, // Ignore extra modifiers by default (Ctrl+K won't trigger)
             toggle_trigger: ToggleTrigger::default(),
             hold_start_delay_ms: default_hold_start_delay_ms(),
             whisper_language: Language::default(),
@@ -315,7 +327,10 @@ impl Default for Config {
             beep_on_start: default_beep_on_start(),
             sound_name: default_sound_name(),
             sound_volume: default_sound_volume(),
+            audio_input_device: None,
             history_enabled: default_history_enabled(),
+            use_local_stt: false,
+            local_model: default_local_model(),
             stt_endpoint: None,
             whisper_server_url: default_whisper_server_url(),
             llm_server_url: default_llm_server_url(),
@@ -338,13 +353,8 @@ impl Default for Config {
 impl Config {
     /// Sanitize configuration values to ensure they're valid.
     pub fn sanitize(&mut self) {
-        // Ensure token limits are reasonable
-        if self.ai_max_tokens <= 0 {
-            self.ai_max_tokens = 512;
-        }
-        if self.ai_assistive_max_tokens <= 0 {
-            self.ai_assistive_max_tokens = 2048;
-        }
+        // Token limits: 0 = no limit (API decides). Don't override.
+        // Tokens are cheap, lost notes are not.
 
         // Validate audio thresholds (legacy)
         if self.silence_db > 0.0 || self.silence_db < -100.0 {

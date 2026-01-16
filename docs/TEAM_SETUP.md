@@ -1,51 +1,177 @@
-# CodeScribe — Internal Onboarding Cheatsheet
+# CodeScribe - Team Setup (Pure Rust Era)
 
-## Option A – DMG Install (fastest)
-1. Copy `packaging/dmg/CodeScribe.dmg` to your Mac and open it.
-2. Inside the DMG run the helpers in order:
-   - `Helpers/Get Models.command` – download Whisper (Large v3 Turbo or Medium).
-   - `Helpers/Install App.command` – copy the app into `/Applications` and launch it.
-3. At first launch, grant macOS permissions (System Settings → Privacy & Security):
-   - Microphone (Terminal/Python)
-   - Accessibility (Terminal/Python)
-   - Input Monitoring (Terminal/Python)
-4. Usage basics:
-   - Hold `Ctrl` ≥ 500 ms to record; release to paste the transcript.
-   - Double‑tap `Option (⌥)` for toggle mode.
+## Quick Start
 
-## Option B – Run from the repo (dev workflow)
-1. Clone the repo and `cd CodeScribe`.
-2. Install dependencies:
-   ```bash
-   uv sync
-   ```
-3. Download models (or copy them into `./models`):
-   ```bash
-   uv run python scripts/get_models.py --whisper large-v3-turbo
-   ```
-4. Start tray + backend as daemons:
-   ```bash
-   ./scripts/quickstart_mac.sh --mode both --daemon --log CodeScribe.log
-   ```
-   - Watch logs with `tail -f CodeScribe.log`.
-   - Stop everything via `./scripts/quickstart_mac.sh --stop-all`.
+### 1. Prerequisites
 
-## Shortcuts & Toggles
-- **Light Plus** is always enabled; AI formatting (Harmony/Ollama) can be toggled in the tray.
-- Tray → **Hotkey Settings**: pick the hold combo (Ctrl / Ctrl+Option / Ctrl+Shift / Ctrl+Command) and exclusive mode. Changes persist to `.env` automatically.
-- Tray → **Feedback**: enable/disable the start chime, switch sounds (Tink/Pop), and set the volume—also persisted to `.env`.
+- macOS 14+ (Apple Silicon recommended)
+- Rust 1.83+ with `wasm32-unknown-unknown` target
+- Trunk (`cargo install trunk`)
+- Tauri CLI (`cargo install tauri-cli`)
 
-## Logs & PID Files
-- Tray (launch agent) log: `~/Library/Logs/CodeScribe.app.log`
-- Quickstart log: `CodeScribe.log`, backend logs under `logs/backend.*.log`
-- PID files for emergency shutdowns: `.pids/tray.pid`, `.pids/backend.pid`
+### 2. Build & Run
 
-## Formatting / AI Models
-- Tray → **Formatting** → uncheck “AI Formatting Enabled” to stay on Light Plus only.
-- To force a local LLM, set `LLM_ID=/path/to/qwen-4b` and select the LLM provider in the Formatting submenu.
+```bash
+# Clone
+git clone git@github.com:VetCoders/CodeScribe.git
+cd CodeScribe
+
+# Build WASM frontend
+cd tauri-app && trunk build && cd ..
+
+# Build and run app
+cargo tauri build --no-bundle
+open target/release/bundle/macos/CodeScribe.app
+```
+
+### 3. Development Mode
+
+```bash
+# Terminal 1: Trunk dev server
+cd tauri-app && trunk serve --port 8080
+
+# Terminal 2: Run debug binary
+./target/debug/codescribe-app
+```
+
+## Permissions Required
+
+Grant in: System Settings > Privacy & Security
+
+1. **Microphone** - for audio recording
+2. **Accessibility** - for global hotkeys
+3. **Input Monitoring** - for hotkey capture
+
+## Hotkeys
+
+| Key                       | Action                                      | AI Mode                |
+|---------------------------|---------------------------------------------|------------------------|
+| Hold **Ctrl**             | Record → paste raw transcript               | ALWAYS RAW (no AI)     |
+| Hold **Ctrl+Shift**       | Record → AI assistant response              | ALWAYS Assistive       |
+| Double-tap **Option**     | Toggle recording (hands-free)               | Respects AI toggle     |
+| Triple-tap **Option**     | Toggle AI Formatting on/off                 | Shows toast            |
+| **Shift** during Ctrl hold| Upgrade to Assistive mode mid-recording     | —                      |
+
+### Mode Behavior
+
+- **RAW mode (Ctrl)**: Fast dictation. Transcript is pasted as-is (only local repetition cleanup).
+  Ignores AI_FORMATTING_ENABLED setting.
+- **Toggle mode (Double Option)**: Respects the AI Formatting toggle. If enabled, sends to AI
+  for formatting. If disabled, pastes raw.
+- **Assistive mode (Ctrl+Shift)**: Full AI assistant. Model can answer questions, expand ideas,
+  or pass through dictation based on detected intent (KURIER/ASYSTENT system).
+
+## Model
+
+**Embedded in the binary (release)**: `whisper-large-v3-turbo-mlx-q8` (~888MB)
+
+- No runtime model download
+- No `Resources/models/*` bundling in the `.app`
+- Model bytes are loaded directly into Metal (zero disk I/O)
+
+**Developer note:** to build an embedded release locally you still need the model folder present
+so it can be embedded at build time:
+
+```bash
+make download-model
+```
+
+Location (dev/build-time): `models/whisper-large-v3-turbo-mlx-q8/`
+
+## CLI Usage
+
+```bash
+# Transcribe audio file
+codescribe transcribe audio.wav
+
+# With AI formatting
+codescribe transcribe audio.wav --format
+
+# Specify language
+codescribe transcribe audio.wav --language pl
+```
+
+## Configuration
+
+File: `~/.codescribe/.env`
+
+```env
+USE_LOCAL_STT=1
+
+# Whisper
+WHISPER_LANGUAGE=pl
+
+# AI formatting (optional) - separate providers for formatting vs assistive
+AI_FORMATTING_ENABLED=1
+
+# Formatting mode (fast, cheap) - for Ctrl Hold with AI toggle
+LLM_FORMATTING_ENDPOINT=https://api.libraxis.cloud/v1/responses
+LLM_FORMATTING_MODEL=gpt-5-mini
+LLM_FORMATTING_API_KEY=sk-xxx
+
+# Assistive mode (smart) - for Ctrl+Shift Hold
+LLM_ASSISTIVE_ENDPOINT=https://api.libraxis.cloud/v1/responses
+LLM_ASSISTIVE_MODEL=gpt-5.2
+LLM_ASSISTIVE_API_KEY=sk-xxx
+
+# Shared fallback (if mode-specific not set)
+LLM_ENDPOINT=https://api.openai.com/v1/responses
+LLM_MODEL=gpt-4.1-mini
+LLM_API_KEY=sk-proj-xxx
+```
+
+### Custom Prompts
+
+Prompts are loaded from `~/.codescribe/prompts/` at each request (no restart needed):
+
+- `formatting.txt` - System prompt for formatting mode (punctuation, structure)
+- `assistive.txt` - System prompt for assistive mode (KURIER/ASYSTENT logic)
+
+Edit these files to customize AI behavior. Changes take effect immediately.
+
+## Quality Assurance
+
+### Local (recommended)
+
+```bash
+# Install pre-commit hooks (runs check/fmt on commit, clippy/semgrep on push)
+make hooks
+
+# Manual quality gate
+make check       # fmt + clippy + unit tests
+
+# E2E tests with real API
+make test-sse    # SSE streaming tests (requires ~/.codescribe/.env)
+```
+
+### CI (GitHub Actions)
+
+**Note:** Full build requires macOS + Swift 6.0 (CoreML, Metal). GitHub runners have Swift 5.10, so CI only runs:
+
+- **Format check** (`cargo fmt --check`) on Linux
+- **Semgrep** security scan on Linux
+
+Clippy and tests run **locally** via pre-commit hooks or `make check`.
+
+For full CI, configure a self-hosted macOS runner (Dragon recommended).
 
 ## Troubleshooting
-- Nothing pastes/records: re-check Accessibility, Input Monitoring, and Microphone permissions.
-- No sound: tray → Feedback → Enable Start Sound; set `SOUND_VOLUME` to 0.1–0.3.
-- Models missing: ensure they live in `./models` or rerun `Get Models.command`.
-- Reset: `./scripts/quickstart_mac.sh --stop-all` and then start again.
+
+### App doesn't start
+
+- Check Console.app for crash logs
+- If building locally: ensure the model exists in `models/` (for embedding at build time)
+
+### Hotkeys don't work
+
+- Grant Accessibility permission
+- Grant Input Monitoring permission
+- Restart app after granting
+
+### No transcription
+
+- Check `USE_LOCAL_STT=1` in config
+- If using local STT: confirm the app is using the embedded engine (default in release builds)
+
+---
+*Created by M&K (c)2026 VetCoders*

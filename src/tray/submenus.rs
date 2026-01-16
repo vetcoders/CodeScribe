@@ -1,21 +1,41 @@
 //! Submenu building functions for the tray menu
 //!
 //! Each function builds a specific submenu and returns its IDs.
+//! Some functions are prepared for future use but not yet integrated into the main menu.
+
+#![allow(dead_code)]
 
 use anyhow::Result;
-use muda::{CheckMenuItem, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{
+    CheckMenuItem, IconMenuItem, MenuId, MenuItem, NativeIcon, PredefinedMenuItem, Submenu,
+};
 
-use crate::tray::state::{
-    HISTORY_MENU_ITEMS, HOLD_MENU_ITEMS, MODEL_MENU_ITEMS, TOGGLE_MENU_ITEMS,
-};
-use crate::tray::types::{
-    HistoryMenuItems, HoldMenuItems, HoldMods, ModelMenuItems, ToggleMenuItems, VolumeLevel,
-};
+use crate::tray::state::{HOLD_MENU_ITEMS, MODEL_MENU_ITEMS, TOGGLE_MENU_ITEMS};
+use crate::tray::types::{HoldMenuItems, HoldMods, ModelMenuItems, ToggleMenuItems, VolumeLevel};
 
 // Type aliases
 pub type ModelMenuIds = (MenuId, MenuId, MenuId, MenuId, MenuId, MenuId);
-pub type HoldMenuIds = (MenuId, MenuId, MenuId, MenuId, MenuId, MenuId, MenuId, MenuId);
-pub type FeedbackMenuIds = (MenuId, MenuId, MenuId, MenuId, MenuId, MenuId, MenuId, MenuId);
+pub type HoldMenuIds = (
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+);
+pub type FeedbackMenuIds = (
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+    MenuId,
+);
+pub type HistoryMenuIds = (MenuId, MenuId, MenuId, MenuId, MenuId, MenuId);
 
 /// Build the Language submenu
 pub fn build_language_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> {
@@ -55,11 +75,19 @@ pub fn build_models_submenu() -> Result<(Submenu, ModelMenuIds)> {
     let model_small =
         CheckMenuItem::new("Use Whisper: Small", true, current_whisper == "small", None);
     let model_small_id = model_small.id().clone();
-    let model_medium =
-        CheckMenuItem::new("Use Whisper: Medium", true, current_whisper == "medium", None);
+    let model_medium = CheckMenuItem::new(
+        "Use Whisper: Medium",
+        true,
+        current_whisper == "medium",
+        None,
+    );
     let model_medium_id = model_medium.id().clone();
-    let model_large_v3 =
-        CheckMenuItem::new("Use Whisper: Large v3", true, current_whisper == "large-v3", None);
+    let model_large_v3 = CheckMenuItem::new(
+        "Use Whisper: Large v3",
+        true,
+        current_whisper == "large-v3",
+        None,
+    );
     let model_large_v3_id = model_large_v3.id().clone();
     let model_large_v3_turbo = CheckMenuItem::new(
         "Use Whisper: Large v3 Turbo",
@@ -151,21 +179,43 @@ pub fn build_formatting_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> {
 pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HoldMenuIds)> {
     let hold_menu = Submenu::new("Hold Hotkeys", true);
 
-    let hold_current_label = MenuItem::new("Current: Ctrl only (Raw)", false, None);
+    // Read from Config (source of truth for initial state)
+    let config = crate::config::Config::load();
+    let current_mods = config.hold_mods;
+    let current_trigger = config.toggle_trigger;
+
+    let hold_current_label =
+        MenuItem::new(format!("Current: {}", current_mods.label()), false, None);
     hold_menu.append(&hold_current_label)?;
     hold_menu.append(&PredefinedMenuItem::separator())?;
 
-    let hold_ctrl =
-        CheckMenuItem::new(format!("Hold: {}", HoldMods::Ctrl.label()), true, true, None);
+    let hold_ctrl = CheckMenuItem::new(
+        format!("Hold: {}", HoldMods::Ctrl.label()),
+        true,
+        current_mods == HoldMods::Ctrl,
+        None,
+    );
     let hold_ctrl_id = hold_ctrl.id().clone();
-    let hold_ctrl_opt =
-        CheckMenuItem::new(format!("Hold: {}", HoldMods::CtrlAlt.label()), true, false, None);
+    let hold_ctrl_opt = CheckMenuItem::new(
+        format!("Hold: {}", HoldMods::CtrlAlt.label()),
+        true,
+        current_mods == HoldMods::CtrlAlt,
+        None,
+    );
     let hold_ctrl_opt_id = hold_ctrl_opt.id().clone();
-    let hold_ctrl_shift =
-        CheckMenuItem::new(format!("Hold: {}", HoldMods::CtrlShift.label()), true, false, None);
+    let hold_ctrl_shift = CheckMenuItem::new(
+        format!("Hold: {}", HoldMods::CtrlShift.label()),
+        true,
+        current_mods == HoldMods::CtrlShift,
+        None,
+    );
     let hold_ctrl_shift_id = hold_ctrl_shift.id().clone();
-    let hold_ctrl_cmd =
-        CheckMenuItem::new(format!("Hold: {}", HoldMods::CtrlCmd.label()), true, false, None);
+    let hold_ctrl_cmd = CheckMenuItem::new(
+        format!("Hold: {}", HoldMods::CtrlCmd.label()),
+        true,
+        current_mods == HoldMods::CtrlCmd,
+        None,
+    );
     let hold_ctrl_cmd_id = hold_ctrl_cmd.id().clone();
 
     hold_menu.append(&hold_ctrl)?;
@@ -174,18 +224,38 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HoldMenuIds)> {
     hold_menu.append(&hold_ctrl_cmd)?;
     hold_menu.append(&PredefinedMenuItem::separator())?;
 
-    let hold_exclusive = CheckMenuItem::new("Exclusive (ignore extra modifiers)", true, true, None);
+    let hold_exclusive = CheckMenuItem::new(
+        "Exclusive (ignore extra modifiers)",
+        true,
+        config.hold_exclusive,
+        None,
+    );
     let hold_exclusive_id = hold_exclusive.id().clone();
     hold_menu.append(&hold_exclusive)?;
     hold_menu.append(&PredefinedMenuItem::separator())?;
 
-    let toggle_label = MenuItem::new("Toggle: double option", false, None);
+    let toggle_label = MenuItem::new(format!("Toggle: {}", current_trigger.label()), false, None);
     hold_menu.append(&toggle_label)?;
-    let toggle_double_opt = CheckMenuItem::new("Use double Option (⌥⌥)", true, true, None);
+    let toggle_double_opt = CheckMenuItem::new(
+        "Use double Option (⌥⌥)",
+        true,
+        current_trigger == crate::config::ToggleTrigger::DoubleOption,
+        None,
+    );
     let toggle_double_opt_id = toggle_double_opt.id().clone();
-    let toggle_double_ralt = CheckMenuItem::new("Use double Right Option", true, false, None);
+    let toggle_double_ralt = CheckMenuItem::new(
+        "Use double Right Option",
+        true,
+        current_trigger == crate::config::ToggleTrigger::DoubleRightOption,
+        None,
+    );
     let toggle_double_ralt_id = toggle_double_ralt.id().clone();
-    let toggle_disabled = CheckMenuItem::new("Disable toggle", true, false, None);
+    let toggle_disabled = CheckMenuItem::new(
+        "Disable toggle",
+        true,
+        current_trigger == crate::config::ToggleTrigger::None,
+        None,
+    );
     let toggle_disabled_id = toggle_disabled.id().clone();
 
     hold_menu.append(&toggle_double_opt)?;
@@ -227,59 +297,53 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HoldMenuIds)> {
 }
 
 /// Build the History submenu
-pub fn build_history_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> {
+/// Returns: (Submenu, (format_last, format_last_5, save_history, keep_audio, copy_latest, open_folder))
+pub fn build_history_submenu() -> Result<(Submenu, HistoryMenuIds)> {
     let history_menu = Submenu::new("History", true);
 
-    let recent_entries = crate::history::recent_entries(5);
-    let latest_label = if let Some(entry) = recent_entries.first() {
-        format!("Latest: {}", entry.label())
-    } else {
-        "Latest: (none)".to_string()
-    };
-    let history_latest_label = MenuItem::new(latest_label, false, None);
-    history_menu.append(&history_latest_label)?;
+    // Format actions at the top
+    let format_last = MenuItem::new("Format Last Transcript", true, None);
+    let format_last_id = format_last.id().clone();
+    history_menu.append(&format_last)?;
+
+    let format_last_5 = MenuItem::new("Format Last 5 Transcripts", true, None);
+    let format_last_5_id = format_last_5.id().clone();
+    history_menu.append(&format_last_5)?;
+
     history_menu.append(&PredefinedMenuItem::separator())?;
 
-    let history_save = CheckMenuItem::new("Save transcripts to History", true, true, None);
+    // Save toggles (paired: history + audio)
+    let config = crate::config::Config::load();
+
+    let history_save = CheckMenuItem::new("Save to History", true, config.history_enabled, None);
     let history_save_id = history_save.id().clone();
     history_menu.append(&history_save)?;
+
+    let keep_audio = CheckMenuItem::new("Keep Audio", true, config.dump_audio_logs, None);
+    let keep_audio_id = keep_audio.id().clone();
+    history_menu.append(&keep_audio)?;
+
     history_menu.append(&PredefinedMenuItem::separator())?;
 
-    if recent_entries.is_empty() {
-        let placeholder_entry = MenuItem::new("(no recent entries)", false, None);
-        history_menu.append(&placeholder_entry)?;
-    } else {
-        for entry in recent_entries.iter().take(5) {
-            let label = entry.label();
-            let display = if label.chars().count() > 40 {
-                format!("{}...", label.chars().take(37).collect::<String>())
-            } else {
-                label.to_string()
-            };
-            history_menu.append(&MenuItem::new(display, true, None))?;
-        }
-    }
-    history_menu.append(&PredefinedMenuItem::separator())?;
-
-    let history_copy_latest = MenuItem::new("Copy Latest to Clipboard", true, None);
+    // Copy and Open actions
+    let history_copy_latest = MenuItem::new("Copy Latest", true, None);
     let history_copy_latest_id = history_copy_latest.id().clone();
-    let history_open_folder = MenuItem::new("Open History Folder", true, None);
-    let history_open_folder_id = history_open_folder.id().clone();
-
     history_menu.append(&history_copy_latest)?;
-    history_menu.append(&history_open_folder)?;
 
-    HISTORY_MENU_ITEMS.with(|items_cell| {
-        *items_cell.borrow_mut() = Some(HistoryMenuItems {
-            latest_label: history_latest_label,
-        });
-    });
+    let history_open_folder = MenuItem::new("Open Folder", true, None);
+    let history_open_folder_id = history_open_folder.id().clone();
+    history_menu.append(&history_open_folder)?;
 
     Ok((
         history_menu,
-        history_save_id,
-        history_copy_latest_id,
-        history_open_folder_id,
+        (
+            format_last_id,
+            format_last_5_id,
+            history_save_id,
+            keep_audio_id,
+            history_copy_latest_id,
+            history_open_folder_id,
+        ),
     ))
 }
 
@@ -364,8 +428,11 @@ pub fn build_permissions_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> 
         crate::permissions::PermissionStatus::NotDetermined => "?",
         _ => "✗",
     };
-    let perm_status_label =
-        MenuItem::new(format!("AX: {} | Mic: {}", ax_status, mic_status), false, None);
+    let perm_status_label = MenuItem::new(
+        format!("AX: {} | Mic: {}", ax_status, mic_status),
+        false,
+        None,
+    );
     permissions_menu.append(&perm_status_label)?;
     permissions_menu.append(&PredefinedMenuItem::separator())?;
 
@@ -391,20 +458,36 @@ pub fn build_permissions_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> 
 }
 
 /// Build the Tools submenu
-pub fn build_tools_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> {
+pub fn build_tools_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId, MenuId)> {
     let tools_menu = Submenu::new("Tools", true);
 
-    let tools_voice_lab = MenuItem::new("🔬 Open Voice Lab", true, None);
+    // Voice Lab - Advanced icon (settings/lab)
+    let tools_voice_lab =
+        IconMenuItem::with_native_icon("Open Voice Lab", true, Some(NativeIcon::Advanced), None);
     let tools_voice_lab_id = tools_voice_lab.id().clone();
     tools_menu.append(&tools_voice_lab)?;
 
-    let tools_teacher = MenuItem::new("👨‍🏫 Calibration Teacher", true, None);
+    // Teacher - Info icon (educational)
+    let tools_teacher =
+        IconMenuItem::with_native_icon("Calibration Teacher", true, Some(NativeIcon::Info), None);
     let tools_teacher_id = tools_teacher.id().clone();
     tools_menu.append(&tools_teacher)?;
 
+    // Native Lab (Tauri) - Computer icon (native app)
+    let tools_native_lab = IconMenuItem::with_native_icon(
+        "Open Native Lab (Tauri)",
+        true,
+        Some(NativeIcon::Computer),
+        None,
+    );
+    let tools_native_lab_id = tools_native_lab.id().clone();
+    tools_menu.append(&tools_native_lab)?;
+
     tools_menu.append(&PredefinedMenuItem::separator())?;
 
-    let tools_new_conversation = MenuItem::new("🔄 New Conversation", true, None);
+    // New Conversation - Add icon (refresh/new)
+    let tools_new_conversation =
+        IconMenuItem::with_native_icon("New Conversation", true, Some(NativeIcon::Add), None);
     let tools_new_conversation_id = tools_new_conversation.id().clone();
     tools_menu.append(&tools_new_conversation)?;
 
@@ -412,6 +495,7 @@ pub fn build_tools_submenu() -> Result<(Submenu, MenuId, MenuId, MenuId)> {
         tools_menu,
         tools_voice_lab_id,
         tools_teacher_id,
+        tools_native_lab_id,
         tools_new_conversation_id,
     ))
 }

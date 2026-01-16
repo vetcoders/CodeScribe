@@ -1,31 +1,47 @@
-name: Tests
+# Rust Code Quality CI
+# Created by M&K (c)2026 VetCoders
+#
+# NOTE: Full build requires macOS with Swift 6.0 (CoreML, Metal).
+# GitHub runners have Swift 5.10, so we only run format checks here.
+# Full quality gate (clippy, tests) runs locally via: make check
+# Or via pre-commit hooks: make hooks
+
+name: Rust Quality
 
 on:
+  push:
+    branches: [main, develop]
   pull_request:
-    types: [opened, reopened]
-    branches: [ main, develop ]
+    branches: [main, develop]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  pytest:
-    runs-on: macos-14
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
-      - name: Sync dependencies
-        run: uv sync --dev
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
 
-      - name: Set PYTHONPATH
-        run: echo "PYTHONPATH=$(pwd)/server" >> $GITHUB_ENV
-
-      - name: Run full check suite
-        env:
-          CODESCRIBE_SETTINGS_PATH: ${{ runner.temp }}/settings.json
-        run: make check
+  # NOTE: clippy and check disabled - requires macOS + Swift 6.0
+  # Run locally: make lint
+  #
+  # To enable full CI, use a self-hosted macOS runner:
+  # quality:
+  #   runs-on: [self-hosted, macos, arm64]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: cargo clippy -- -D warnings
+  #     - run: cargo test --lib

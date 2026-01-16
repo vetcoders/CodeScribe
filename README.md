@@ -1,160 +1,401 @@
-# CodeScribe
+# ⌜ CodeScribe ⌟
 
-[![Tests](https://github.com/Loctree/CodeScribe/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Loctree/CodeScribe/actions/workflows/tests.yml)
-[![Lint](https://github.com/Loctree/CodeScribe/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/Loctree/CodeScribe/actions/workflows/lint.yml)
+**Local speech-to-text for macOS with AI formatting — Pure Rust, Metal GPU, embedded Whisper.**
 
-CodeScribe is a macOS menu-bar companion that records audio through global hotkeys, runs it
-through local MLX Whisper models, and pastes the transcript directly into the currently focused
-application. Optional Harmony- or Ollama-based formatting can polish the output, but the Light+
-formatter keeps everything private and deterministic by default.
+## Overview
 
-## Feature Highlights
-- **Zero-cloud capture** – MLX Whisper (Medium, Large V3, Large V3 Turbo, PL fine-tunes) loads from
-  `./models` without API keys.
-- **Tray-first UX** – hold Control (press-or-hold) or double-tap Option to start/stop recording,
-  with animated tray glyphs and optional chimes.
-- **Deterministic Light+ formatting** – always-on cleanup that removes fillers, fixes casing, and
-  stabilizes punctuation before anything touches an LLM.
-- **Optional AI formatting** – Harmony-compatible providers (Libraxis/OpenAI `/v1/responses`) or
-  local Ollama models for “Assistive” mode; toggled live from the Formatting submenu.
-- **Shared backend** – `codescribe_server` exposes REST + NDJSON + WebSocket streaming endpoints so
-  the React/Tauri Vista client can reuse the same transcription core.
-- **Developer utilities** – launch scripts, tester UI (`/tester`) with live spectrogram, and a
-  persistent JSON settings store that is shared between the tray, backend, and packaged apps.
+CodeScribe is a native macOS menu-bar application that captures audio through global hotkeys, transcribes it locally
+using Whisper with Metal GPU acceleration, and pastes the transcript directly into the focused application. Optional AI
+formatting via LLM polishes the output while keeping everything private and local.
 
-## Quick Start
-1. **Install uv** (if missing): `curl -LsSf https://astral.sh/uv/install.sh | sh && exec -l $SHELL`.
-2. **Install dependencies**: `uv sync` (creates/updates `.venv`).
-3. **Copy env template**: `cp .env.example .env` and tweak anything you need (e.g.
-   `WHISPER_VARIANT`, Harmony/Ollama endpoints). All durable settings end up in
-   `$HOME/.CodeScribe/settings.json`, which the tray, backend, and packaged app share.
-4. **Download models**: `uv run python scripts/get_models.py --whisper large-v3-turbo` (repeat for
-   `medium` or PL fine-tunes as needed).
-5. **Run the tray**: `uv run python -m codescribe.main` (foreground) or use the launcher:
-   ```bash
-   ./CodeScribe start            # tray + backend as daemons (logs written to ./logs)
-   ./CodeScribe tester           # ensures backend is up and opens the spectrogram UI
-   ./CodeScribe stop             # stop everything started by the launcher
-   ```
-   For interactive dev runs (foreground, verbose logging), use `./CodeScribe-dev start` or
-   `./CodeScribe-dev tester`.
+> **Status:** v0.6.2 — Embedded model (~888MB binary) + *Whisper Live* (streaming transcription during recording).
 
-## Repository Layout
+See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md)
+
+## API Provider
+
+CodeScribe uses the **Responses API** (`/v1/responses`) for AI formatting. Compatible with OpenAI, LibraxisAI,
+Anthropic, and any provider supporting this format.
+
+### Multi-Provider Setup (Recommended)
+
+Use different providers for different modes — e.g., cheaper model for formatting, powerful model for assistive:
+
+```env
+# ~/.codescribe/.env
+
+# Shared defaults
+LLM_ENDPOINT=https://api.openai.com/v1/responses
+LLM_MODEL=gpt-4.1-mini
+LLM_API_KEY=sk-proj-xxx
+
+# Formatting mode overrides (Ctrl hold - cleanup only)
+LLM_FORMATTING_ENDPOINT=https://api.libraxis.cloud/v1/responses
+LLM_FORMATTING_MODEL=gpt-4.1-mini
+LLM_FORMATTING_API_KEY=vista-xxx
+
+# Assistive mode overrides (Ctrl+Shift - AI augmentation)
+LLM_ASSISTIVE_ENDPOINT=https://api.openai.com/v1/responses
+LLM_ASSISTIVE_MODEL=gpt-4.1
+LLM_ASSISTIVE_API_KEY=sk-proj-xxx
 ```
-scripts/               # helper scripts (model downloaders, quickstart, diagnostics)
-src/codescribe/       # tray + backend source (controllers, STT, LLM, assets, settings)
-tests/                 # pytest suites (unit + backend streaming/tests/manual)
-docs/                  # documentation (team setup, proposals, tree snapshots under docs/reports)
-packaging/             # py2app + DMG build scripts and wrappers
-tools/                 # auxiliary tooling (bandit config, expose_ollama helper, etc.)
-logs/                  # runtime logs, generated trees, PID files (gitignored)
-```
-The tracked snapshot of the tree lives in `docs/reports/project-tree.txt`. Regenerate it any time
-with `tree -a -L 2 > logs/project-tree.txt` and copy the portion you care about into docs.
 
-## Configuration & Settings
-- The tray/backend read lightweight config values from `.env`, but persistent toggles (formatting
-  provider, preferred Whisper variant, menu toggles) live in `$HOME/.CodeScribe/` and follow you
-  between the CLI, LaunchAgent, and bundled app.
-- Use `.env.example` in the repo root as the single source of truth. Copy it to `.env`, keep the
-  handful of variables you care about, and let the JSON settings store handle everything else.
-- When automation scripts need deterministic overrides (e.g. CI, the test-instance launcher) they
-  now export the relevant variables inline—no extra template files are required.
-- `HARMONY_BASE_URL` no longer has a baked-in default; set it explicitly (for example
-  `https://api.libraxis.cloud/llm/v1`) whenever the Harmony provider is enabled. The CLI will raise
-  a helpful error if it is missing.
-- `CODESCRIBE_HOST` lets you point the tray utilities (tester, client, chat demo) at a different
-  backend host. It defaults to `127.0.0.1`, but setting it to another hostname/IP saves you from
-  editing random scripts.
+> **Note:** All requests use `previous_response_id` for conversation chaining. Context persists across transcriptions.
 
-### First-run wizard
-If CodeScribe can’t find `.env` or `~/.CodeScribe/settings.json`, it launches a guided wizard that
-walks through model selection, permissions, and (optionally) AI formatting providers. The dialogs
-force themselves to the front of the desktop stack, so you always see the prompts immediately. To
-re-run the wizard later, remove `~/.CodeScribe/settings.json` (or run `./CodeScribe fresh --yes`)
-and restart the tray.
+## Features
 
-## Scripts & Automation
-- `CodeScribe` / `CodeScribe-dev`: thin wrappers around `scripts/quickstart_mac.sh`. They ensure
-  permissions, detach processes, handle logs, and expose helpers like `status`, `logs`, `fresh`, and
-  `tester`.
-- `scripts/start_test_instance.sh`: spins up a dedicated backend/tray pair on port 7237 with the
-  baked-in “test” overrides (it no longer depends on a separate `.env.test`).
-- `scripts/test_hotkeys.sh`: guided smoke test for the double-Option vs. Hold workflows.
-- `tools/expose_ollama_tailscale.sh`: networking helper for piping Ollama through Tailscale.
+- **Pure Rust Implementation** — Native macOS app built entirely in Rust with candle-core + Metal GPU
+- **Embedded Whisper Model** — whisper-large-v3-turbo-mlx-q8 baked into binary (~888MB), zero disk I/O
+- **Whisper Live (Streaming)** — transcription happens *during recording* (chunks + overlap), so `stop()` is
+  near-instant
+- **Metal GPU Acceleration** — Hardware-accelerated inference on Apple Silicon
+- **System Tray App** — Minimal menu-bar presence with animated status glyphs
+- **Global Hotkeys** — Hold Ctrl or double-tap Option to record
+- **Provider Separation** — Different LLM providers for formatting vs assistive mode
+- **AI Formatting** — Optional post-processing via Responses API
+- **Slug Filenames** — Transcripts named with first 3 words for easy identification
+- **CLI Transcribe Command** — `codescribe transcribe` for batch audio processing
 
-## Background Server Usage
-`CodeScribeServer` is a standalone FastAPI process that powers all transcription and formatting
-requests. You can leave it running even after quitting the tray icon, which is handy when Vista (the
-Tauri frontend) or other tooling needs a local transcription API.
+## Tech Stack
 
-- **Starting the server only** – `./CodeScribe start backend` (or `scripts/quickstart_mac.sh
-  --mode backend`) launches the server as a daemon and records its port in
-  `logs/codescribe-server.port`.
-- **Checking status** – `./CodeScribe status` reports whether the tray and backend processes are
-  alive along with their PIDs.
-- **Quitting from the tray** – the menu item is now labeled **Quit...**. When you click it you get
-  three choices:
-  1. **Quit App & Server** – stops the tray, sends SIGTERM to `CodeScribeServer`, and removes the
-     tray icon.
-  2. **Keep Background Server** – exits the tray but keeps the FastAPI server alive for Vista or any
-     other client.
-  3. **Cancel** – leaves everything running.
+| Component        | Technology                        | Purpose                    |
+|------------------|-----------------------------------|----------------------------|
+| Language         | Rust 2024 Edition                 | Native performance         |
+| ML Framework     | candle-core + candle-transformers | Whisper inference          |
+| GPU Acceleration | Metal (Apple Silicon)             | Hardware-accelerated STT   |
+| System Tray      | tray-icon + muda + tao            | Menu bar app               |
+| Hotkeys          | CGEventTap (core-graphics)        | Global key detection       |
+| Audio            | cpal + hound + symphonia          | Recording & format support |
+| HTTP Client      | reqwest                           | LLM API calls              |
+| API Format       | openai-harmony                    | Responses API support      |
 
-If you prefer the CLI, `./CodeScribe stop` or `python -m codescribe.codescribe_server stop`
-performs the same cleanup.
+## Installation
 
-## Quality Gates
-All the usual checks can be run locally before pushing:
+### Prerequisites
+
+- **macOS 14+** (Sonoma or later)
+- **Apple Silicon** (M1, M2, M3, or later)
+- **Rust Toolchain** (1.85+ with edition 2024 support)
+
+### Install from Source
 
 ```bash
-uvx ruff format --check .
-uvx ruff check .
-uvx python -m bandit -c tools/bandit.yaml -r server/codescribe
-uv run mypy                 # uses the repo’s [tool.mypy] settings
-uv run pytest -q            # full suite
+# Clone the repository
+git clone https://github.com/VetCoders/CodeScribe.git
+cd CodeScribe
+
+# Download Whisper model (required for embedding)
+make download-model
+
+# Install CLI (~888MB with embedded model)
+make install
+
+# Verify installation
+codescribe --version
 ```
-`./CodeScribe-dev lint` wraps the Ruff commands, and `.pre-commit-config.yaml` wires the same stack
-into Git hooks (Ruff, pyupgrade, codespell, Bandit via `tools/bandit.yaml`, Semgrep, mypy).
 
-## Contributing
-We accept pull requests against the `develop` branch only (see [CONTRIBUTING.md](CONTRIBUTING.md)
-for the full workflow, coding style, and PR checklist). In short: keep UI copy in English, run Ruff
-and pytest locally, attach screenshots/logs for tray changes, and delete dead code instead of hiding
-it behind flags. The GitHub Actions badges above mirror the required checks.
+### Build Options
 
-## Changelog
-The recent stabilization work is summarized in [`CHANGELOG.md`](CHANGELOG.md), broken into two
-phases: `develop` vs `main` (baseline modernization) and `develop` vs `functional` (current modular
-refactor).
+```bash
+make build              # Debug build (external model)
+make release            # Release build (embedded model)
+make install            # Install with embedded model (~888MB)
+make install-no-embed   # Dev-only: install without embedding (needs CODESCRIBE_MODEL_PATH)
+```
 
-## Troubleshooting
-- **Scripts won’t run** – ensure `scripts/quickstart_mac.sh` is executable and remove quarantine:
-  ```bash
-  chmod +x scripts/quickstart_mac.sh CodeScribe CodeScribe-dev
-  xattr -dr com.apple.quarantine "$(pwd)"
-  ```
-- **CRLF headaches** – if you cloned on Windows or the files came via email:
-  `brew install dos2unix && dos2unix CodeScribe CodeScribe-dev scripts/quickstart_mac.sh`.
-- **No audio / permissions dialog** – macOS Privacy & Security → Microphone, Accessibility, Input
-  Monitoring must allow “Python” (or the terminal app you’re using).
-- **Backend port missing** – the backend rotates through 8237 → 7237 → 6237 → 5237. Check
-  `logs/codescribe-server.port` or `./CodeScribe status`, and ensure nothing else (e.g.
-  `mlx_audio.server`) is bound to 8237.
-- **Multiple instances** – delete `.codescribe.lock` if you hard-killed a tray instance, then
-  relaunch. The launcher already removes stale locks when you call `./CodeScribe stop`.
+## Quick Start
 
-## License & Contact
-CodeScribe is distributed under the **BSD 4-Clause License** (Original BSD).
+```bash
+# Start tray app
+codescribe
 
-- Copyright (c) 2025 Loctree — [contact@loctree.io](mailto:contact@loctree.io)
-- All redistributions—source or binary—must retain the copyright and license text **and** include
-  the acknowledgement: “This product includes software developed by Loctree.”
-- Review [`LICENSE`](LICENSE) for the full wording, including the advertising clause and guidance on
-  how to refer to CodeScribe in marketing copy.
+# Open/create config file
+make config
+# or: codescribe --config
 
-### Attribution requirement
-Any marketing, website copy, blog post, release notes, or in-product splash screen that mentions
-CodeScribe’s capabilities must contain the exact sentence above. The DMG README, macOS app
-“Credits” dialog, and external release notes have been updated to reference it—mirroring that text in
-your own derivatives keeps you compliant with the BSD 4-Clause license.
+# Verbose logging
+codescribe -v
+
+# CLI transcription
+codescribe transcribe audio.wav
+codescribe transcribe -l pl audio.m4a
+codescribe transcribe -f audio.mp3  # with AI formatting
+```
+
+## How It Works
+
+```mermaid
+flowchart TD
+    A[Hotkey Press] --> B{Mode?}
+    B -->|Hold Ctrl| C[Start Recording]
+    B -->|Double Option| C
+    C --> D[Recording]
+    D -->|live chunks| E[Whisper STT (streaming)]
+    D -->|Release / Toggle| F[Stop]
+    F --> G[Finalize last chunk]
+    G --> H{AI Enabled?}
+    H -->|Yes| I[LLM Formatting]
+    H -->|No| J[Raw Transcript]
+    I --> K[Paste to Active App]
+    J --> K
+
+    E -.- E1[Metal GPU • embedded model]
+    I -.- I1[Responses API • previous_response_id]
+```
+
+### Recording Modes
+
+| Mode             | Trigger                 | Description                   |
+|------------------|-------------------------|-------------------------------|
+| **Hold-to-talk** | Hold Ctrl (800ms delay) | Release to transcribe + paste |
+| **Assistive**    | Hold Ctrl+Shift         | AI augmentation mode          |
+| **Toggle**       | Double-tap Option       | Start/stop recording          |
+
+## Configuration
+
+Config file: `~/.codescribe/.env`
+
+```bash
+# Create/edit config
+make config
+```
+
+### Environment Variables
+
+```env
+# STT (Speech-to-Text)
+WHISPER_LANGUAGE=pl                  # pl | en | de | fr (no auto!)
+# CODESCRIBE_MODEL_PATH=             # Override embedded model
+
+# Hotkeys
+HOLD_MODS=ctrl                       # ctrl | ctrl_alt | ctrl_shift | ctrl_cmd
+TOGGLE_TRIGGER=double_option         # double_option | double_ralt | none
+HOLD_START_DELAY_MS=800              # Delay before recording starts
+
+# AI Formatting
+AI_FORMATTING_ENABLED=1              # 1=format via LLM, 0=raw transcript
+
+# LLM Provider (shared defaults)
+LLM_ENDPOINT=https://api.openai.com/v1/responses
+LLM_MODEL=gpt-4.1-mini
+LLM_API_KEY=sk-proj-xxx
+
+# Provider separation (optional)
+# LLM_FORMATTING_{ENDPOINT,MODEL,API_KEY}=
+# LLM_ASSISTIVE_{ENDPOINT,MODEL,API_KEY}=
+
+# History
+HISTORY_ENABLED=1                    # Save transcripts
+DUMP_AUDIO_LOGS=0                    # 1=save .wav paired with .txt
+
+# Audio
+BEEP_ON_START=1
+SOUND_VOLUME=0.5
+# AUDIO_INPUT_DEVICE=                # Specific device name
+
+# Logging
+LOG_LEVEL=INFO                       # TRACE | DEBUG | INFO | WARN | ERROR
+```
+
+See `.env.example` for complete reference.
+
+## CLI Reference
+
+### `codescribe` (Tray App)
+
+Main application — runs as menu bar app with global hotkeys.
+
+```bash
+codescribe [OPTIONS]
+
+Options:
+  -v, --verbose      Enable verbose logging
+  --config           Create/edit config file
+  --version          Show version
+  -h, --help         Show help
+```
+
+### `codescribe transcribe`
+
+CLI transcription without tray app.
+
+```bash
+codescribe transcribe FILE [OPTIONS]
+
+Arguments:
+  FILE               Audio file (WAV, MP3, M4A)
+
+Options:
+  -l, --language     Language hint (pl, en, de, fr)
+  -f, --format       Apply AI formatting
+  -m, --model        Model name (if using external)
+  --llm              LLM model for formatting
+  -h, --help         Show help
+```
+
+## Model
+
+CodeScribe uses **whisper-large-v3-turbo-mlx-q8**:
+
+- 4-layer turbo architecture (vs 32 layers in full model)
+- Q8 quantization (~894MB weights)
+- ~10x faster than whisper-large-v3
+- Metal GPU acceleration
+
+### Embedded Model (Default)
+
+Release builds include the model via `include_bytes!`:
+
+```bash
+cargo build --release          # ~888MB binary with model
+CODESCRIBE_NO_EMBED=1 cargo build --release  # Dev-only experiment (not supported for distribution)
+```
+
+### External Model (Development)
+
+For development or custom models:
+
+1. `CODESCRIBE_MODEL_PATH` environment variable
+2. `~/.codescribe/models/whisper-large-v3-turbo-mlx-q8/`
+3. `./models/whisper-large-v3-turbo-mlx-q8/`
+
+Model files required:
+
+- `config.json`
+- `weights.safetensors`
+- `tokenizer.json`
+- `mel_filters.npz`
+
+## Architecture
+
+```
+CodeScribe/
+├── src/
+│   ├── lib.rs                 # Library exports
+│   ├── main.rs                # CLI entry point
+│   ├── controller.rs          # Recording/transcription orchestration
+│   ├── ai_formatting.rs       # LLM formatting (Responses API)
+│   ├── whisper/
+│   │   ├── mod.rs             # Whisper module exports
+│   │   ├── engine.rs          # LocalWhisperEngine (candle)
+│   │   ├── embedded.rs        # Embedded model bytes
+│   │   ├── singleton.rs       # Shared model instance
+│   │   ├── model.rs           # Model wrapper
+│   │   └── params.rs          # DecodingParams
+│   ├── audio/
+│   │   ├── recorder.rs        # cpal audio capture
+│   │   ├── streaming_recorder.rs # Live (streaming) transcription during recording
+│   │   ├── loader.rs          # File loading + resampling
+│   │   └── playback.rs        # System sound playback
+│   ├── hotkeys/
+│   │   └── mod.rs             # CGEventTap hotkey handler
+│   ├── tray/
+│   │   ├── mod.rs             # Tray app setup
+│   │   ├── menu.rs            # Menu construction
+│   │   ├── handlers.rs        # Menu event handlers
+│   │   └── submenus.rs        # History, Modes, Settings
+│   ├── config/
+│   │   ├── mod.rs             # Config struct + loading
+│   │   └── prompts.rs         # AI prompt management
+│   └── state/
+│       ├── history.rs         # Transcript history + slug naming
+│       └── conversation.rs    # Conversation state
+├── tauri-app/                 # Tauri GUI (Voice Lab, Settings)
+├── models/                    # Whisper model files
+├── tests/                     # Unit + E2E tests
+└── docs/
+    ├── WHISPER_LIVE.md        # Embedded + streaming transcription (DONE)
+    └── ARCHITECTURE.md        # Technical documentation
+```
+
+## Development
+
+```bash
+# Clone and setup
+git clone https://github.com/VetCoders/CodeScribe.git
+cd CodeScribe
+
+# Development build (external model)
+CODESCRIBE_MODEL_PATH=./models/whisper-large-v3-turbo-mlx-q8 cargo run
+
+# Quality checks
+make lint           # clippy + fmt check
+make test           # Unit + integration tests
+make check          # Full quality gate
+
+# Formatting
+make format         # cargo fmt
+
+# Tauri GUI
+make tauri-dev      # Start Tauri dev server
+make tauri-build    # Build Tauri release
+```
+
+### Makefile Targets
+
+```
+make build            # Debug build
+make release          # Release build (embedded model)
+make install          # Install CLI (~888MB)
+make install-no-embed # Dev-only: install without embedding
+make config           # Edit ~/.codescribe/.env
+make bundle           # Create CodeScribe.app
+make install-app      # Install to /Applications
+make start            # Start as daemon
+make stop             # Stop running instance
+make logs             # View logs
+make lint             # Clippy + format check
+make test             # Run tests
+make check            # Full quality gate
+make download-model   # Download Whisper model
+```
+
+## Code Quality
+
+| Tool           | Purpose    | Config            |
+|----------------|------------|-------------------|
+| **Clippy**     | Linting    | `-D warnings`     |
+| **rustfmt**    | Formatting | Rust 2024 edition |
+| **cargo test** | Testing    | Unit + E2E        |
+
+## Permissions
+
+CodeScribe requires macOS permissions for:
+
+- **Microphone** — Audio recording
+- **Accessibility** — Global hotkey detection
+- **Input Monitoring** — Keyboard event capture
+
+Grant permissions in System Settings > Privacy & Security when prompted.
+
+## Roadmap
+
+### Implemented
+
+- [x] Local Whisper STT (Metal GPU)
+- [x] Embedded model in binary (~888MB)
+- [x] Global hotkeys (CGEventTap)
+- [x] AI formatting (Responses API)
+- [x] Provider separation (formatting/assistive)
+- [x] Conversation chaining (previous_response_id)
+- [x] Tray app with submenus
+- [x] CLI transcribe command
+- [x] History with slug filenames
+- [x] Keep Audio toggle
+- [x] Tauri GUI (Voice Lab, Settings)
+
+### Planned
+
+- [ ] Voice chat mode (WebSocket streaming)
+- [ ] Custom prompt editing in GUI
+- [ ] More languages for prompts
+- [ ] DMG distribution with notarization
+
+## License
+
+Apache License 2.0
+
+---
+
+**Made with (งಠ_ಠ)ง by the ⌜ VetCoders ⌟ 𝖙𝖊𝖆𝖒 (c) 2024-2026
+Maciej & Monika + Klaudiusz (AI) + Junie (AI)**

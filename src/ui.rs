@@ -48,7 +48,6 @@ const kAXSizeAttribute: &str = "AXSize";
 // AXValue types
 const kAXValueCGPointType: i32 = 1;
 const kAXValueCGSizeType: i32 = 2;
-#[allow(dead_code)]
 const kAXValueCFRangeType: i32 = 3;
 
 // Window level constants
@@ -71,10 +70,10 @@ impl BadgeMode {
     /// Get the base color for this mode (RGBA)
     pub fn color(&self) -> (f64, f64, f64, f64) {
         match self {
-            BadgeMode::Hold => (1.0, 0.0, 0.0, 0.8),       // Red
-            BadgeMode::Toggle => (1.0, 0.0, 0.0, 0.8),     // Red (will pulse)
+            BadgeMode::Hold => (1.0, 0.0, 0.0, 0.8),        // Red
+            BadgeMode::Toggle => (1.0, 0.0, 0.0, 0.8),      // Red (will pulse)
             BadgeMode::Processing => (1.0, 0.5, 0.0, 0.85), // Orange
-            BadgeMode::Assistive => (0.6, 0.2, 0.9, 0.85), // Purple
+            BadgeMode::Assistive => (0.6, 0.2, 0.9, 0.85),  // Purple
         }
     }
 
@@ -464,13 +463,15 @@ unsafe extern "C" {
 }
 
 /// Create a CGColor from RGBA components
-unsafe fn create_cg_color(r: f64, g: f64, b: f64, a: f64) -> *const std::ffi::c_void { unsafe {
-    let color_space = CGColorSpaceCreateDeviceRGB();
-    let components: [f64; 4] = [r, g, b, a];
-    let color = CGColorCreate(color_space, components.as_ptr());
-    CGColorSpaceRelease(color_space);
-    color
-}}
+unsafe fn create_cg_color(r: f64, g: f64, b: f64, a: f64) -> *const std::ffi::c_void {
+    unsafe {
+        let color_space = CGColorSpaceCreateDeviceRGB();
+        let components: [f64; 4] = [r, g, b, a];
+        let color = CGColorCreate(color_space, components.as_ptr());
+        CGColorSpaceRelease(color_space);
+        color
+    }
+}
 
 /// Update the badge window position
 unsafe fn update_badge_position(window: Id, config: &HoldBadgeConfig) {
@@ -499,7 +500,7 @@ pub fn show_badge_for_mode(mode: BadgeMode) {
 fn show_hold_badge_impl(config: HoldBadgeConfig) {
     debug!("Showing hold badge (diameter={})", config.diameter);
     unsafe {
-        let mut state = BADGE_STATE.lock().unwrap();
+        let mut state = BADGE_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
         // Hide existing badge if any
         if let Some(window_ptr) = state.window {
@@ -530,10 +531,14 @@ fn show_hold_badge_impl(config: HoldBadgeConfig) {
             let mut pulse_phase: f64 = 0.0;
             let pulse_speed = 0.15; // Radians per update cycle
 
-            while BADGE_STATE.lock().unwrap().timer_running {
+            while BADGE_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .timer_running
+            {
                 thread::sleep(Duration::from_millis(update_interval));
 
-                let state = BADGE_STATE.lock().unwrap();
+                let state = BADGE_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 if !state.timer_running {
                     break;
                 }
@@ -550,7 +555,7 @@ fn show_hold_badge_impl(config: HoldBadgeConfig) {
                     // Position and opacity updates need main thread
                     Queue::main().exec_async(move || {
                         let window = window_ptr as Id;
-                        let state = BADGE_STATE.lock().unwrap();
+                        let state = BADGE_STATE.lock().unwrap_or_else(|e| e.into_inner());
                         update_badge_position(window, &state.config);
 
                         // Update opacity for pulsing effect
@@ -563,7 +568,8 @@ fn show_hold_badge_impl(config: HoldBadgeConfig) {
                                     let badge_view: Id = msg_send![subviews, objectAtIndex: 0usize];
                                     let layer: Id = msg_send![badge_view, layer];
                                     if !layer.is_null() {
-                                        let _: () = msg_send![layer, setOpacity: pulse_opacity as f32];
+                                        let _: () =
+                                            msg_send![layer, setOpacity: pulse_opacity as f32];
                                     }
                                 }
                             }
@@ -600,13 +606,13 @@ pub fn hide_hold_badge() {
 
     // Stop the timer first (can be done on any thread)
     {
-        let mut state = BADGE_STATE.lock().unwrap();
+        let mut state = BADGE_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.timer_running = false;
     }
 
     // Dispatch window close to main thread
     Queue::main().exec_async(|| unsafe {
-        let mut state = BADGE_STATE.lock().unwrap();
+        let mut state = BADGE_STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(window_ptr) = state.window {
             let window = window_ptr as Id;
             let _: () = msg_send![window, close];

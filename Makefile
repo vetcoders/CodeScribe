@@ -1,14 +1,17 @@
-# CodeScribe - Unified Build System
-# Speech-to-text tray app for macOS (Rust) + Python backend
+# CodeScribe - Pure Rust Build System
+# Speech-to-text tray app for macOS
 
-.PHONY: all build release install bundle install-app start stop restart status logs logs-app logs-backend logs-follow config \
+.PHONY: all build release install install-no-embed config bundle install-app \
+        start stop restart status logs logs-follow \
         bump bump-patch bump-minor bump-major version \
-        lint format test security check clean help \
-        backend-start backend-stop
+        lint format test test-e2e test-e2e-real test-sse test-formatting test-all \
+        demo demo-raw demo-assistive check clean help \
+        tauri-dev tauri-build tauri-check \
+        dmg dmg-signed dmg-full notarize download-model \
+        hooks
 
 SHELL := /bin/bash
 VERSION_FILE := Cargo.toml
-ENV_FILE := ~/.codescribe/.env
 EDITOR ?= $(shell command -v code || command -v nvim || command -v vim || echo nano)
 
 # ============================================================================
@@ -18,50 +21,65 @@ EDITOR ?= $(shell command -v code || command -v nvim || command -v vim || echo n
 all: check
 
 build:
-	@echo "Building Rust binary (debug)..."
+	@echo "Building (debug)..."
 	@cargo build
 
 release:
-	@echo "Building Rust binary (release)..."
+	@echo "Building (release)..."
 	@cargo build --release
 
 install:
-	@echo "Installing CodeScribe..."
+	@echo "Installing CodeScribe (with embedded model)..."
 	@cargo install --path . --force
 	@mkdir -p ~/.codescribe
 	@pwd > ~/.codescribe/repo_path
-	@echo "✅ Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
-	@echo "   Repo path saved: $$(pwd)"
+	@echo "Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
 
-bundle: install
+install-no-embed:
+	@echo "Installing CodeScribe (no embedded model)..."
+	@CODESCRIBE_NO_EMBED=1 cargo install --path . --force
+	@mkdir -p ~/.codescribe
+	@pwd > ~/.codescribe/repo_path
+	@echo "Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
+	@echo "Note: Set CODESCRIBE_MODEL_PATH at runtime"
+
+config:
+	@mkdir -p ~/.codescribe
+	@if [ ! -f ~/.codescribe/.env ]; then \
+		cp .env.example ~/.codescribe/.env 2>/dev/null || echo "# CodeScribe Config" > ~/.codescribe/.env; \
+		echo "Created ~/.codescribe/.env"; \
+	fi
+	@$(EDITOR) ~/.codescribe/.env
+
+bundle: release
 	@echo "Creating macOS app bundle..."
 	@mkdir -p bundle/CodeScribe.app/Contents/{MacOS,Resources}
-	@cp bundle/CodeScribe.app/Contents/Info.plist bundle/CodeScribe.app/Contents/ 2>/dev/null || true
-	@cp assets/AppIcon.icns bundle/CodeScribe.app/Contents/Resources/
+	@cp target/release/codescribe bundle/CodeScribe.app/Contents/MacOS/
+	@cp assets/AppIcon.icns bundle/CodeScribe.app/Contents/Resources/ 2>/dev/null || true
 	@VERSION=$$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*"\(.*\)"/\1/'); \
-	sed -i '' "s/<string>0\.[0-9]*\.[0-9]*</<string>$$VERSION</g" bundle/CodeScribe.app/Contents/Info.plist
-	@echo "✅ Bundle ready: bundle/CodeScribe.app"
+	if [ -f bundle/CodeScribe.app/Contents/Info.plist ]; then \
+		sed -i '' "s/<string>0\.[0-9]*\.[0-9]*</<string>$$VERSION</g" bundle/CodeScribe.app/Contents/Info.plist; \
+	fi
+	@echo "Bundle ready: bundle/CodeScribe.app"
 
 install-app: bundle
 	@echo "Installing to /Applications..."
 	@rm -rf /Applications/CodeScribe.app
 	@cp -R bundle/CodeScribe.app /Applications/
-	@echo "✅ Installed: /Applications/CodeScribe.app"
-	@echo "   You can now launch CodeScribe from Spotlight or Launchpad"
+	@echo "Installed: /Applications/CodeScribe.app"
 
 # ============================================================================
 # Run
 # ============================================================================
 
-start: backend-start
+start:
 	@nohup codescribe > /tmp/codescribe.log 2>&1 & disown
-	@echo "✅ CodeScribe started (logs: /tmp/codescribe.log)"
+	@echo "CodeScribe started (logs: /tmp/codescribe.log)"
 
 stop:
 	@pkill -f "^codescribe$$" 2>/dev/null || true
-	@pkill -f "python.*codescribe.backend" 2>/dev/null || true
 	@rm -f ~/.codescribe/codescribe.pid 2>/dev/null || true
-	@echo "✅ Stopped"
+	@echo "Stopped"
 
 restart: stop
 	@sleep 1
@@ -70,46 +88,12 @@ restart: stop
 status:
 	@echo "=== CodeScribe Status ==="
 	@pgrep -fl codescribe 2>/dev/null || echo "Not running"
-	@echo ""
-	@echo "=== Backend Status ==="
-	@curl -s http://127.0.0.1:8237/healthz 2>/dev/null || echo "Backend not responding"
 
 logs:
-	@echo "=== Backend Logs (last 30) ==="
-	@cat /tmp/codescribe-backend.log 2>/dev/null | tail -30 || echo "No backend logs"
-	@echo ""
-	@echo "=== App Logs (last 30) ==="
-	@cat /tmp/codescribe.log 2>/dev/null | tail -30 || echo "No app logs"
-
-logs-backend:
-	@tail -100 /tmp/codescribe-backend.log 2>/dev/null || echo "No backend logs"
-
-logs-app:
-	@tail -100 /tmp/codescribe.log 2>/dev/null || echo "No app logs"
+	@tail -50 /tmp/codescribe.log 2>/dev/null || echo "No logs"
 
 logs-follow:
-	@tail -f /tmp/codescribe.log /tmp/codescribe-backend.log 2>/dev/null || echo "No logs"
-
-# ============================================================================
-# Configuration
-# ============================================================================
-
-config:
-	@mkdir -p ~/.codescribe
-	@if [ ! -f "$(ENV_FILE)" ]; then \
-		cp .env "$(ENV_FILE)" 2>/dev/null || touch "$(ENV_FILE)"; \
-		echo "Created $(ENV_FILE)"; \
-	fi
-	@$(EDITOR) "$(ENV_FILE)"
-
-config-show:
-	@echo "=== $(ENV_FILE) ==="
-	@cat "$(ENV_FILE)" 2>/dev/null || echo "No config found"
-
-config-copy:
-	@mkdir -p ~/.codescribe
-	@cp .env "$(ENV_FILE)"
-	@echo "✅ Copied .env → $(ENV_FILE)"
+	@tail -f /tmp/codescribe.log 2>/dev/null || echo "No logs"
 
 # ============================================================================
 # Version Bump
@@ -134,7 +118,7 @@ bump:
 	esac; \
 	new="$$major.$$minor.$$patch"; \
 	sed -i '' "s/^version = \"$$current\"/version = \"$$new\"/" $(VERSION_FILE); \
-	echo "✅ Bumped: v$$current → v$$new"
+	echo "Bumped: v$$current -> v$$new"
 
 bump-patch:
 	@$(MAKE) bump TYPE=patch
@@ -146,62 +130,87 @@ bump-major:
 	@$(MAKE) bump TYPE=major
 
 # ============================================================================
-# Backend (Python)
+# Tauri Frontend
 # ============================================================================
 
-backend-start:
-	@if curl -s http://127.0.0.1:8237/healthz >/dev/null 2>&1; then \
-		echo "Backend already running"; \
-	else \
-		echo "Starting Python backend..."; \
-		nohup uv run python -m codescribe.backend > /tmp/codescribe-backend.log 2>&1 & \
-		for i in 1 2 3 4 5 6 7 8 9 10; do \
-			sleep 1; \
-			if curl -s http://127.0.0.1:8237/healthz >/dev/null 2>&1; then \
-				echo "✅ Backend started on :8237 ($$i sec)"; \
-				exit 0; \
-			fi; \
-			printf "."; \
-		done; \
-		echo ""; \
-		echo "⏳ Backend still starting (Whisper loading). Continuing..."; \
-	fi
+tauri-dev:
+	@echo "Starting Tauri dev server..."
+	@cd tauri-app && cargo tauri dev
 
-backend-stop:
-	@pkill -f "python.*codescribe.backend" 2>/dev/null && echo "✅ Backend stopped" || echo "Backend not running"
+tauri-build:
+	@echo "Building Tauri release..."
+	@cd tauri-app && cargo tauri build
 
-backend-logs:
-	@cat /tmp/codescribe-backend.log 2>/dev/null | tail -100
+tauri-check:
+	@echo "Checking Tauri..."
+	@cd tauri-app && cargo check
 
 # ============================================================================
-# Linting & Testing
+# Quality
 # ============================================================================
 
 format:
-	@echo "Formatting Python..."
-	@uv run ruff format .
-	@echo "Formatting Rust..."
 	@cargo fmt
 
 lint:
-	@echo "=== Python Lint ==="
-	@uv run ruff check .
-	@uv run mypy server/src/codescribe
-	@echo "=== Rust Lint ==="
+	@echo "=== Format Check ==="
 	@cargo fmt -- --check
+	@echo "=== Clippy ==="
 	@cargo clippy -- -D warnings
 
-security:
-	@echo "Running Bandit..."
-	@uv run bandit -ll -c pyproject.toml -r server/src/codescribe
-
 test:
-	@echo "=== Python Tests ==="
-	@uv run pytest
-	@echo "=== Rust Tests ==="
-	@cargo test
+	@echo "=== Unit Tests ==="
+	@cargo test --lib
+	@echo "=== Integration Tests ==="
+	@cargo test --test '*' -- --skip e2e || true
 
-check: lint security test
+test-e2e:
+	@echo "=== E2E Tests (mock) ==="
+	@cargo test e2e --release -- --nocapture
+
+test-e2e-real:
+	@echo "=== E2E Tests (real API) ==="
+	@echo "Requires: LLM_API_KEY, LLM_ASSISTIVE_API_KEY"
+	@cargo test e2e --release -- --ignored --nocapture
+
+test-sse:
+	@echo "=== SSE Streaming Tests ==="
+	@cargo test e2e_sse --release -- --ignored --nocapture
+
+test-formatting:
+	@echo "=== AI Formatting Tests ==="
+	@cargo test formatting --release -- --nocapture
+
+test-all:
+	@echo "=== Full Test Suite ==="
+	@cargo test --lib
+	@cargo test --test '*' -- --nocapture || true
+	@echo "Done. Run 'make test-e2e-real' for real API tests."
+
+demo:
+	@echo "=== Full Pipeline Demo ==="
+	@cargo run --release --example demo_full_pipeline -- $(AUDIO)
+
+demo-raw:
+	@echo "=== Raw Transcription Demo ==="
+	@cargo run --release --example demo_full_pipeline -- --raw $(AUDIO)
+
+demo-assistive:
+	@echo "=== Assistive Mode Demo ==="
+	@cargo run --release --example demo_full_pipeline -- --assistive $(AUDIO)
+
+check: lint test
+	@echo "Quality gate passed"
+
+# ============================================================================
+# Git Hooks
+# ============================================================================
+
+hooks:
+	@echo "Installing pre-commit hooks..."
+	@command -v pre-commit >/dev/null 2>&1 || { echo "Install pre-commit: pipx install pre-commit"; exit 1; }
+	@pre-commit install --hook-type pre-commit --hook-type pre-push
+	@echo "Hooks installed: pre-commit (check+fmt) + pre-push (clippy+semgrep)"
 
 # ============================================================================
 # Cleanup
@@ -209,51 +218,83 @@ check: lint security test
 
 clean:
 	@cargo clean
-	@rm -rf .pytest_cache .ruff_cache .mypy_cache
-	@find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
-	@echo "✅ Cleaned"
+	@rm -rf .loctree
+	@echo "Cleaned"
 
 # ============================================================================
 # Help
 # ============================================================================
 
 help:
-	@echo "CodeScribe - Speech-to-text tray app"
+	@echo "CodeScribe - Speech-to-text (Pure Rust)"
 	@echo ""
 	@echo "Build & Install:"
-	@echo "  make build         Build debug binary"
-	@echo "  make release       Build release binary"
-	@echo "  make install       Install CLI to ~/.cargo/bin"
-	@echo "  make bundle        Create CodeScribe.app bundle"
-	@echo "  make install-app   Install to /Applications"
+	@echo "  make build           Build debug binary"
+	@echo "  make release         Build release binary (with embedded model)"
+	@echo "  make install         Install CLI (~888MB with embedded model)"
+	@echo "  make install-no-embed Install without model (needs CODESCRIBE_MODEL_PATH)"
+	@echo "  make config          Edit ~/.codescribe/.env"
+	@echo "  make bundle          Create CodeScribe.app bundle"
+	@echo "  make install-app     Install to /Applications"
+	@echo ""
+	@echo "Release & Distribution:"
+	@echo "  make dmg             Build DMG (ad-hoc signed)"
+	@echo "  make dmg-signed      Build DMG (Developer ID signed)"
+	@echo "  make dmg-full        Build DMG with embedded model (~888MB)"
+	@echo "  make notarize        Notarize DMG with Apple"
+	@echo "  make download-model  Download Whisper model from HF"
 	@echo ""
 	@echo "Run:"
-	@echo "  make start         Start CodeScribe + backend"
-	@echo "  make stop          Stop all processes"
-	@echo "  make restart       Restart everything"
-	@echo "  make status        Show status"
-	@echo "  make logs          Show all logs (app + backend)"
-	@echo "  make logs-app      Show app logs only"
-	@echo "  make logs-backend  Show backend logs only"
-	@echo "  make logs-follow   Tail all logs"
-	@echo ""
-	@echo "Configuration:"
-	@echo "  make config        Edit ~/.codescribe/.env"
-	@echo "  make config-show   Show current config"
-	@echo "  make config-copy   Copy .env to ~/.codescribe/"
+	@echo "  make start           Start CodeScribe"
+	@echo "  make stop            Stop CodeScribe"
+	@echo "  make restart         Restart"
+	@echo "  make status          Show status"
+	@echo "  make logs            Show logs"
+	@echo "  make logs-follow     Tail logs"
 	@echo ""
 	@echo "Version:"
-	@echo "  make version       Show current version"
-	@echo "  make bump-patch    0.5.1 → 0.5.2"
-	@echo "  make bump-minor    0.5.1 → 0.6.0"
-	@echo "  make bump-major    0.5.1 → 1.0.0"
+	@echo "  make version         Show current version"
+	@echo "  make bump-patch      Bump patch (0.5.1 -> 0.5.2)"
+	@echo "  make bump-minor      Bump minor (0.5.1 -> 0.6.0)"
+	@echo "  make bump-major      Bump major (0.5.1 -> 1.0.0)"
 	@echo ""
 	@echo "Quality:"
-	@echo "  make lint          Run all linters"
-	@echo "  make format        Format all code"
-	@echo "  make test          Run all tests"
-	@echo "  make check         Full CI pipeline"
+	@echo "  make lint            Run clippy + fmt check"
+	@echo "  make format          Format code"
+	@echo "  make test            Run unit + integration tests (skip E2E)"
+	@echo "  make test-e2e        Run E2E tests (mock)"
+	@echo "  make test-e2e-real   Run E2E tests with real API (needs LLM_*_API_KEY)"
+	@echo "  make test-sse        Run SSE streaming tests (real API)"
+	@echo "  make test-formatting Run AI formatting tests"
+	@echo "  make test-all        Run full test suite"
+	@echo "  make check           Full quality gate"
+	@echo "  make hooks           Install pre-commit + pre-push hooks"
 	@echo ""
-	@echo "Backend:"
-	@echo "  make backend-start Start Python backend only"
-	@echo "  make backend-stop  Stop Python backend only"
+	@echo "Tauri:"
+	@echo "  make tauri-dev       Start dev server"
+	@echo "  make tauri-build     Build release"
+	@echo "  make tauri-check     Check compilation"
+
+# ============================================================================
+# Release & Distribution
+# ============================================================================
+
+dmg:
+	@./scripts/build-release.sh
+
+dmg-signed:
+	@./scripts/build-release.sh --sign
+
+dmg-full:
+	@./scripts/build-release.sh --sign
+
+notarize:
+	@if ls CodeScribe_*.dmg 1> /dev/null 2>&1; then \
+		DMG=$$(ls -t CodeScribe_*.dmg | head -1); \
+		./scripts/notarize.sh "$$DMG"; \
+	else \
+		echo "No DMG found. Run 'make dmg-signed' first."; \
+	fi
+
+download-model:
+	@./scripts/download-model.sh

@@ -10,7 +10,7 @@ use tray_icon::Icon;
 use crate::tray::icons::{create_fallback_icon, load_custom_icon};
 
 // Re-export config enums for menu use (single source of truth)
-pub use crate::config::{HoldMods, Language, ToggleTrigger};
+pub use crate::config::{HoldMods, ToggleTrigger};
 
 /// Status of the CodeScribe system, reflected in tray icon
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +39,17 @@ impl TrayStatus {
         }
     }
 
+    /// Get the status line text for the menu
+    pub fn menu_label(&self) -> &'static str {
+        match self {
+            TrayStatus::Idle => "Status: Idle",
+            TrayStatus::Listening => "Status: Recording...",
+            TrayStatus::Thinking => "Status: Processing...",
+            TrayStatus::Success => "Status: Done!",
+            TrayStatus::Error => "Status: Error",
+        }
+    }
+
     /// Create an icon from this status using the custom CodeScribe logo
     /// Falls back to simple circle if custom icon fails
     pub fn to_icon(self) -> Result<Icon> {
@@ -50,28 +61,20 @@ impl TrayStatus {
 }
 
 /// Menu events that can be sent to the main controller.
+/// Some variants are prepared for future use but handlers may not be implemented yet.
+#[allow(dead_code)] // Used by tauri-app
 #[derive(Debug, Clone)]
 pub enum TrayMenuEvent {
-    // Top-level actions
-    ToggleHotkeys,
-    StartAtLogin(bool),
-    /// User clicked Quit - show confirmation dialog
+    /// Copy last transcript to clipboard
+    CopyLast,
+    /// Open settings file in editor
+    OpenSettings,
+    /// Open help/documentation in browser
+    OpenHelp,
+    /// Show about dialog
+    ShowAbout,
+    /// User clicked Quit - clean shutdown
     Quit,
-    /// Close tray AND stop backend server
-    QuitCloseAll,
-    /// Close tray but leave backend server running
-    QuitLeaveServer,
-
-    // Language submenu
-    SetLanguage(Language),
-
-    // Models submenu (Whisper model selection)
-    SetWhisperModel(WhisperModel),
-    OpenModelsFolder,
-
-    // Formatting submenu
-    SetFormattingProvider(FormattingProvider),
-    ToggleAiFormatting,
 
     // Hold Hotkeys submenu
     SetHoldMods(HoldMods),
@@ -83,42 +86,10 @@ pub enum TrayMenuEvent {
     CopyLatestToClipboard,
     OpenHistoryFolder,
     SelectHistoryEntry(usize),
-
-    // Appearance submenu
-    ToggleStatusGlyph,
-    RefreshTrayIcon,
-
-    // Feedback submenu
-    ToggleStartSound,
-    SetSoundType(SoundType),
-    SetVolume(VolumeLevel),
-
-    // Permissions submenu
-    CheckPermissions,
-    OpenAccessibilitySettings,
-    OpenMicrophoneSettings,
-
-    // Tools submenu
-    OpenVoiceLab,
-    OpenTeacher,
-    NewConversation,
 }
 
-/// Formatting provider selection (maps to config::AiProvider)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FormattingProvider {
-    Harmony,
-    Ollama,
-}
-
-/// Sound type for audio feedback
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SoundType {
-    Tink,
-    Pop,
-}
-
-/// Volume level presets
+/// Volume level presets (prepared for future Feedback submenu)
+#[allow(dead_code)] // Used by tauri-app
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VolumeLevel {
     Mute,   // 0%
@@ -128,6 +99,7 @@ pub enum VolumeLevel {
     Full,   // 100%
 }
 
+#[allow(dead_code)] // Used by tauri-app
 impl VolumeLevel {
     /// Convert to f32 value (0.0 - 1.0)
     pub fn as_f32(self) -> f32 {
@@ -143,60 +115,11 @@ impl VolumeLevel {
     /// Get display label
     pub fn label(self) -> &'static str {
         match self {
-            VolumeLevel::Mute => "🔇 Mute (0%)",
-            VolumeLevel::Low => "🔈 Low (25%)",
-            VolumeLevel::Medium => "🔉 Medium (50%)",
-            VolumeLevel::High => "🔊 High (75%)",
-            VolumeLevel::Full => "🔊 Full (100%)",
-        }
-    }
-
-    /// Get VolumeLevel from f32 value (rounds to nearest)
-    pub fn from_f32(value: f32) -> Self {
-        if value <= 0.125 {
-            VolumeLevel::Mute
-        } else if value <= 0.375 {
-            VolumeLevel::Low
-        } else if value <= 0.625 {
-            VolumeLevel::Medium
-        } else if value <= 0.875 {
-            VolumeLevel::High
-        } else {
-            VolumeLevel::Full
-        }
-    }
-}
-
-/// Whisper model variants available for local STT
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WhisperModel {
-    Small,
-    Medium,
-    LargeV3,
-    LargeV3Turbo,
-    LargeV3Q8,
-}
-
-impl WhisperModel {
-    /// Human-readable label for the menu
-    pub fn label(&self) -> &'static str {
-        match self {
-            WhisperModel::Small => "Small",
-            WhisperModel::Medium => "Medium",
-            WhisperModel::LargeV3 => "Large v3",
-            WhisperModel::LargeV3Turbo => "Large v3 Turbo",
-            WhisperModel::LargeV3Q8 => "Large v3 Q8",
-        }
-    }
-
-    /// Directory name / model identifier
-    pub fn model_id(&self) -> &'static str {
-        match self {
-            WhisperModel::Small => "whisper-small",
-            WhisperModel::Medium => "whisper-medium",
-            WhisperModel::LargeV3 => "whisper-large-v3",
-            WhisperModel::LargeV3Turbo => "whisper-large-v3-turbo",
-            WhisperModel::LargeV3Q8 => "whisper-large-v3-mlx-q8",
+            VolumeLevel::Mute => "Mute (0%)",
+            VolumeLevel::Low => "Low (25%)",
+            VolumeLevel::Medium => "Medium (50%)",
+            VolumeLevel::High => "High (75%)",
+            VolumeLevel::Full => "Full (100%)",
         }
     }
 }
@@ -205,7 +128,8 @@ impl WhisperModel {
 // Menu Item Storage Structs
 // ============================================================================
 
-/// Model menu items for dynamic updates
+/// Model menu items for dynamic updates (prepared for future Models submenu)
+#[allow(dead_code)] // Used by tauri-app
 pub struct ModelMenuItems {
     pub small: CheckMenuItem,
     pub medium: CheckMenuItem,
@@ -233,6 +157,7 @@ pub struct ToggleMenuItems {
 }
 
 /// History menu label for dynamic updates
+#[allow(dead_code)] // Used by tauri-app
 pub struct HistoryMenuItems {
     pub latest_label: MenuItem,
 }
@@ -244,27 +169,13 @@ pub struct HistoryMenuItems {
 /// Menu item IDs for tracking all clickable items
 pub struct MenuIds {
     // Top-level
-    pub enable_hotkeys: MenuId,
-    pub start_at_login: MenuId,
+    pub ai_formatting: MenuId,
+    pub copy_last: MenuId,
+    pub format_last: MenuId,
+    pub format_last_five: MenuId,
+    pub help: MenuId,
+    pub about: MenuId,
     pub quit: MenuId,
-
-    // Language submenu
-    pub lang_auto: MenuId,
-    pub lang_polish: MenuId,
-    pub lang_english: MenuId,
-
-    // Models submenu (Whisper model selection)
-    pub model_small: MenuId,
-    pub model_medium: MenuId,
-    pub model_large_v3: MenuId,
-    pub model_large_v3_turbo: MenuId,
-    pub model_large_v3_q8: MenuId,
-    pub model_open_folder: MenuId,
-
-    // Formatting submenu
-    pub fmt_toggle: MenuId,
-    pub fmt_harmony: MenuId,
-    pub fmt_ollama: MenuId,
 
     // Hold Hotkeys submenu
     pub hold_ctrl: MenuId,
@@ -278,30 +189,13 @@ pub struct MenuIds {
 
     // History submenu
     pub history_save: MenuId,
+    pub keep_audio: MenuId,
     pub history_copy_latest: MenuId,
     pub history_open_folder: MenuId,
 
-    // Appearance submenu
-    pub appearance_glyph: MenuId,
-    pub appearance_refresh: MenuId,
-
-    // Feedback submenu
-    pub feedback_start_sound: MenuId,
-    pub feedback_sound_tink: MenuId,
-    pub feedback_sound_pop: MenuId,
-    pub volume_mute: MenuId,
-    pub volume_low: MenuId,
-    pub volume_medium: MenuId,
-    pub volume_high: MenuId,
-    pub volume_full: MenuId,
-
-    // Permissions submenu
-    pub perm_check: MenuId,
-    pub perm_accessibility: MenuId,
-    pub perm_microphone: MenuId,
-
-    // Tools submenu
-    pub tools_voice_lab: MenuId,
-    pub tools_teacher: MenuId,
-    pub tools_new_conversation: MenuId,
+    // Settings submenu
+    pub settings_edit_config: MenuId,
+    pub settings_edit_prompt: MenuId,
+    pub settings_open_prompt_folder: MenuId,
+    pub settings_reset_context: MenuId,
 }

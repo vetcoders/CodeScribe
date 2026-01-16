@@ -2,6 +2,10 @@
 //!
 //! This module manages a LaunchAgent plist in ~/Library/LaunchAgents/ to enable
 //! CodeScribe to start automatically when the user logs in.
+//!
+//! NOTE: Currently unused - will be connected to Tauri Settings panel.
+
+#![allow(dead_code)]
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -132,9 +136,10 @@ mod tests {
     fn test_get_plist_path() {
         let path = get_plist_path().expect("Should get plist path");
         assert!(path.to_string_lossy().contains("Library/LaunchAgents"));
-        assert!(path
-            .to_string_lossy()
-            .ends_with("io.loctree.codescribe.plist"));
+        assert!(
+            path.to_string_lossy()
+                .ends_with("io.loctree.codescribe.plist")
+        );
     }
 
     #[test]

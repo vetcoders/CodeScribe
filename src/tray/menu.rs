@@ -1,132 +1,237 @@
 //! Main menu building logic for the tray menu
 //!
-//! Constructs the complete tray menu by composing submenus.
+//! Menu structure:
+//! - Status line (dynamic)
+//! - Copy Last to Clipboard
+//! - Hold Hotkeys submenu (root level)
+//! - History submenu (with Format Last, Format Last 5)
+//! - Settings submenu (flat: AI Formatting + config items)
+//! - Help/About
+//! - Quit
+
+use std::cell::RefCell;
 
 use anyhow::Result;
-use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
-use crate::tray::submenus::{
-    build_appearance_submenu, build_feedback_submenu, build_formatting_submenu,
-    build_history_submenu, build_hold_hotkeys_submenu, build_language_submenu,
-    build_models_submenu, build_permissions_submenu, build_tools_submenu,
-};
+use crate::config::Config;
+use crate::tray::submenus::{build_history_submenu, build_hold_hotkeys_submenu};
 use crate::tray::types::MenuIds;
 
-/// Build the complete tray menu with all submenus
+// Thread-local storage for menu items that need dynamic updates
+thread_local! {
+    pub static STATUS_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
+    pub static AI_FORMATTING_ITEM: RefCell<Option<CheckMenuItem>> = const { RefCell::new(None) };
+}
+
+/// Build the tray menu
+///
+/// Menu structure:
+/// ```text
+/// Status: Idle
+/// ─────────────
+/// Copy Last to Clipboard
+/// ─────────────
+/// Hold Hotkeys ▸
+///     ├── Ctrl only
+///     ├── Ctrl+Option
+///     ├── Ctrl+Shift
+///     └── Ctrl+Command
+/// History ▸
+///     ├── Format Last Transcript
+///     ├── Format Last 5 Transcripts
+///     ├── ────────────
+///     ├── [✓] Save to History
+///     ├── Copy Latest
+///     └── Open Folder
+/// ─────────────
+/// Settings ▸
+///     ├── [✓] AI Formatting
+///     ├── ────────────
+///     ├── Edit Config File
+///     ├── Edit AI Prompt
+///     ├── Open Prompts Folder
+///     └── Reset AI Context
+/// ─────────────
+/// Help
+/// About
+/// ─────────────
+/// Quit
+/// ```
 pub fn build_menu() -> Result<(Menu, MenuIds)> {
     let menu = Menu::new();
 
-    // 1. Status: Ready (disabled label)
-    let status_item = MenuItem::new("Status: Ready", false, None);
+    // 1. Status line (disabled, dynamic text)
+    let status_item = MenuItem::new("Status: Idle", false, None);
     menu.append(&status_item)?;
 
-    // 2. Enable Hotkeys (checkbox toggle)
-    let enable_hotkeys = CheckMenuItem::new("Enable Hotkeys", true, true, None);
-    let enable_hotkeys_id = enable_hotkeys.id().clone();
-    menu.append(&enable_hotkeys)?;
+    // Store for dynamic updates
+    STATUS_MENU_ITEM.with(|cell| {
+        *cell.borrow_mut() = Some(status_item);
+    });
 
-    // 3. Separator
+    // 2. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 4. Language submenu
-    let (lang_menu, lang_auto_id, lang_polish_id, lang_english_id) = build_language_submenu()?;
-    menu.append(&lang_menu)?;
+    // 3. Copy last to clipboard (quick action)
+    let copy_last_item = MenuItem::new("Copy Last to Clipboard", true, None);
+    let copy_last_id = copy_last_item.id().clone();
+    menu.append(&copy_last_item)?;
 
-    // 5. Models submenu
-    let (models_menu, model_ids) = build_models_submenu()?;
-    menu.append(&models_menu)?;
+    // 4. Separator
+    menu.append(&PredefinedMenuItem::separator())?;
 
-    // 6. Formatting submenu
-    let (fmt_menu, fmt_toggle_id, fmt_harmony_id, fmt_ollama_id) = build_formatting_submenu()?;
-    menu.append(&fmt_menu)?;
+    // 5. Hold Hotkeys submenu (root level)
+    let (hold_hotkeys_menu, hold_ids) = build_hold_hotkeys_submenu()?;
+    menu.append(&hold_hotkeys_menu)?;
 
-    // 7. Hold Hotkeys submenu
-    let (hold_menu, hold_ids) = build_hold_hotkeys_submenu()?;
-    menu.append(&hold_menu)?;
-
-    // 8. History submenu
-    let (history_menu, history_save_id, history_copy_latest_id, history_open_folder_id) =
-        build_history_submenu()?;
+    // 6. History submenu (with Format Last actions)
+    let (history_menu, history_ids) = build_history_submenu()?;
     menu.append(&history_menu)?;
 
-    // 9. Appearance submenu
-    let (appearance_menu, appearance_glyph_id, appearance_refresh_id) =
-        build_appearance_submenu()?;
-    menu.append(&appearance_menu)?;
-
-    // 10. Feedback submenu
-    let (feedback_menu, feedback_ids) = build_feedback_submenu()?;
-    menu.append(&feedback_menu)?;
-
-    // 11. Tools submenu
-    let (tools_menu, tools_voice_lab_id, tools_teacher_id, tools_new_conversation_id) =
-        build_tools_submenu()?;
-    menu.append(&tools_menu)?;
-
-    // 12. Permissions submenu
-    let (permissions_menu, perm_check_id, perm_accessibility_id, perm_microphone_id) =
-        build_permissions_submenu()?;
-    menu.append(&permissions_menu)?;
-
-    // 13. Separator
+    // 7. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 14. Start at Login
-    let is_enabled = crate::launchd::is_login_item_enabled();
-    let start_at_login = CheckMenuItem::new("Start at Login", true, is_enabled, None);
-    let start_at_login_id = start_at_login.id().clone();
-    menu.append(&start_at_login)?;
+    // 8. Settings Submenu (flat structure)
+    let settings_menu = Submenu::new("Settings", true);
 
-    // 15. Quit
+    // 8a. AI Formatting toggle
+    let ai_enabled = Config::load().ai_formatting_enabled;
+    let ai_formatting_item = CheckMenuItem::new("AI Formatting", true, ai_enabled, None);
+    let ai_formatting_id = ai_formatting_item.id().clone();
+    settings_menu.append(&ai_formatting_item)?;
+
+    // Store for dynamic updates
+    AI_FORMATTING_ITEM.with(|cell| {
+        *cell.borrow_mut() = Some(ai_formatting_item);
+    });
+
+    settings_menu.append(&PredefinedMenuItem::separator())?;
+
+    // 8b. Edit Config File
+    let edit_config_item = MenuItem::new("Edit Config File", true, None);
+    let edit_config_id = edit_config_item.id().clone();
+    settings_menu.append(&edit_config_item)?;
+
+    // 8c. Edit AI Prompt
+    let edit_prompt_item = MenuItem::new("Edit AI Prompt", true, None);
+    let edit_prompt_id = edit_prompt_item.id().clone();
+    settings_menu.append(&edit_prompt_item)?;
+
+    // 8d. Open Prompts Folder
+    let open_prompt_folder_item = MenuItem::new("Open Prompts Folder", true, None);
+    let open_prompt_folder_id = open_prompt_folder_item.id().clone();
+    settings_menu.append(&open_prompt_folder_item)?;
+
+    // 8e. Reset AI Context
+    let reset_context_item = MenuItem::new("Reset AI Context", true, None);
+    let reset_context_id = reset_context_item.id().clone();
+    settings_menu.append(&reset_context_item)?;
+
+    menu.append(&settings_menu)?;
+
+    // 9. Separator
+    menu.append(&PredefinedMenuItem::separator())?;
+
+    // 10. Help
+    let help_item = MenuItem::new("Help", true, None);
+    let help_id = help_item.id().clone();
+    menu.append(&help_item)?;
+
+    // 11. About
+    let about_item = MenuItem::new("About", true, None);
+    let about_id = about_item.id().clone();
+    menu.append(&about_item)?;
+
+    // 12. Separator
+    menu.append(&PredefinedMenuItem::separator())?;
+
+    // 13. Quit
     let quit_item = MenuItem::new("Quit", true, None);
     let quit_id = quit_item.id().clone();
     menu.append(&quit_item)?;
 
+    // Destructure hold_ids tuple
+    let (
+        hold_ctrl_id,
+        hold_ctrl_opt_id,
+        hold_ctrl_shift_id,
+        hold_ctrl_cmd_id,
+        hold_exclusive_id,
+        toggle_double_opt_id,
+        toggle_double_ralt_id,
+        toggle_disabled_id,
+    ) = hold_ids;
+
+    // Destructure history_ids
+    let (
+        format_last_id,
+        format_last_five_id,
+        history_save_id,
+        keep_audio_id,
+        history_copy_latest_id,
+        history_open_folder_id,
+    ) = history_ids;
+
     Ok((
         menu,
         MenuIds {
-            enable_hotkeys: enable_hotkeys_id,
-            start_at_login: start_at_login_id,
+            ai_formatting: ai_formatting_id,
+            copy_last: copy_last_id,
+            format_last: format_last_id,
+            format_last_five: format_last_five_id,
+            help: help_id,
+            about: about_id,
             quit: quit_id,
-            lang_auto: lang_auto_id,
-            lang_polish: lang_polish_id,
-            lang_english: lang_english_id,
-            model_small: model_ids.0,
-            model_medium: model_ids.1,
-            model_large_v3: model_ids.2,
-            model_large_v3_turbo: model_ids.3,
-            model_large_v3_q8: model_ids.4,
-            model_open_folder: model_ids.5,
-            fmt_toggle: fmt_toggle_id,
-            fmt_harmony: fmt_harmony_id,
-            fmt_ollama: fmt_ollama_id,
-            hold_ctrl: hold_ids.0,
-            hold_ctrl_opt: hold_ids.1,
-            hold_ctrl_shift: hold_ids.2,
-            hold_ctrl_cmd: hold_ids.3,
-            hold_exclusive: hold_ids.4,
-            toggle_double_opt: hold_ids.5,
-            toggle_double_ralt: hold_ids.6,
-            toggle_disabled: hold_ids.7,
+            // Hold Hotkeys submenu
+            hold_ctrl: hold_ctrl_id,
+            hold_ctrl_opt: hold_ctrl_opt_id,
+            hold_ctrl_shift: hold_ctrl_shift_id,
+            hold_ctrl_cmd: hold_ctrl_cmd_id,
+            hold_exclusive: hold_exclusive_id,
+            toggle_double_opt: toggle_double_opt_id,
+            toggle_double_ralt: toggle_double_ralt_id,
+            toggle_disabled: toggle_disabled_id,
+            // History submenu
             history_save: history_save_id,
+            keep_audio: keep_audio_id,
             history_copy_latest: history_copy_latest_id,
             history_open_folder: history_open_folder_id,
-            appearance_glyph: appearance_glyph_id,
-            appearance_refresh: appearance_refresh_id,
-            feedback_start_sound: feedback_ids.0,
-            feedback_sound_tink: feedback_ids.1,
-            feedback_sound_pop: feedback_ids.2,
-            volume_mute: feedback_ids.3,
-            volume_low: feedback_ids.4,
-            volume_medium: feedback_ids.5,
-            volume_high: feedback_ids.6,
-            volume_full: feedback_ids.7,
-            perm_check: perm_check_id,
-            perm_accessibility: perm_accessibility_id,
-            perm_microphone: perm_microphone_id,
-            tools_voice_lab: tools_voice_lab_id,
-            tools_teacher: tools_teacher_id,
-            tools_new_conversation: tools_new_conversation_id,
+            // Settings
+            settings_edit_config: edit_config_id,
+            settings_edit_prompt: edit_prompt_id,
+            settings_open_prompt_folder: open_prompt_folder_id,
+            settings_reset_context: reset_context_id,
         },
     ))
+}
+
+/// Update the status label in the menu
+/// Must be called from the main thread
+pub fn update_status_label(label: &str) {
+    STATUS_MENU_ITEM.with(|cell| {
+        if let Some(ref item) = *cell.borrow() {
+            item.set_text(label);
+        }
+    });
+}
+
+/// Toggle AI Formatting and persist to config
+pub fn toggle_ai_formatting() -> bool {
+    // Read current state from Config (source of truth - is_checked() unreliable on macOS)
+    let current_state = Config::load().ai_formatting_enabled;
+    let new_state = !current_state;
+
+    // Update checkbox visual
+    AI_FORMATTING_ITEM.with(|cell| {
+        if let Some(ref item) = *cell.borrow() {
+            item.set_checked(new_state);
+        }
+    });
+
+    // Persist to config
+    let config = Config::load();
+    let _ = config.save_to_env("AI_FORMATTING_ENABLED", if new_state { "1" } else { "0" });
+
+    new_state
 }

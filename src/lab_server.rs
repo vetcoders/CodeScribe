@@ -2,6 +2,10 @@
 //!
 //! Serves static files from assets/lab/ directory.
 //! No external dependencies - just tokio TCP.
+//!
+//! NOTE: Currently unused - will be activated when Tauri frontend is integrated.
+
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
