@@ -49,6 +49,25 @@ enum Commands {
 
     /// Run as daemon with tray icon (default when no args)
     Daemon,
+
+    /// Migrate transcript/audio filenames to ASCII + suffix naming
+    MigrateHistory {
+        /// Only print planned changes without renaming files
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Assume kind for files without suffix
+        #[arg(long, value_enum, default_value = "raw")]
+        assume_kind: MigrateKind,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum MigrateKind {
+    Raw,
+    Ai,
+    AiFailed,
+    Failed,
 }
 
 #[tokio::main]
@@ -68,6 +87,10 @@ async fn main() -> Result<()> {
             format,
             llm,
         }) => handle_transcribe_command(file, language, format, llm).await,
+        Some(Commands::MigrateHistory {
+            dry_run,
+            assume_kind,
+        }) => handle_migrate_history_command(dry_run, assume_kind),
         Some(Commands::Daemon) | None => run_daemon().await,
     }
 }
@@ -122,6 +145,24 @@ fn handle_config_command() -> Result<()> {
 
     println!("Opening in: {}", editor);
     Command::new(&editor).arg(&config_path).status()?;
+
+    Ok(())
+}
+
+fn handle_migrate_history_command(dry_run: bool, assume_kind: MigrateKind) -> Result<()> {
+    let kind = match assume_kind {
+        MigrateKind::Raw => codescribe::state::history::TranscriptKind::Raw,
+        MigrateKind::Ai => codescribe::state::history::TranscriptKind::Ai,
+        MigrateKind::AiFailed => codescribe::state::history::TranscriptKind::AiFailed,
+        MigrateKind::Failed => codescribe::state::history::TranscriptKind::Failed,
+    };
+
+    let report = codescribe::state::history::migrate_transcriptions(kind, dry_run)?;
+
+    println!(
+        "Migration summary: {} transcripts renamed, {} audio renamed, {} skipped, {} errors",
+        report.renamed_text, report.renamed_audio, report.skipped, report.errors
+    );
 
     Ok(())
 }
@@ -304,6 +345,9 @@ async fn run_daemon() -> Result<()> {
     use tokio::runtime::Handle;
 
     eprintln!("CodeScribe daemon starting...");
+
+    #[cfg(target_os = "macos")]
+    codescribe::set_dock_icon();
 
     codescribe::whisper::init().context("Failed to initialize Whisper")?;
     let controller = Arc::new(RecordingController::new());

@@ -60,3 +60,5 @@ CONFIG_AUDIT.md
 /.claude
 nohup.out
 nohup.out.backup
+/.ai
+/.junie

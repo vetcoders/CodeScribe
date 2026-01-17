@@ -1,7 +1,7 @@
 {
   "build": {
-    "beforeDevCommand": { "script": "trunk serve", "cwd": "." },
-    "beforeBuildCommand": { "script": "trunk build", "cwd": "." },
+    "beforeDevCommand": { "script": "NO_COLOR=true trunk serve", "cwd": "." },
+    "beforeBuildCommand": { "script": "NO_COLOR=true trunk build", "cwd": "." },
     "devUrl": "http://localhost:8080",
     "frontendDist": "dist"
   },
