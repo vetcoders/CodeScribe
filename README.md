@@ -8,7 +8,7 @@ CodeScribe is a native macOS menu-bar application that captures audio through gl
 using Whisper with Metal GPU acceleration, and pastes the transcript directly into the focused application. Optional AI
 formatting via LLM polishes the output while keeping everything private and local.
 
-> **Status:** v0.6.2 — Embedded model (~888MB binary) + *Whisper Live* (streaming transcription during recording).
+> **Status:** current release (see `Cargo.toml`) — Embedded model (~888MB binary) + *Whisper Live* (streaming transcription during recording).
 
 See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md)
 

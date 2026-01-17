@@ -231,7 +231,7 @@ CodeScribe/
 
 ## Implementation Status
 
-### ✅ Completed (v0.6.2)
+### ✅ Completed (current release)
 
 - **Whisper Live (Streaming)** - transcription happens during recording (chunking + overlap + dedup)
 - **Hotkeys** - CGEventTap integration, hold Ctrl/Ctrl+Shift modes, double-Option toggle
