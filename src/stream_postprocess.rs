@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -38,39 +39,20 @@ struct Lexicon {
 impl Lexicon {
     fn from_builtin() -> Self {
         let mut rules = Vec::new();
-
-        for (idx, line) in BUILTIN_LEXICON.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            let entry: LexiconEntry = match serde_json::from_str(line) {
-                Ok(entry) => entry,
-                Err(e) => {
-                    warn!("Lexicon line {} failed to parse: {}", idx + 1, e);
-                    continue;
-                }
-            };
-
-            for mis in entry.mispronunciations.iter() {
-                if mis.eq_ignore_ascii_case(&entry.term) {
-                    continue;
-                }
-
-                if let Some(pattern) = build_word_regex(mis) {
-                    rules.push(LexiconRule {
-                        pattern,
-                        replacement: entry.term.clone(),
-                    });
-                }
-            }
-        }
+        let builtin_count = load_rules_from_jsonl(BUILTIN_LEXICON, "builtin", &mut rules);
+        let custom_count = load_custom_lexicon()
+            .map(|content| load_rules_from_jsonl(&content, "custom", &mut rules))
+            .unwrap_or(0);
 
         if !rules.is_empty() {
-            info!("Loaded {} lexicon rules (builtin)", rules.len());
+            info!(
+                "Loaded {} lexicon rules (builtin={}, custom={})",
+                rules.len(),
+                builtin_count,
+                custom_count
+            );
         } else {
-            warn!("No lexicon rules loaded from builtin lexicon");
+            warn!("No lexicon rules loaded from lexicon sources");
         }
 
         Self { rules }
@@ -87,6 +69,64 @@ impl Lexicon {
             }
         }
         out
+    }
+}
+
+fn load_rules_from_jsonl(source: &str, label: &str, rules: &mut Vec<LexiconRule>) -> usize {
+    let mut added = 0usize;
+    for (idx, line) in source.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let entry: LexiconEntry = match serde_json::from_str(line) {
+            Ok(entry) => entry,
+            Err(e) => {
+                warn!(
+                    "Lexicon line {} ({}) failed to parse: {}",
+                    idx + 1,
+                    label,
+                    e
+                );
+                continue;
+            }
+        };
+
+        for mis in entry.mispronunciations.iter() {
+            if mis.eq_ignore_ascii_case(&entry.term) {
+                continue;
+            }
+
+            if let Some(pattern) = build_word_regex(mis) {
+                rules.push(LexiconRule {
+                    pattern,
+                    replacement: entry.term.clone(),
+                });
+                added += 1;
+            }
+        }
+    }
+
+    added
+}
+
+fn load_custom_lexicon() -> Option<String> {
+    let path = Config::config_dir().join("lexicon.custom.jsonl");
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            if content.trim().is_empty() {
+                None
+            } else {
+                Some(content)
+            }
+        }
+        Err(e) => {
+            if path.exists() {
+                warn!("Failed to read custom lexicon {}: {}", path.display(), e);
+            }
+            None
+        }
     }
 }
 
@@ -187,7 +227,7 @@ pub struct StreamPostProcessor {
     stats: StreamPostProcessStats,
 }
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct StreamPostProcessStats {
     pub input_chunks: u64,
     pub output_chunks: u64,

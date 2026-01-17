@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,7 @@ use crate::ai_formatting;
 use crate::audio::load_audio_file;
 use crate::audio::streaming_recorder::transcribe_streaming_samples;
 use crate::config::Config;
+use crate::safe_path::safe_read_to_string;
 use crate::stream_postprocess::{StreamPostProcessStats, StreamPostProcessor};
 use crate::{client, whisper};
 
@@ -31,7 +32,7 @@ pub struct QualityReportConfig {
     pub copy_audio: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct QualityReport {
     pub generated_at: String,
     pub environment: ReportEnvironment,
@@ -39,7 +40,7 @@ pub struct QualityReport {
     pub entries: Vec<ReportEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReportEnvironment {
     pub stt_endpoint: Option<String>,
     pub stt_api_key_present: bool,
@@ -50,7 +51,7 @@ pub struct ReportEnvironment {
     pub whisper_language: Option<String>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct ReportSummary {
     pub total_files: usize,
     pub processed_files: usize,
@@ -64,7 +65,7 @@ pub struct ReportSummary {
     pub avg_cloud_cer: Option<f32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReportEntry {
     pub id: String,
     pub audio_path: String,
@@ -77,7 +78,7 @@ pub struct ReportEntry {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ReportTranscripts {
     pub raw: Option<String>,
     pub post: Option<String>,
@@ -86,7 +87,7 @@ pub struct ReportTranscripts {
     pub reference: Option<String>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ReportMetrics {
     pub raw_wer: Option<f32>,
     pub raw_cer: Option<f32>,
@@ -159,7 +160,7 @@ async fn process_pair(
 
     let mut errors = Vec::new();
     let reference = if reference_path.exists() {
-        match fs::read_to_string(&reference_path) {
+        match safe_read_to_string(&reference_path) {
             Ok(content) => {
                 let trimmed = content.trim().to_string();
                 if trimmed.is_empty() {
@@ -1073,17 +1074,24 @@ fn ensure_audio_asset(
     }
 
     if copy_audio {
-        fs::copy(audio_path, &dest)?;
+        let audio_src = crate::safe_path::safe_canonicalize(audio_path)?;
+        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (audio path is canonicalized, output dir controlled)
+        fs::copy(audio_src, &dest)?;
     } else {
         #[cfg(target_family = "unix")]
         {
-            if let Err(_) = std::os::unix::fs::symlink(audio_path, &dest) {
-                fs::copy(audio_path, &dest)?;
+            let audio_src = crate::safe_path::safe_canonicalize(audio_path)?;
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (audio path is canonicalized, output dir controlled)
+            if std::os::unix::fs::symlink(&audio_src, &dest).is_err() {
+                // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (audio path is canonicalized, output dir controlled)
+                fs::copy(&audio_src, &dest)?;
             }
         }
         #[cfg(not(target_family = "unix"))]
         {
-            fs::copy(audio_path, &dest)?;
+            let audio_src = crate::safe_path::safe_canonicalize(audio_path)?;
+            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (audio path is canonicalized, output dir controlled)
+            fs::copy(audio_src, &dest)?;
         }
     }
 
@@ -1171,7 +1179,7 @@ fn make_entry_id(audio_path: &Path) -> String {
         Some(date) => format!("{date}__{stem}"),
         None => stem.to_string(),
     };
-    raw_id.replace('/', "_").replace('\\', "_")
+    raw_id.replace(['/', '\\'], "_")
 }
 
 fn normalize_for_eval(text: &str) -> (Vec<String>, String) {

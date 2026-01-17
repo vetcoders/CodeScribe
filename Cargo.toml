@@ -30,6 +30,10 @@ path = "src/main.rs"
 name = "codescribe-quality"
 path = "src/bin/codescribe_quality.rs"
 
+[[bin]]
+name = "codescribe-loop"
+path = "src/bin/codescribe_loop.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }

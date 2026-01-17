@@ -117,12 +117,37 @@ fn load_or_create(filename: &str, default_content: &str) -> String {
     }
 }
 
+fn load_optional(filename: &str) -> Option<String> {
+    let path = prompts_dir().join(filename);
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Err(_) => None,
+    }
+}
+
 pub fn get_formatting_prompt() -> String {
-    load_or_create("formatting.txt", DEFAULT_FORMATTING_PROMPT)
+    let mut base = load_or_create("formatting.txt", DEFAULT_FORMATTING_PROMPT);
+    if let Some(tuning) = load_optional("formatting_tuning.txt") {
+        base.push_str("\n\n");
+        base.push_str(&tuning);
+    }
+    base
 }
 
 pub fn get_assistive_prompt() -> String {
-    load_or_create("assistive.txt", DEFAULT_ASSISTIVE_PROMPT)
+    let mut base = load_or_create("assistive.txt", DEFAULT_ASSISTIVE_PROMPT);
+    if let Some(tuning) = load_optional("assistive_tuning.txt") {
+        base.push_str("\n\n");
+        base.push_str(&tuning);
+    }
+    base
 }
 
 pub fn get_formatting_prompt_path() -> PathBuf {

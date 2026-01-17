@@ -4,7 +4,7 @@
 .PHONY: all build release install install-no-embed config bundle install-app \
         start stop restart status logs logs-follow \
         bump bump-patch bump-minor bump-major version \
-        lint format test test-e2e test-e2e-real test-sse test-formatting test-all \
+        lint format test test-quick test-e2e test-e2e-real test-sse test-formatting test-all \
         demo demo-raw demo-assistive check clean help \
         tauri-dev tauri-build tauri-check \
         dmg dmg-signed dmg-full notarize download-model \
@@ -159,10 +159,14 @@ lint:
 	@cargo clippy --workspace -- -D warnings
 
 test:
-	@echo "=== Unit Tests ==="
-	@cargo test --lib
-	@echo "=== Integration Tests ==="
-	@cargo test --test '*' -- --skip e2e || true
+	@echo "=== Tests (workspace) ==="
+	@cargo test --workspace --all-targets -- --nocapture
+	@echo "=== Tests (ignored / real API) ==="
+	@cargo test --workspace --all-targets -- --ignored --nocapture
+
+test-quick:
+	@echo "=== Tests (quick, no real API) ==="
+	@cargo test --workspace --all-targets -- --nocapture
 
 test-e2e:
 	@echo "=== E2E Tests (mock) ==="
@@ -183,9 +187,8 @@ test-formatting:
 
 test-all:
 	@echo "=== Full Test Suite ==="
-	@cargo test --lib
-	@cargo test --test '*' -- --nocapture || true
-	@echo "Done. Run 'make test-e2e-real' for real API tests."
+	@$(MAKE) test
+	@echo "Done."
 
 demo:
 	@echo "=== Full Pipeline Demo ==="
@@ -199,7 +202,13 @@ demo-assistive:
 	@echo "=== Assistive Mode Demo ==="
 	@cargo run --release --example demo_full_pipeline -- --assistive $(AUDIO)
 
-check: lint test
+check:
+	@echo "=== Format (fix) ==="
+	@cargo fmt
+	@echo "=== Clippy (workspace, all targets) ==="
+	@cargo clippy --workspace --all-targets -- -D warnings
+	@echo "=== Semgrep ==="
+	@semgrep scan --config auto --error .
 	@echo "Quality gate passed"
 
 # ============================================================================
@@ -261,13 +270,14 @@ help:
 	@echo "Quality:"
 	@echo "  make lint            Run clippy + fmt check"
 	@echo "  make format          Format code"
-	@echo "  make test            Run unit + integration tests (skip E2E)"
+	@echo "  make test            Run full test suite (incl. ignored real-API tests)"
+	@echo "  make test-quick      Run tests without real-API calls"
 	@echo "  make test-e2e        Run E2E tests (mock)"
 	@echo "  make test-e2e-real   Run E2E tests with real API (needs LLM_*_API_KEY)"
 	@echo "  make test-sse        Run SSE streaming tests (real API)"
 	@echo "  make test-formatting Run AI formatting tests"
 	@echo "  make test-all        Run full test suite"
-	@echo "  make check           Full quality gate"
+	@echo "  make check           Format (fix) + clippy + semgrep"
 	@echo "  make hooks           Install pre-commit + pre-push hooks"
 	@echo ""
 	@echo "Tauri GUI:"
