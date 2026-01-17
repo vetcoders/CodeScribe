@@ -121,6 +121,7 @@ lazy_static = "1.4"
 # Image processing (for tray icon)
 image = { version = "0.25", default-features = false, features = ["png"] }
 walkdir = "2.5.0"
+cap-std = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # candle-coreml = "0.3"

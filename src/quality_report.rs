@@ -15,7 +15,10 @@ use crate::ai_formatting;
 use crate::audio::load_audio_file;
 use crate::audio::streaming_recorder::transcribe_streaming_samples;
 use crate::config::Config;
-use crate::safe_path::safe_read_to_string;
+use crate::safe_path::{
+    safe_canonicalize_bounded, safe_copy_bounded, safe_prepare_path, safe_read_to_string_bounded,
+    safe_symlink_or_copy_bounded, safe_write_bounded,
+};
 use crate::stream_postprocess::{StreamPostProcessStats, StreamPostProcessor};
 use crate::{client, whisper};
 
@@ -105,19 +108,19 @@ pub async fn run(config: QualityReportConfig) -> Result<PathBuf> {
 
     let env_snapshot = snapshot_environment();
 
-    let pairs = collect_pairs(
-        &config.input_dir,
-        config.date_filter.as_deref(),
-        config.limit,
-    );
+    let config_root = Config::config_dir();
+    let input_root = resolve_input_root(&config.input_dir, &config_root)?;
+    let output_root = resolve_output_root(&config.output_dir, &config_root)?;
+
+    let pairs = collect_pairs(&input_root, config.date_filter.as_deref(), config.limit);
     if pairs.is_empty() {
-        anyhow::bail!("No WAV+TXT pairs found in {}", config.input_dir.display());
+        anyhow::bail!("No WAV+TXT pairs found in {}", input_root.display());
     }
 
-    fs::create_dir_all(&config.output_dir)
-        .with_context(|| format!("Failed to create {}", config.output_dir.display()))?;
-    let artifacts_dir = config.output_dir.join("artifacts");
-    let audio_dir = config.output_dir.join("audio");
+    fs::create_dir_all(&output_root)
+        .with_context(|| format!("Failed to create {}", output_root.display()))?;
+    let artifacts_dir = output_root.join("artifacts");
+    let audio_dir = output_root.join("audio");
     fs::create_dir_all(&artifacts_dir)?;
     fs::create_dir_all(&audio_dir)?;
 
@@ -128,7 +131,15 @@ pub async fn run(config: QualityReportConfig) -> Result<PathBuf> {
     let mut totals = Totals::default();
 
     for pair in pairs {
-        let entry = process_pair(&pair, &config, &artifacts_dir, &audio_dir).await?;
+        let entry = process_pair(
+            &pair,
+            &config,
+            &input_root,
+            &output_root,
+            &artifacts_dir,
+            &audio_dir,
+        )
+        .await?;
         totals.accumulate(&entry.metrics);
         entries.push(entry);
     }
@@ -141,14 +152,16 @@ pub async fn run(config: QualityReportConfig) -> Result<PathBuf> {
         entries,
     };
 
-    write_report_files(&report, &config, &artifacts_dir)?;
+    write_report_files(&report, &config, &artifacts_dir, &output_root)?;
 
-    Ok(config.output_dir)
+    Ok(output_root)
 }
 
 async fn process_pair(
     pair: &CorpusPair,
     config: &QualityReportConfig,
+    input_root: &Path,
+    output_root: &Path,
     artifacts_dir: &Path,
     audio_dir: &Path,
 ) -> Result<ReportEntry> {
@@ -156,11 +169,33 @@ async fn process_pair(
     let reference_path = pair.reference_path.clone();
     let id = pair.id.clone();
 
-    let audio_rel_path = ensure_audio_asset(&audio_path, audio_dir, &id, config.copy_audio)?;
+    let audio_canon = safe_canonicalize_bounded(&audio_path, input_root)
+        .with_context(|| format!("Audio path escapes input root: {}", audio_path.display()))?;
+    let reference_canon = if reference_path.exists() {
+        Some(
+            safe_canonicalize_bounded(&reference_path, input_root).with_context(|| {
+                format!(
+                    "Reference path escapes input root: {}",
+                    reference_path.display()
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+
+    let audio_rel_path = ensure_audio_asset(
+        &audio_canon,
+        audio_dir,
+        &id,
+        input_root,
+        output_root,
+        config.copy_audio,
+    )?;
 
     let mut errors = Vec::new();
-    let reference = if reference_path.exists() {
-        match safe_read_to_string(&reference_path) {
+    let reference = if let Some(reference_canon) = reference_canon.as_ref() {
+        match safe_read_to_string_bounded(reference_canon, input_root) {
             Ok(content) => {
                 let trimmed = content.trim().to_string();
                 if trimmed.is_empty() {
@@ -180,8 +215,8 @@ async fn process_pair(
         None
     };
 
-    let (samples, sample_rate) = load_audio_file(&audio_path)
-        .with_context(|| format!("Failed to load audio {}", audio_path.display()))?;
+    let (samples, sample_rate) = load_audio_file(&audio_canon)
+        .with_context(|| format!("Failed to load audio {}", audio_canon.display()))?;
     let duration_secs = samples.len() as f32 / sample_rate as f32;
 
     let raw =
@@ -264,17 +299,15 @@ async fn process_pair(
         reference: reference.clone(),
     };
 
-    write_artifacts(&id, artifacts_dir, &transcripts)?;
+    write_artifacts(&id, artifacts_dir, output_root, &transcripts)?;
 
     Ok(ReportEntry {
         id,
-        audio_path: audio_path.to_string_lossy().to_string(),
+        audio_path: audio_canon.to_string_lossy().to_string(),
         audio_rel_path,
-        reference_path: if reference_path.exists() {
-            Some(reference_path.to_string_lossy().to_string())
-        } else {
-            None
-        },
+        reference_path: reference_canon
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         duration_secs,
         transcripts,
         metrics,
@@ -352,21 +385,46 @@ fn compute_metrics(
     }
 }
 
-fn write_artifacts(id: &str, artifacts_dir: &Path, transcripts: &ReportTranscripts) -> Result<()> {
+fn write_artifacts(
+    id: &str,
+    artifacts_dir: &Path,
+    output_root: &Path,
+    transcripts: &ReportTranscripts,
+) -> Result<()> {
     if let Some(text) = transcripts.raw.as_deref() {
-        fs::write(artifacts_dir.join(format!("{id}.raw.txt")), text)?;
+        safe_write_bounded(
+            &artifacts_dir.join(format!("{id}.raw.txt")),
+            output_root,
+            text,
+        )?;
     }
     if let Some(text) = transcripts.post.as_deref() {
-        fs::write(artifacts_dir.join(format!("{id}.post.txt")), text)?;
+        safe_write_bounded(
+            &artifacts_dir.join(format!("{id}.post.txt")),
+            output_root,
+            text,
+        )?;
     }
     if let Some(text) = transcripts.ai_formatted.as_deref() {
-        fs::write(artifacts_dir.join(format!("{id}.ai.txt")), text)?;
+        safe_write_bounded(
+            &artifacts_dir.join(format!("{id}.ai.txt")),
+            output_root,
+            text,
+        )?;
     }
     if let Some(text) = transcripts.cloud.as_deref() {
-        fs::write(artifacts_dir.join(format!("{id}.cloud.txt")), text)?;
+        safe_write_bounded(
+            &artifacts_dir.join(format!("{id}.cloud.txt")),
+            output_root,
+            text,
+        )?;
     }
     if let Some(text) = transcripts.reference.as_deref() {
-        fs::write(artifacts_dir.join(format!("{id}.reference.txt")), text)?;
+        safe_write_bounded(
+            &artifacts_dir.join(format!("{id}.reference.txt")),
+            output_root,
+            text,
+        )?;
     }
     Ok(())
 }
@@ -375,23 +433,24 @@ fn write_report_files(
     report: &QualityReport,
     config: &QualityReportConfig,
     artifacts_dir: &Path,
+    output_root: &Path,
 ) -> Result<()> {
-    let json_path = config.output_dir.join("report.json");
-    let md_path = config.output_dir.join("report.md");
-    let html_path = config.output_dir.join("index.html");
-    let ingest_path = config.output_dir.join("ingest.jsonl");
+    let json_path = output_root.join("report.json");
+    let md_path = output_root.join("report.md");
+    let html_path = output_root.join("index.html");
+    let ingest_path = output_root.join("ingest.jsonl");
 
     let json = serde_json::to_string_pretty(report)?;
-    fs::write(json_path, json)?;
+    safe_write_bounded(&json_path, output_root, &json)?;
 
     let md = render_markdown(report);
-    fs::write(md_path, md)?;
+    safe_write_bounded(&md_path, output_root, &md)?;
 
     let html = render_html(report, config);
-    fs::write(html_path, html)?;
+    safe_write_bounded(&html_path, output_root, &html)?;
 
     let jsonl = render_ingest_jsonl(report, artifacts_dir)?;
-    fs::write(ingest_path, jsonl)?;
+    safe_write_bounded(&ingest_path, output_root, &jsonl)?;
 
     Ok(())
 }
@@ -1061,6 +1120,8 @@ fn ensure_audio_asset(
     audio_path: &Path,
     audio_dir: &Path,
     asset_id: &str,
+    input_root: &Path,
+    output_root: &Path,
     copy_audio: bool,
 ) -> Result<String> {
     let ext = audio_path
@@ -1074,24 +1135,15 @@ fn ensure_audio_asset(
     }
 
     if copy_audio {
-        let audio_src = crate::safe_path::safe_canonicalize(audio_path)?;
-        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (audio path is canonicalized, output dir controlled)
-        fs::copy(audio_src, &dest)?;
+        safe_copy_bounded(audio_path, input_root, &dest, output_root)?;
     } else {
         #[cfg(target_family = "unix")]
         {
-            let audio_src = crate::safe_path::safe_canonicalize(audio_path)?;
-            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (audio path is canonicalized, output dir controlled)
-            if std::os::unix::fs::symlink(&audio_src, &dest).is_err() {
-                // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (audio path is canonicalized, output dir controlled)
-                fs::copy(&audio_src, &dest)?;
-            }
+            safe_symlink_or_copy_bounded(audio_path, input_root, &dest, output_root)?;
         }
         #[cfg(not(target_family = "unix"))]
         {
-            let audio_src = crate::safe_path::safe_canonicalize(audio_path)?;
-            // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (audio path is canonicalized, output dir controlled)
-            fs::copy(audio_src, &dest)?;
+            safe_copy_bounded(audio_path, input_root, &dest, output_root)?;
         }
     }
 
@@ -1180,6 +1232,29 @@ fn make_entry_id(audio_path: &Path) -> String {
         None => stem.to_string(),
     };
     raw_id.replace(['/', '\\'], "_")
+}
+
+fn resolve_input_root(path: &Path, root: &Path) -> Result<PathBuf> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    safe_canonicalize_bounded(&candidate, root)
+        .with_context(|| format!("Input dir must stay within {}", root.display()))
+}
+
+fn resolve_output_root(path: &Path, root: &Path) -> Result<PathBuf> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let prepared = safe_prepare_path(&candidate, root)
+        .with_context(|| format!("Output dir must stay within {}", root.display()))?;
+    fs::create_dir_all(&prepared)?;
+    safe_canonicalize_bounded(&prepared, root)
+        .with_context(|| format!("Output dir must stay within {}", root.display()))
 }
 
 fn normalize_for_eval(text: &str) -> (Vec<String>, String) {

@@ -9,12 +9,14 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::quality_report::{QualityReport, QualityReportConfig, ReportSummary};
-use crate::safe_path::{safe_canonicalize, safe_read_to_string};
+use crate::safe_path::{
+    safe_append_line_bounded, safe_canonicalize_bounded, safe_prepare_path,
+    safe_read_to_string_bounded,
+};
 
 const DEFAULT_REGRESSION_THRESHOLD: f32 = 0.02;
 const DEFAULT_SIMILARITY: f32 = 0.93;
@@ -81,15 +83,18 @@ struct LoopHistoryEntry {
 }
 
 pub async fn run(config: QualityLoopConfig) -> Result<PathBuf> {
-    let report_config = config.report_config.clone();
+    let config_root = Config::config_dir();
+    let report_config = normalize_report_config(&config.report_config, &config_root)?;
     let output_dir = crate::quality_report::run(report_config).await?;
-    let report_path = output_dir.join("report.json");
-    let report = load_report(&report_path)?;
+    let output_root = safe_canonicalize_bounded(&output_dir, &config_root)?;
+    let report_path = output_root.join("report.json");
+    let report = load_report(&report_path, &config_root)?;
 
-    let baseline_path = resolve_baseline(&config, &output_dir);
+    let history_path = resolve_history_path(&config.history_path, &config_root)?;
+    let baseline_path = resolve_baseline(&config, &output_root, &config_root, &history_path)?;
     let baseline_report = baseline_path
         .as_ref()
-        .and_then(|path| load_report(path).ok());
+        .and_then(|path| load_report(path, &config_root).ok());
 
     let (regressions, regression_summary) = analyze_regressions(
         &report,
@@ -137,30 +142,64 @@ pub async fn run(config: QualityLoopConfig) -> Result<PathBuf> {
         updates,
     };
 
-    write_analysis_files(&output_dir, &analysis)?;
-    append_history(&config.history_path, &report, &output_dir)?;
+    write_analysis_files(&output_root, &analysis)?;
+    append_history(&history_path, &config_root, &report, &output_root)?;
 
-    Ok(output_dir)
+    Ok(output_root)
 }
 
-fn load_report(path: &Path) -> Result<QualityReport> {
-    let data = safe_read_to_string(path)
+fn load_report(path: &Path, root: &Path) -> Result<QualityReport> {
+    let data = safe_read_to_string_bounded(path, root)
         .with_context(|| format!("Failed to read report {}", path.display()))?;
     serde_json::from_str(&data).context("Failed to parse report.json")
 }
 
-fn resolve_baseline(config: &QualityLoopConfig, output_dir: &Path) -> Option<PathBuf> {
+fn normalize_report_config(
+    config: &QualityReportConfig,
+    root: &Path,
+) -> Result<QualityReportConfig> {
+    let mut normalized = config.clone();
+    let input_candidate = safe_prepare_path(&normalized.input_dir, root)?;
+    if !input_candidate.exists() {
+        anyhow::bail!(
+            "Input directory does not exist: {}",
+            input_candidate.display()
+        );
+    }
+    normalized.input_dir = safe_canonicalize_bounded(&input_candidate, root)?;
+    normalized.output_dir = safe_prepare_path(&normalized.output_dir, root)?;
+    Ok(normalized)
+}
+
+fn resolve_history_path(path: &Path, root: &Path) -> Result<PathBuf> {
+    safe_prepare_path(path, root)
+}
+
+fn resolve_baseline(
+    config: &QualityLoopConfig,
+    output_dir: &Path,
+    root: &Path,
+    history_path: &Path,
+) -> Result<Option<PathBuf>> {
     if let Some(path) = config.baseline_report.as_ref() {
-        return Some(resolve_report_path(path));
+        let resolved = resolve_report_path(path);
+        let bounded = safe_canonicalize_bounded(&resolved, root)
+            .with_context(|| format!("Baseline report must stay within {}", root.display()))?;
+        return Ok(Some(bounded));
     }
 
-    let history = read_last_history(&config.history_path)?;
+    let history = read_last_history(history_path, root)?;
+    let Some(history) = history else {
+        return Ok(None);
+    };
     let history_path = PathBuf::from(&history.report_json);
     if history_path.exists() && history_path != output_dir.join("report.json") {
-        return Some(history_path);
+        let bounded = safe_canonicalize_bounded(&history_path, root)
+            .with_context(|| format!("Baseline report must stay within {}", root.display()))?;
+        return Ok(Some(bounded));
     }
 
-    None
+    Ok(None)
 }
 
 fn resolve_report_path(path: &Path) -> PathBuf {
@@ -171,24 +210,30 @@ fn resolve_report_path(path: &Path) -> PathBuf {
     }
 }
 
-fn read_last_history(path: &Path) -> Option<LoopHistoryEntry> {
-    let content = safe_read_to_string(path).ok()?;
+fn read_last_history(path: &Path, root: &Path) -> Result<Option<LoopHistoryEntry>> {
+    let content = safe_read_to_string_bounded(path, root).ok();
+    let content = match content {
+        Some(content) => content,
+        None => return Ok(None),
+    };
     for line in content.lines().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<LoopHistoryEntry>(trimmed) {
-            return Some(entry);
+            return Ok(Some(entry));
         }
     }
-    None
+    Ok(None)
 }
 
-fn append_history(path: &Path, report: &QualityReport, output_dir: &Path) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-
+fn append_history(
+    path: &Path,
+    root: &Path,
+    report: &QualityReport,
+    output_dir: &Path,
+) -> Result<()> {
     let entry = LoopHistoryEntry {
         generated_at: report.generated_at.clone(),
         report_dir: output_dir.to_string_lossy().to_string(),
@@ -197,12 +242,7 @@ fn append_history(path: &Path, report: &QualityReport, output_dir: &Path) -> Res
     };
 
     let line = serde_json::to_string(&entry)?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{}", line)?;
-    Ok(())
+    safe_append_line_bounded(path, root, &line)
 }
 
 fn write_analysis_files(output_dir: &Path, analysis: &LoopAnalysis) -> Result<()> {
@@ -210,10 +250,10 @@ fn write_analysis_files(output_dir: &Path, analysis: &LoopAnalysis) -> Result<()
     let md_path = output_dir.join("analysis.md");
 
     let json = serde_json::to_string_pretty(analysis)?;
-    fs::write(json_path, json)?;
+    crate::safe_path::safe_write_bounded(&json_path, output_dir, &json)?;
 
     let md = render_analysis_markdown(analysis);
-    fs::write(md_path, md)?;
+    crate::safe_path::safe_write_bounded(&md_path, output_dir, &md)?;
 
     Ok(())
 }
@@ -523,13 +563,20 @@ fn propose_gate_update(
     let Some(post_worse_ratio) = signals.post_worse_ratio else {
         return Ok(None);
     };
-    let env_path = Config::config_dir().join(".env");
+    let config_root = Config::config_dir();
+    let env_path = config_root.join(".env");
     let similarity = read_env_f32(
         &env_path,
+        &config_root,
         "CODESCRIBE_STREAM_SIMILARITY",
         DEFAULT_SIMILARITY,
     );
-    let novelty = read_env_f32(&env_path, "CODESCRIBE_STREAM_NOVELTY", DEFAULT_NOVELTY);
+    let novelty = read_env_f32(
+        &env_path,
+        &config_root,
+        "CODESCRIBE_STREAM_NOVELTY",
+        DEFAULT_NOVELTY,
+    );
 
     let mut new_similarity = similarity;
     let mut new_novelty = novelty;
@@ -561,11 +608,13 @@ fn propose_gate_update(
     if apply {
         applied |= update_env_var(
             &env_path,
+            &config_root,
             "CODESCRIBE_STREAM_SIMILARITY",
             &format!("{:.3}", new_similarity),
         )?;
         applied |= update_env_var(
             &env_path,
+            &config_root,
             "CODESCRIBE_STREAM_NOVELTY",
             &format!("{:.3}", new_novelty),
         )?;
@@ -595,14 +644,20 @@ fn propose_embedding_update(
     let Some(embeddings_enabled) = stats.embeddings_enabled else {
         return Ok(None);
     };
-    let env_path = Config::config_dir().join(".env");
+    let config_root = Config::config_dir();
+    let env_path = config_root.join(".env");
 
     if !embeddings_enabled {
         if let Some(suspicious_rate) = stats.suspicious_rate()
             && suspicious_rate > 0.20
         {
             let applied = if apply {
-                update_env_var(&env_path, "CODESCRIBE_STREAM_DISABLE_EMBEDDINGS", "0")?
+                update_env_var(
+                    &env_path,
+                    &config_root,
+                    "CODESCRIBE_STREAM_DISABLE_EMBEDDINGS",
+                    "0",
+                )?
             } else {
                 false
             };
@@ -618,7 +673,12 @@ fn propose_embedding_update(
         && gate_rate > 0.40
     {
         let applied = if apply {
-            update_env_var(&env_path, "CODESCRIBE_STREAM_DISABLE_EMBEDDINGS", "1")?
+            update_env_var(
+                &env_path,
+                &config_root,
+                "CODESCRIBE_STREAM_DISABLE_EMBEDDINGS",
+                "1",
+            )?
         } else {
             false
         };
@@ -661,14 +721,15 @@ fn propose_prompt_tuning(
         now.format("%Y-%m-%d %H:%M:%S")
     );
 
-    let prompts_dir = Config::config_dir().join("prompts");
+    let config_root = Config::config_dir();
+    let prompts_dir = safe_prepare_path(&config_root.join("prompts"), &config_root)?;
     fs::create_dir_all(&prompts_dir)?;
     let path = prompts_dir.join("formatting_tuning.txt");
 
     let applied = if apply {
-        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let existing = safe_read_to_string_bounded(&path, &config_root).unwrap_or_default();
         if existing.trim() != tuning.trim() {
-            fs::write(&path, &tuning)?;
+            crate::safe_path::safe_write_bounded(&path, &config_root, &tuning)?;
             true
         } else {
             false
@@ -700,9 +761,10 @@ fn propose_lexicon_updates(
         return Ok(None);
     }
 
-    let path = Config::config_dir().join("lexicon.custom.jsonl");
+    let config_root = Config::config_dir();
+    let path = safe_prepare_path(&config_root.join("lexicon.custom.jsonl"), &config_root)?;
     let applied = if apply {
-        apply_lexicon_suggestions(&path, &suggestions)?
+        apply_lexicon_suggestions(&path, &config_root, &suggestions)?
     } else {
         false
     };
@@ -785,8 +847,12 @@ struct LexiconEntry {
     mispronunciations: Vec<String>,
 }
 
-fn apply_lexicon_suggestions(path: &Path, suggestions: &[LexiconSuggestion]) -> Result<bool> {
-    let mut entries = read_custom_lexicon(path);
+fn apply_lexicon_suggestions(
+    path: &Path,
+    root: &Path,
+    suggestions: &[LexiconSuggestion],
+) -> Result<bool> {
+    let mut entries = read_custom_lexicon(path, root);
     let mut changed = false;
 
     for suggestion in suggestions {
@@ -810,16 +876,15 @@ fn apply_lexicon_suggestions(path: &Path, suggestions: &[LexiconSuggestion]) -> 
             out.push_str(&serde_json::to_string(&entry)?);
             out.push('\n');
         }
-        fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
-        fs::write(path, out)?;
+        crate::safe_path::safe_write_bounded(path, root, &out)?;
     }
 
     Ok(changed)
 }
 
-fn read_custom_lexicon(path: &Path) -> HashMap<String, HashSet<String>> {
+fn read_custom_lexicon(path: &Path, root: &Path) -> HashMap<String, HashSet<String>> {
     let mut map: HashMap<String, HashSet<String>> = HashMap::new();
-    let content = fs::read_to_string(path).unwrap_or_default();
+    let content = safe_read_to_string_bounded(path, root).unwrap_or_default();
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -938,14 +1003,14 @@ fn levenshtein<T: Eq>(a: &[T], b: &[T]) -> usize {
     prev[b.len()]
 }
 
-fn read_env_f32(path: &Path, key: &str, default: f32) -> f32 {
+fn read_env_f32(path: &Path, root: &Path, key: &str, default: f32) -> f32 {
     if let Ok(value) = std::env::var(key)
         && let Ok(parsed) = value.parse::<f32>()
     {
         return parsed;
     }
 
-    if let Some(value) = read_env_value(path, key)
+    if let Some(value) = read_env_value(path, root, key)
         && let Ok(parsed) = value.parse::<f32>()
     {
         return parsed;
@@ -954,8 +1019,8 @@ fn read_env_f32(path: &Path, key: &str, default: f32) -> f32 {
     default
 }
 
-fn read_env_value(path: &Path, key: &str) -> Option<String> {
-    let content = safe_read_to_string(path).ok()?;
+fn read_env_value(path: &Path, root: &Path, key: &str) -> Option<String> {
+    let content = safe_read_to_string_bounded(path, root).ok()?;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('#') || trimmed.is_empty() {
@@ -971,14 +1036,14 @@ fn read_env_value(path: &Path, key: &str) -> Option<String> {
     None
 }
 
-fn update_env_var(path: &Path, key: &str, value: &str) -> Result<bool> {
+fn update_env_var(path: &Path, root: &Path, key: &str, value: &str) -> Result<bool> {
     let mut lines = Vec::new();
     let mut found = false;
     let mut changed = false;
     let target = format!("{}={}", key, value);
 
     if path.exists() {
-        let content = safe_read_to_string(path)?;
+        let content = safe_read_to_string_bounded(path, root)?;
         for line in content.lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with(&format!("{}=", key)) {
@@ -1001,12 +1066,7 @@ fn update_env_var(path: &Path, key: &str, value: &str) -> Result<bool> {
     if changed {
         let mut output = lines.join("\n");
         output.push('\n');
-        let canonical = match safe_canonicalize(path) {
-            Ok(path) => path,
-            Err(_) => path.to_path_buf(),
-        };
-        // nosemgrep: rust.actix.path-traversal.tainted-path.tainted-path (config path under ~/.codescribe)
-        fs::write(canonical, output)?;
+        crate::safe_path::safe_write_bounded(path, root, &output)?;
     }
     Ok(changed)
 }
