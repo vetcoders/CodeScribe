@@ -10,8 +10,8 @@ use muda::{
     CheckMenuItem, IconMenuItem, MenuId, MenuItem, NativeIcon, PredefinedMenuItem, Submenu,
 };
 
-use crate::tray::state::{HOLD_MENU_ITEMS, MODEL_MENU_ITEMS, TOGGLE_MENU_ITEMS};
-use crate::tray::types::{HoldMenuItems, HoldMods, ModelMenuItems, ToggleMenuItems, VolumeLevel};
+use crate::tray::state::{HOLD_MENU_ITEMS, TOGGLE_MENU_ITEMS};
+use crate::tray::types::{HoldMenuItems, HoldMods, ToggleMenuItems, VolumeLevel};
 
 // Type aliases
 pub type ModelMenuIds = (MenuId, MenuId, MenuId, MenuId, MenuId, MenuId);
@@ -114,17 +114,6 @@ pub fn build_models_submenu() -> Result<(Submenu, ModelMenuIds)> {
     let model_open_folder = MenuItem::new("Open Models Folder", true, None);
     let model_open_folder_id = model_open_folder.id().clone();
     models_menu.append(&model_open_folder)?;
-
-    MODEL_MENU_ITEMS.with(|items_cell| {
-        *items_cell.borrow_mut() = Some(ModelMenuItems {
-            small: model_small,
-            medium: model_medium,
-            large_v3: model_large_v3,
-            large_v3_turbo: model_large_v3_turbo,
-            large_v3_q8: model_large_v3_q8,
-            label: whisper_label,
-        });
-    });
 
     Ok((
         models_menu,

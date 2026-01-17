@@ -37,10 +37,11 @@ pub async fn format_transcript(
 
 /// Reset AI conversation context
 ///
-/// Clears the previous_response_id for Responses API continuity
+/// Clears the conversation memory/context
 #[tauri::command]
 pub async fn reset_ai_context() -> Result<(), String> {
-    codescribe::ai_formatting::reset_context();
+    codescribe::ai_formatting::reset_ollama_memory();
+    codescribe::state::conversation::reset_conversation();
     Ok(())
 }
 
@@ -99,6 +100,43 @@ pub fn open_prompt_in_editor(prompt_type: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Save AI prompt content to file
+#[tauri::command]
+pub fn save_ai_prompt(prompt_type: String, content: String) -> Result<(), String> {
+    let prompt_path = get_prompt_path(&prompt_type)?;
+
+    // Ensure directory exists
+    if let Some(parent) = prompt_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    std::fs::write(&prompt_path, &content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Send a message to AI assistant and get response
+#[tauri::command]
+pub async fn send_message(message: String) -> Result<MessageResponse, String> {
+    if message.trim().is_empty() {
+        return Err("Empty message".to_string());
+    }
+
+    // Use assistive mode for chat
+    let response = codescribe::ai_formatting::format_text(&message, Some("pl"), true).await;
+
+    Ok(MessageResponse {
+        content: response,
+        is_final: true,
+    })
+}
+
+/// Response from send_message command
+#[derive(serde::Serialize)]
+pub struct MessageResponse {
+    pub content: String,
+    pub is_final: bool,
 }
 
 /// Reset AI prompt to default

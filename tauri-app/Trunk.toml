@@ -8,8 +8,6 @@ dist = "dist"
 target = "index.html"
 # Public URL path for assets
 public_url = "/"
-# Disable wasm-opt (incompatible with current rustc output)
-no_optimize = true
 
 [watch]
 # Watch these paths for changes during development

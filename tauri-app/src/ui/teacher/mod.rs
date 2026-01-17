@@ -7,10 +7,7 @@ struct LexiconEntry {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)] // Fields will be used when backend integration is complete
 struct CalibrationRun {
-    sentence: String,
-    transcript: String,
     wer: f32,
 }
 
@@ -102,8 +99,6 @@ pub fn TeacherView() -> impl IntoView {
             runs.insert(
                 0,
                 CalibrationRun {
-                    sentence: reference.get(),
-                    transcript: transcript.get(),
                     wer: 0.15, // Mock 15% WER
                 },
             );

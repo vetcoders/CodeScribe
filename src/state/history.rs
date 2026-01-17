@@ -12,14 +12,12 @@ use tracing::{debug, error, info, warn};
 
 /// A single history entry
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields prepared for history menu UI
 pub struct HistoryEntry {
     pub path: PathBuf,
     pub timestamp: DateTime<Local>,
     pub preview: String,
 }
 
-#[allow(dead_code)] // Prepared for history menu UI
 impl HistoryEntry {
     /// Get a formatted label for display in menus
     pub fn label(&self) -> String {
@@ -67,10 +65,10 @@ pub fn transcriptions_dir(date: &DateTime<Local>) -> PathBuf {
     let date_folder = date.format("%Y-%m-%d").to_string();
     let dir = base.join(date_folder);
 
-    if !dir.exists() {
-        if let Err(e) = fs::create_dir_all(&dir) {
-            error!("Failed to create transcriptions directory: {}", e);
-        }
+    if !dir.exists()
+        && let Err(e) = fs::create_dir_all(&dir)
+    {
+        error!("Failed to create transcriptions directory: {}", e);
     }
 
     dir
@@ -78,7 +76,6 @@ pub fn transcriptions_dir(date: &DateTime<Local>) -> PathBuf {
 
 /// Get the history directory, creating it if needed
 /// Note: Now an alias for transcriptions_dir with current date for backwards compatibility
-#[allow(dead_code)] // Used by tauri-app
 pub fn history_dir() -> PathBuf {
     transcriptions_dir(&Local::now())
 }
@@ -158,13 +155,13 @@ pub fn recent_entries(limit: usize) -> Vec<HistoryEntry> {
     // Collect all .txt files from date subdirectories
     if let Ok(day_dirs) = fs::read_dir(&base_dir) {
         for day_entry in day_dirs.flatten() {
-            if day_entry.path().is_dir() {
-                if let Ok(txt_files) = fs::read_dir(day_entry.path()) {
-                    for txt_entry in txt_files.flatten() {
-                        let path = txt_entry.path();
-                        if path.extension().is_some_and(|ext| ext == "txt") {
-                            files.push(path);
-                        }
+            if day_entry.path().is_dir()
+                && let Ok(txt_files) = fs::read_dir(day_entry.path())
+            {
+                for txt_entry in txt_files.flatten() {
+                    let path = txt_entry.path();
+                    if path.extension().is_some_and(|ext| ext == "txt") {
+                        files.push(path);
                     }
                 }
             }
@@ -278,32 +275,29 @@ pub fn save_audio(
 ///
 /// Prefer using save_audio() with explicit timestamp for proper pairing with transcripts
 #[deprecated(note = "Use save_audio() with explicit timestamp instead")]
-#[allow(dead_code)] // Legacy API
 pub fn dump_audio(src_path: &Path, _reason: &str) -> Option<PathBuf> {
     save_audio(src_path, Local::now(), None)
 }
 
 /// Open the transcriptions folder in Finder (alias for open_history_folder)
-#[allow(dead_code)] // Used by tauri-app
 pub fn open_audio_logs_folder() {
     open_history_folder();
 }
 
 /// Clear all history entries
-#[allow(dead_code)] // Used by tauri-app
 pub fn clear_history() {
     let dir = history_dir();
     if let Ok(day_dirs) = fs::read_dir(&dir) {
         for day_entry in day_dirs.flatten() {
-            if day_entry.path().is_dir() {
-                if let Ok(txt_files) = fs::read_dir(day_entry.path()) {
-                    for txt_entry in txt_files.flatten() {
-                        let path = txt_entry.path();
-                        if path.extension().is_some_and(|ext| ext == "txt") {
-                            if let Err(e) = fs::remove_file(&path) {
-                                warn!("Failed to delete history entry '{}': {}", path.display(), e);
-                            }
-                        }
+            if day_entry.path().is_dir()
+                && let Ok(txt_files) = fs::read_dir(day_entry.path())
+            {
+                for txt_entry in txt_files.flatten() {
+                    let path = txt_entry.path();
+                    if path.extension().is_some_and(|ext| ext == "txt")
+                        && let Err(e) = fs::remove_file(&path)
+                    {
+                        warn!("Failed to delete history entry '{}': {}", path.display(), e);
                     }
                 }
             }

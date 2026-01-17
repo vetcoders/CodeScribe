@@ -130,7 +130,7 @@ bump-major:
 	@$(MAKE) bump TYPE=major
 
 # ============================================================================
-# Tauri Frontend
+# Tauri GUI (codescribe-gui)
 # ============================================================================
 
 tauri-dev:
@@ -138,7 +138,7 @@ tauri-dev:
 	@cd tauri-app && cargo tauri dev
 
 tauri-build:
-	@echo "Building Tauri release..."
+	@echo "Building CodeScribe.app (Tauri GUI)..."
 	@cd tauri-app && cargo tauri build
 
 tauri-check:
@@ -156,7 +156,7 @@ lint:
 	@echo "=== Format Check ==="
 	@cargo fmt -- --check
 	@echo "=== Clippy ==="
-	@cargo clippy -- -D warnings
+	@cargo clippy --workspace -- -D warnings
 
 test:
 	@echo "=== Unit Tests ==="
@@ -270,9 +270,9 @@ help:
 	@echo "  make check           Full quality gate"
 	@echo "  make hooks           Install pre-commit + pre-push hooks"
 	@echo ""
-	@echo "Tauri:"
-	@echo "  make tauri-dev       Start dev server"
-	@echo "  make tauri-build     Build release"
+	@echo "Tauri GUI:"
+	@echo "  make tauri-dev       Start dev server (hot reload)"
+	@echo "  make tauri-build     Build CodeScribe.app (~850MB)"
 	@echo "  make tauri-check     Check compilation"
 
 # ============================================================================

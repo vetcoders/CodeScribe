@@ -46,6 +46,9 @@ pub mod ui;
 #[cfg(target_os = "macos")]
 pub mod voice_chat_ui;
 
+#[cfg(target_os = "macos")]
+pub mod tray;
+
 // ═══════════════════════════════════════════════════════════
 // Public API - Whisper (main interface)
 // ═══════════════════════════════════════════════════════════

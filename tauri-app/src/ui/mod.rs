@@ -1,5 +1,7 @@
 pub mod app;
+pub mod assistant;
 pub mod lab;
+pub mod prompts;
 pub mod settings;
 pub mod teacher;
 

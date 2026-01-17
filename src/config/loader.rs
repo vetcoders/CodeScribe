@@ -43,30 +43,30 @@ impl Config {
     /// Load configuration values from environment variables.
     pub fn load_from_env(&mut self) {
         // Hotkeys
-        if let Ok(val) = std::env::var("HOLD_MODS") {
-            if let Ok(mods) = val.parse::<HoldMods>() {
-                self.hold_mods = mods;
-            }
+        if let Ok(val) = std::env::var("HOLD_MODS")
+            && let Ok(mods) = val.parse::<HoldMods>()
+        {
+            self.hold_mods = mods;
         }
         if let Ok(val) = std::env::var("HOLD_EXCLUSIVE") {
             self.hold_exclusive = matches!(val.as_str(), "1" | "true" | "yes" | "on");
         }
-        if let Ok(val) = std::env::var("TOGGLE_TRIGGER") {
-            if let Ok(trigger) = val.parse::<ToggleTrigger>() {
-                self.toggle_trigger = trigger;
-            }
+        if let Ok(val) = std::env::var("TOGGLE_TRIGGER")
+            && let Ok(trigger) = val.parse::<ToggleTrigger>()
+        {
+            self.toggle_trigger = trigger;
         }
-        if let Ok(val) = std::env::var("HOLD_START_DELAY_MS") {
-            if let Ok(ms) = val.parse() {
-                self.hold_start_delay_ms = ms;
-            }
+        if let Ok(val) = std::env::var("HOLD_START_DELAY_MS")
+            && let Ok(ms) = val.parse()
+        {
+            self.hold_start_delay_ms = ms;
         }
 
         // Language
-        if let Ok(val) = std::env::var("WHISPER_LANGUAGE") {
-            if let Ok(lang) = val.parse::<Language>() {
-                self.whisper_language = lang;
-            }
+        if let Ok(val) = std::env::var("WHISPER_LANGUAGE")
+            && let Ok(lang) = val.parse::<Language>()
+        {
+            self.whisper_language = lang;
         }
 
         // AI Formatting
@@ -74,20 +74,20 @@ impl Config {
             self.ai_formatting_enabled =
                 matches!(val.as_str(), "1" | "true" | "yes" | "on" | "enabled");
         }
-        if let Ok(val) = std::env::var("AI_PROVIDER") {
-            if let Ok(provider) = val.parse::<AiProvider>() {
-                self.ai_provider = provider;
-            }
+        if let Ok(val) = std::env::var("AI_PROVIDER")
+            && let Ok(provider) = val.parse::<AiProvider>()
+        {
+            self.ai_provider = provider;
         }
-        if let Ok(val) = std::env::var("AI_MAX_TOKENS") {
-            if let Ok(tokens) = val.parse() {
-                self.ai_max_tokens = tokens;
-            }
+        if let Ok(val) = std::env::var("AI_MAX_TOKENS")
+            && let Ok(tokens) = val.parse()
+        {
+            self.ai_max_tokens = tokens;
         }
-        if let Ok(val) = std::env::var("AI_ASSISTIVE_MAX_TOKENS") {
-            if let Ok(tokens) = val.parse() {
-                self.ai_assistive_max_tokens = tokens;
-            }
+        if let Ok(val) = std::env::var("AI_ASSISTIVE_MAX_TOKENS")
+            && let Ok(tokens) = val.parse()
+        {
+            self.ai_assistive_max_tokens = tokens;
         }
 
         // UI
@@ -97,20 +97,20 @@ impl Config {
         if let Ok(val) = std::env::var("HOLD_INDICATOR") {
             self.hold_indicator = val.parse().unwrap_or(true);
         }
-        if let Ok(val) = std::env::var("HOLD_BADGE_SIZE") {
-            if let Ok(size) = val.parse() {
-                self.hold_badge_size = size;
-            }
+        if let Ok(val) = std::env::var("HOLD_BADGE_SIZE")
+            && let Ok(size) = val.parse()
+        {
+            self.hold_badge_size = size;
         }
-        if let Ok(val) = std::env::var("HOLD_BADGE_OFFSET_X") {
-            if let Ok(offset) = val.parse() {
-                self.hold_badge_offset_x = offset;
-            }
+        if let Ok(val) = std::env::var("HOLD_BADGE_OFFSET_X")
+            && let Ok(offset) = val.parse()
+        {
+            self.hold_badge_offset_x = offset;
         }
-        if let Ok(val) = std::env::var("HOLD_BADGE_OFFSET_Y") {
-            if let Ok(offset) = val.parse() {
-                self.hold_badge_offset_y = offset;
-            }
+        if let Ok(val) = std::env::var("HOLD_BADGE_OFFSET_Y")
+            && let Ok(offset) = val.parse()
+        {
+            self.hold_badge_offset_y = offset;
         }
 
         // Sound
@@ -120,10 +120,10 @@ impl Config {
         if let Ok(val) = std::env::var("SOUND_NAME") {
             self.sound_name = val;
         }
-        if let Ok(val) = std::env::var("SOUND_VOLUME") {
-            if let Ok(volume) = val.parse() {
-                self.sound_volume = volume;
-            }
+        if let Ok(val) = std::env::var("SOUND_VOLUME")
+            && let Ok(volume) = val.parse()
+        {
+            self.sound_volume = volume;
         }
 
         // Audio
@@ -189,10 +189,10 @@ impl Config {
         if let Ok(val) = std::env::var("RESTORE_CLIPBOARD") {
             self.restore_clipboard = val.parse().unwrap_or(true);
         }
-        if let Ok(val) = std::env::var("RESTORE_CLIPBOARD_DELAY_MS") {
-            if let Ok(delay) = val.parse() {
-                self.restore_clipboard_delay_ms = delay;
-            }
+        if let Ok(val) = std::env::var("RESTORE_CLIPBOARD_DELAY_MS")
+            && let Ok(delay) = val.parse()
+        {
+            self.restore_clipboard_delay_ms = delay;
         }
 
         // System
@@ -315,10 +315,10 @@ impl Config {
         }
 
         // 2) Bundle Resources/.env.example (when running from .app)
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.push(dir.join("../Resources/.env.example"));
-            }
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            candidates.push(dir.join("../Resources/.env.example"));
         }
 
         // 3) Repo root .env.example (dev mode; CARGO_MANIFEST_DIR points to codescribe-rs)
@@ -332,11 +332,11 @@ impl Config {
 
         // Find the first existing template
         if let Some(template) = candidates.into_iter().find(|p| p.exists()) {
-            if let Some(parent) = env_path.parent() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    warn!("Failed to create config dir for .env: {}", e);
-                    return;
-                }
+            if let Some(parent) = env_path.parent()
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                warn!("Failed to create config dir for .env: {}", e);
+                return;
             }
 
             match fs::copy(&template, &env_path) {

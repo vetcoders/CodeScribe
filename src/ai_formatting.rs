@@ -1006,10 +1006,10 @@ async fn call_llm_endpoint_streaming(
                         }
                         "response.output_text.done" => {
                             // Full text available - use it if we missed deltas
-                            if let Some(text) = chunk.text {
-                                if collected_text.is_empty() {
-                                    collected_text = text;
-                                }
+                            if let Some(text) = chunk.text
+                                && collected_text.is_empty()
+                            {
+                                collected_text = text;
                             }
                         }
                         "response.completed" | "response.done" => {

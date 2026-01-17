@@ -32,7 +32,6 @@ pub fn safe_canonicalize(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("Failed to canonicalize path: {}", path.display()))
 }
 
-#[allow(dead_code)] // Public API for bounded path validation
 /// Canonicalize a path and verify it's within an allowed root directory.
 ///
 /// This prevents path traversal attacks where `../..` or symlinks could

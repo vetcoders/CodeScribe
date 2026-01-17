@@ -270,7 +270,6 @@ impl LocalWhisperEngine {
     }
 
     /// Get current decoding parameters.
-    #[allow(dead_code)] // Public API for external consumers
     pub fn decoding_params(&self) -> &DecodingParams {
         &self.decoding_params
     }
@@ -296,19 +295,16 @@ impl LocalWhisperEngine {
         self.transcribe_long_with_language(&samples, sample_rate, language)
     }
 
-    #[allow(dead_code)] // Used by tauri-app
     pub fn detect_language_file(&mut self, path: &Path) -> Result<String> {
         let (samples, sample_rate) =
             audio_loader::load_audio_file(path).context("Failed to load audio file")?;
         self.detect_language(&samples, sample_rate)
     }
 
-    #[allow(dead_code)] // Used by tauri-app
     pub fn transcribe_file(&mut self, path: &Path) -> Result<String> {
         self.transcribe_file_with_language(path, None)
     }
 
-    #[allow(dead_code)] // Used by tauri-app
     pub fn transcribe_with_language(
         &mut self,
         audio: &[f32],
@@ -339,7 +335,6 @@ impl LocalWhisperEngine {
         self.transcribe_samples_16k(&samples, language, debug_tokens)
     }
 
-    #[allow(dead_code)] // Used by tauri-app
     pub fn transcribe_long(&mut self, audio: &[f32], sample_rate: u32) -> Result<String> {
         self.transcribe_long_with_language(audio, sample_rate, None)
     }
@@ -487,10 +482,10 @@ impl LocalWhisperEngine {
             if (id as usize) >= vocab_size {
                 break;
             }
-            if let Some(tok) = self.tokenizer.id_to_token(id) {
-                if let Some(lang) = parse_language_token(&tok) {
-                    out.push((id, lang.to_string()));
-                }
+            if let Some(tok) = self.tokenizer.id_to_token(id)
+                && let Some(lang) = parse_language_token(&tok)
+            {
+                out.push((id, lang.to_string()));
             }
         }
 
@@ -504,10 +499,10 @@ impl LocalWhisperEngine {
         ];
         for lang in fallback {
             let tok = format!("<|{}|>", lang);
-            if let Some(id) = self.tokenizer.token_to_id(&tok) {
-                if (id as usize) < vocab_size {
-                    out.push((id, lang.to_string()));
-                }
+            if let Some(id) = self.tokenizer.token_to_id(&tok)
+                && (id as usize) < vocab_size
+            {
+                out.push((id, lang.to_string()));
             }
         }
         out
@@ -591,19 +586,19 @@ impl LocalWhisperEngine {
             let mut logits_vec = last_logits.to_vec1::<f32>()?;
 
             // 3. No-Speech Threshold (no_speech_threshold)
-            if step == 0 {
-                if let Some(nos) = nospeech_token {
-                    let nos_idx = nos as usize;
-                    if nos_idx < logits_vec.len() {
-                        // Compute softmax probability for nospeech only
-                        let max_val = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                        let exp_sum: f32 = logits_vec.iter().map(|&x| (x - max_val).exp()).sum();
-                        let nos_prob = (logits_vec[nos_idx] - max_val).exp() / exp_sum;
+            if step == 0
+                && let Some(nos) = nospeech_token
+            {
+                let nos_idx = nos as usize;
+                if nos_idx < logits_vec.len() {
+                    // Compute softmax probability for nospeech only
+                    let max_val = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let exp_sum: f32 = logits_vec.iter().map(|&x| (x - max_val).exp()).sum();
+                    let nos_prob = (logits_vec[nos_idx] - max_val).exp() / exp_sum;
 
-                        if nos_prob > self.decoding_params.no_speech_threshold {
-                            tracing::debug!("No speech detected (prob={:.3})", nos_prob);
-                            return Ok(String::new()); // Return empty for silence
-                        }
+                    if nos_prob > self.decoding_params.no_speech_threshold {
+                        tracing::debug!("No speech detected (prob={:.3})", nos_prob);
+                        return Ok(String::new()); // Return empty for silence
                     }
                 }
             }
@@ -647,10 +642,10 @@ impl LocalWhisperEngine {
                 if (eot_token as usize) < logits_vec.len() {
                     logits_vec[eot_token as usize] = f32::NEG_INFINITY;
                 }
-                if let Some(nos) = nospeech_token {
-                    if (nos as usize) < logits_vec.len() {
-                        logits_vec[nos as usize] = f32::NEG_INFINITY;
-                    }
+                if let Some(nos) = nospeech_token
+                    && (nos as usize) < logits_vec.len()
+                {
+                    logits_vec[nos as usize] = f32::NEG_INFINITY;
                 }
             }
 

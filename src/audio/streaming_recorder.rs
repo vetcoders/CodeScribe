@@ -30,7 +30,6 @@ impl StreamingRecorder {
         })
     }
 
-    #[allow(dead_code)] // Public API for custom configurations
     pub fn with_config(config: RecorderConfig) -> Result<Self> {
         let sample_rate = config.sample_rate;
         let recorder = Recorder::with_config(config)?;

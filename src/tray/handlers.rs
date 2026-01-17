@@ -66,6 +66,10 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         handle_copy_latest_to_clipboard();
     } else if event_id == &menu_ids.history_open_folder {
         handle_open_history_folder();
+    }
+    // Settings - Open GUI
+    else if event_id == &menu_ids.settings_open_gui {
+        open_gui();
     } else {
         debug!("Unknown menu event id: {:?}", event_id);
     }
@@ -402,4 +406,41 @@ fn handle_format_last_five() {
 fn handle_open_prompts_folder() {
     crate::config::prompts::open_prompts_folder();
     info!("Opened prompts folder");
+}
+
+/// Open GUI (Tauri window)
+/// Public so it can be called from dock click handler
+pub fn open_gui() {
+    info!("Opening GUI...");
+
+    // Try to launch codescribe-gui binary
+    // First check if it exists in same directory as codescribe
+    let gui_binary = if let Ok(exe_path) = std::env::current_exe() {
+        let parent = exe_path.parent().unwrap_or(std::path::Path::new("."));
+        let gui_path = parent.join("codescribe-gui");
+        if gui_path.exists() {
+            gui_path
+        } else {
+            // Fallback to PATH lookup
+            std::path::PathBuf::from("codescribe-gui")
+        }
+    } else {
+        std::path::PathBuf::from("codescribe-gui")
+    };
+
+    match Command::new(&gui_binary).spawn() {
+        Ok(_) => {
+            info!("Launched GUI: {}", gui_binary.display());
+        }
+        Err(e) => {
+            // If codescribe-gui not found, show notification
+            info!("Failed to launch GUI: {} - {}", gui_binary.display(), e);
+
+            // Show macOS notification about missing GUI
+            let _ = Command::new("osascript")
+                .arg("-e")
+                .arg(r#"display notification "GUI binary not found. Build with: cd tauri-app && cargo tauri build" with title "CodeScribe""#)
+                .spawn();
+        }
+    }
 }

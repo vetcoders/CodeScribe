@@ -833,3 +833,209 @@ textarea.input {
   padding: 6px 12px;
   font-size: 0.8rem;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Settings Page - loctree design system
+   ═══════════════════════════════════════════════════════════ */
+
+.settings-page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+.settings-header {
+  margin-bottom: 32px;
+}
+
+.settings-header h1 {
+  margin: 0 0 8px;
+  font-size: 1.8rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(120deg, var(--vista-accent-mint), var(--vista-accent-blue));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.settings-header .subtitle {
+  margin: 0;
+  color: var(--vista-text-muted);
+  font-size: 0.95rem;
+}
+
+.settings-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Panel - matches loctree .panel */
+.settings-page .panel {
+  background: var(--vista-bg-panel);
+  border: 1px solid var(--vista-border-default);
+  border-radius: 18px;
+  padding: 24px;
+  box-shadow: 0 18px 50px rgba(2, 6, 17, 0.35);
+}
+
+.panel__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--vista-border-default);
+}
+
+.panel__icon {
+  font-size: 1.4rem;
+}
+
+.panel__header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--vista-text-primary);
+}
+
+/* Field */
+.field {
+  margin-bottom: 18px;
+}
+
+.field:last-child {
+  margin-bottom: 0;
+}
+
+.field__label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--vista-text-primary);
+}
+
+.field__input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--vista-border-default);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--vista-text-primary);
+  font-size: 0.95rem;
+  font-family: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.field__input:focus {
+  outline: none;
+  border-color: var(--vista-accent-mint);
+  box-shadow: 0 0 0 3px rgba(102, 224, 208, 0.15);
+}
+
+.field__input:hover:not(:focus) {
+  border-color: var(--vista-border-strong);
+}
+
+.field__hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--vista-text-muted);
+}
+
+/* Buttons - loctree style */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border-radius: 12px;
+  border: none;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn--primary {
+  background: linear-gradient(120deg, var(--vista-accent-mint), var(--vista-accent-blue));
+  color: #041019;
+  box-shadow: 0 12px 30px rgba(102, 224, 208, 0.25);
+}
+
+.btn--primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 40px rgba(102, 224, 208, 0.35);
+}
+
+.btn--primary:active {
+  transform: translateY(0);
+}
+
+.btn--ghost {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--vista-border-default);
+  color: var(--vista-text-primary);
+}
+
+.btn--ghost:hover {
+  border-color: var(--vista-accent-mint);
+  color: var(--vista-accent-mint);
+}
+
+/* Toast notifications */
+.toast {
+  padding: 12px 16px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.toast--error {
+  background: rgba(255, 100, 100, 0.1);
+  border: 1px solid rgba(255, 100, 100, 0.3);
+  color: #ff9a8b;
+}
+
+.toast--success {
+  background: rgba(102, 224, 208, 0.1);
+  border: 1px solid rgba(102, 224, 208, 0.3);
+  color: var(--vista-accent-mint);
+}
+
+/* Footer */
+.settings-footer {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--vista-border-default);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.footer-hint {
+  color: var(--vista-text-muted);
+  font-size: 0.85rem;
+}
+
+/* Responsive */
+@media (max-width: 520px) {
+  .settings-page {
+    padding: 20px 16px;
+  }
+
+  .settings-page .panel {
+    padding: 18px;
+  }
+
+  .settings-footer {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: center;
+  }
+}

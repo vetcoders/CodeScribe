@@ -29,25 +29,15 @@ thread_local! {
 /// Menu structure:
 /// ```text
 /// Status: Idle
+/// Open GUI...              ← Opens Tauri window
 /// ─────────────
 /// Copy Last to Clipboard
 /// ─────────────
 /// Hold Hotkeys ▸
-///     ├── Ctrl only
-///     ├── Ctrl+Option
-///     ├── Ctrl+Shift
-///     └── Ctrl+Command
 /// History ▸
-///     ├── Format Last Transcript
-///     ├── Format Last 5 Transcripts
-///     ├── ────────────
-///     ├── [✓] Save to History
-///     ├── Copy Latest
-///     └── Open Folder
 /// ─────────────
 /// Settings ▸
 ///     ├── [✓] AI Formatting
-///     ├── ────────────
 ///     ├── Edit Config File
 ///     ├── Edit AI Prompt
 ///     ├── Open Prompts Folder
@@ -70,10 +60,15 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
         *cell.borrow_mut() = Some(status_item);
     });
 
-    // 2. Separator
+    // 2. Open GUI (launches Tauri window) - first action after status
+    let open_gui_item = MenuItem::new("Open GUI...", true, None);
+    let open_gui_id = open_gui_item.id().clone();
+    menu.append(&open_gui_item)?;
+
+    // 3. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 3. Copy last to clipboard (quick action)
+    // 4. Copy last to clipboard (quick action)
     let copy_last_item = MenuItem::new("Copy Last to Clipboard", true, None);
     let copy_last_id = copy_last_item.id().clone();
     menu.append(&copy_last_item)?;
@@ -202,6 +197,7 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
             settings_edit_prompt: edit_prompt_id,
             settings_open_prompt_folder: open_prompt_folder_id,
             settings_reset_context: reset_context_id,
+            settings_open_gui: open_gui_id,
         },
     ))
 }

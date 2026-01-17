@@ -22,6 +22,10 @@ description = "Speech-to-text tray app for macOS - Pure Rust"
 authors = ["VetCoders <hello@vetcoders.io>"]
 license = "Apache-2.0"
 
+[[bin]]
+name = "codescribe"
+path = "src/main.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -133,10 +137,6 @@ dirs = "6"
 # Allow unexpected_cfgs from objc crate's msg_send! macro (uses cargo-clippy cfg internally)
 # embed_model is set by build.rs when model is available
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(embed_model)'] }
-
-[lints.clippy]
-# Rust 2024: Allow collapsible_if for now (let-chains are new, can refactor later)
-collapsible_if = "allow"
 
 [profile.release]
 opt-level = "z"
