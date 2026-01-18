@@ -1,6 +1,9 @@
 //! Hotkey integration for Tauri app
 //!
 //! Spawns the CGEventTap hotkey listener and routes events to the recording controller.
+//! This is a FALLBACK for standalone mode when CLI isn't running.
+//! With CLI running, hotkeys are handled by CLI's controller.
+//!
 //! Created by M&K (c)2026 VetCoders
 
 use crate::state::AppState;
@@ -61,40 +64,38 @@ fn run_hotkey_event_loop(rx: Receiver<HotkeyEvent>, state: Arc<AppState>, _app: 
                 debug!("Received hotkey event: {:?}", event);
 
                 match event {
-                    HotkeyEvent::Hold { action, assistive } => {
-                        match action {
-                            HoldAction::Down => {
-                                // Start recording after delay (handled by schedule_hold_start in controller)
-                                // For Tauri, we start immediately but could add delay later
-                                hold_pending = true;
-                                pending_assistive = assistive;
+                    HotkeyEvent::Hold { action, assistive } => match action {
+                        HoldAction::Down => {
+                            // Start recording after delay (handled by schedule_hold_start in controller)
+                            // For Tauri, we start immediately but could add delay later
+                            hold_pending = true;
+                            pending_assistive = assistive;
+
+                            let state = Arc::clone(&state);
+                            rt.spawn(async move {
+                                if let Err(e) = handle_start_recording(&state).await {
+                                    error!("Failed to start recording: {}", e);
+                                }
+                            });
+                        }
+                        HoldAction::Up => {
+                            if hold_pending {
+                                hold_pending = false;
 
                                 let state = Arc::clone(&state);
+                                let use_assistive = pending_assistive;
                                 rt.spawn(async move {
-                                    if let Err(e) = handle_start_recording(&state).await {
-                                        error!("Failed to start recording: {}", e);
+                                    if let Err(e) =
+                                        handle_stop_recording(&state, use_assistive).await
+                                    {
+                                        error!("Failed to stop recording: {}", e);
                                     }
                                 });
                             }
-                            HoldAction::Up => {
-                                if hold_pending {
-                                    hold_pending = false;
-
-                                    let state = Arc::clone(&state);
-                                    let use_assistive = pending_assistive;
-                                    rt.spawn(async move {
-                                        if let Err(e) =
-                                            handle_stop_recording(&state, use_assistive).await
-                                        {
-                                            error!("Failed to stop recording: {}", e);
-                                        }
-                                    });
-                                }
-                            }
                         }
-                    }
-                    HotkeyEvent::Toggle => {
-                        // Toggle mode: start or stop depending on current state
+                    },
+                    HotkeyEvent::ToggleNormal => {
+                        // Toggle mode: start or stop depending on current state (normal formatting)
                         let state = Arc::clone(&state);
                         rt.spawn(async move {
                             let recording = state.recording.lock().await;
@@ -104,13 +105,28 @@ fn run_hotkey_event_loop(rx: Receiver<HotkeyEvent>, state: Arc<AppState>, _app: 
                             if is_recording {
                                 // Stop and transcribe
                                 if let Err(e) = handle_stop_recording(&state, false).await {
-                                    error!("Failed to stop recording (toggle): {}", e);
+                                    error!("Failed to stop recording (toggle normal): {}", e);
                                 }
-                            } else {
-                                // Start recording
-                                if let Err(e) = handle_start_recording(&state).await {
-                                    error!("Failed to start recording (toggle): {}", e);
+                            } else if let Err(e) = handle_start_recording(&state).await {
+                                error!("Failed to start recording (toggle normal): {}", e);
+                            }
+                        });
+                    }
+                    HotkeyEvent::ToggleAssistive => {
+                        // Toggle mode: start or stop depending on current state (assistive)
+                        let state = Arc::clone(&state);
+                        rt.spawn(async move {
+                            let recording = state.recording.lock().await;
+                            let is_recording = recording.is_recording;
+                            drop(recording);
+
+                            if is_recording {
+                                // Stop and transcribe
+                                if let Err(e) = handle_stop_recording(&state, true).await {
+                                    error!("Failed to stop recording (toggle assistive): {}", e);
                                 }
+                            } else if let Err(e) = handle_start_recording(&state).await {
+                                error!("Failed to start recording (toggle assistive): {}", e);
                             }
                         });
                     }
@@ -137,8 +153,8 @@ async fn handle_start_recording(state: &AppState) -> Result<(), String> {
 
     // Initialize recorder if needed
     if recording.recorder.is_none() {
-        let recorder = codescribe::audio::Recorder::new()
-            .map_err(|e| format!("Failed to init recorder: {e}"))?;
+        let recorder =
+            codescribe::Recorder::new().map_err(|e| format!("Failed to init recorder: {e}"))?;
         recording.recorder = Some(recorder);
     }
 
@@ -149,10 +165,11 @@ async fn handle_start_recording(state: &AppState) -> Result<(), String> {
             .await
             .map_err(|e| format!("Failed to start recording: {e}"))?;
         recording.is_recording = true;
+        recording.via_ipc = false;
         info!("Recording started via hotkey");
 
         // Play start beep
-        codescribe::sound::play_sound("Tink");
+        codescribe::audio::play_sound("Tink");
 
         Ok(())
     } else {
@@ -176,6 +193,7 @@ async fn handle_stop_recording(state: &AppState, assistive: bool) -> Result<(), 
             .await
             .map_err(|e| format!("Failed to stop recording: {e}"))?;
         recording.is_recording = false;
+        recording.via_ipc = false;
         result
     } else {
         recording.is_recording = false;
@@ -198,47 +216,16 @@ async fn handle_stop_recording(state: &AppState, assistive: bool) -> Result<(), 
     // Get language from config
     let config = state.config.lock().map_err(|e| e.to_string())?;
     let language = config.whisper_language;
-    let use_local_stt = config.use_local_stt;
-    let local_model = config.local_model.clone();
     drop(config);
 
-    let language_opt = match language {
-        codescribe::config::Language::Auto => None,
-        lang => Some(lang.as_str().to_string()),
-    };
+    // Convert language enum to option string for Whisper API
+    let language_opt = Some(language.as_str());
 
-    // Transcribe using local STT
-    let raw_text = if use_local_stt {
-        // Try to use the engine from state
-        let mut stt = state.stt.lock().map_err(|e| e.to_string())?;
+    // Initialize Whisper singleton and transcribe
+    codescribe::whisper::init().map_err(|e| format!("Failed to init Whisper: {e}"))?;
 
-        // Load engine if not already loaded
-        if stt.engine.is_none() || stt.loaded_model.as_ref() != Some(&local_model) {
-            let model_path = state.model_manager.get_model_path(&local_model);
-            match codescribe::whisper::LocalWhisperEngine::new(&model_path) {
-                Ok(engine) => {
-                    stt.engine = Some(engine);
-                    stt.loaded_model = Some(local_model.clone());
-                    info!("Loaded local STT model: {}", local_model);
-                }
-                Err(e) => {
-                    warn!("Failed to load local STT: {}", e);
-                    return Err(format!("Local STT unavailable: {e}"));
-                }
-            }
-        }
-
-        // Transcribe
-        if let Some(ref mut engine) = stt.engine {
-            engine
-                .transcribe_file_with_language(&audio_path, language_opt.as_deref())
-                .map_err(|e| format!("Transcription failed: {e}"))?
-        } else {
-            return Err("Local STT engine not available".to_string());
-        }
-    } else {
-        return Err("Cloud STT not implemented in Tauri yet".to_string());
-    };
+    let raw_text = codescribe::whisper::transcribe_file(&audio_path, language_opt)
+        .map_err(|e| format!("Transcription failed: {e}"))?;
 
     if raw_text.trim().is_empty() {
         warn!("Empty transcript");
@@ -267,7 +254,7 @@ async fn handle_stop_recording(state: &AppState, assistive: bool) -> Result<(), 
     info!("Text pasted successfully ({} chars)", final_text.len());
 
     // Play completion beep
-    codescribe::sound::play_sound("Pop");
+    codescribe::audio::play_sound("Pop");
 
     Ok(())
 }

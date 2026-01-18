@@ -82,7 +82,6 @@ impl ModelManager {
         self.models_dir.join(model_name)
     }
 
-    #[allow(dead_code)] // Public API for tauri-app
     pub fn check_model_exists(&self, model_name: &str) -> bool {
         let path = self.get_model_path(model_name);
         path.join("tokenizer.json").exists()
@@ -100,10 +99,10 @@ impl ModelManager {
             let path = entry.path();
             if path.is_dir() {
                 // Check if it's a valid model (has tokenizer.json)
-                if path.join("tokenizer.json").exists() {
-                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                        out.push(name.to_string());
-                    }
+                if path.join("tokenizer.json").exists()
+                    && let Some(name) = path.file_name().and_then(|s| s.to_str())
+                {
+                    out.push(name.to_string());
                 }
             }
         }
@@ -111,7 +110,6 @@ impl ModelManager {
         Ok(out)
     }
 
-    #[allow(dead_code)] // Used by tauri-app
     pub fn models_dir(&self) -> &PathBuf {
         &self.models_dir
     }

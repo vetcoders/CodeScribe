@@ -1,6 +1,6 @@
 # ⌜ CodeScribe ⌟
 
-**Local speech-to-text for macOS with AI formatting — Pure Rust, Metal GPU, embedded Whisper.**
+**Native macOS Audio Intelligence Platform — Embedded Whisper Live, Quality Loop & Semantic Postprocessing.**
 
 ## Overview
 
@@ -8,7 +8,57 @@ CodeScribe is a native macOS menu-bar application that captures audio through gl
 using Whisper with Metal GPU acceleration, and pastes the transcript directly into the focused application. Optional AI
 formatting via LLM polishes the output while keeping everything private and local.
 
-> **Status:** v0.6.2 — Embedded model (~888MB binary) + *Whisper Live* (streaming transcription during recording).
+```mermaid
+flowchart TB
+    %% Minimal monochrome styling
+    classDef default fill:#fff,stroke:#333,stroke-width:1px;
+    classDef box fill:#fafafa,stroke:#666,stroke-width:1px,stroke-dasharray: 0;
+
+    subgraph APP[CodeScribe Application]
+        direction TB
+
+        subgraph UI[Leptos WASM Frontend]
+            direction LR
+            VL[Voice Lab] --- TE[Teacher] --- SET[Settings]
+        end
+
+        subgraph BACKEND[Tauri Rust Backend]
+            CMD[Command Handlers]
+        end
+
+        UI -->|IPC invoke| BACKEND
+
+        subgraph CORE[Core Library]
+            direction TB
+            REC[Streaming Recorder]
+            POST[Stream Postprocess]
+            WH[Whisper Engine]
+            IPC[IPC Server]
+            QL[Quality Loop]
+
+            REC -->|Live Chunks| POST
+            POST -->|Semantic Gating| WH
+            WH -->|Transcript| IPC
+            QL -.->|Self-Improvement| WH
+        end
+
+        BACKEND --> CORE
+    end
+
+    MODEL[Embedded Whisper Model\nlarge-v3-turbo-mlx-q8\n(~888MB)]
+    WH === MODEL
+
+    subgraph TOOLS[CLI Suite]
+        QCLI[codescribe-quality]
+        LCLI[codescribe-loop]
+    end
+
+    CORE -.-> TOOLS
+
+    class APP,UI,BACKEND,CORE,TOOLS box
+```
+
+> **Status:** current release (see `Cargo.toml`) — **Strictly Embedded Model** (~888MB binary, zero exceptions) + *Whisper Live* (streaming transcription).
 
 See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md)
 
@@ -45,16 +95,19 @@ LLM_ASSISTIVE_API_KEY=sk-proj-xxx
 ## Features
 
 - **Pure Rust Implementation** — Native macOS app built entirely in Rust with candle-core + Metal GPU
-- **Embedded Whisper Model** — whisper-large-v3-turbo-mlx-q8 baked into binary (~888MB), zero disk I/O
-- **Whisper Live (Streaming)** — transcription happens *during recording* (chunks + overlap), so `stop()` is
+- **Strictly Embedded Whisper** — Model is welded into the binary (~888MB). No external files, zero disk I/O, no exceptions.
+- **Whisper Live** — Streaming transcription happens *during recording* (chunks + overlap), so `stop()` is
   near-instant
+- **Stream postprocess** — semantic gating + cleanup of live chunks before final output
+- **IPC Server** — Stable runtime interface for GUI/clients
+- **Quality Loop + Report** — Automated quality scoring and batch reports
+- **CLI Suite** — `codescribe`, `codescribe-quality`, `codescribe-loop`
 - **Metal GPU Acceleration** — Hardware-accelerated inference on Apple Silicon
 - **System Tray App** — Minimal menu-bar presence with animated status glyphs
 - **Global Hotkeys** — Hold Ctrl or double-tap Option to record
 - **Provider Separation** — Different LLM providers for formatting vs assistive mode
 - **AI Formatting** — Optional post-processing via Responses API
 - **Slug Filenames** — Transcripts named with first 3 words for easy identification
-- **CLI Transcribe Command** — `codescribe transcribe` for batch audio processing
 
 ## Tech Stack
 
@@ -68,6 +121,8 @@ LLM_ASSISTIVE_API_KEY=sk-proj-xxx
 | Audio            | cpal + hound + symphonia          | Recording & format support |
 | HTTP Client      | reqwest                           | LLM API calls              |
 | API Format       | openai-harmony                    | Responses API support      |
+| Security         | cap-std                           | Path safety hardening      |
+| Embeddings       | fastembed                         | Local vector utilities     |
 
 ## Installation
 

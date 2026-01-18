@@ -1,3 +1,12 @@
+//! Settings view for CodeScribe tray app
+//!
+//! Simplified settings focused on:
+//! - Hotkey configuration (hold mods, toggle trigger)
+//! - Audio input device selection
+//! - Language preference
+//!
+//! Created by M&K (c)2026 VetCoders
+
 use leptos::prelude::*;
 use serde_json::Value;
 
@@ -11,43 +20,25 @@ struct SaveConfigArgs {
     config: Value,
 }
 
-#[derive(serde::Serialize)]
-struct AudioNoArgs {}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PromptTypeArgs {
-    prompt_type: String,
-}
-
 #[component]
 pub fn SettingsView() -> impl IntoView {
     let (loaded, set_loaded) = signal(false);
     let (error, set_error) = signal(None::<String>);
+    let (saved, set_saved) = signal(false);
 
-    let (use_local_stt, set_use_local_stt) = signal(false);
-    let (local_model, set_local_model) = signal(String::new());
-    let (stt_endpoint, set_stt_endpoint) = signal(String::new());
-    let (llm_host, set_llm_host) = signal(String::new());
-
-    let (hold_mods, set_hold_mods) = signal(String::from("ctrl_alt"));
-    let (hold_exclusive, set_hold_exclusive) = signal(false);
+    // Hotkey settings
+    let (hold_mods, set_hold_mods) = signal(String::from("ctrl"));
     let (toggle_trigger, set_toggle_trigger) = signal(String::from("double_option"));
-    let (hold_start_delay_ms, set_hold_start_delay_ms) = signal(200u64);
-    let (whisper_language, set_whisper_language) = signal(String::from("auto"));
 
+    // Audio settings
     let (audio_devices, set_audio_devices) = signal(Vec::<String>::new());
     let (current_audio_device, set_current_audio_device) = signal(None::<String>);
-    // Empty means "use system default"
     let (audio_input_device, set_audio_input_device) = signal(String::new());
 
-    let (models, set_models) = signal(Vec::<String>::new());
+    // Language
+    let (whisper_language, set_whisper_language) = signal(String::from("auto"));
 
-    // AI Prompt state
-    let (formatting_prompt, set_formatting_prompt) = signal(String::new());
-    let (prompt_loading, set_prompt_loading) = signal(false);
-    let (prompt_message, set_prompt_message) = signal(None::<String>);
-
+    // Load config on mount
     Effect::new(move |_| {
         if loaded.get() {
             return;
@@ -59,53 +50,17 @@ pub fn SettingsView() -> impl IntoView {
             let cfg: Result<Value, String> = tauri::invoke("get_config", NoArgs {}).await;
             match cfg {
                 Ok(v) => {
-                    set_use_local_stt.set(
-                        v.get("use_local_stt")
-                            .and_then(|x| x.as_bool())
-                            .unwrap_or(false),
-                    );
-                    set_local_model.set(
-                        v.get("local_model")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    );
-                    set_stt_endpoint.set(
-                        v.get("stt_endpoint")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    );
-                    // Try llm_host first, fallback to ollama_host for backwards compat
-                    set_llm_host.set(
-                        v.get("llm_host")
-                            .or_else(|| v.get("ollama_host"))
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    );
-
                     set_hold_mods.set(
                         v.get("hold_mods")
                             .and_then(|x| x.as_str())
-                            .unwrap_or("ctrl_alt")
+                            .unwrap_or("ctrl")
                             .to_string(),
-                    );
-                    set_hold_exclusive.set(
-                        v.get("hold_exclusive")
-                            .and_then(|x| x.as_bool())
-                            .unwrap_or(false),
                     );
                     set_toggle_trigger.set(
                         v.get("toggle_trigger")
                             .and_then(|x| x.as_str())
                             .unwrap_or("double_option")
                             .to_string(),
-                    );
-                    set_hold_start_delay_ms.set(
-                        v.get("hold_start_delay_ms")
-                            .and_then(|x| x.as_u64())
-                            .unwrap_or(200),
                     );
                     set_whisper_language.set(
                         v.get("whisper_language")
@@ -123,316 +78,161 @@ pub fn SettingsView() -> impl IntoView {
                 Err(e) => set_error.set(Some(e)),
             }
 
-            // Load models
-            let res: Result<Vec<String>, String> =
-                tauri::invoke("get_available_models", NoArgs {}).await;
-            if let Ok(v) = res {
-                set_models.set(v);
-            }
-
             // Load audio devices
             let devs: Result<Vec<String>, String> =
-                tauri::invoke("list_audio_devices", AudioNoArgs {}).await;
+                tauri::invoke("list_audio_devices", NoArgs {}).await;
             if let Ok(v) = devs {
                 set_audio_devices.set(v);
             }
             let current: Result<Option<String>, String> =
-                tauri::invoke("get_current_audio_device", AudioNoArgs {}).await;
+                tauri::invoke("get_current_audio_device", NoArgs {}).await;
             if let Ok(v) = current {
                 set_current_audio_device.set(v);
-            }
-
-            // Load formatting prompt
-            let prompt_res: Result<String, String> = tauri::invoke(
-                "get_ai_prompt",
-                PromptTypeArgs {
-                    prompt_type: "formatting".to_string(),
-                },
-            )
-            .await;
-            if let Ok(p) = prompt_res {
-                set_formatting_prompt.set(p);
             }
         });
     });
 
+    let save_config = move |_| {
+        set_error.set(None);
+        set_saved.set(false);
+
+        let payload = serde_json::json!({
+            "hold_mods": hold_mods.get(),
+            "toggle_trigger": toggle_trigger.get(),
+            "whisper_language": whisper_language.get(),
+            "audio_input_device": audio_input_device.get(),
+        });
+
+        leptos::task::spawn_local(async move {
+            let res: Result<(), String> =
+                tauri::invoke("save_config", SaveConfigArgs { config: payload }).await;
+            match res {
+                Ok(()) => set_saved.set(true),
+                Err(e) => set_error.set(Some(e)),
+            }
+        });
+    };
+
     view! {
-        <div class="settings-view">
-            <h2>"Settings"</h2>
+        <div class="settings-page">
+            <header class="settings-header">
+                <h1>"Settings"</h1>
+                <p class="subtitle">"Configure hotkeys, audio, and language"</p>
+            </header>
 
             <Show when=move || error.get().is_some()>
-                <pre class="error">{move || error.get().unwrap_or_default()}</pre>
+                <div class="toast toast--error">
+                    {move || error.get().unwrap_or_default()}
+                </div>
             </Show>
 
-            <div class="panel">
-                <h3>"STT"</h3>
-
-                <label class="row">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || use_local_stt.get()
-                        on:change=move |ev| {
-                            let checked = event_target_checked(&ev);
-                            set_use_local_stt.set(checked);
-                        }
-                    />
-                    <span>"Use local STT (Whisper)"</span>
-                </label>
-
-                <div class="row">
-                    <label class="label">"Local model"</label>
-                    <select
-                        class="input"
-                        on:change=move |ev| set_local_model.set(event_target_value(&ev))
-                        prop:value=move || local_model.get()
-                    >
-                        <For
-                            each=move || models.get()
-                            key=|m| m.clone()
-                            children=move |m| view! { <option value={m.clone()}>{m.clone()}</option> }
-                        />
-                    </select>
+            <Show when=move || saved.get()>
+                <div class="toast toast--success">
+                    "Settings saved"
                 </div>
+            </Show>
 
-                <div class="row">
-                    <label class="label">"STT endpoint (optional)"</label>
-                    <input
-                        class="input"
-                        placeholder="https://..."
-                        prop:value=move || stt_endpoint.get()
-                        on:input=move |ev| set_stt_endpoint.set(event_target_value(&ev))
-                    />
-                </div>
-            </div>
+            <div class="settings-grid">
+                // Hotkeys Panel
+                <section class="panel">
+                    <div class="panel__header">
+                        <span class="panel__icon">"⌨️"</span>
+                        <h2>"Hotkeys"</h2>
+                    </div>
 
-            <div class="panel">
-                <h3>"LLM"</h3>
-                <div class="row">
-                    <label class="label">"LLM host"</label>
-                    <input
-                        class="input"
-                        placeholder="http://localhost:11434"
-                        prop:value=move || llm_host.get()
-                        on:input=move |ev| set_llm_host.set(event_target_value(&ev))
-                    />
-                </div>
-            </div>
+                    <div class="field">
+                        <label class="field__label">"Hold to record"</label>
+                        <select
+                            class="field__input"
+                            prop:value=move || hold_mods.get()
+                            on:change=move |ev| set_hold_mods.set(event_target_value(&ev))
+                        >
+                            <option value="ctrl">"Ctrl"</option>
+                            <option value="ctrl_alt">"Ctrl + Option"</option>
+                            <option value="ctrl_shift">"Ctrl + Shift"</option>
+                            <option value="ctrl_cmd">"Ctrl + Command"</option>
+                        </select>
+                        <span class="field__hint">"Hold these keys to start recording"</span>
+                    </div>
 
-            <div class="panel">
-                <h3>"Language"</h3>
-                <div class="row">
-                    <label class="label">"Whisper language"</label>
-                    <select
-                        class="input"
-                        prop:value=move || whisper_language.get()
-                        on:change=move |ev| set_whisper_language.set(event_target_value(&ev))
-                    >
-                        <option value="auto">"auto"</option>
-                        <option value="pl">"pl"</option>
-                        <option value="en">"en"</option>
-                    </select>
-                </div>
-            </div>
+                    <div class="field">
+                        <label class="field__label">"Toggle recording"</label>
+                        <select
+                            class="field__input"
+                            prop:value=move || toggle_trigger.get()
+                            on:change=move |ev| set_toggle_trigger.set(event_target_value(&ev))
+                        >
+                            <option value="double_option">"Double-tap Option"</option>
+                            <option value="double_ralt">"Double-tap Right Option"</option>
+                            <option value="none">"Disabled"</option>
+                        </select>
+                        <span class="field__hint">"Quick double-tap to toggle"</span>
+                    </div>
+                </section>
 
-            <div class="panel">
-                <h3>"Hotkeys"</h3>
+                // Audio Panel
+                <section class="panel">
+                    <div class="panel__header">
+                        <span class="panel__icon">"🎤"</span>
+                        <h2>"Audio"</h2>
+                    </div>
 
-                <div class="row">
-                    <label class="label">"Hold mods"</label>
-                    <select
-                        class="input"
-                        prop:value=move || hold_mods.get()
-                        on:change=move |ev| set_hold_mods.set(event_target_value(&ev))
-                    >
-                        <option value="ctrl">"ctrl"</option>
-                        <option value="ctrl_alt">"ctrl_alt"</option>
-                        <option value="ctrl_shift">"ctrl_shift"</option>
-                        <option value="ctrl_cmd">"ctrl_cmd"</option>
-                    </select>
-                </div>
-
-                <label class="row">
-                    <input
-                        type="checkbox"
-                        prop:checked=move || hold_exclusive.get()
-                        on:change=move |ev| set_hold_exclusive.set(event_target_checked(&ev))
-                    />
-                    <span>"Hold exclusive"</span>
-                </label>
-
-                <div class="row">
-                    <label class="label">"Toggle trigger"</label>
-                    <select
-                        class="input"
-                        prop:value=move || toggle_trigger.get()
-                        on:change=move |ev| set_toggle_trigger.set(event_target_value(&ev))
-                    >
-                        <option value="double_option">"double_option"</option>
-                        <option value="double_ralt">"double_ralt"</option>
-                        <option value="none">"none"</option>
-                    </select>
-                </div>
-
-                <div class="row">
-                    <label class="label">"Hold start delay (ms)"</label>
-                    <input
-                        class="input"
-                        type="number"
-                        min="0"
-                        prop:value=move || hold_start_delay_ms.get().to_string()
-                        on:input=move |ev| {
-                            let v = event_target_value(&ev);
-                            if let Ok(n) = v.parse::<u64>() {
-                                set_hold_start_delay_ms.set(n);
-                            }
-                        }
-                    />
-                </div>
-            </div>
-
-            <div class="panel">
-                <h3>"Audio"</h3>
-                <div class="row">
-                    <label class="label">"Input device"</label>
-                    <select
-                        class="input"
-                        prop:value=move || audio_input_device.get()
-                        on:change=move |ev| set_audio_input_device.set(event_target_value(&ev))
-                    >
-                        <option value="">
-                            {move || {
-                                let current = current_audio_device.get().unwrap_or_else(|| "(unknown)".to_string());
-                                format!("System default (current: {})", current)
-                            }}
-                        </option>
-                        <For
-                            each=move || audio_devices.get()
-                            key=|d| d.clone()
-                            children=move |d| view! { <option value={d.clone()}>{d.clone()}</option> }
-                        />
-                    </select>
-                </div>
-            </div>
-
-            <div class="panel">
-                <h3>"AI Prompt"</h3>
-
-                <Show when=move || prompt_message.get().is_some()>
-                    <p class="prompt-message">{move || prompt_message.get().unwrap_or_default()}</p>
-                </Show>
-
-                <div class="row">
-                    <label class="label">"Formatting prompt"</label>
-                    <textarea
-                        class="input prompt-textarea"
-                        rows="6"
-                        prop:value=move || formatting_prompt.get()
-                        on:input=move |ev| set_formatting_prompt.set(event_target_value(&ev))
-                        disabled=move || prompt_loading.get()
-                    ></textarea>
-                </div>
-
-                <div class="row button-group">
-                    <button
-                        class="secondary"
-                        disabled=move || prompt_loading.get()
-                        on:click=move |_| {
-                            set_prompt_loading.set(true);
-                            set_prompt_message.set(None);
-                            leptos::task::spawn_local(async move {
-                                let res: Result<(), String> = tauri::invoke(
-                                    "open_prompt_in_editor",
-                                    PromptTypeArgs { prompt_type: "formatting".to_string() },
-                                ).await;
-                                set_prompt_loading.set(false);
-                                match res {
-                                    Ok(()) => set_prompt_message.set(Some("Opened in editor".to_string())),
-                                    Err(e) => set_prompt_message.set(Some(format!("Error: {}", e))),
+                    <div class="field">
+                        <label class="field__label">"Input device"</label>
+                        <select
+                            class="field__input"
+                            prop:value=move || audio_input_device.get()
+                            on:change=move |ev| set_audio_input_device.set(event_target_value(&ev))
+                        >
+                            <option value="">
+                                {move || {
+                                    let current = current_audio_device.get()
+                                        .unwrap_or_else(|| "Unknown".to_string());
+                                    format!("System default ({})", current)
+                                }}
+                            </option>
+                            <For
+                                each=move || audio_devices.get()
+                                key=|d| d.clone()
+                                children=move |d| view! {
+                                    <option value={d.clone()}>{d.clone()}</option>
                                 }
-                            });
-                        }
-                    >
-                        "Open in Editor"
-                    </button>
-                    <button
-                        class="secondary"
-                        disabled=move || prompt_loading.get()
-                        on:click=move |_| {
-                            set_prompt_loading.set(true);
-                            set_prompt_message.set(None);
-                            leptos::task::spawn_local(async move {
-                                let res: Result<String, String> = tauri::invoke(
-                                    "reset_ai_prompt",
-                                    PromptTypeArgs { prompt_type: "formatting".to_string() },
-                                ).await;
-                                set_prompt_loading.set(false);
-                                match res {
-                                    Ok(default_prompt) => {
-                                        set_formatting_prompt.set(default_prompt);
-                                        set_prompt_message.set(Some("Reset to default".to_string()));
-                                    }
-                                    Err(e) => set_prompt_message.set(Some(format!("Error: {}", e))),
-                                }
-                            });
-                        }
-                    >
-                        "Reset to Default"
-                    </button>
-                </div>
+                            />
+                        </select>
+                    </div>
+                </section>
+
+                // Language Panel
+                <section class="panel">
+                    <div class="panel__header">
+                        <span class="panel__icon">"🌐"</span>
+                        <h2>"Language"</h2>
+                    </div>
+
+                    <div class="field">
+                        <label class="field__label">"Transcription language"</label>
+                        <select
+                            class="field__input"
+                            prop:value=move || whisper_language.get()
+                            on:change=move |ev| set_whisper_language.set(event_target_value(&ev))
+                        >
+                            <option value="auto">"Auto-detect"</option>
+                            <option value="en">"English"</option>
+                            <option value="pl">"Polish"</option>
+                            <option value="de">"German"</option>
+                            <option value="es">"Spanish"</option>
+                            <option value="fr">"French"</option>
+                        </select>
+                    </div>
+                </section>
             </div>
 
-            <div class="panel">
-                <h3>"AI Context"</h3>
-                <p class="muted">"Reset conversation context to start fresh with no history."</p>
-                <div class="row">
-                    <button
-                        class="secondary"
-                        on:click=move |_| {
-                            leptos::task::spawn_local(async move {
-                                let res: Result<(), String> = tauri::invoke(
-                                    "reset_ai_context",
-                                    NoArgs {},
-                                ).await;
-                                if res.is_ok() {
-                                    log::info!("AI context reset");
-                                }
-                            });
-                        }
-                    >
-                        "Reset AI Context"
-                    </button>
-                </div>
-            </div>
-
-            <div class="row">
-                <button on:click=move |_| {
-                    set_error.set(None);
-                    let payload = serde_json::json!({
-                        "use_local_stt": use_local_stt.get(),
-                        "local_model": local_model.get(),
-                        "stt_endpoint": stt_endpoint.get(),
-                        "llm_host": llm_host.get(),
-                        "whisper_language": whisper_language.get(),
-                        "hold_mods": hold_mods.get(),
-                        "hold_exclusive": hold_exclusive.get(),
-                        "toggle_trigger": toggle_trigger.get(),
-                        "hold_start_delay_ms": hold_start_delay_ms.get(),
-                        "audio_input_device": audio_input_device.get(),
-                    });
-                    leptos::task::spawn_local(async move {
-                        let res: Result<(), String> = tauri::invoke(
-                            "save_config",
-                            SaveConfigArgs { config: payload },
-                        )
-                        .await;
-                        if let Err(e) = res {
-                            set_error.set(Some(e));
-                        }
-                    });
-                }>
-                    "Save"
+            <footer class="settings-footer">
+                <button class="btn btn--primary" on:click=save_config>
+                    "Save Settings"
                 </button>
-            </div>
+                <span class="footer-hint">"Settings are applied immediately"</span>
+            </footer>
         </div>
     }
 }

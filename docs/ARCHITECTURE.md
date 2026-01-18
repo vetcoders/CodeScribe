@@ -44,18 +44,35 @@ flowchart TB
             CO[config/]
             AU[audio/\n(cpal + stream)]
             HK[hotkeys/]
+            IPC[ipc/\n(unix socket server)]
 
             LENTRY --> WH
             LENTRY --> CO
             LENTRY --> AU
             LENTRY --> HK
+            LENTRY --> IPC
         end
 
         BENTRY --> LENTRY
     end
 
     WH --> MODEL[Whisper Model\nlarge-v3-turbo\nmlx-q8 (~888MB)\n(embedded in bin)]
+
+    subgraph TOOLS[Quality & CLI Tools]
+        CLI[codescribe-quality]
+        LOOP[codescribe-loop]
+    end
+
+    LIB -.-> TOOLS
 ```
+
+## Runtime & Quality Tools
+
+- **IPC Server**: Unix socket server (`src/ipc/`) allowing external clients (or CLI tools) to control the
+  recording/transcription session and receive real-time events.
+- **Quality Loop**: Automated self-tuning system (`src/quality_loop.rs`) that evaluates transcription accuracy.
+- **Stream Postprocess**: Pipeline stage (`src/stream_postprocess.rs`) that applies semantic gating and cleanup to live
+  chunks.
 
 ## IPC Commands Reference
 
@@ -199,10 +216,15 @@ CodeScribe/
 ├── src/                      # codescribe crate (backend library)
 │   ├── whisper/              # Embedded + singleton Whisper engine
 │   ├── audio/                # Recorder + StreamingRecorder
+│   ├── ipc/                  # IPC server + types (runtime interface)
+│   ├── stream_postprocess.rs # Semantic gating for live chunks
+│   ├── quality_loop.rs       # Automated quality loop
+│   ├── quality_report.rs     # Batch quality reports
 │   ├── hotkeys/              # CGEventTap hotkey handler
 │   ├── controller.rs         # Recording/transcription orchestration (uses StreamingRecorder)
 │   ├── config/               # Configuration management
 │   └── ...
+├── src/bin/                   # CLI tools (codescribe-quality, codescribe-loop)
 ├── tauri-app/                # Tauri application
 │   ├── src/
 │   │   ├── lib.rs            # Tauri setup + tray + hotkey init
@@ -231,7 +253,7 @@ CodeScribe/
 
 ## Implementation Status
 
-### ✅ Completed (v0.6.2)
+### ✅ Completed (current release)
 
 - **Whisper Live (Streaming)** - transcription happens during recording (chunking + overlap + dedup)
 - **Hotkeys** - CGEventTap integration, hold Ctrl/Ctrl+Shift modes, double-Option toggle
@@ -249,6 +271,9 @@ CodeScribe/
 | Tray app with submenus                     | ✅      |
 | Tauri GUI (Voice Lab, Settings)            | ✅      |
 | History with slug filenames                | ✅      |
+| IPC server (runtime interface)             | ✅      |
+| Stream postprocess (semantic gating)       | ✅      |
+| Quality loop + report                      | ✅      |
 
 ---
 

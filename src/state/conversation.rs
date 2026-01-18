@@ -60,7 +60,6 @@ pub fn set_response_id_for_mode(mode: AiMode, id: String) {
 }
 
 /// Reset conversation for a specific mode
-#[allow(dead_code)] // Part of public API for tauri-app
 pub fn reset_conversation_for_mode(mode: AiMode) {
     if let Ok(mut state) = get_state().write() {
         info!("{:?} mode conversation reset", mode);
@@ -83,7 +82,6 @@ pub fn reset_conversation() {
 }
 
 /// Check if there's an active conversation in any mode
-#[allow(dead_code)] // Used by tauri-app
 pub fn has_active_conversation() -> bool {
     get_state()
         .read()

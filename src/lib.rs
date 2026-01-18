@@ -28,8 +28,11 @@ pub mod audio;
 pub mod clipboard;
 pub mod config;
 pub mod permissions;
+pub mod quality_loop;
+pub mod quality_report;
 pub mod safe_path;
 pub mod state;
+mod stream_postprocess;
 pub mod voice_chat;
 pub mod whisper;
 
@@ -41,10 +44,22 @@ pub mod whisper;
 pub mod hotkeys;
 
 #[cfg(target_os = "macos")]
+pub mod controller;
+
+#[cfg(target_os = "macos")]
+pub mod client;
+
+#[cfg(target_os = "macos")]
+pub mod ipc;
+
+#[cfg(target_os = "macos")]
 pub mod ui;
 
 #[cfg(target_os = "macos")]
 pub mod voice_chat_ui;
+
+#[cfg(target_os = "macos")]
+pub mod tray;
 
 // ═══════════════════════════════════════════════════════════
 // Public API - Whisper (main interface)
@@ -62,7 +77,7 @@ pub mod stt {
 // Public API - Audio
 // ═══════════════════════════════════════════════════════════
 
-pub use audio::recorder::Recorder;
+pub use audio::recorder::{Recorder, RecorderConfig};
 
 // ═══════════════════════════════════════════════════════════
 // Public API - AI & Context

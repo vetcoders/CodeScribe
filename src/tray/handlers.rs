@@ -66,6 +66,14 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         handle_copy_latest_to_clipboard();
     } else if event_id == &menu_ids.history_open_folder {
         handle_open_history_folder();
+    }
+    // Settings - Open GUI
+    else if event_id == &menu_ids.settings_open_gui {
+        open_gui();
+    }
+    // Quality - Open Report
+    else if event_id == &menu_ids.quality_open_report {
+        handle_open_quality_report();
     } else {
         debug!("Unknown menu event id: {:?}", event_id);
     }
@@ -341,10 +349,22 @@ fn handle_format_last() {
             if let Some(last_entry) = crate::state::history::latest_entry() {
                 if let Ok(text) = std::fs::read_to_string(&last_entry.path) {
                     let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Thinking);
-                    let formatted = crate::ai_formatting::format_text(&text, None, false).await;
+                    let result =
+                        crate::ai_formatting::format_text_with_status(&text, None, false).await;
+                    let kind = match result.status {
+                        crate::ai_formatting::AiFormatStatus::Applied => {
+                            crate::state::history::TranscriptKind::Ai
+                        }
+                        crate::ai_formatting::AiFormatStatus::Failed => {
+                            crate::state::history::TranscriptKind::AiFailed
+                        }
+                        crate::ai_formatting::AiFormatStatus::Skipped => {
+                            crate::state::history::TranscriptKind::Raw
+                        }
+                    };
                     // Zapisujemy jako nowy wpis, pozostawiając oryginalny raw w historii
-                    crate::state::history::save_entry(&formatted);
-                    let _ = crate::clipboard::set_clipboard(&formatted);
+                    crate::state::history::save_entry_with_kind(&result.text, kind);
+                    let _ = crate::clipboard::set_clipboard(&result.text);
 
                     let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Success);
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -380,10 +400,22 @@ fn handle_format_last_five() {
 
             for entry in entries {
                 if let Ok(text) = std::fs::read_to_string(&entry.path) {
-                    let formatted = crate::ai_formatting::format_text(&text, None, false).await;
+                    let result =
+                        crate::ai_formatting::format_text_with_status(&text, None, false).await;
+                    let kind = match result.status {
+                        crate::ai_formatting::AiFormatStatus::Applied => {
+                            crate::state::history::TranscriptKind::Ai
+                        }
+                        crate::ai_formatting::AiFormatStatus::Failed => {
+                            crate::state::history::TranscriptKind::AiFailed
+                        }
+                        crate::ai_formatting::AiFormatStatus::Skipped => {
+                            crate::state::history::TranscriptKind::Raw
+                        }
+                    };
                     // Zapisujemy jako nowy wpis, raw pozostaje w historii
-                    crate::state::history::save_entry(&formatted);
-                    last_formatted = Some(formatted);
+                    crate::state::history::save_entry_with_kind(&result.text, kind);
+                    last_formatted = Some(result.text);
                 }
             }
 
@@ -402,4 +434,89 @@ fn handle_format_last_five() {
 fn handle_open_prompts_folder() {
     crate::config::prompts::open_prompts_folder();
     info!("Opened prompts folder");
+}
+
+/// Open GUI (Tauri window)
+/// Public so it can be called from dock click handler
+pub fn open_gui() {
+    info!("Opening GUI...");
+
+    if activate_running_gui() {
+        info!("Activated running GUI instance");
+        return;
+    }
+
+    if open_gui_app_bundle() {
+        info!("Opened GUI app bundle");
+        return;
+    }
+
+    // Try to launch codescribe-gui binary
+    // First check if it exists in same directory as codescribe
+    let gui_binary = if let Ok(exe_path) = std::env::current_exe() {
+        let parent = exe_path.parent().unwrap_or(std::path::Path::new("."));
+        let gui_path = parent.join("codescribe-gui");
+        if gui_path.exists() {
+            gui_path
+        } else {
+            // Fallback to PATH lookup
+            std::path::PathBuf::from("codescribe-gui")
+        }
+    } else {
+        std::path::PathBuf::from("codescribe-gui")
+    };
+
+    match Command::new(&gui_binary).spawn() {
+        Ok(_) => {
+            info!("Launched GUI: {}", gui_binary.display());
+        }
+        Err(e) => {
+            // If codescribe-gui not found, show notification
+            info!("Failed to launch GUI: {} - {}", gui_binary.display(), e);
+
+            // Show macOS notification about missing GUI
+            let _ = Command::new("osascript")
+                .arg("-e")
+                .arg(r#"display notification "GUI binary not found. Build with: cd tauri-app && cargo tauri build" with title "CodeScribe""#)
+                .spawn();
+        }
+    }
+}
+
+fn activate_running_gui() -> bool {
+    Command::new("osascript")
+        .arg("-e")
+        .arg(r#"tell application "CodeScribe" to activate"#)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn open_gui_app_bundle() -> bool {
+    Command::new("open")
+        .arg("-a")
+        .arg("CodeScribe")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+// ============================================================================
+// Quality Handlers
+// ============================================================================
+
+/// Open the latest quality report in browser
+fn handle_open_quality_report() {
+    info!("Opening quality report...");
+
+    if crate::quality_loop::open_latest_report() {
+        info!("Opened quality report");
+    } else {
+        // No report available - show notification
+        info!("No quality report available");
+        let _ = Command::new("osascript")
+            .arg("-e")
+            .arg(r#"display notification "No quality report available. Run: codescribe-loop --daemon" with title "CodeScribe Quality""#)
+            .spawn();
+    }
 }
