@@ -10,20 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.0] – 2026-01-17
 
 ### Added
-- **Strict Embedded Policy** – Model Whisper jest zawsze spawany z binarką release. Zero zewnętrznych plików modelu, zero wyjątków.
-- **IPC server** – nowy serwer IPC i typy komunikatów do stabilnej integracji runtime.
-- **Quality loop** – automatyczna pętla oceny jakości transkrypcji.
-- **Quality report** – generator raportów batchowych jakości.
-- **Stream postprocess** – semantyczne „gating” i czyszczenie strumienia w pipeline live.
-- **New CLI tools** – `codescribe-quality`, `codescribe-loop`.
-- **serial_test** – serializacja testów E2E, mniej race conditions.
+- **Strict Embedded Policy** – Whisper model is always embedded into release binary. Zero external model files, zero exceptions.
+- **IPC server** – New IPC server and message types for stable runtime integration.
+- **Quality loop** – Automated transcription quality assessment loop.
+- **Quality report** – Batch quality report generator with WER/CER metrics.
+- **Stream postprocess** – Semantic gating and stream cleanup in live pipeline.
+- **New CLI tools** – `codescribe-quality`, `codescribe-loop` for quality management.
+- **serial_test** – E2E test serialization to reduce race conditions.
 
 ### Changed
-- **Version unification** – spójne wersjonowanie w projekcie.
-- **Security hardening** – `cap-std` i ograniczenie operacji plikowych do dozwolonych ścieżek.
+- **Version unification** – Consistent versioning across the project.
+- **Security hardening** – `cap-std` and file operation restrictions to allowed paths only.
 
 ### Fixed
-- Poprawki w formatowaniu SSE i zbieraniu końcowego tekstu.
+- SSE formatting and final text collection fixes.
 
 ## [v0.6.3] – 2026-01-16
 
