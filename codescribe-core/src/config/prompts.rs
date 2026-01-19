@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_prompt_paths_api() {
-        // Test path functions (used by tauri-app and tests)
+        // Test path functions (used by GUI apps and tests)
         let formatting_path = get_formatting_prompt_path();
         let assistive_path = get_assistive_prompt_path();
 
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_reset_to_defaults() {
-        // This tests the reset_to_defaults function (used by tauri-app)
+        // This tests the reset_to_defaults function (used by GUI apps)
         // We can't fully test it without temp dir setup, but we verify it compiles
         // and is callable
         let result = reset_to_defaults();

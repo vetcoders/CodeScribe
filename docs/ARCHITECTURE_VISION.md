@@ -1,14 +1,14 @@
-# Architecture Vision: The Tesseract Protocol
+# Architecture Vision: The Libraxis Qube Protocol
 
 > **Status:** Draft / Conceptual
 > **Date:** 2026-01-19
 > **Author:** Junie (AI) for VetCoders
 
-## 1. Core Concept: The Tesseract
+## 1. Core Concept: The Libraxis Qube
 
-We are renaming the central orchestration node (formerly "CodeScribe Core") to **The Tesseract**.
+We are renaming the central orchestration node (formerly "CodeScribe Core") to **The Libraxis Qube**.
 
-The **Tesseract** is a central, location-agnostic **Stream Router & Orchestrator**. It is not just a backend for an app;
+The **Libraxis Qube** is a central, location-agnostic **Stream Router & Orchestrator**. It is not just a backend for an app;
 it is the "infinite cube" that holds the state of the conversation and manages all flows of information (Audio, Text,
 Artifacts).
 
@@ -17,8 +17,8 @@ Artifacts).
 The architecture removes the distinction between "Local" and "Cloud".
 
 - **Distance is irrelevant.**
-- The Tesseract can run on `localhost` (your laptop) or on `Dragon` (remote workstation).
-- The **Client** (Microphone/Speaker) connects to the Tesseract via a **WebSocket**.
+- The Libraxis Qube can run on `localhost` (your laptop) or on `Dragon` (remote workstation).
+- The **Client** (Microphone/Speaker) connects to the Libraxis Qube via a **WebSocket**.
 - Whether that WebSocket connects to `ws://127.0.0.1:8000` or `wss://dragon.lan:8000` changes nothing in the system
   logic. It only changes the latency of the wire.
 
@@ -32,8 +32,8 @@ graph TD
         UI[Visual Overlay/Logs]
     end
 
-    subgraph TesseractNode [The Tesseract Node]
-        Router[<b>Tesseract Orchestrator</b><br/>(State, Routing, Demux)]
+    subgraph Libraxis QubeNode [The Libraxis Qube Node]
+        Router[<b>Libraxis Qube Orchestrator</b><br/>(State, Routing, Demux)]
 
         subgraph Modules [Attached Modules]
             ASR[<b>Candle Transformers</b><br/>(Whisper v3 Turbo - Streaming)]
@@ -59,7 +59,7 @@ graph TD
 ## 3. The "Single Stream" Protocol
 
 To maintain synchronization and simplicity, the Agent/Model does not open multiple TCP connections. Instead, it emits a
-**single continuous stream** of tokens. The Tesseract is responsible for **demuxing** (splitting) this stream based on
+**single continuous stream** of tokens. The Libraxis Qube is responsible for **demuxing** (splitting) this stream based on
 **Tags**.
 
 ### Stream Structure
@@ -89,10 +89,10 @@ The stream contains interspersed content types, delimited by XML-like tags or sp
 
 1. **Default Channel**: Tokens flow to the internal buffer/context.
 2. **Audio Channel (`<speak>` / `<audio>` tag)**:
-    - Tesseract buffers text within tags.
+    - Libraxis Qube buffers text within tags.
     - Sends to TTS Module.
     - TTS returns Audio Bytes.
-    - Tesseract pushes Audio Bytes down the Client WebSocket.
+    - Libraxis Qube pushes Audio Bytes down the Client WebSocket.
 3. **Artifact Channel (`<artifact>` / `<task>` tag)**:
     - Content is diverted to specific handlers (e.g., PDF writer, File saver).
     - Client receives only a notification ("Report generated").
@@ -105,7 +105,7 @@ The stream contains interspersed content types, delimited by XML-like tags or sp
 - **Responsibility**: Capture Audio (Microphone), Play Audio (Speaker), Render simple UI.
 - **Protocol**: WebSocket.
 
-### B. The Tesseract (Orchestrator)
+### B. The Libraxis Qube (Orchestrator)
 
 - **Role**: The "Brain stem".
 - **Responsibilities**:
@@ -133,16 +133,16 @@ The stream contains interspersed content types, delimited by XML-like tags or sp
 ### Scenario A: Local Monolith
 
 - **Hardware**: MacBook Pro (M3).
-- **Setup**: Client and Tesseract run on the same machine.
+- **Setup**: Client and Libraxis Qube run on the same machine.
 - **Transport**: WebSocket over `localhost`.
 - **Latency**: Minimal.
 
 ### Scenario B: Cloud/Dragon Offload
 
-- **Hardware**: Laptop (Client) + Dragon Workstation (Tesseract).
+- **Hardware**: Laptop (Client) + Dragon Workstation (Libraxis Qube).
 - **Setup**:
     - Laptop runs only the Client (Mic/Speaker).
-    - Dragon runs Tesseract, Candle, LLM, TTS.
+    - Dragon runs Libraxis Qube, Candle, LLM, TTS.
 - **Transport**: WebSocket over LAN/VPN (`wss://dragon...`).
 - **Latency**: Network RTT + Inference.
 - **Benefit**: Laptop stays cool/quiet; Dragon uses massive RAM/GPU for better models.
@@ -153,7 +153,7 @@ The stream contains interspersed content types, delimited by XML-like tags or sp
 sequenceDiagram
     participant User
     participant Client
-    participant Tesseract
+    participant Libraxis Qube
     participant Candle
     participant Agent
     participant TTS
@@ -161,26 +161,26 @@ sequenceDiagram
     Note over User, Client: "Single Stream" Session
 
     User->>Client: Speaks (Audio)
-    Client->>Tesseract: WebSocket: Binary Audio Chunks
+    Client->>Libraxis Qube: WebSocket: Binary Audio Chunks
 
     loop Real-time ASR
-        Tesseract->>Candle: Push Audio Chunk
-        Candle-->>Tesseract: Emit Token/Segment
+        Libraxis Qube->>Candle: Push Audio Chunk
+        Candle-->>Libraxis Qube: Emit Token/Segment
     end
 
-    Tesseract->>Agent: Push User Transcript (Context)
+    Libraxis Qube->>Agent: Push User Transcript (Context)
 
     loop Agent Response Stream
-        Agent-->>Tesseract: Stream Token
+        Agent-->>Libraxis Qube: Stream Token
 
         alt is <speak> tag
-            Tesseract->>TTS: Buffer & Send Text
-            TTS-->>Tesseract: Audio Bytes
-            Tesseract-->>Client: WebSocket: Play Audio
+            Libraxis Qube->>TTS: Buffer & Send Text
+            TTS-->>Libraxis Qube: Audio Bytes
+            Libraxis Qube-->>Client: WebSocket: Play Audio
             Client-->>User: Hears Voice
         else is <artifact> tag
-            Tesseract->>Tesseract: Generate PDF/File
-            Tesseract-->>Client: Notify "File Ready"
+            Libraxis Qube->>Libraxis Qube: Generate PDF/File
+            Libraxis Qube-->>Client: Notify "File Ready"
         end
     end
 ```

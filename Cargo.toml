@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "codescribe_core", "tauri-app"]
+members = [".", "codescribe-core"]
 
 [workspace.package]
 version = "0.7.0"
@@ -36,7 +36,7 @@ path = "src/bin/codescribe_loop.rs"
 
 [dependencies]
 # Core library
-codescribe_core = { path = "codescribe_core" }
+codescribe_core = { package = "codescribe-core", path = "codescribe-core" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

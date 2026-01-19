@@ -477,7 +477,7 @@ pub fn open_gui() {
             // Show macOS notification about missing GUI
             let _ = Command::new("osascript")
                 .arg("-e")
-                .arg(r#"display notification "GUI binary not found. Build with: cd tauri-app && cargo tauri build" with title "CodeScribe""#)
+                .arg(r#"display notification "GUI binary not found. Build or install your GUI wrapper." with title "CodeScribe""#)
                 .spawn();
         }
     }

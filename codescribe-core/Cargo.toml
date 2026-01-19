@@ -1,5 +1,5 @@
 [package]
-name = "codescribe_core"
+name = "codescribe-core"
 version.workspace = true
 edition.workspace = true
 authors = ["VetCoders <hello@vetcoders.io>"]

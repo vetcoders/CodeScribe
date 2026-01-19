@@ -8,36 +8,14 @@
 flowchart TB
     %% High-level packaging / layers
 
-    subgraph TAURI[CodeScribe Tauri App]
-        direction TB
+    subgraph APP[codescribe crate (bin/daemon)]
+        direction LR
+        HK[hotkeys/\n(macOS CGEventTap)]
+        CTRL[controller.rs]
+        IPC_SERVER[ipc/server.rs]
+        TRAY[tray/]
 
-        subgraph UI[Leptos WASM Frontend]
-            direction LR
-            VL[Voice Lab]
-            TE[Teacher]
-            SE[Settings]
-        end
-
-        INV[invoke("command", args)]
-        UI --> INV
-
-        subgraph BACKEND[Tauri Rust Backend (Native)]
-            direction LR
-            BENTRY[Command handlers]
-            STT[commands/stt.rs]
-            CFG[commands/config.rs]
-            AUD[commands/audio.rs]
-            LEX[commands/lexicon.rs]
-
-            BENTRY --> STT
-            BENTRY --> CFG
-            BENTRY --> AUD
-            BENTRY --> LEX
-        end
-
-        INV -->|Tauri IPC| BENTRY
-
-        subgraph CORE[codescribe_core crate]
+        subgraph CORE[codescribe-core crate]
             direction LR
             WH[whisper/\n(embedded + singleton)]
             CO[config/]
@@ -45,15 +23,6 @@ flowchart TB
             IPC_CORE[ipc types]
         end
 
-        subgraph APP[codescribe crate (bin/daemon)]
-            direction LR
-            HK[hotkeys/\n(macOS CGEventTap)]
-            CTRL[controller.rs]
-            IPC_SERVER[ipc/server.rs]
-            TRAY[tray/]
-        end
-
-        BENTRY --> CORE
         APP --> CORE
     end
 
@@ -75,73 +44,6 @@ flowchart TB
 - **Stream Postprocess**: Pipeline stage (`src/stream_postprocess.rs`) that applies semantic gating and cleanup to live
   chunks.
 
-## IPC Commands Reference
-
-### commands/stt.rs
-
-| Command                | Parameters           | Returns                  | Backend                                               | Status        |
-|------------------------|----------------------|--------------------------|-------------------------------------------------------|---------------|
-| `transcribe_audio`     | `audio_path: String` | `Result<String, String>` | `LocalWhisperEngine::transcribe_file_with_language()` | ✅ IMPLEMENTED |
-| `get_available_models` | none                 | `Vec<String>`            | `ModelManager::list_models()`                         | ✅ IMPLEMENTED |
-| `get_current_model`    | none                 | `String`                 | `config.local_model`                                  | ✅ IMPLEMENTED |
-
-### commands/config.rs
-
-| Command       | Parameters                  | Returns              | Backend                 | Status        |
-|---------------|-----------------------------|----------------------|-------------------------|---------------|
-| `get_config`  | none                        | `serde_json::Value`  | `Config` serialized     | ✅ IMPLEMENTED |
-| `save_config` | `config: serde_json::Value` | `Result<(), String>` | `Config::save_to_env()` | ✅ IMPLEMENTED |
-| `get_env_var` | `key: String`               | `Option<String>`     | `std::env::var()`       | ✅ IMPLEMENTED |
-
-### commands/audio.rs
-
-| Command                    | Parameters | Returns          | Backend                                       | Status        |
-|----------------------------|------------|------------------|-----------------------------------------------|---------------|
-| `list_audio_devices`       | none       | `Vec<String>`    | `cpal::default_host().input_devices()`        | ✅ IMPLEMENTED |
-| `get_current_audio_device` | none       | `Option<String>` | `cpal::default_host().default_input_device()` | ✅ IMPLEMENTED |
-
-### commands/lexicon.rs
-
-| Command               | Parameters              | Returns              | Backend            | Status        |
-|-----------------------|-------------------------|----------------------|--------------------|---------------|
-| `get_lexicon_entries` | `topic: Option<String>` | `Vec<LexiconEntry>`  | File-based storage | ✅ IMPLEMENTED |
-| `list_lexicon_topics` | none                    | `Vec<String>`        | Directory scan     | ✅ IMPLEMENTED |
-| `save_lexicon_entry`  | `entry: LexiconEntry`   | `Result<(), String>` | File write         | ✅ IMPLEMENTED |
-
-### commands/recording.rs
-
-| Command           | Parameters | Returns                          | Backend                                | Status        |
-|-------------------|------------|----------------------------------|----------------------------------------|---------------|
-| `start_recording` | none       | `Result<(), String>`             | `codescribe::audio::Recorder::start()` | ✅ IMPLEMENTED |
-| `stop_recording`  | none       | `Result<Option<String>, String>` | `Recorder::stop()` → returns WAV path  | ✅ IMPLEMENTED |
-| `is_recording`    | none       | `Result<bool, String>`           | State check                            | ✅ IMPLEMENTED |
-
-## UI → IPC Mapping
-
-### Voice Lab (lab/mod.rs)
-
-| UI Element               | Action                                | IPC Call                              | Status      |
-|--------------------------|---------------------------------------|---------------------------------------|-------------|
-| "Start streaming" button | Starts audio capture                  | `start_recording`                     | ✅ Connected |
-| "Stop" button            | Stops audio capture + auto-transcribe | `stop_recording` → `transcribe_audio` | ✅ Connected |
-| "Upload → STT" button    | Transcribe file                       | `transcribe_audio`                    | ✅ Connected |
-| "Copy transcript" button | Copy to clipboard                     | **NONE** - log only                   | ❌ TODO      |
-| "Load config" button     | Fetch config                          | `get_config`                          | ✅ Connected |
-| "List models" button     | Fetch models                          | `get_available_models`                | ✅ Connected |
-| "List devices" button    | Fetch devices                         | `list_audio_devices`                  | ✅ Connected |
-
-### Settings (settings/mod.rs)
-
-| UI Element  | Action           | IPC Call      | Status      |
-|-------------|------------------|---------------|-------------|
-| Config form | Load settings    | `get_config`  | ✅ Connected |
-| Save button | Persist settings | `save_config` | ✅ Connected |
-
-### Chat Panel
-
-| UI Element   | Action   | IPC Call               | Status |
-|--------------|----------|------------------------|--------|
-| Send message | Call LLM | **NONE** - placeholder | ❌ TODO |
 
 ## Hotkey Integration
 
@@ -164,28 +66,6 @@ flowchart TB
   Double Option → Toggle recording
 ```
 
-### Tauri Integration ✅ IMPLEMENTED
-
-**Implementation**: Spawn hotkey thread in Tauri setup (Option A)
-
-```text
-// In tauri-app/src/lib.rs setup()
-// Clone state for hotkey listener (shares internal Arcs)
-let state_for_hotkeys = Arc::new(state.clone());
-
-// In setup closure:
-hotkey_integration::start_hotkey_listener(
-    app.handle().clone(),
-    Arc::clone(&state_for_hotkeys),
-)?;
-```
-
-The `hotkey_integration.rs` module:
-
-- Creates `HotkeyManager` which spawns CGEventTap in background thread
-- Receives `HotkeyEvent` via crossbeam channel
-- Routes Hold Down → `handle_start_recording()`
-- Routes Hold Up / Toggle → `handle_stop_recording()` → transcribe → paste
 
 ### Model Location
 
@@ -214,42 +94,28 @@ Model files required:
 
 ```
 CodeScribe/
-├── src/                      # codescribe crate (backend library)
-│   ├── whisper/              # Embedded + singleton Whisper engine
-│   ├── audio/                # Recorder + StreamingRecorder
-│   ├── ipc/                  # IPC server + types (runtime interface)
-│   ├── stream_postprocess.rs # Semantic gating for live chunks
-│   ├── quality_loop.rs       # Automated quality loop
-│   ├── quality_report.rs     # Batch quality reports
-│   ├── hotkeys/              # CGEventTap hotkey handler
-│   ├── controller.rs         # Recording/transcription orchestration (uses StreamingRecorder)
-│   ├── config/               # Configuration management
-│   └── ...
-├── src/bin/                   # CLI tools (codescribe-quality, codescribe-loop)
-├── tauri-app/                # Tauri application
+├── codescribe-core/          # Core library (Whisper, audio, config, quality)
 │   ├── src/
-│   │   ├── lib.rs            # Tauri setup + tray + hotkey init
-│   │   ├── hotkey_integration.rs  # CGEventTap → recording → paste
-│   │   ├── state.rs          # AppState (config, stt engine, recording)
-│   │   ├── commands/         # IPC command handlers
-│   │   │   ├── stt.rs
-│   │   │   ├── config.rs
-│   │   │   ├── audio.rs
-│   │   │   ├── recording.rs  # start/stop/is_recording
-│   │   │   └── lexicon.rs
-│   │   ├── ui/               # Leptos components
-│   │   │   ├── app.rs
-│   │   │   ├── lab/mod.rs
-│   │   │   ├── settings/mod.rs
-│   │   │   └── teacher/mod.rs
-│   │   └── state.rs          # AppState (config, stt engine)
-│   ├── Trunk.toml            # WASM build config
-│   └── tauri.conf.json       # Tauri config
+│   │   ├── whisper/           # Embedded + singleton Whisper engine
+│   │   ├── audio/             # Recorder + StreamingRecorder
+│   │   ├── ipc/               # IPC types
+│   │   ├── stream_postprocess.rs # Semantic gating for live chunks
+│   │   ├── quality_loop.rs    # Automated quality loop
+│   │   ├── quality_report.rs  # Batch quality reports
+│   │   ├── config/            # Configuration management
+│   │   └── ...
+├── src/                      # codescribe crate (daemon/CLI)
+│   ├── ipc/                  # IPC server (Unix socket)
+│   ├── hotkeys.rs            # CGEventTap hotkey handler
+│   ├── tray/                 # Tray app setup + menu
+│   ├── controller.rs         # Recording/transcription orchestration
+│   └── ...
+├── src/bin/                  # CLI tools (codescribe-quality, codescribe-loop)
 ├── docs/
 │   ├── ARCHITECTURE.md       # This file
-│   ├── WHISPER_LIVE.md        # Embedded + streaming transcription (DONE)
+│   ├── WHISPER_LIVE.md       # Embedded + streaming transcription (DONE)
 │   └── TEAM_SETUP.md         # Team setup guide
-└── .ai-agents/               # Planning/internal docs
+└── tests/
 ```
 
 ## Implementation Status

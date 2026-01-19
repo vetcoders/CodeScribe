@@ -325,38 +325,22 @@ Model files required:
 
 ```
 CodeScribe/
+├── codescribe-core/           # Core library (Whisper, audio, config, quality)
+│   ├── src/
+│   │   ├── lib.rs             # Core exports
+│   │   ├── whisper/           # Embedded Whisper engine
+│   │   ├── audio/             # Recorder + streaming
+│   │   ├── config/            # Config + prompts
+│   │   ├── quality_loop.rs    # Self-improvement loop
+│   │   └── ...
 ├── src/
-│   ├── lib.rs                 # Library exports
+│   ├── lib.rs                 # App exports (macOS tray/hotkeys/UI)
 │   ├── main.rs                # CLI entry point
 │   ├── controller.rs          # Recording/transcription orchestration
-│   ├── ai_formatting.rs       # LLM formatting (Responses API)
-│   ├── whisper/
-│   │   ├── mod.rs             # Whisper module exports
-│   │   ├── engine.rs          # LocalWhisperEngine (candle)
-│   │   ├── embedded.rs        # Embedded model bytes
-│   │   ├── singleton.rs       # Shared model instance
-│   │   ├── model.rs           # Model wrapper
-│   │   └── params.rs          # DecodingParams
-│   ├── audio/
-│   │   ├── recorder.rs        # cpal audio capture
-│   │   ├── streaming_recorder.rs # Live (streaming) transcription during recording
-│   │   ├── loader.rs          # File loading + resampling
-│   │   └── playback.rs        # System sound playback
-│   ├── hotkeys/
-│   │   └── mod.rs             # CGEventTap hotkey handler
-│   ├── tray/
-│   │   ├── mod.rs             # Tray app setup
-│   │   ├── menu.rs            # Menu construction
-│   │   ├── handlers.rs        # Menu event handlers
-│   │   └── submenus.rs        # History, Modes, Settings
-│   ├── config/
-│   │   ├── mod.rs             # Config struct + loading
-│   │   └── prompts.rs         # AI prompt management
-│   └── state/
-│       ├── history.rs         # Transcript history + slug naming
-│       └── conversation.rs    # Conversation state
-├── tauri-app/                 # Tauri GUI (Voice Lab, Settings)
-├── models/                    # Whisper model files
+│   ├── tray/                  # Tray menu + handlers
+│   ├── hotkeys.rs             # CGEventTap hotkey handler
+│   └── ...
+├── models/                    # Whisper model files (build-time only)
 ├── tests/                     # Unit + E2E tests
 └── docs/
     ├── WHISPER_LIVE.md        # Embedded + streaming transcription (DONE)
@@ -381,9 +365,6 @@ make check          # Full quality gate
 # Formatting
 make format         # cargo fmt
 
-# Tauri GUI
-make tauri-dev      # Start Tauri dev server
-make tauri-build    # Build Tauri release
 ```
 
 ### Makefile Targets
@@ -394,8 +375,6 @@ make release          # Release build (embedded model)
 make install          # Install CLI (~888MB)
 make install-no-embed # Dev-only: install without embedding
 make config           # Edit ~/.codescribe/.env
-make bundle           # Create CodeScribe.app
-make install-app      # Install to /Applications
 make start            # Start as daemon
 make stop             # Stop running instance
 make logs             # View logs

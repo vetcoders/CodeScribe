@@ -110,7 +110,7 @@ fn handle_config_command() -> Result<()> {
 
     // Create default config if missing
     if !config_path.exists() {
-        let default_config = include_str!("../codescribe_core/src/config/default_env.txt");
+        let default_config = include_str!("../codescribe-core/src/config/default_env.txt");
         fs::write(&config_path, default_config)?;
         println!("Created default config: {}", config_path.display());
     } else {

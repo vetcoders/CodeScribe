@@ -129,21 +129,6 @@ bump-minor:
 bump-major:
 	@$(MAKE) bump TYPE=major
 
-# ============================================================================
-# Tauri GUI (codescribe-gui)
-# ============================================================================
-
-tauri-dev:
-	@echo "Starting Tauri dev server..."
-	@cd tauri-app && cargo tauri dev
-
-tauri-build:
-	@echo "Building CodeScribe.app (Tauri GUI)..."
-	@cd tauri-app && cargo tauri build
-
-tauri-check:
-	@echo "Checking Tauri..."
-	@cd tauri-app && cargo check
 
 # ============================================================================
 # Quality

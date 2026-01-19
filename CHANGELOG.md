@@ -99,7 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.6.0] – 2026-01-13
 
 ### Added
-- **Native desktop UI (Tauri + Leptos)** – Introduced the `tauri-app/` frontend with a
+- **Native desktop UI (Tauri + Leptos)** – Introduced the (now legacy) Tauri frontend with a
   three-tab interface (Voice Lab, Teacher, Settings). ([a275ae8](https://github.com/VetCoders/CodeScribe/commit/a275ae8),
   [7aa0754](https://github.com/VetCoders/CodeScribe/commit/7aa0754))
 - **Pure Rust local Whisper STT (Metal GPU)** – Added local Whisper inference via

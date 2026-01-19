@@ -5,32 +5,24 @@
 ### 1. Prerequisites
 
 - macOS 14+ (Apple Silicon ARM64 only)
-- Rust 1.83+ with `wasm32-unknown-unknown` target
-- Trunk (`cargo install trunk`)
-- Tauri CLI (`cargo install tauri-cli`)
+- Rust 1.83+
 
-### 2. Build & Run
+### 2. Build & Run (CLI)
 
 ```bash
 # Clone
 git clone git@github.com:VetCoders/CodeScribe.git
 cd CodeScribe
 
-# Build WASM frontend
-cd tauri-app && trunk build && cd ..
-
-# Build and run app
-cargo tauri build --no-bundle
-open target/release/bundle/macos/CodeScribe.app
+# Build and run CLI
+cargo build --release -p codescribe
+./target/release/codescribe
 ```
 
 ### 3. Development Mode
 
 ```bash
-# Terminal 1: Trunk dev server
-cd tauri-app && trunk serve --port 8080
-
-# Terminal 2: Run debug binary
+# Run debug binary
 cargo run
 ```
 

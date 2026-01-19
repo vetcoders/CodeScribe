@@ -23,20 +23,9 @@
   5. User stops speaking -> VAD detects silence.
   6. Recording stops -> Final transcript -> Paste/Action.
 
-## 2. Frontend / GUI (Tauri App)
+## 2. Architecture
 
-### 2.1. "Copy Transcript" Button
-- **Status**: UI button exists in "Voice Lab".
-- **Issue**: Currently logs "TODO" instead of copying.
-- **Fix**: Implement clipboard copy via browser API (since it's WASM/WebView) or IPC command to Daemon.
-
-### 2.2. Hotkey Configuration
-- **Status**: `hotkey_integration.rs` was removed from Tauri App (duplicated/dead code).
-- **Goal**: Allow configuring Daemon hotkeys via GUI (IPC `SaveConfig`).
-
-## 3. Architecture
-
-### 3.1. Tesseract Protocol (Future)
+### 2.1. Libraxis Qube Protocol (Future)
 - **Goal**: Move to WebSocket-based "Single Stream" architecture.
 - **Status**: Conceptual (`docs/ARCHITECTURE_VISION.md`).
 - **Next Steps**:
@@ -44,6 +33,6 @@
   - Implement Tag Demuxer.
   - Integrate TTS.
 
-### 3.2. CodeScribe Core Separation
+### 2.2. CodeScribe Core Separation
 - **Status**: ✅ Completed.
-- **Details**: `codescribe_core` crate extracted. `codescribe` (Daemon) and `tauri-app` (GUI) both depend on Core.
+- **Details**: `codescribe-core` crate extracted. `codescribe` (Daemon) depends on Core.

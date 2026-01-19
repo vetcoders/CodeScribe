@@ -1,6 +1,6 @@
-# Analiza Wykonalności: Tesseract Protocol
+# Analiza Wykonalności: Libraxis Qube Protocol
 
-Dokument ten zawiera analizę obecnego stanu kodu (`CodeScribe`) w kontekście wdrożenia nowej architektury **Tesseract** (Centralny Orchestrator + Streaming).
+Dokument ten zawiera analizę obecnego stanu kodu (`CodeScribe`) w kontekście wdrożenia nowej architektury **Libraxis Qube** (Centralny Orchestrator + Streaming).
 
 Data: 2026-01-19
 Autor: Junie (AI)
@@ -15,7 +15,7 @@ Analiza kodu wykazała, że obecna architektura jest **monolityczna i zorientowa
 1.  **Protokół Strumieniowy (Client-Side)**:
     -   Plik `src/voice_chat.rs` zawiera gotową (choć nieużywaną) implementację klienta WebSocket (`VoiceChatClient`).
     -   Zdefiniowany protokół (`ClientMessage`, `ServerMessage`) obsługuje przesyłanie chunków audio (`Chunk`), zdarzeń końca wypowiedzi (`End`, `Flush`) oraz odbieranie transkrypcji i delty LLM.
-    -   To jest **kluczowy fundament** pod Tesseract Protocol.
+    -   To jest **kluczowy fundament** pod Libraxis Qube Protocol.
 
 2.  **Streaming Audio & Whisper**:
     -   `src/audio/streaming_recorder.rs` i `src/whisper/` (Singleton/Engine) realizują bardzo wydajne, lokalne przetwarzanie audio (1x RT).
@@ -28,13 +28,13 @@ Analiza kodu wykazała, że obecna architektura jest **monolityczna i zorientowa
     -   `src/ipc/server.rs` istnieje, ale obsługuje tylko proste komendy sterujące (Start/Stop/Config). Nie nadaje się do streamingu audio (brak wydajności/protokołu).
 
 ### Czego brakuje (Luki):
-1.  **Brak Implementacji Serwera (Tesseract Node)**:
+1.  **Brak Implementacji Serwera (Libraxis Qube Node)**:
     -   W projekcie **nie ma kodu serwera WebSocket**. `src/voice_chat.rs` to tylko klient.
     -   Brak punktu wejścia (np. `warp`, `axum` lub surowy `tokio-tungstenite`), który mógłby przyjąć połączenie od klienta (lokalnego lub zdalnego).
 
 2.  **Sztywne Sprzężenie w `controller.rs`**:
     -   `RecordingController` zarządza `StreamingRecorder`, który "na sztywno" wiąże mikrofon (`cpal`) z lokalnym Whisperem.
-    -   Brak abstrakcji **Input Source** (Mikrofon vs Strumień Sieciowy) oraz **Processing Backend** (Lokalny Whisper vs Zdalny Tesseract).
+    -   Brak abstrakcji **Input Source** (Mikrofon vs Strumień Sieciowy) oraz **Processing Backend** (Lokalny Whisper vs Zdalny Libraxis Qube).
 
 3.  **Brak Obsługi Tagów/Demux**:
     -   Obecny protokół `VoiceChatEvent` w `src/voice_chat.rs` jest prosty (Transcript/LlmDelta). Nie ma mechanizmu "Tagowania" (np. `<pdf>`, `<tts>`) ani routingu tych tagów do osobnych handlerów.
@@ -60,10 +60,10 @@ Analiza kodu wykazała, że obecna architektura jest **monolityczna i zorientowa
 
 Proponuję implementację w 3 fazach, aby nie zepsuć obecnej funkcjonalności ("Game Changer").
 
-### Faza 1: Tesseract Server (Skeleton)
+### Faza 1: Libraxis Qube Server (Skeleton)
 **Cel**: Uruchomienie serwera WS, który przyjmuje audio i (na razie) tylko loguje/odbija dane (echo).
 1.  Dodać zależność `axum` (lub użyć `tokio-tungstenite` w trybie server).
-2.  Utworzyć moduł `src/tesseract/server.rs`.
+2.  Utworzyć moduł `src/Libraxis Qube/server.rs`.
 3.  Zaimplementować obsługę `ClientMessage` po stronie serwera.
 
 ### Faza 2: Decoupling Controllera (Abstrakcja)
@@ -74,15 +74,15 @@ Proponuję implementację w 3 fazach, aby nie zepsuć obecnej funkcjonalności (
     -   `NetworkBackend` (nowy kod: cpal -> voice_chat_client -> WS).
 3.  Umożliwić przełączanie backendu w Configu (Local vs Remote).
 
-### Faza 3: Pełny Tesseract Protocol (Tagi + Routing)
+### Faza 3: Pełny Libraxis Qube Protocol (Tagi + Routing)
 **Cel**: Obsługa wielu kanałów w jednym strumieniu.
 1.  Rozszerzyć `ServerMessage` o wariant `TagStart { name: String, metadata: Json }` i `TagEnd`.
 2.  Wdrożyć logikę Demuxera w `voice_chat.rs` (klient) – gdy przychodzi tag `<tts>`, kieruj audio do głośników; gdy `<pdf>`, zapisuj plik.
-3.  Podłączyć LLM/Agenta po stronie Serwera (Tesseract).
+3.  Podłączyć LLM/Agenta po stronie Serwera (Libraxis Qube).
 
 ### Faza 4: Unifikacja (Deployment Neutrality)
 **Cel**: `codescribe` działa zawsze jako Klient + Server.
-1.  Nawet w trybie "lokalnym", aplikacja uruchamia wewnętrzny serwer Tesseract (na `localhost`) i łączy się do niego.
+1.  Nawet w trybie "lokalnym", aplikacja uruchamia wewnętrzny serwer Libraxis Qube (na `localhost`) i łączy się do niego.
 2.  Eliminuje to podział kodu na ścieżki "Local vs Remote" – różnica jest tylko w adresie IP (127.0.0.1 vs Dragon IP).
 
 ---

@@ -23,11 +23,11 @@ mod types;
 
 // Re-export types
 pub use types::{AiProvider, Config, HoldMods, ToggleTrigger};
-// Language re-exported for external consumers (tauri-app)
+// Language re-exported for external consumers (GUI apps)
 #[allow(unused_imports)]
 pub use types::Language;
 
-// Re-export prompts API (public API for tauri-app)
+// Re-export prompts API (public API for GUI apps)
 #[allow(unused_imports)] // Public API for external consumers
 pub use prompts::{
     DEFAULT_ASSISTIVE_PROMPT, DEFAULT_FORMATTING_PROMPT, get_assistive_prompt,
