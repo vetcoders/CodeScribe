@@ -737,13 +737,32 @@ impl LocalWhisperEngine {
             }
         }
 
-        // 4. Compression Ratio Threshold
+        // 4. Compression Ratio Threshold - apply dedup if ratio too high
         let ratio = compression_ratio(&text);
         if ratio > self.decoding_params.compression_ratio_threshold {
             tracing::warn!(
-                "High compression ratio ({:.2}) - possible hallucination",
+                "High compression ratio ({:.2}) - applying dedup cleanup",
                 ratio
             );
+
+            // Apply word/phrase deduplication to reduce repetitions
+            let cleaned = dedup_repetitions(&text);
+            let new_ratio = compression_ratio(&cleaned);
+
+            if new_ratio > self.decoding_params.compression_ratio_threshold {
+                tracing::warn!(
+                    "Still high after dedup ({:.2}) - returning cleaned text",
+                    new_ratio
+                );
+            } else {
+                tracing::debug!(
+                    "Compression ratio improved: {:.2} -> {:.2}",
+                    ratio,
+                    new_ratio
+                );
+            }
+
+            return Ok(cleaned);
         }
 
         Ok(text)
