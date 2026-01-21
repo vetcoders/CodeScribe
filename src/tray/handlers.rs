@@ -7,16 +7,14 @@ use std::process::Command;
 use tracing::{debug, info};
 
 use crate::config::{Config, HoldMods, ToggleTrigger};
-use crate::tray::menu::toggle_ai_formatting;
 use crate::tray::state::{HOLD_MENU_ITEMS, TOGGLE_MENU_ITEMS, send_menu_event};
 use crate::tray::types::{MenuIds, TrayMenuEvent};
 
 /// Handle menu item click and send appropriate event
+/// Note: Settings handlers removed - settings now in Chat Overlay Settings tab
 pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
     // Top-level items
-    if event_id == &menu_ids.ai_formatting {
-        handle_toggle_ai_formatting();
-    } else if event_id == &menu_ids.copy_last {
+    if event_id == &menu_ids.copy_last {
         handle_copy_last();
     } else if event_id == &menu_ids.show_overlay {
         crate::show_voice_chat_overlay();
@@ -24,14 +22,6 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         handle_format_last();
     } else if event_id == &menu_ids.format_last_five {
         handle_format_last_five();
-    } else if event_id == &menu_ids.settings_edit_config {
-        handle_open_settings();
-    } else if event_id == &menu_ids.settings_edit_prompt {
-        handle_edit_prompt();
-    } else if event_id == &menu_ids.settings_open_prompt_folder {
-        handle_open_prompts_folder();
-    } else if event_id == &menu_ids.settings_reset_context {
-        handle_reset_context();
     } else if event_id == &menu_ids.help {
         handle_open_help();
     } else if event_id == &menu_ids.about {
@@ -75,15 +65,6 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
     } else {
         debug!("Unknown menu event id: {:?}", event_id);
     }
-}
-
-/// Toggle AI Formatting state
-fn handle_toggle_ai_formatting() {
-    let new_state = toggle_ai_formatting();
-    info!(
-        "AI Formatting toggled: {}",
-        if new_state { "ON" } else { "OFF" }
-    );
 }
 
 /// Copy last transcript to clipboard
@@ -221,61 +202,6 @@ fn handle_open_history_folder() {
     info!("Opening history folder");
 }
 
-// ============================================================================
-// Settings Handlers
-// ============================================================================
-
-/// Open settings file in $EDITOR
-fn handle_open_settings() {
-    send_menu_event(TrayMenuEvent::OpenSettings);
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let config_path = format!("{}/.codescribe/.env", home);
-
-        // Ensure directory exists
-        let config_dir = format!("{}/.codescribe", home);
-        let _ = std::fs::create_dir_all(&config_dir);
-
-        // Create default config if missing
-        if !std::path::Path::new(&config_path).exists() {
-            let default_config = r#"# CodeScribe Configuration
-# Created by: codescribe Settings menu
-
-# === STT (Speech-to-Text) ===
-STT_ENDPOINT=https://api.libraxis.cloud/v1/audio/transcriptions
-STT_API_KEY=your-api-key-here
-WHISPER_MODEL=mlx-community/whisper-large-v3-mlx
-WHISPER_LANGUAGE=en
-
-# === LLM (AI Formatting) ===
-LLM_ENDPOINT=https://api.libraxis.cloud/v1/responses
-LLM_API_KEY=your-api-key-here
-LLM_MODEL=gpt-oss-120b-mlx
-AI_FORMATTING_ENABLED=1
-
-# === Hotkeys ===
-HOLD_MODS=ctrl
-TOGGLE_TRIGGER=double_option
-
-# === Audio ===
-SOUND_VOLUME=0.25
-
-# === Logging ===
-LOG_LEVEL=INFO
-"#;
-            let _ = std::fs::write(&config_path, default_config);
-            info!("Created default config: {}", config_path);
-        }
-
-        // Use macOS `open -t` for default text editor (works without TTY)
-        // Falls back to TextEdit if no default is set
-        info!("Opening settings with default text editor: {}", config_path);
-        let _ = Command::new("open").arg("-t").arg(&config_path).spawn();
-    }
-}
-
 /// Open help documentation in browser
 fn handle_open_help() {
     send_menu_event(TrayMenuEvent::OpenHelp);
@@ -318,19 +244,6 @@ fn handle_show_about() {
         info!("Showing about dialog");
         let _ = Command::new("osascript").arg("-e").arg(&script).spawn();
     }
-}
-
-/// Open prompt files for editing
-fn handle_edit_prompt() {
-    info!("Opening prompt files for editing...");
-    crate::config::prompts::open_prompt_file("formatting.txt");
-}
-
-/// Reset conversation context
-fn handle_reset_context() {
-    crate::state::conversation::reset_conversation();
-    crate::ai_formatting::reset_ollama_memory();
-    info!("Conversation context reset");
 }
 
 /// Format last transcript (async in new thread)
@@ -428,12 +341,6 @@ fn handle_format_last_five() {
             let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Idle);
         });
     });
-}
-
-/// Open prompts folder
-fn handle_open_prompts_folder() {
-    crate::config::prompts::open_prompts_folder();
-    info!("Opened prompts folder");
 }
 
 // ============================================================================

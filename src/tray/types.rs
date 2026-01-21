@@ -113,9 +113,9 @@ pub struct ToggleMenuItems {
 // ============================================================================
 
 /// Menu item IDs for tracking all clickable items
+/// Note: Settings options moved to Settings tab in Chat Overlay
 pub struct MenuIds {
     // Top-level
-    pub ai_formatting: MenuId,
     pub copy_last: MenuId,
     pub show_overlay: MenuId,
     pub format_last: MenuId,
@@ -140,12 +140,6 @@ pub struct MenuIds {
     pub history_copy_latest: MenuId,
     pub history_open_folder: MenuId,
 
-    // Settings submenu
-    pub settings_edit_config: MenuId,
-    pub settings_edit_prompt: MenuId,
-    pub settings_open_prompt_folder: MenuId,
-    pub settings_reset_context: MenuId,
-
-    // Quality submenu
+    // Quality
     pub quality_open_report: MenuId,
 }
