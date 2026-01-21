@@ -106,7 +106,6 @@ LLM_ASSISTIVE_API_KEY=sk-proj-xxx
 - **CLI Suite** — `codescribe`, `codescribe-quality`, `codescribe-loop`
 - **Metal GPU Acceleration** — Hardware-accelerated inference on Apple Silicon
 - **System Tray App** — Minimal menu-bar presence with animated status glyphs
-- **Hands-off Chat Overlay** — Live transcription and AI responses in a non-intrusive overlay window with chat history and auto-send capability
 - **Global Hotkeys** — Hold Ctrl or double-tap Option to record
 - **Provider Separation** — Different LLM providers for formatting vs assistive mode
 - **AI Formatting** — Optional post-processing via Responses API
@@ -188,7 +187,7 @@ flowchart TD
     B -->|Hold Ctrl| C[Start Recording]
     B -->|Double Option| C
     C --> D[Recording]
-    D -->|live chunks| E["Whisper STT (streaming)"]
+  D -->|live chunks| E[Whisper STT (streaming)]
     D -->|Release / Toggle| F[Stop]
     F --> G[Finalize last chunk]
     G --> H{AI Enabled?}
