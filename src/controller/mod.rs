@@ -28,8 +28,8 @@ pub use types::{HotkeyAction, HotkeyInput, HotkeyType, State};
 
 use crate::stream_postprocess::StreamPostProcessor;
 use anyhow::{Context, Result};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -47,6 +47,29 @@ use helpers::{
     setup_voice_chat_send_callback,
 };
 use types::ValidatedAudioPath;
+
+static OVERLAY_CONTROLLER: OnceLock<Arc<RecordingController>> = OnceLock::new();
+
+/// Register the controller for overlay actions (commit/close fragment).
+pub fn register_overlay_controller(controller: Arc<RecordingController>) {
+    if OVERLAY_CONTROLLER.set(controller).is_err() {
+        warn!("Overlay controller already registered");
+    }
+}
+
+/// Stop the current recording and enter decision mode without waiting for VAD.
+pub fn request_recording_commit() {
+    let Some(controller) = OVERLAY_CONTROLLER.get().cloned() else {
+        warn!("Overlay controller not registered; cannot commit recording");
+        return;
+    };
+
+    tokio::spawn(async move {
+        if let Err(e) = controller.finish_recording().await {
+            error!("Overlay commit failed: {}", e);
+        }
+    });
+}
 
 /// Recording controller managing state machine and lifecycle
 pub struct RecordingController {
