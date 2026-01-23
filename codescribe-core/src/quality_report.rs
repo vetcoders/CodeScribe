@@ -1,6 +1,6 @@
 //! Quality report pipeline for batch audio evaluation.
 //!
-//! Flow: batch WAV -> streaming transcription (raw + postprocess) -> AI formatting + cloud ref
+//! Flow: batch WAV -> single-pass transcription (raw + postprocess) -> AI formatting + cloud ref
 //! -> metrics -> artifacts + HTML/JSON/MD reports.
 //!
 //! Created by M&K (c)2026 VetCoders
@@ -12,14 +12,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tracing::info;
+
 use crate::ai_formatting;
 use crate::audio::load_audio_file;
-use crate::audio::streaming_recorder::transcribe_streaming_samples;
 use crate::config::Config;
 use crate::safe_path::{
     safe_canonicalize_bounded, safe_copy_bounded, safe_prepare_path, safe_read_to_string_bounded,
     safe_symlink_or_copy_bounded, safe_write_bounded,
 };
+use crate::state::conversation::{AiMode, reset_conversation_for_mode};
 use crate::stream_postprocess::{StreamPostProcessStats, StreamPostProcessor};
 use crate::{client, whisper};
 use tokio::sync::Semaphore;
@@ -186,13 +188,37 @@ pub async fn run(config: QualityReportConfig) -> Result<PathBuf> {
     ensure_model_path()?;
     whisper::init().context("Failed to init Whisper")?;
 
+    // Resume: skip pairs that already have artifacts (both .ai.txt and .reference.txt)
+    let total_before = pairs.len();
+    let pairs: Vec<_> = pairs
+        .into_iter()
+        .filter(|pair| {
+            let ai_artifact = artifacts_dir.join(format!("{}.ai.txt", pair.id));
+            let ref_artifact = artifacts_dir.join(format!("{}.reference.txt", pair.id));
+            if ai_artifact.exists() && ref_artifact.exists() {
+                info!("[RESUME] Skipping already-processed: {}", pair.id);
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    let skipped = total_before - pairs.len();
+    if skipped > 0 {
+        info!(
+            "[RESUME] Processing {} pairs ({} skipped as already done)",
+            pairs.len(),
+            skipped
+        );
+    }
+
     let mut entries = Vec::new();
     let mut totals = Totals::default();
     let mut cloud_jobs = prepare_cloud_jobs(&pairs, &config, &input_root);
 
-    for pair in pairs {
+    for pair in &pairs {
         let entry = process_pair(
-            &pair,
+            pair,
             &config,
             &input_root,
             &output_root,
@@ -330,15 +356,14 @@ async fn process_pair(
         .with_context(|| format!("Failed to load audio {}", audio_canon.display()))?;
     let duration_secs = samples.len() as f32 / sample_rate as f32;
 
-    let raw =
-        match transcribe_streaming_samples(&samples, sample_rate, config.language.as_deref(), None)
-        {
-            Ok(text) => Some(text),
-            Err(e) => {
-                errors.push(format!("Raw transcription failed: {}", e));
-                None
-            }
-        };
+    // Single-pass transcription: engine handles 25s/5s chunking internally
+    let raw = match whisper::transcribe(&samples, sample_rate, config.language.as_deref()) {
+        Ok(text) => Some(text),
+        Err(e) => {
+            errors.push(format!("Raw transcription failed: {}", e));
+            None
+        }
+    };
     if raw
         .as_deref()
         .map(|text| text.trim().is_empty())
@@ -347,23 +372,15 @@ async fn process_pair(
         errors.push("Raw transcript is empty".into());
     }
 
+    // Post = raw + lexicon/cleanup (single pass through postprocessor)
     let mut postprocessor = StreamPostProcessor::new();
-    let post = match transcribe_streaming_samples(
-        &samples,
-        sample_rate,
-        config.language.as_deref(),
-        Some(&mut postprocessor),
-    ) {
-        Ok(text) => Some(text),
-        Err(e) => {
-            errors.push(format!("Post transcription failed: {}", e));
-            None
-        }
-    };
-    if post
+    let post = raw
         .as_deref()
+        .and_then(|raw_text| postprocessor.process(raw_text));
+    if post
+        .as_ref()
         .map(|text| text.trim().is_empty())
-        .unwrap_or(false)
+        .unwrap_or(raw.is_some() && post.is_none())
     {
         errors.push("Postprocess transcript is empty".into());
     }
@@ -374,7 +391,19 @@ async fn process_pair(
         errors.push("AI formatting skipped: missing endpoint/model/key".into());
         None
     } else if let Some(post_text) = post.as_deref() {
-        Some(ai_formatting::format_text(post_text, config.language.as_deref(), false).await)
+        // Reset conversation chain — batch mode must NOT chain between files
+        reset_conversation_for_mode(AiMode::Formatting);
+        let ai_result =
+            ai_formatting::format_text(post_text, config.language.as_deref(), false).await;
+        info!(
+            "[AI_LOG] id={} input_len={} output_len={} input_preview={:?} output_preview={:?}",
+            id,
+            post_text.len(),
+            ai_result.len(),
+            &post_text[..post_text.len().min(80)],
+            &ai_result[..ai_result.len().min(80)]
+        );
+        Some(ai_result)
     } else {
         None
     };

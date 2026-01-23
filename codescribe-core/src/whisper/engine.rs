@@ -798,7 +798,30 @@ fn normalize_token_for_overlap(token: &str) -> String {
     }
 }
 
-/// Helper for deduplication at chunk boundaries
+/// Word-level edit distance for short sequences (used by fuzzy overlap)
+fn word_edit_distance(a: &[String], b: &[String]) -> usize {
+    let m = a.len();
+    let n = b.len();
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut cur = vec![0usize; n + 1];
+
+    for i in 1..=m {
+        cur[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        prev.clone_from(&cur);
+    }
+    prev[n]
+}
+
+/// Helper for deduplication at chunk boundaries.
+///
+/// Two-pass approach:
+/// 1. Exact match (fast path) — suffix of `out` == prefix of `segment`
+/// 2. Fuzzy match (fallback) — allows up to k/3 word-level edits in overlap region
+///    Catches cases where Whisper produces slightly different text for the same audio
 pub fn append_with_overlap_dedup(out: &mut String, segment: &str) {
     let seg = segment.trim();
     if seg.is_empty() {
@@ -830,12 +853,36 @@ pub fn append_with_overlap_dedup(out: &mut String, segment: &str) {
         .map(|word| normalize_token_for_overlap(word))
         .collect();
 
-    let max_overlap = out_words.len().min(seg_words.len()).min(20);
+    let max_overlap = out_words.len().min(seg_words.len()).min(30);
     let mut overlap = 0usize;
+
+    // Pass 1: exact match (fast path)
     for k in (1..=max_overlap).rev() {
         if out_norm[out_norm.len() - k..] == seg_norm[..k] {
             overlap = k;
             break;
+        }
+    }
+
+    // Pass 2: fuzzy match — allow up to k/3 word edits (min 1)
+    if overlap == 0 {
+        for k in (3..=max_overlap).rev() {
+            let tail = &out_norm[out_norm.len() - k..];
+            let head = &seg_norm[..k];
+            let max_errors = (k / 3).max(1);
+            let dist = word_edit_distance(tail, head);
+            if dist <= max_errors {
+                overlap = k;
+                tracing::debug!(
+                    "[FUZZY_DEDUP] matched k={} dist={} max_err={} tail={:?} head={:?}",
+                    k,
+                    dist,
+                    max_errors,
+                    &tail[..tail.len().min(5)],
+                    &head[..head.len().min(5)]
+                );
+                break;
+            }
         }
     }
 

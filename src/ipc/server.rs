@@ -14,7 +14,6 @@ use tracing::{info, warn};
 
 use super::{AppStatus, IpcCommand, IpcResponse};
 use crate::audio::load_audio_file;
-use crate::audio::streaming_recorder::transcribe_streaming_samples;
 use crate::config::prompts::{
     DEFAULT_ASSISTIVE_PROMPT, DEFAULT_FORMATTING_PROMPT, get_assistive_prompt,
     get_assistive_prompt_path, get_formatting_prompt, get_formatting_prompt_path,
@@ -22,6 +21,7 @@ use crate::config::prompts::{
 use crate::config::{AiProvider, Config};
 use crate::controller::{HotkeyAction, HotkeyInput, HotkeyType, RecordingController, State};
 use crate::stream_postprocess::StreamPostProcessor;
+use crate::whisper;
 use crate::{ai_formatting, hotkeys};
 
 const REDACTED_VALUE: &str = "<redacted>";
@@ -206,14 +206,12 @@ async fn handle_command(cmd: IpcCommand, controller: &RecordingController) -> Ip
             };
 
             let language = Config::load().whisper_language;
-            let mut postprocessor = StreamPostProcessor::new();
-            match transcribe_streaming_samples(
-                &samples,
-                sample_rate,
-                Some(language.as_str()),
-                Some(&mut postprocessor),
-            ) {
-                Ok(text) => {
+            // Single-pass: engine handles 25s/5s chunking internally
+            match whisper::transcribe(&samples, sample_rate, Some(language.as_str())) {
+                Ok(raw_text) => {
+                    // Apply lexicon/cleanup postprocessing
+                    let mut postprocessor = StreamPostProcessor::new();
+                    let text = postprocessor.process(&raw_text).unwrap_or(raw_text);
                     if text.trim().is_empty() {
                         IpcResponse::Error("Transcription returned empty result".to_string())
                     } else {

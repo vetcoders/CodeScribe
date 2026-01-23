@@ -345,6 +345,24 @@ pub fn transcribe_streaming_samples(
     let overlap_size = (sample_rate as f32 * overlap_sec) as usize;
     let step = chunk_limit.saturating_sub(overlap_size).max(1);
 
+    let total_audio_sec = samples.len() as f32 / sample_rate as f32;
+    let stride_sec = chunk_duration_sec - overlap_sec;
+    let n_chunks =
+        ((samples.len().saturating_sub(chunk_limit)) as f32 / step as f32).ceil() as usize + 1;
+    let processing_factor = chunk_duration_sec / stride_sec;
+    let effective_audio_sec = n_chunks as f32 * chunk_duration_sec;
+
+    info!(
+        "[STREAM_DIAG] chunk={:.1}s overlap={:.1}s stride={:.1}s | audio={:.1}s chunks={} factor={:.2}x effective={:.1}s",
+        chunk_duration_sec,
+        overlap_sec,
+        stride_sec,
+        total_audio_sec,
+        n_chunks,
+        processing_factor,
+        effective_audio_sec
+    );
+
     let engine_mutex = get_engine()?;
     let mut engine = engine_mutex
         .lock()
@@ -352,11 +370,26 @@ pub fn transcribe_streaming_samples(
 
     let mut out = String::new();
     let mut offset = 0usize;
+    let mut chunks_processed = 0usize;
+    let t_start = std::time::Instant::now();
 
     while offset < samples.len() {
         let end = (offset + chunk_limit).min(samples.len());
         let chunk = &samples[offset..end];
+        let chunk_sec = chunk.len() as f32 / sample_rate as f32;
+        let t_chunk = std::time::Instant::now();
         let text = engine.transcribe_with_language(chunk, sample_rate, language)?;
+        let chunk_ms = t_chunk.elapsed().as_millis();
+        chunks_processed += 1;
+
+        debug!(
+            "[STREAM_CHUNK] #{} offset={:.1}s len={:.1}s transcribe={}ms words={}",
+            chunks_processed,
+            offset as f32 / sample_rate as f32,
+            chunk_sec,
+            chunk_ms,
+            text.split_whitespace().count()
+        );
 
         if let Some(processor) = postprocessor.as_deref_mut() {
             if let Some(cleaned) = processor.process(&text) {
@@ -371,6 +404,14 @@ pub fn transcribe_streaming_samples(
         }
         offset = offset.saturating_add(step);
     }
+
+    let total_ms = t_start.elapsed().as_millis();
+    info!(
+        "[STREAM_DONE] chunks_processed={} total_ms={} out_words={}",
+        chunks_processed,
+        total_ms,
+        out.split_whitespace().count()
+    );
 
     Ok(out)
 }
