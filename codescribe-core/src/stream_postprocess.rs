@@ -296,7 +296,18 @@ impl StreamPostProcessor {
         }
     }
 
+    /// Process a streaming chunk — applies lexicon, cleanup, and semantic gate.
     pub fn process(&mut self, text: &str) -> Option<String> {
+        self.process_internal(text, true)
+    }
+
+    /// Process a complete utterance — applies lexicon and cleanup, no semantic gate.
+    /// Use this for VAD-segmented utterances where each segment is naturally distinct.
+    pub fn process_utterance(&mut self, text: &str) -> Option<String> {
+        self.process_internal(text, false)
+    }
+
+    fn process_internal(&mut self, text: &str, apply_gate: bool) -> Option<String> {
         self.stats.input_chunks += 1;
         self.lexicon.maybe_reload();
 
@@ -322,7 +333,7 @@ impl StreamPostProcessor {
             return None;
         }
 
-        if is_suspicious(&cleaned) {
+        if apply_gate && is_suspicious(&cleaned) {
             self.stats.suspicious_chunks += 1;
             if self.gate.should_drop(&cleaned) {
                 self.stats.dropped_chunks += 1;
@@ -331,7 +342,9 @@ impl StreamPostProcessor {
             }
         }
 
-        self.gate.observe(&cleaned);
+        if apply_gate {
+            self.gate.observe(&cleaned);
+        }
         self.stats.output_chunks += 1;
         Some(cleaned)
     }

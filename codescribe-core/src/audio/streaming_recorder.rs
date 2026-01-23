@@ -1,16 +1,25 @@
 use crate::audio::recorder::{Recorder, RecorderConfig};
 use crate::stream_postprocess::StreamPostProcessor;
+use crate::whisper;
 use crate::whisper::append_with_overlap_dedup;
 use crate::whisper::singleton::engine as get_engine;
 use anyhow::{Context, Result, anyhow};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{fs::OpenOptions, io::Write, path::Path};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info};
 
 const DEFAULT_CHUNK_DURATION_SEC: f32 = 15.0;
 const OVERLAP_SEC: f32 = 2.0; // Overlap for context
+const DEFAULT_VAD_SILENCE_DB: f32 = -45.0;
+const DEFAULT_VAD_SILENCE_SEC: f32 = 0.8;
+const DEFAULT_VAD_MAX_UTTERANCE_SEC: f32 = 30.0;
+const DEFAULT_VAD_PRE_ROLL_MS: u64 = 300;
+const DEFAULT_BUFFER_DELAY_MS: u64 = 3000;
+const DEFAULT_TYPING_CPS: f32 = 30.0;
 
 pub type StreamDeltaCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -89,20 +98,33 @@ impl StreamingRecorder {
 
         // Start transcription worker (after we know the real sample rate)
         let transcript_buffer = self.transcript_buffer.clone();
-        let postprocessor = StreamPostProcessor::new();
         let stream_log_path = stream_log_path();
         let delta_callback = self.delta_callback.clone();
+        let use_buffered_stream = env_bool("CODESCRIBE_BUFFERED_STREAM");
         self.transcription_handle = Some(tokio::spawn(async move {
-            transcription_worker(
-                rx,
-                transcript_buffer,
-                actual_sample_rate,
-                language,
-                postprocessor,
-                delta_callback,
-                stream_log_path,
-            )
-            .await;
+            if use_buffered_stream {
+                buffered_transcription_worker(
+                    rx,
+                    transcript_buffer,
+                    actual_sample_rate,
+                    language,
+                    delta_callback,
+                    stream_log_path,
+                )
+                .await;
+            } else {
+                let postprocessor = StreamPostProcessor::new();
+                transcription_worker(
+                    rx,
+                    transcript_buffer,
+                    actual_sample_rate,
+                    language,
+                    postprocessor,
+                    delta_callback,
+                    stream_log_path,
+                )
+                .await;
+            }
         }));
 
         Ok(())
@@ -190,6 +212,348 @@ async fn transcription_worker(
     }
 
     info!("Transcription worker finished");
+}
+
+struct VADConfig {
+    silence_threshold_db: f32,
+    silence_duration_sec: f32,
+    max_utterance_sec: f32,
+    pre_roll_ms: u64,
+}
+
+impl VADConfig {
+    fn from_env() -> Self {
+        Self {
+            silence_threshold_db: env_f32("CODESCRIBE_VAD_SILENCE_DB", DEFAULT_VAD_SILENCE_DB),
+            silence_duration_sec: env_f32("CODESCRIBE_VAD_SILENCE_SEC", DEFAULT_VAD_SILENCE_SEC)
+                .clamp(0.2, 5.0),
+            max_utterance_sec: env_f32(
+                "CODESCRIBE_VAD_MAX_UTTERANCE_SEC",
+                DEFAULT_VAD_MAX_UTTERANCE_SEC,
+            )
+            .clamp(5.0, 120.0),
+            pre_roll_ms: env_u64("CODESCRIBE_VAD_PRE_ROLL_MS", DEFAULT_VAD_PRE_ROLL_MS),
+        }
+    }
+}
+
+struct VADSegmenter {
+    pending_samples: Vec<f32>,
+    sample_rate: u32,
+    silence_threshold_db: f32,
+    silence_duration_sec: f32,
+    max_utterance_sec: f32,
+    pre_roll_samples: usize,
+    silence_frames: usize,
+    is_in_speech: bool,
+}
+
+impl VADSegmenter {
+    fn new(sample_rate: u32) -> Self {
+        Self::with_config(sample_rate, VADConfig::from_env())
+    }
+
+    fn with_config(sample_rate: u32, config: VADConfig) -> Self {
+        let pre_roll_samples = ((config.pre_roll_ms as f32 / 1000.0) * sample_rate as f32)
+            .round()
+            .max(1.0) as usize;
+        Self {
+            pending_samples: Vec::new(),
+            sample_rate,
+            silence_threshold_db: config.silence_threshold_db,
+            silence_duration_sec: config.silence_duration_sec,
+            max_utterance_sec: config.max_utterance_sec,
+            pre_roll_samples,
+            silence_frames: 0,
+            is_in_speech: false,
+        }
+    }
+
+    fn feed(&mut self, audio: &[f32]) -> Option<Vec<f32>> {
+        if audio.is_empty() {
+            return None;
+        }
+
+        self.pending_samples.extend_from_slice(audio);
+        let rms_db = calculate_rms_db(audio);
+
+        if rms_db < self.silence_threshold_db {
+            if self.is_in_speech {
+                self.silence_frames = self.silence_frames.saturating_add(audio.len());
+                let silence_duration = self.silence_frames as f32 / self.sample_rate as f32;
+                if silence_duration >= self.silence_duration_sec {
+                    // Cut before silence — don't feed trailing silence to Whisper
+                    let utterance_end = self
+                        .pending_samples
+                        .len()
+                        .saturating_sub(self.silence_frames);
+                    return self.split_at(utterance_end);
+                }
+            } else if self.pending_samples.len() > self.pre_roll_samples {
+                // Trim leading silence to prevent unbounded buffer growth
+                let start_idx = self.pending_samples.len() - self.pre_roll_samples;
+                self.pending_samples = self.pending_samples[start_idx..].to_vec();
+            }
+        } else {
+            self.is_in_speech = true;
+            self.silence_frames = 0;
+        }
+
+        let max_samples = (self.max_utterance_sec * self.sample_rate as f32) as usize;
+        if self.pending_samples.len() >= max_samples {
+            return self.split_at(self.pending_samples.len());
+        }
+
+        None
+    }
+
+    fn flush(&mut self) -> Option<Vec<f32>> {
+        if self.pending_samples.is_empty() {
+            return None;
+        }
+        let utterance = std::mem::take(&mut self.pending_samples);
+        self.silence_frames = 0;
+        self.is_in_speech = false;
+        Some(utterance)
+    }
+
+    /// Split utterance at given position. Keeps pre-roll from speech end.
+    fn split_at(&mut self, utterance_end: usize) -> Option<Vec<f32>> {
+        if utterance_end == 0 {
+            self.pending_samples.clear();
+            self.silence_frames = 0;
+            self.is_in_speech = false;
+            return None;
+        }
+
+        let utterance = self.pending_samples[..utterance_end].to_vec();
+        let pre_roll_start = utterance_end.saturating_sub(self.pre_roll_samples);
+        self.pending_samples = self.pending_samples[pre_roll_start..utterance_end].to_vec();
+        self.silence_frames = 0;
+        self.is_in_speech = false;
+        Some(utterance)
+    }
+}
+
+struct TranscriptionPipeline {
+    language: Option<String>,
+    postprocessor: StreamPostProcessor,
+}
+
+impl TranscriptionPipeline {
+    fn new(language: Option<String>) -> Self {
+        Self {
+            language,
+            postprocessor: StreamPostProcessor::new(),
+        }
+    }
+
+    fn postprocess(&mut self, text: &str) -> Option<String> {
+        self.postprocessor.process_utterance(text)
+    }
+}
+
+struct BufferedEmitter {
+    queue: VecDeque<String>,
+    initial_delay_ms: u64,
+    typing_speed_cps: f32,
+    first_output_at: Option<Instant>,
+    current_segment: Option<String>,
+    current_index: usize,
+    current_len: usize,
+    delta_callback: Option<StreamDeltaCallback>,
+    transcript_buffer: Arc<Mutex<String>>,
+    stream_log_path: Option<std::path::PathBuf>,
+    finished: bool,
+    has_output: bool,
+}
+
+impl BufferedEmitter {
+    fn new(
+        transcript_buffer: Arc<Mutex<String>>,
+        delta_callback: Option<StreamDeltaCallback>,
+        stream_log_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            initial_delay_ms: env_u64("CODESCRIBE_BUFFER_DELAY_MS", DEFAULT_BUFFER_DELAY_MS),
+            typing_speed_cps: env_f32("CODESCRIBE_TYPING_CPS", DEFAULT_TYPING_CPS).max(5.0),
+            first_output_at: None,
+            current_segment: None,
+            current_index: 0,
+            current_len: 0,
+            delta_callback,
+            transcript_buffer,
+            stream_log_path,
+            finished: false,
+            has_output: false,
+        }
+    }
+
+    fn push_segment(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let mut segment = text;
+        if !segment.starts_with(char::is_whitespace)
+            && (self.has_output || self.current_segment.is_some() || !self.queue.is_empty())
+        {
+            segment = format!(" {}", segment);
+        }
+        self.queue.push_back(segment);
+        if self.first_output_at.is_none() {
+            self.first_output_at = Some(Instant::now());
+        }
+    }
+
+    async fn tick(&mut self) -> bool {
+        if self.finished && self.queue.is_empty() && self.current_segment.is_none() {
+            return true;
+        }
+
+        if self.is_buffering() {
+            return false;
+        }
+
+        if self.current_segment.is_none() {
+            self.current_segment = self.queue.pop_front();
+            self.current_index = 0;
+            self.current_len = self
+                .current_segment
+                .as_ref()
+                .map(|segment| segment.chars().count())
+                .unwrap_or(0);
+        }
+
+        if let Some(segment) = self.current_segment.as_ref()
+            && let Some(ch) = segment.chars().nth(self.current_index)
+        {
+            let delta = ch.to_string();
+            self.current_index += 1;
+            self.has_output = true;
+
+            if self.current_index >= self.current_len {
+                self.current_segment = None;
+                self.current_index = 0;
+                self.current_len = 0;
+            }
+
+            {
+                let mut buffer = self.transcript_buffer.lock().await;
+                buffer.push_str(&delta);
+            }
+
+            if let Some(callback) = &self.delta_callback {
+                callback(&delta);
+            }
+
+            if let Some(path) = self.stream_log_path.as_deref() {
+                let _ = append_to_stream_log(path, &delta);
+            }
+        }
+
+        self.finished && self.queue.is_empty() && self.current_segment.is_none()
+    }
+
+    fn is_buffering(&self) -> bool {
+        let Some(start) = self.first_output_at else {
+            return true;
+        };
+        start.elapsed() < Duration::from_millis(self.initial_delay_ms)
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
+async fn emitter_tick_loop(emitter: Arc<Mutex<BufferedEmitter>>) {
+    let interval = {
+        let guard = emitter.lock().await;
+        Duration::from_secs_f32(1.0 / guard.typing_speed_cps)
+    };
+    let mut ticker = tokio::time::interval(interval);
+
+    loop {
+        ticker.tick().await;
+        let should_stop = {
+            let mut guard = emitter.lock().await;
+            guard.tick().await
+        };
+        if should_stop {
+            break;
+        }
+    }
+}
+
+async fn buffered_transcription_worker(
+    mut chunk_receiver: mpsc::Receiver<Vec<f32>>,
+    transcript_buffer: Arc<Mutex<String>>,
+    sample_rate: u32,
+    language: Option<String>,
+    delta_callback: Option<StreamDeltaCallback>,
+    stream_log_path: Option<std::path::PathBuf>,
+) {
+    info!("Buffered transcription worker started");
+
+    let mut segmenter = VADSegmenter::new(sample_rate);
+    let mut pipeline = TranscriptionPipeline::new(language);
+    let emitter = Arc::new(Mutex::new(BufferedEmitter::new(
+        transcript_buffer.clone(),
+        delta_callback,
+        stream_log_path,
+    )));
+
+    let emitter_handle = tokio::spawn(emitter_tick_loop(emitter.clone()));
+
+    while let Some(data) = chunk_receiver.recv().await {
+        if let Some(utterance) = segmenter.feed(&data)
+            && let Err(e) = handle_utterance(utterance, sample_rate, &mut pipeline, &emitter).await
+        {
+            error!("Buffered transcription failed: {}", e);
+        }
+    }
+
+    if let Some(utterance) = segmenter.flush()
+        && let Err(e) = handle_utterance(utterance, sample_rate, &mut pipeline, &emitter).await
+    {
+        error!("Final buffered transcription failed: {}", e);
+    }
+
+    {
+        let mut guard = emitter.lock().await;
+        guard.finish();
+    }
+
+    if let Err(e) = emitter_handle.await {
+        error!("Buffered emitter task failed: {}", e);
+    }
+
+    info!("Buffered transcription worker finished");
+}
+
+async fn handle_utterance(
+    utterance: Vec<f32>,
+    sample_rate: u32,
+    pipeline: &mut TranscriptionPipeline,
+    emitter: &Arc<Mutex<BufferedEmitter>>,
+) -> Result<()> {
+    if utterance.is_empty() {
+        return Ok(());
+    }
+
+    let language = pipeline.language.clone();
+    let raw_text = tokio::task::spawn_blocking(move || {
+        whisper::transcribe(&utterance, sample_rate, language.as_deref())
+    })
+    .await??;
+
+    if let Some(cleaned) = pipeline.postprocess(&raw_text) {
+        let mut guard = emitter.lock().await;
+        guard.push_segment(cleaned);
+    }
+
+    Ok(())
 }
 
 async fn process_chunk(
@@ -321,6 +685,13 @@ fn env_f32(key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 fn stream_chunk_duration_sec() -> f32 {
     env_f32("CODESCRIBE_STREAM_CHUNK_SEC", DEFAULT_CHUNK_DURATION_SEC).clamp(0.5, 30.0)
 }
@@ -416,6 +787,22 @@ pub fn transcribe_streaming_samples(
     Ok(out)
 }
 
+fn calculate_rms_db(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return -120.0;
+    }
+
+    let sum_squares: f64 = samples
+        .iter()
+        .map(|&s| {
+            let sample = s as f64;
+            sample * sample
+        })
+        .sum();
+    let rms = (sum_squares / samples.len() as f64).sqrt() as f32;
+    20.0 * (rms + 1e-9).log10()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +811,42 @@ mod tests {
     use serial_test::serial;
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn test_vad_segmenter_flush_on_silence() {
+        let config = VADConfig {
+            silence_threshold_db: -40.0,
+            silence_duration_sec: 0.3,
+            max_utterance_sec: 2.0,
+            pre_roll_ms: 100,
+        };
+        let mut segmenter = VADSegmenter::with_config(1000, config);
+
+        let speech = vec![1.0; 400];
+        assert!(segmenter.feed(&speech).is_none());
+
+        let silence = vec![0.0; 300];
+        let utterance = segmenter
+            .feed(&silence)
+            .expect("Expected utterance after silence");
+        assert!(!utterance.is_empty());
+    }
+
+    #[test]
+    fn test_vad_segmenter_flush_on_max_duration() {
+        let config = VADConfig {
+            silence_threshold_db: -40.0,
+            silence_duration_sec: 1.0,
+            max_utterance_sec: 0.5,
+            pre_roll_ms: 100,
+        };
+        let mut segmenter = VADSegmenter::with_config(1000, config);
+        let speech = vec![1.0; 600];
+        let utterance = segmenter
+            .feed(&speech)
+            .expect("Expected utterance after max duration");
+        assert!(!utterance.is_empty());
+    }
 
     #[test]
     #[serial]
