@@ -183,8 +183,38 @@ fn get_temperature(assistive: bool) -> Option<f32> {
         }
     }
 
-    // Default: 0.1 for formatting (deterministic), 0.3 for assistive (creative)
-    Some(if assistive { 0.3 } else { 0.1 })
+    // No default — user sets if they want, model decides otherwise
+    None
+}
+
+// ============================================================================
+// Endpoint routing — path-based, no domain heuristics
+// ============================================================================
+
+/// Endpoint format detected from URL path
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointFormat {
+    /// Responses API (/v1/responses or anything else) — default
+    ResponsesApi,
+    /// Ollama native chat (/api/chat) — legacy compatibility
+    OllamaChat,
+}
+
+/// Detect format from endpoint path. No domain checks, no guessing.
+fn detect_format(endpoint: &str) -> EndpointFormat {
+    if endpoint.contains("/api/chat") {
+        EndpointFormat::OllamaChat
+    } else {
+        EndpointFormat::ResponsesApi
+    }
+}
+
+/// Streaming = default. Opt-out via LLM_USE_STREAMING=0|false.
+fn use_streaming() -> bool {
+    if let Ok(val) = env::var("LLM_USE_STREAMING") {
+        return val != "0" && val.to_lowercase() != "false";
+    }
+    true
 }
 
 fn prune_memory(memory: &mut Vec<MemoryMessage>) {
@@ -626,91 +656,86 @@ pub async fn format_text_with_status(
             cleaned.clone()
         };
 
-        // Try Ollama first if configured as AI_PROVIDER
-        let mut result_opt = if has_ollama() {
-            match tokio::time::timeout(
-                attempt_timeout,
-                call_ollama(&user_message, &system_prompt, assistive),
-            )
-            .await
-            {
-                Ok(Ok(formatted)) => Some(formatted),
-                Ok(Err(e)) => {
-                    warn!(
-                        "Ollama failed (attempt {}): {}, trying other providers",
-                        attempt, e
-                    );
-                    None
-                }
-                Err(_) => {
-                    warn!(
-                        "Ollama timed out after {:?} (attempt {})",
-                        attempt_timeout, attempt
-                    );
-                    None
-                }
-            }
+        // Route based on endpoint path — no domain heuristics
+        let endpoint = if assistive {
+            get_assistive_endpoint().unwrap_or_default()
         } else {
-            None
+            get_formatting_endpoint().unwrap_or_default()
         };
 
-        // Try LLM endpoint if Ollama failed/skipped
-        if result_opt.is_none() {
-            let endpoint = if assistive {
-                get_assistive_endpoint().unwrap_or_default()
-            } else {
-                get_formatting_endpoint().unwrap_or_default()
-            };
-            let use_streaming = is_openai_endpoint(&endpoint);
+        let llm_timeout = Duration::from_secs(90);
 
-            // GPT-5.x needs more time for longer inputs
-            let llm_timeout = Duration::from_secs(90);
-
-            if use_streaming {
-                // SSE streaming for OpenAI/Libraxis
+        let result_opt = match detect_format(&endpoint) {
+            EndpointFormat::OllamaChat => {
                 match tokio::time::timeout(
-                    llm_timeout,
-                    call_llm_endpoint_streaming(
-                        &user_message,
-                        &system_prompt,
-                        assistive,
-                        on_delta.clone(),
-                    ),
+                    attempt_timeout,
+                    call_ollama(&user_message, &system_prompt, assistive),
                 )
                 .await
                 {
-                    Ok(Ok(formatted)) => result_opt = Some(formatted),
+                    Ok(Ok(formatted)) => Some(formatted),
                     Ok(Err(e)) => {
-                        warn!("LLM streaming failed (attempt {}): {}", attempt, e);
+                        warn!("Ollama failed (attempt {}): {}", attempt, e);
+                        None
                     }
                     Err(_) => {
                         warn!(
-                            "LLM streaming timed out after {:?} (attempt {})",
-                            llm_timeout, attempt
+                            "Ollama timed out after {:?} (attempt {})",
+                            attempt_timeout, attempt
                         );
-                    }
-                }
-            } else {
-                // Sync mode for other providers
-                match tokio::time::timeout(
-                    llm_timeout,
-                    call_llm_endpoint(&user_message, &system_prompt, assistive),
-                )
-                .await
-                {
-                    Ok(Ok(formatted)) => result_opt = Some(formatted),
-                    Ok(Err(e)) => {
-                        warn!("LLM endpoint failed (attempt {}): {}", attempt, e);
-                    }
-                    Err(_) => {
-                        warn!(
-                            "LLM endpoint timed out after {:?} (attempt {})",
-                            llm_timeout, attempt
-                        );
+                        None
                     }
                 }
             }
-        }
+            EndpointFormat::ResponsesApi => {
+                if use_streaming() {
+                    match tokio::time::timeout(
+                        llm_timeout,
+                        call_llm_endpoint_streaming(
+                            &user_message,
+                            &system_prompt,
+                            assistive,
+                            on_delta.clone(),
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(formatted)) => Some(formatted),
+                        Ok(Err(e)) => {
+                            warn!("LLM streaming failed (attempt {}): {}", attempt, e);
+                            None
+                        }
+                        Err(_) => {
+                            warn!(
+                                "LLM streaming timed out after {:?} (attempt {})",
+                                llm_timeout, attempt
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    match tokio::time::timeout(
+                        llm_timeout,
+                        call_llm_endpoint(&user_message, &system_prompt, assistive),
+                    )
+                    .await
+                    {
+                        Ok(Ok(formatted)) => Some(formatted),
+                        Ok(Err(e)) => {
+                            warn!("LLM endpoint failed (attempt {}): {}", attempt, e);
+                            None
+                        }
+                        Err(_) => {
+                            warn!(
+                                "LLM endpoint timed out after {:?} (attempt {})",
+                                llm_timeout, attempt
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+        };
 
         if let Some(formatted) = result_opt {
             // Detect AI refusal responses (OpenAI content policy)
@@ -923,18 +948,7 @@ async fn call_llm_endpoint(
     Ok(formatted)
 }
 
-/// Check if streaming should be used for this endpoint
-/// SSE streaming = immediate handshake, no timeout issues
-fn is_openai_endpoint(endpoint: &str) -> bool {
-    // Disable streaming with LLM_USE_STREAMING=0 if needed
-    if let Ok(val) = env::var("LLM_USE_STREAMING") {
-        return val == "1" || val.to_lowercase() == "true";
-    }
-    // Default: enable streaming for OpenAI/Libraxis Responses API
-    endpoint.contains("openai.com") || endpoint.contains("libraxis")
-}
-
-/// Call LLM endpoint with SSE streaming (OpenAI Responses API)
+/// Call LLM endpoint with SSE streaming (Responses API)
 ///
 /// Uses mode-aware config: LLM_{FORMATTING,ASSISTIVE}_{ENDPOINT,MODEL,API_KEY}
 async fn call_llm_endpoint_streaming(
@@ -1111,9 +1125,10 @@ async fn call_ollama(user_message: &str, system_prompt: &str, assistive: bool) -
         (get_formatting_endpoint()?, get_formatting_model()?)
     };
 
-    // Ollama native API uses /api/chat - strip any /v1/responses suffix
+    // Normalize: strip known path suffixes, then always use /api/chat
     let base_host = host
         .trim_end_matches('/')
+        .trim_end_matches("/api/chat")
         .trim_end_matches("/v1/responses")
         .trim_end_matches("/v1");
     let endpoint = format!("{}/api/chat", base_host);
@@ -1179,40 +1194,24 @@ async fn call_ollama(user_message: &str, system_prompt: &str, assistive: bool) -
     Ok(formatted)
 }
 
-/// Check if local Ollama is configured for formatting mode
-/// Returns true if endpoint points to localhost AND doesn't use /v1/ path
-fn has_ollama() -> bool {
+/// Check if AI formatting is available
+/// Returns true if at least formatting mode is configured
+pub fn has_api_key() -> bool {
     let endpoint = match get_formatting_endpoint() {
         Ok(e) => e,
         Err(_) => return false,
     };
 
-    // Skip Ollama native format if endpoint uses /v1/ (Responses API)
-    if endpoint.contains("/v1/") {
+    if get_formatting_model().is_err() {
         return false;
     }
 
-    // Check if pointing to localhost
-    endpoint.contains("127.0.0.1") || endpoint.contains("localhost")
-}
-
-/// Check if AI formatting is available
-/// Returns true if at least formatting mode is configured
-pub fn has_api_key() -> bool {
-    // Need endpoint and model for formatting
-    let has_endpoint = get_formatting_endpoint().is_ok();
-    let has_model = get_formatting_model().is_ok();
-
-    if !has_endpoint || !has_model {
-        return false;
-    }
-
-    // Local Ollama doesn't need API key
-    if has_ollama() {
+    // OllamaChat doesn't need API key
+    if matches!(detect_format(&endpoint), EndpointFormat::OllamaChat) {
         return true;
     }
 
-    // Remote LLM requires API key
+    // Responses API requires API key
     get_formatting_api_key().is_ok()
 }
 
