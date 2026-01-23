@@ -26,6 +26,7 @@ mod types;
 pub use helpers::{is_assistive_session, set_assistive_session};
 pub use types::{HotkeyAction, HotkeyInput, HotkeyType, State};
 
+use crate::stream_postprocess::StreamPostProcessor;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -707,6 +708,22 @@ impl RecordingController {
 
         info!("Raw transcript captured ({} chars)", raw_text.len());
 
+        // ALWAYS-ON: Final post-processing pass (lexicon + cleanup + semantic gate)
+        // This ensures ALL output paths receive clean text regardless of mode.
+        // Contract: every chunk/transcript passes through StreamPostProcessor before
+        // reaching overlay, clipboard, augmentation, or dataset.
+        let clean_text = {
+            let mut finalizer = StreamPostProcessor::new();
+            finalizer
+                .process(&raw_text)
+                .unwrap_or_else(|| raw_text.clone())
+        };
+        info!(
+            "Post-processed transcript ({} chars, delta={})",
+            clean_text.len(),
+            raw_text.len() as i64 - clean_text.len() as i64
+        );
+
         if raw_save_enabled {
             let raw_entry = crate::state::history::save_entry_with_timestamp_and_slug(
                 &raw_text,
@@ -718,15 +735,15 @@ impl RecordingController {
         }
 
         // Check for repetition loops (Whisper hallucination like "Wielki, Wielki, Wielki...")
-        let has_repetition = crate::ai_formatting::has_repetition_loop(&raw_text);
+        let has_repetition = crate::ai_formatting::has_repetition_loop(&clean_text);
         if has_repetition {
             warn!("Detected repetition loop in transcription - will clean up");
         }
 
         if manual_actions_only {
             // Manual actions only: keep overlay visible and let user choose (Copy/Augment/Archive).
-            // Ensure overlay shows the final transcript (streaming fallback).
-            crate::set_transcription_text(&raw_text);
+            // Ensure overlay shows the final transcript (post-processed).
+            crate::set_transcription_text(&clean_text);
             info!("Manual action mode: skipping auto-format/paste");
             return Ok(());
         }
@@ -749,7 +766,7 @@ impl RecordingController {
             info!("Assistive mode (Ctrl+Shift): augmenting transcript via AI");
 
             if chat_active {
-                crate::voice_chat_ui::add_voice_chat_user_message(&raw_text);
+                crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
                 crate::voice_chat_ui::set_voice_chat_draft_text("");
                 crate::voice_chat_ui::set_voice_chat_sending(true);
                 // Update overlay status to show AI is thinking
@@ -775,7 +792,7 @@ impl RecordingController {
             };
 
             let result = crate::ai_formatting::format_text_with_status(
-                &raw_text,
+                &clean_text,
                 lang_str.as_deref(),
                 true,
                 delta_callback,
@@ -811,15 +828,19 @@ impl RecordingController {
             (result.text, kind)
         } else if force_raw {
             // Ctrl Hold: ALWAYS raw transcript (fast dictation mode)
+            // Post-processed clean_text is used (lexicon + cleanup already applied)
             if has_repetition {
-                info!("Raw mode (Ctrl): applying local repetition cleanup only");
+                info!("Raw mode (Ctrl): applying local repetition cleanup on post-processed text");
                 (
-                    crate::ai_formatting::remove_simple_repetitions(&raw_text),
+                    crate::ai_formatting::remove_simple_repetitions(&clean_text),
                     crate::state::history::TranscriptKind::Raw,
                 )
             } else {
-                info!("Raw mode (Ctrl): using raw transcript");
-                (raw_text.clone(), crate::state::history::TranscriptKind::Raw)
+                info!("Raw mode (Ctrl): using post-processed transcript");
+                (
+                    clean_text.clone(),
+                    crate::state::history::TranscriptKind::Raw,
+                )
             }
         } else if force_ai {
             // Left double Option: ALWAYS formatting (no augmentation)
@@ -828,7 +849,7 @@ impl RecordingController {
                 info!("Formatting mode (Left Option): correcting transcript via AI");
 
                 if chat_active {
-                    crate::voice_chat_ui::add_voice_chat_user_message(&raw_text);
+                    crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
                     crate::voice_chat_ui::set_voice_chat_draft_text("");
                     crate::voice_chat_ui::set_voice_chat_sending(true);
                     // Update overlay status to show AI is formatting
@@ -854,7 +875,7 @@ impl RecordingController {
                 };
 
                 let result = crate::ai_formatting::format_text_with_status(
-                    &raw_text,
+                    &clean_text,
                     lang_str.as_deref(),
                     false,
                     delta_callback,
@@ -891,12 +912,17 @@ impl RecordingController {
             } else if has_repetition {
                 info!("Formatting mode (Left Option): AI unavailable, cleaning repetitions");
                 (
-                    crate::ai_formatting::remove_simple_repetitions(&raw_text),
+                    crate::ai_formatting::remove_simple_repetitions(&clean_text),
                     crate::state::history::TranscriptKind::Raw,
                 )
             } else {
-                info!("Formatting mode (Left Option): AI unavailable, using raw transcript");
-                (raw_text.clone(), crate::state::history::TranscriptKind::Raw)
+                info!(
+                    "Formatting mode (Left Option): AI unavailable, using post-processed transcript"
+                );
+                (
+                    clean_text.clone(),
+                    crate::state::history::TranscriptKind::Raw,
+                )
             }
         } else {
             // Double Option: respects AI Formatting toggle setting
@@ -908,7 +934,7 @@ impl RecordingController {
                 info!("Formatting mode (Toggle): correcting transcript via AI");
 
                 if chat_active {
-                    crate::voice_chat_ui::add_voice_chat_user_message(&raw_text);
+                    crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
                     crate::voice_chat_ui::set_voice_chat_draft_text("");
                     crate::voice_chat_ui::set_voice_chat_sending(true);
                     // Update overlay status to show AI is formatting
@@ -934,7 +960,7 @@ impl RecordingController {
                 };
 
                 let result = crate::ai_formatting::format_text_with_status(
-                    &raw_text,
+                    &clean_text,
                     lang_str.as_deref(),
                     false,
                     delta_callback,
@@ -972,13 +998,16 @@ impl RecordingController {
                 // Toggle OFF with repetition: local cleanup only
                 info!("Raw mode (Toggle OFF): applying local repetition cleanup");
                 (
-                    crate::ai_formatting::remove_simple_repetitions(&raw_text),
+                    crate::ai_formatting::remove_simple_repetitions(&clean_text),
                     crate::state::history::TranscriptKind::Raw,
                 )
             } else {
-                // Toggle OFF: raw transcript
-                info!("Raw mode (Toggle OFF): using raw transcript");
-                (raw_text.clone(), crate::state::history::TranscriptKind::Raw)
+                // Toggle OFF: using post-processed transcript
+                info!("Raw mode (Toggle OFF): using post-processed transcript");
+                (
+                    clean_text.clone(),
+                    crate::state::history::TranscriptKind::Raw,
+                )
             }
         };
 

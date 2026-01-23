@@ -444,7 +444,7 @@ impl Config {
             self.silence_db = -45.0;
         }
         if self.silence_hang_sec <= 0.0 || self.silence_hang_sec > 10.0 {
-            self.silence_hang_sec = 0.8;
+            self.silence_hang_sec = 1.5;
         }
 
         // Ensure at least one backend port is configured (legacy)

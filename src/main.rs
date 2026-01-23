@@ -524,9 +524,107 @@ async fn run_daemon() -> Result<()> {
     // Start Lab Server (Side-by-side comparison MVP)
     lab_server::start_lab_server();
 
+    // Start Quality Loop daemon (always-on self-improvement)
+    let quality_child = spawn_quality_daemon();
+
     tray::run_with_hotkeys(Some(hotkey_manager))?;
 
+    // Cleanup: kill quality daemon when tray exits
+    if let Some(mut child) = quality_child {
+        let _ = child.kill();
+    }
+
     Ok(())
+}
+
+/// Spawn `codescribe-loop --daemon` as a background child process.
+/// Returns the Child handle so we can kill it on app exit.
+fn spawn_quality_daemon() -> Option<std::process::Child> {
+    use std::process::{Command, Stdio};
+
+    // Strategy: find codescribe-loop binary next to current exe, or in PATH
+    let loop_bin = find_sibling_binary("codescribe-loop");
+
+    let bin_path = match loop_bin {
+        Some(path) => path,
+        None => {
+            // Try PATH fallback
+            if which_exists("codescribe-loop") {
+                PathBuf::from("codescribe-loop")
+            } else {
+                eprintln!("[quality-daemon] codescribe-loop not found; skipping auto-start");
+                return None;
+            }
+        }
+    };
+
+    let config_dir = codescribe::config::Config::config_dir();
+    let log_path = config_dir.join("logs").join("quality_daemon.log");
+    std::fs::create_dir_all(config_dir.join("logs")).ok();
+
+    let log_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[quality-daemon] Failed to open log file: {}", e);
+            return None;
+        }
+    };
+
+    let stderr_file = log_file.try_clone().unwrap_or_else(|_| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .expect("log file")
+    });
+
+    match Command::new(&bin_path)
+        .args(["--daemon", "--apply", "--daemon-interval", "1800"])
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+    {
+        Ok(child) => {
+            eprintln!(
+                "[quality-daemon] Started (pid={}, bin={}, log={})",
+                child.id(),
+                bin_path.display(),
+                log_path.display()
+            );
+            Some(child)
+        }
+        Err(e) => {
+            eprintln!("[quality-daemon] Failed to spawn: {}", e);
+            None
+        }
+    }
+}
+
+/// Find a sibling binary (same directory as current executable)
+fn find_sibling_binary(name: &str) -> Option<PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    let dir = current_exe.parent()?;
+    let sibling = dir.join(name);
+    if sibling.exists() {
+        Some(sibling)
+    } else {
+        None
+    }
+}
+
+/// Check if a binary exists in PATH
+fn which_exists(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn emit_stdout(text: &str) -> Result<()> {

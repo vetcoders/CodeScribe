@@ -84,7 +84,7 @@ pub fn default_silence_db() -> f32 {
 }
 
 pub fn default_silence_hang_sec() -> f32 {
-    0.8
+    1.5
 }
 
 pub fn default_dump_audio_logs() -> bool {

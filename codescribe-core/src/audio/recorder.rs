@@ -82,7 +82,7 @@ const DEFAULT_SILENCE_DB: f32 = -45.0;
 
 /// Silence duration threshold (seconds) (runtime override: SILENCE_HANG_SEC env var)
 /// Recording stops automatically after this duration of continuous silence.
-const DEFAULT_HANG_SEC: f32 = 0.8;
+const DEFAULT_HANG_SEC: f32 = 1.5;
 
 /// Size of audio chunks to read from stream (samples)
 const BLOCK_SIZE: usize = 1024;

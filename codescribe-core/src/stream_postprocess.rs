@@ -216,7 +216,7 @@ impl SemanticGate {
                     *guard = Some(model);
                 }
                 Err(e) => {
-                    warn!("Failed to initialize BGEM3 embedder: {}", e);
+                    warn!("Failed to initialize ParaphraseMLMiniLM embedder: {}", e);
                     return None;
                 }
             }
@@ -422,8 +422,8 @@ fn init_embedder() -> Result<TextEmbedding> {
     let cache_dir = embedding_cache_dir();
     std::fs::create_dir_all(&cache_dir)?;
 
-    info!("Initializing BGEM3 embedder (this can take a while on first run)");
-    let options = TextInitOptions::new(EmbeddingModel::BGEM3)
+    info!("Initializing ParaphraseMLMiniLM embedder (this can take a while on first run)");
+    let options = TextInitOptions::new(EmbeddingModel::ParaphraseMLMiniLML12V2Q)
         .with_max_length(256)
         .with_cache_dir(cache_dir)
         .with_show_download_progress(true);
