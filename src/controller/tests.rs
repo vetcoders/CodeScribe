@@ -12,7 +12,6 @@ async fn test_initial_state() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "requires audio hardware"]
 async fn test_hold_down_schedules_delayed_start() {
     let controller = RecordingController::new();
     // Override hold delay for faster test
@@ -39,7 +38,6 @@ async fn test_hold_down_schedules_delayed_start() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "requires audio hardware"]
 async fn test_hold_up_before_delay_cancels() {
     let controller = RecordingController::new();
     // Override hold delay for faster test
@@ -73,7 +71,6 @@ async fn test_hold_up_before_delay_cancels() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "requires audio hardware"]
 async fn test_toggle_starts_immediately() {
     let controller = RecordingController::new();
 
@@ -321,7 +318,6 @@ async fn test_hold_up_preserves_mode_flags_when_idle() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "requires audio hardware"]
 async fn test_hold_up_triggers_finish_recording() {
     // This test verifies that Hold Up in REC_HOLD state triggers finish_recording
     // which reads force_raw_mode and assistive_mode before processing.
@@ -442,7 +438,6 @@ async fn test_mode_matrix_coverage() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "requires audio hardware"]
 async fn test_finish_recording_resets_unconditionally_force_raw() {
     // Regression test: paste fix removed `manual_actions_only` gate.
     // After recording finishes, state MUST reset to Idle and flags clear
@@ -469,7 +464,6 @@ async fn test_finish_recording_resets_unconditionally_force_raw() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "requires audio hardware"]
 async fn test_finish_recording_resets_unconditionally_assistive() {
     // Same test but for assistive mode — paste must work in all modes
     let controller = RecordingController::new();
@@ -510,7 +504,6 @@ async fn test_no_decision_mode_state_exists() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "requires audio hardware"]
 async fn test_finish_recording_resets_unconditionally_toggle_mode() {
     // Toggle mode (double-Option): after finish, same cleanup as hold modes
     let controller = RecordingController::new();

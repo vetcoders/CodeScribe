@@ -42,6 +42,10 @@ pub fn append_voice_chat_delta(delta: &str) {
 /// Finalize voice draft: save to file and clear buffer
 /// Called when VAD stops or recording finishes
 pub fn finalize_voice_draft() -> Option<std::path::PathBuf> {
+    // Skip in unit tests: exec_sync deadlocks without a running main queue/run loop
+    if cfg!(test) {
+        return None;
+    }
     Queue::main().exec_sync(finalize_voice_draft_impl)
 }
 

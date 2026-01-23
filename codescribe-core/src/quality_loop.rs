@@ -1165,3 +1165,491 @@ pub fn open_latest_report() -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quality_report::{
+        ReportEntry, ReportEnvironment, ReportMetrics, ReportSummary, ReportTranscripts,
+    };
+    use crate::stream_postprocess::StreamPostProcessStats;
+
+    fn mock_environment() -> ReportEnvironment {
+        ReportEnvironment {
+            stt_endpoint: None,
+            stt_api_key_present: false,
+            llm_formatting_endpoint: None,
+            llm_formatting_model: None,
+            llm_formatting_key_present: false,
+            local_model: None,
+            whisper_language: None,
+            metrics_reference: "corpus".into(),
+        }
+    }
+
+    fn mock_entry(id: &str) -> ReportEntry {
+        ReportEntry {
+            id: id.to_string(),
+            audio_path: format!("/tmp/{}.wav", id),
+            audio_rel_path: format!("{}.wav", id),
+            reference_path: None,
+            duration_secs: 5.0,
+            transcripts: ReportTranscripts::default(),
+            metrics: ReportMetrics::default(),
+            postprocess_stats: None,
+            errors: vec![],
+        }
+    }
+
+    fn mock_report(entries: Vec<ReportEntry>) -> QualityReport {
+        QualityReport {
+            generated_at: "2026-01-23T12:00:00+01:00".into(),
+            environment: mock_environment(),
+            summary: ReportSummary::default(),
+            entries,
+        }
+    }
+
+    // ─── normalize_tokens ────────────────────────────────────────────
+
+    #[test]
+    fn test_normalize_tokens_basic() {
+        let tokens = normalize_tokens("Hello World");
+        assert_eq!(tokens, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_normalize_tokens_punctuation_to_space() {
+        let tokens = normalize_tokens("CodeScribe's test-case, version 2.0!");
+        assert_eq!(
+            tokens,
+            vec!["codescribe", "s", "test", "case", "version", "2", "0"]
+        );
+    }
+
+    #[test]
+    fn test_normalize_tokens_polish_diacritics() {
+        let tokens = normalize_tokens("Źródło działania systemu");
+        assert_eq!(tokens, vec!["źródło", "działania", "systemu"]);
+    }
+
+    #[test]
+    fn test_normalize_tokens_extra_whitespace() {
+        let tokens = normalize_tokens("  foo   bar  \n baz  ");
+        assert_eq!(tokens, vec!["foo", "bar", "baz"]);
+    }
+
+    // ─── token_eligible ──────────────────────────────────────────────
+
+    #[test]
+    fn test_token_eligible_too_short() {
+        assert!(!token_eligible("ab"));
+        assert!(!token_eligible("x"));
+    }
+
+    #[test]
+    fn test_token_eligible_all_digits() {
+        assert!(!token_eligible("123"));
+        assert!(!token_eligible("007"));
+    }
+
+    #[test]
+    fn test_token_eligible_valid() {
+        assert!(token_eligible("foo"));
+        assert!(token_eligible("abc123"));
+        assert!(token_eligible("źródło"));
+    }
+
+    // ─── word_distance / levenshtein ─────────────────────────────────
+
+    #[test]
+    fn test_word_distance_identical() {
+        assert_eq!(word_distance("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn test_word_distance_one_sub() {
+        assert_eq!(word_distance("cat", "bat"), 1);
+    }
+
+    #[test]
+    fn test_word_distance_insertion_deletion() {
+        assert_eq!(word_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn test_word_distance_polish_morphology() {
+        // odpowiedział vs odpowiadał - should be within 4
+        assert!(word_distance("odpowiedział", "odpowiadał") <= 4);
+        // remote'a vs remontu - within 4
+        assert!(word_distance("remontu", "remotea") <= 4);
+    }
+
+    #[test]
+    fn test_word_distance_completely_different() {
+        assert!(word_distance("python", "javascript") > 4);
+    }
+
+    // ─── align_tokens ────────────────────────────────────────────────
+
+    #[test]
+    fn test_align_tokens_identical() {
+        let ref_tokens = vec!["ala".into(), "ma".into(), "kota".into()];
+        let hyp_tokens = vec!["ala".into(), "ma".into(), "kota".into()];
+        let subs = align_tokens(&ref_tokens, &hyp_tokens);
+        assert!(subs.is_empty());
+    }
+
+    #[test]
+    fn test_align_tokens_single_substitution() {
+        let ref_tokens = vec!["ala".into(), "ma".into(), "kota".into()];
+        let hyp_tokens = vec!["ala".into(), "ma".into(), "psa".into()];
+        let subs = align_tokens(&ref_tokens, &hyp_tokens);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0], ("kota".to_string(), "psa".to_string()));
+    }
+
+    #[test]
+    fn test_align_tokens_multiple_substitutions() {
+        let ref_tokens = vec!["system".into(), "działa".into(), "poprawnie".into()];
+        let hyp_tokens = vec!["system".into(), "działa".into(), "niepoprawne".into()];
+        let subs = align_tokens(&ref_tokens, &hyp_tokens);
+        assert_eq!(subs.len(), 1);
+        assert_eq!(
+            subs[0],
+            ("poprawnie".to_string(), "niepoprawne".to_string())
+        );
+    }
+
+    #[test]
+    fn test_align_tokens_insertion_not_a_substitution() {
+        // Insertion: hypothesis has extra word - NOT counted as substitution
+        let ref_tokens = vec!["ala".into(), "kota".into()];
+        let hyp_tokens = vec!["ala".into(), "ma".into(), "kota".into()];
+        let subs = align_tokens(&ref_tokens, &hyp_tokens);
+        assert!(subs.is_empty());
+    }
+
+    // ─── compare_metric ──────────────────────────────────────────────
+
+    #[test]
+    fn test_compare_metric_regression() {
+        let mut regressions = Vec::new();
+        let mut improvements = 0usize;
+        compare_metric(
+            "e1",
+            "raw_wer",
+            Some(0.15),
+            Some(0.10),
+            0.02,
+            &mut regressions,
+            &mut improvements,
+        );
+        assert_eq!(regressions.len(), 1);
+        assert_eq!(regressions[0].metric, "raw_wer");
+        assert_eq!(improvements, 0);
+    }
+
+    #[test]
+    fn test_compare_metric_improvement() {
+        let mut regressions = Vec::new();
+        let mut improvements = 0usize;
+        compare_metric(
+            "e1",
+            "raw_wer",
+            Some(0.05),
+            Some(0.15),
+            0.02,
+            &mut regressions,
+            &mut improvements,
+        );
+        assert!(regressions.is_empty());
+        assert_eq!(improvements, 1);
+    }
+
+    #[test]
+    fn test_compare_metric_within_threshold() {
+        let mut regressions = Vec::new();
+        let mut improvements = 0usize;
+        compare_metric(
+            "e1",
+            "raw_wer",
+            Some(0.11),
+            Some(0.10),
+            0.02,
+            &mut regressions,
+            &mut improvements,
+        );
+        assert!(regressions.is_empty());
+        assert_eq!(improvements, 0);
+    }
+
+    #[test]
+    fn test_compare_metric_none_values_skip() {
+        let mut regressions = Vec::new();
+        let mut improvements = 0usize;
+        compare_metric(
+            "e1",
+            "raw_wer",
+            None,
+            Some(0.10),
+            0.02,
+            &mut regressions,
+            &mut improvements,
+        );
+        compare_metric(
+            "e2",
+            "raw_wer",
+            Some(0.10),
+            None,
+            0.02,
+            &mut regressions,
+            &mut improvements,
+        );
+        assert!(regressions.is_empty());
+        assert_eq!(improvements, 0);
+    }
+
+    // ─── QualitySignals::from_report ─────────────────────────────────
+
+    #[test]
+    fn test_quality_signals_post_worse_ratio() {
+        let mut entries = vec![];
+        // 3 entries: post worse in 2 of them
+        for i in 0..3 {
+            let mut entry = mock_entry(&format!("e{}", i));
+            entry.metrics.raw_wer = Some(0.10);
+            entry.metrics.post_wer = if i < 2 { Some(0.15) } else { Some(0.08) };
+            entries.push(entry);
+        }
+        let report = mock_report(entries);
+        let signals = QualitySignals::from_report(&report, 0.02);
+        // 2 out of 3 are worse
+        let ratio = signals.post_worse_ratio.unwrap();
+        assert!((ratio - 2.0 / 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_quality_signals_empty_report() {
+        let report = mock_report(vec![]);
+        let signals = QualitySignals::from_report(&report, 0.02);
+        assert!(signals.post_worse_ratio.is_none());
+        assert!(signals.ai_worse_ratio.is_none());
+    }
+
+    // ─── PostprocessStats::from_report ───────────────────────────────
+
+    #[test]
+    fn test_postprocess_stats_aggregation() {
+        let mut entries = vec![];
+        for i in 0..3 {
+            let mut entry = mock_entry(&format!("e{}", i));
+            entry.postprocess_stats = Some(StreamPostProcessStats {
+                input_chunks: 10,
+                output_chunks: 8,
+                dropped_chunks: 2,
+                gate_drops: 1,
+                suspicious_chunks: 2,
+                lexicon_rewrites: 3,
+                repetition_cleanups: 1,
+                embeddings_enabled: true,
+            });
+            entries.push(entry);
+        }
+        let report = mock_report(entries);
+        let stats = PostprocessStats::from_report(&report);
+        assert_eq!(stats.input_chunks, 30);
+        assert_eq!(stats.gate_drops, 3);
+        assert_eq!(stats.suspicious, 6);
+        assert_eq!(stats.embeddings_enabled, Some(true));
+    }
+
+    #[test]
+    fn test_postprocess_stats_gate_drop_rate() {
+        let mut entry = mock_entry("e1");
+        entry.postprocess_stats = Some(StreamPostProcessStats {
+            input_chunks: 100,
+            gate_drops: 25,
+            ..Default::default()
+        });
+        let report = mock_report(vec![entry]);
+        let stats = PostprocessStats::from_report(&report);
+        let rate = stats.gate_drop_rate().unwrap();
+        assert!((rate - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_postprocess_stats_no_entries() {
+        let report = mock_report(vec![]);
+        let stats = PostprocessStats::from_report(&report);
+        assert!(stats.gate_drop_rate().is_none());
+        assert!(stats.suspicious_rate().is_none());
+    }
+
+    // ─── extract_lexicon_suggestions ─────────────────────────────────
+
+    #[test]
+    fn test_extract_lexicon_suggestions_finds_mismatches() {
+        let mut entries = vec![];
+        // Same substitution in 3 entries → count=3, passes min_count=2
+        for i in 0..3 {
+            let mut entry = mock_entry(&format!("e{}", i));
+            entry.transcripts.reference = Some("system działa poprawnie".into());
+            entry.transcripts.raw = Some("system działa paprawnie".into());
+            entries.push(entry);
+        }
+        let report = mock_report(entries);
+        let suggestions = extract_lexicon_suggestions(&report, 10, 2, LexiconSource::Corpus);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].term, "poprawnie");
+        assert_eq!(suggestions[0].mis, "paprawnie");
+        assert_eq!(suggestions[0].count, 3);
+    }
+
+    #[test]
+    fn test_extract_lexicon_suggestions_respects_min_count() {
+        let mut entry = mock_entry("e1");
+        entry.transcripts.reference = Some("system działa poprawnie".into());
+        entry.transcripts.raw = Some("system działa paprawnie".into());
+        let report = mock_report(vec![entry]);
+        // min_count=2, but only 1 occurrence
+        let suggestions = extract_lexicon_suggestions(&report, 10, 2, LexiconSource::Corpus);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_extract_lexicon_suggestions_respects_max_updates() {
+        let mut entries = vec![];
+        for i in 0..5 {
+            let mut entry = mock_entry(&format!("e{}", i));
+            entry.transcripts.reference = Some("alfa beta gamma delta".into());
+            entry.transcripts.raw = Some("alfe bete gamme delte".into());
+            entries.push(entry);
+        }
+        let report = mock_report(entries);
+        let suggestions = extract_lexicon_suggestions(&report, 2, 1, LexiconSource::Corpus);
+        assert_eq!(suggestions.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_lexicon_suggestions_filters_high_distance() {
+        let mut entries = vec![];
+        for i in 0..3 {
+            let mut entry = mock_entry(&format!("e{}", i));
+            // "python" vs "javascript" - distance > 4, should be filtered
+            entry.transcripts.reference = Some("programuję python codziennie".into());
+            entry.transcripts.raw = Some("programuję javascript codziennie".into());
+            entries.push(entry);
+        }
+        let report = mock_report(entries);
+        let suggestions = extract_lexicon_suggestions(&report, 10, 1, LexiconSource::Corpus);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_extract_lexicon_suggestions_cloud_source() {
+        let mut entries = vec![];
+        for i in 0..3 {
+            let mut entry = mock_entry(&format!("e{}", i));
+            // "transkrypcja" vs "transkrypsja" - distance=1, well within 4
+            entry.transcripts.cloud = Some("dokładna transkrypcja audio".into());
+            entry.transcripts.raw = Some("dokładna transkrypsja audio".into());
+            entries.push(entry);
+        }
+        let report = mock_report(entries);
+        let suggestions = extract_lexicon_suggestions(&report, 10, 2, LexiconSource::Cloud);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].term, "transkrypcja");
+        assert_eq!(suggestions[0].mis, "transkrypsja");
+    }
+
+    #[test]
+    fn test_extract_lexicon_case_insensitive_skips_same_word() {
+        let mut entries = vec![];
+        for i in 0..3 {
+            let mut entry = mock_entry(&format!("e{}", i));
+            entry.transcripts.reference = Some("System działa".into());
+            entry.transcripts.raw = Some("system działa".into());
+            entries.push(entry);
+        }
+        let report = mock_report(entries);
+        let suggestions = extract_lexicon_suggestions(&report, 10, 1, LexiconSource::Corpus);
+        // "system" vs "system" after normalize should be identical, no substitution
+        assert!(suggestions.is_empty());
+    }
+
+    // ─── analyze_regressions ─────────────────────────────────────────
+
+    #[test]
+    fn test_analyze_regressions_no_baseline() {
+        let report = mock_report(vec![mock_entry("e1")]);
+        let (regressions, summary) = analyze_regressions(&report, None, 0.02);
+        assert!(regressions.is_empty());
+        assert_eq!(summary.compared_entries, 0);
+    }
+
+    #[test]
+    fn test_analyze_regressions_detects_wer_regression() {
+        let mut current_entry = mock_entry("e1");
+        current_entry.metrics.raw_wer = Some(0.20);
+        let current = mock_report(vec![current_entry]);
+
+        let mut base_entry = mock_entry("e1");
+        base_entry.metrics.raw_wer = Some(0.10);
+        let baseline = mock_report(vec![base_entry]);
+
+        let (regressions, summary) = analyze_regressions(&current, Some(&baseline), 0.02);
+        assert!(!regressions.is_empty());
+        assert_eq!(summary.compared_entries, 1);
+        assert_eq!(summary.regression_count, regressions.len());
+    }
+
+    // ─── LexiconSource ──────────────────────────────────────────────
+
+    #[test]
+    fn test_lexicon_source_as_str() {
+        assert_eq!(LexiconSource::Corpus.as_str(), "corpus");
+        assert_eq!(LexiconSource::Cloud.as_str(), "cloud");
+        assert_eq!(LexiconSource::AiFormatted.as_str(), "ai");
+    }
+
+    // ─── render_analysis_markdown ────────────────────────────────────
+
+    #[test]
+    fn test_render_analysis_markdown_contains_sections() {
+        let analysis = LoopAnalysis {
+            generated_at: "2026-01-23T12:00:00".into(),
+            current_report: "/tmp/report.json".into(),
+            baseline_report: Some("/tmp/baseline.json".into()),
+            summary: LoopSummary {
+                total_entries: 10,
+                compared_entries: 8,
+                regression_count: 2,
+                improvement_count: 3,
+                post_worse_ratio: Some(0.25),
+                ai_worse_ratio: None,
+                gate_drop_rate: Some(0.10),
+                suspicious_rate: None,
+            },
+            regressions: vec![RegressionFinding {
+                id: "e1".into(),
+                metric: "raw_wer".into(),
+                current: 0.20,
+                baseline: 0.10,
+                delta: 0.10,
+            }],
+            updates: vec![UpdateAction {
+                kind: "lexicon".into(),
+                detail: "added 3 rules".into(),
+                applied: true,
+            }],
+        };
+        let md = render_analysis_markdown(&analysis);
+        assert!(md.contains("# CodeScribe Quality Loop Analysis"));
+        assert!(md.contains("Baseline report"));
+        assert!(md.contains("## Regressions"));
+        assert!(md.contains("## Updates"));
+        assert!(md.contains("raw_wer"));
+        assert!(md.contains("lexicon"));
+    }
+}

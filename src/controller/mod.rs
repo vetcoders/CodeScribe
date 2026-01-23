@@ -340,18 +340,20 @@ impl RecordingController {
 
     /// Schedule delayed recording start for hold mode
     async fn schedule_hold_start(&self) -> Result<()> {
-        // Check backend health before starting
-        match crate::client::check_health().await {
-            Ok(true) => {}
-            Ok(false) => {
-                warn!("Backend not ready (model loading)");
-                let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
-                return Ok(());
-            }
-            Err(e) => {
-                error!("Backend unavailable: {}", e);
-                let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
-                return Ok(());
+        // Check backend health before starting (skip in tests: no backend available)
+        if !cfg!(test) {
+            match crate::client::check_health().await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!("Backend not ready (model loading)");
+                    let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("Backend unavailable: {}", e);
+                    let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
+                    return Ok(());
+                }
             }
         }
 
@@ -400,7 +402,7 @@ impl RecordingController {
 
             info!("Starting hold recording (session={})", new_session_id);
 
-            // Start the recorder
+            // Start the recorder (skip in tests: no CoreAudio device needed)
             let mut rec = recorder.lock().await;
             rec.recorder.config.silence_db = silence_db;
             rec.recorder.config.hang_sec = silence_hang_sec;
@@ -408,7 +410,9 @@ impl RecordingController {
                 info!("VAD callback: setting vad_triggered flag");
                 vad_flag.store(true, Ordering::SeqCst);
             });
-            if let Err(e) = rec.start(Some(language.as_str().to_string())).await {
+            if !cfg!(test)
+                && let Err(e) = rec.start(Some(language.as_str().to_string())).await
+            {
                 error!("Failed to start recorder: {}", e);
                 return;
             }
@@ -452,18 +456,20 @@ impl RecordingController {
 
     /// Start recording in toggle mode (immediate, no delay)
     async fn start_toggle_recording(&self, is_assistive: bool) -> Result<()> {
-        // Check backend health before starting
-        match crate::client::check_health().await {
-            Ok(true) => {}
-            Ok(false) => {
-                warn!("Backend not ready (model loading)");
-                let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
-                return Ok(());
-            }
-            Err(e) => {
-                error!("Backend unavailable: {}", e);
-                let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
-                return Ok(());
+        // Check backend health before starting (skip in tests: no backend available)
+        if !cfg!(test) {
+            match crate::client::check_health().await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!("Backend not ready (model loading)");
+                    let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
+                    return Ok(());
+                }
+                Err(e) => {
+                    error!("Backend unavailable: {}", e);
+                    let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Error);
+                    return Ok(());
+                }
             }
         }
 
@@ -511,7 +517,10 @@ impl RecordingController {
             route_transcription_delta(text);
         })));
 
-        recorder.start(Some(language.as_str().to_string())).await?;
+        // Skip actual audio stream in tests (no CoreAudio device needed)
+        if !cfg!(test) {
+            recorder.start(Some(language.as_str().to_string())).await?;
+        }
 
         // Play start beep if enabled
         let beep_enabled = self.config.read().await.beep_on_start;
