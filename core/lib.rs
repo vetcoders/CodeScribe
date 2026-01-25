@@ -16,8 +16,6 @@
 //!
 //! - **whisper** - Embedded Whisper model (~900MB in binary), zero I/O
 //! - **tts** - Embedded CSM-1B model (~1GB in binary), text-to-speech
-//! - **vad** - Voice activity detection using WebRTC VAD
-//! - **embedder** - Text embeddings using E5 model via fastembed
 //! - **audio** - Recording and audio loading
 //! - **config** - User configuration
 //! - **ai_formatting** - Post-processing with LLMs
@@ -30,8 +28,6 @@
 
 pub mod audio;
 pub mod config;
-pub mod conversation;
-pub mod embedder;
 pub mod ipc;
 pub mod llm;
 pub mod pipeline;
@@ -65,8 +61,8 @@ pub mod stt_api {
 pub mod tts_api {
     pub use crate::tts::embedded::{EmbeddedTts, get_embedded_data, is_embedded_available};
     pub use crate::tts::{
-        AudioPlayer, SAMPLE_RATE, get_model_path, init, is_initialized, play, synthesize,
-        synthesize_to_file,
+        get_model_path, init, is_initialized, play, synthesize, synthesize_to_file, AudioPlayer,
+        SAMPLE_RATE,
     };
 }
 
@@ -74,35 +70,11 @@ pub mod tts_api {
 // Public API - VAD (voice activity detection)
 // ═══════════════════════════════════════════════════════════
 
-/// Voice activity detection using Silero VAD (neural network)
+/// Voice activity detection using Silero neural network
 pub mod vad_api {
     pub use crate::vad::{
-        CHUNK_SIZE, Resampler, SAMPLE_RATE, SileroVad, VadConfig, default_model_path, init,
-        init_with_config, is_initialized, is_speech, reset, speech_probability,
-    };
-}
-
-// ═══════════════════════════════════════════════════════════
-// Public API - Embedder (text embeddings)
-// ═══════════════════════════════════════════════════════════
-
-/// Text embeddings using E5 model via fastembed
-pub mod embedder_api {
-    pub use crate::embedder::{
-        DEFAULT_MODEL, EMBEDDING_DIM, EmbedderConfig, EmbedderEngine, embed, embed_batch, init,
-        is_initialized, similarity,
-    };
-}
-
-// ═══════════════════════════════════════════════════════════
-// Public API - Conversation (Moshi voice AI)
-// ═══════════════════════════════════════════════════════════
-
-/// Full-duplex conversational AI using Moshi
-pub mod conversation_api {
-    pub use crate::conversation::{
-        ConversationContext, ConversationEngine, FRAME_SAMPLES, MoshiConfig, NUM_CODEBOOKS,
-        SAMPLE_RATE, TurnManager,
+        VadConfig, init, is_initialized, is_speech, reset, speech_probability,
+        CHUNK_SIZE, SAMPLE_RATE,
     };
 }
 

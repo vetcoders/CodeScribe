@@ -17,9 +17,6 @@ pub struct VadConfig {
     /// Maximum silence duration in seconds before ending speech segment
     pub max_silence_duration_sec: f32,
 
-    /// Maximum utterance duration in seconds (force flush after this)
-    pub max_utterance_sec: f32,
-
     /// Pre-roll duration in seconds to keep before speech onset
     pub pre_roll_sec: f32,
 }
@@ -27,30 +24,10 @@ pub struct VadConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            // Clamp threshold to valid probability range [0.1, 0.95]
-            threshold: env_f32_clamped("CODESCRIBE_VAD_THRESHOLD", 0.5, 0.1, 0.95),
-            // Clamp durations to reasonable ranges
-            min_speech_duration_sec: env_f32_clamped(
-                "CODESCRIBE_VAD_MIN_SPEECH_SEC",
-                0.1,
-                0.01,
-                1.0,
-            ),
-            // Sync with default_env.txt: 1.2s (was 0.8s)
-            max_silence_duration_sec: env_f32_clamped(
-                "CODESCRIBE_VAD_MAX_SILENCE_SEC",
-                1.2,
-                0.1,
-                10.0,
-            ),
-            // Sync with default_env.txt: 60s (was 30s)
-            max_utterance_sec: env_f32_clamped(
-                "CODESCRIBE_VAD_MAX_UTTERANCE_SEC",
-                60.0,
-                1.0,
-                300.0,
-            ),
-            pre_roll_sec: env_f32_clamped("CODESCRIBE_VAD_PRE_ROLL_SEC", 0.3, 0.0, 2.0),
+            threshold: env_f32("CODESCRIBE_VAD_THRESHOLD", 0.5),
+            min_speech_duration_sec: env_f32("CODESCRIBE_VAD_MIN_SPEECH_SEC", 0.1),
+            max_silence_duration_sec: env_f32("CODESCRIBE_VAD_MAX_SILENCE_SEC", 0.8),
+            pre_roll_sec: env_f32("CODESCRIBE_VAD_PRE_ROLL_SEC", 0.3),
         }
     }
 }
@@ -62,16 +39,6 @@ impl VadConfig {
             threshold,
             ..Default::default()
         }
-    }
-
-    /// Get min speech duration in milliseconds (for Silero API)
-    pub fn min_speech_ms(&self) -> u64 {
-        (self.min_speech_duration_sec * 1000.0) as u64
-    }
-
-    /// Get max silence duration in milliseconds (for Silero API)
-    pub fn max_silence_ms(&self) -> u64 {
-        (self.max_silence_duration_sec * 1000.0) as u64
     }
 
     /// More sensitive detection (catches quiet speech, more false positives)
@@ -98,11 +65,6 @@ fn env_f32(key: &str, default: f32) -> f32 {
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(default)
-}
-
-/// Parse env var as f32 with clamping to valid range
-fn env_f32_clamped(key: &str, default: f32, min: f32, max: f32) -> f32 {
-    env_f32(key, default).clamp(min, max)
 }
 
 #[cfg(test)]

@@ -3,15 +3,15 @@
 #
 # Usage: ./scripts/download-csm.sh
 #
-# Downloads to: ~/.codescribe/models/csm-1b/
+# Downloads to: models/csm-1b/
 #
 # Created by M&K (c)2026 VetCoders
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# All models go to ~/.codescribe/models/
-MODEL_DIR="${HOME}/.codescribe/models/csm-1b"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+MODEL_DIR="$PROJECT_DIR/models/csm-1b"
 
 echo "╔═══════════════════════════════════════════════════════════╗"
 echo "║  Downloading CSM-1B Text-to-Speech Model                 ║"
