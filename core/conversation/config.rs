@@ -38,23 +38,17 @@ pub struct MoshiConfig {
 impl Default for MoshiConfig {
     fn default() -> Self {
         // Default to moshiko (male voice), paths can be overridden
-        // All models in ~/.codescribe/models/ (unified path)
         let models_dir = directories::BaseDirs::new()
-            .map(|d| d.home_dir().to_path_buf())
+            .map(|d| d.data_local_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".codescribe")
+            .join("codescribe")
             .join("models");
 
         Self {
-            // Moshiko LM weights (.gguf quantized)
-            model_path: models_dir.join("moshiko-q8").join("model.q8.gguf"),
-            // Mimi codec (shared with CSM TTS)
-            mimi_path: models_dir.join("csm-1b").join("mimi.safetensors"),
-            // SentencePiece tokenizer
-            tokenizer_path: models_dir
-                .join("moshiko-q8")
-                .join("tokenizer_spm_32k_3.model"),
-            temperature: 0.8,
+            model_path: models_dir.join("moshiko-q8"),
+            mimi_path: models_dir.join("mimi"),
+            tokenizer_path: models_dir.join("moshiko-q8").join("tokenizer.json"),
+            temperature: 0.7,
             top_p: 0.9,
             max_response_frames: 500, // ~40 seconds at 80ms/frame
             streaming: true,
@@ -72,18 +66,15 @@ impl MoshiConfig {
 
     /// Create config for Moshika (female voice)
     pub fn moshika() -> Self {
-        // All models in ~/.codescribe/models/ (unified path)
         let models_dir = directories::BaseDirs::new()
-            .map(|d| d.home_dir().to_path_buf())
+            .map(|d| d.data_local_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".codescribe")
+            .join("codescribe")
             .join("models");
 
         Self {
-            model_path: models_dir.join("moshika-q8").join("model.q8.gguf"),
-            tokenizer_path: models_dir
-                .join("moshika-q8")
-                .join("tokenizer_spm_32k_3.model"),
+            model_path: models_dir.join("moshika-q8"),
+            tokenizer_path: models_dir.join("moshika-q8").join("tokenizer.json"),
             voice: "moshika".to_string(),
             ..Self::default()
         }

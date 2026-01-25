@@ -52,8 +52,8 @@
 //   ```
 //
 // configuration via environment variables:
-//   - CODESCRIBE_VAD_THRESHOLD: speech probability threshold 0.0-1.0 (default: 0.5)
-//   - CODESCRIBE_VAD_MAX_SILENCE_SEC: silence duration before auto-stop (default: 1.2)
+//   - SILENCE_DB: silence threshold in dB (default: -45.0)
+//   - SILENCE_HANG_SEC: silence duration before auto-stop (default: 0.8)
 //   - AUTO_SILENCE: enable/disable silence detection (default: true)
 
 use crate::vad;
@@ -80,10 +80,13 @@ const CHANNELS: u16 = 1;
 /// Below this is considered silence. Default: 0.5
 const DEFAULT_SPEECH_THRESHOLD: f32 = 0.5;
 
-/// Silence duration threshold (seconds)
+/// Silence threshold in dB - DEPRECATED, use speech_threshold instead
+#[allow(dead_code)]
+const DEFAULT_SILENCE_DB: f32 = -45.0;
+
+/// Silence duration threshold (seconds) (runtime override: SILENCE_HANG_SEC env var)
 /// Recording stops automatically after this duration of continuous silence.
-/// Synced with VadConfig::max_silence_duration_sec default (1.2s)
-const DEFAULT_HANG_SEC: f32 = 1.2;
+const DEFAULT_HANG_SEC: f32 = 1.5;
 
 /// Size of audio chunks to read from stream (samples)
 const BLOCK_SIZE: usize = 1024;
@@ -117,11 +120,10 @@ impl Default for RecorderConfig {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(DEFAULT_SPEECH_THRESHOLD)
                 .clamp(0.1, 0.9),
-            hang_sec: std::env::var("CODESCRIBE_VAD_MAX_SILENCE_SEC")
+            hang_sec: std::env::var("SILENCE_HANG_SEC")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_HANG_SEC)
-                .clamp(0.1, 10.0),
+                .unwrap_or(DEFAULT_HANG_SEC),
             auto_silence: std::env::var("AUTO_SILENCE")
                 .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"))
                 .unwrap_or(true),
@@ -235,18 +237,6 @@ impl Recorder {
         }
 
         info!("Starting recording...");
-
-        // Initialize VAD (lazy init - only loads model on first use)
-        if !vad::is_initialized() {
-            let model_path = vad::default_model_path();
-            if let Err(e) = vad::init(&model_path) {
-                warn!(
-                    "VAD init failed ({}): {} - auto-stop disabled, speech_probability will return 1.0",
-                    model_path.display(),
-                    e
-                );
-            }
-        }
 
         // Clear buffer and reset diagnostics
         self.buffer

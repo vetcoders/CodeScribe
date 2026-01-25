@@ -6,7 +6,7 @@
 #   ./scripts/download-moshi.sh moshiko   # Download only male voice
 #   ./scripts/download-moshi.sh moshika   # Download only female voice
 #
-# Downloads to: ~/.codescribe/models/moshiko-q8/ and ~/.codescribe/models/moshika-q8/
+# Downloads to: models/moshiko-q8/ and models/moshika-q8/
 #
 # Note: Mimi codec is shared with CSM - run download-csm.sh if not present.
 #
@@ -15,8 +15,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# All models go to ~/.codescribe/models/
-MODELS_DIR="${HOME}/.codescribe/models"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+MODELS_DIR="$PROJECT_DIR/models"
 
 # Parse arguments
 DOWNLOAD_MOSHIKO=true
@@ -98,7 +98,7 @@ if [ "$DOWNLOAD_MOSHIKA" = true ]; then
 fi
 
 # Check for Mimi codec (shared with CSM)
-MIMI_FILE="${HOME}/.codescribe/models/csm-1b/mimi.safetensors"
+MIMI_FILE="$MODELS_DIR/csm-1b/mimi.safetensors"
 if [ ! -f "$MIMI_FILE" ]; then
     echo "⚠️  Mimi codec not found at: $MIMI_FILE"
     echo "   Moshi requires Mimi for audio encoding/decoding."
