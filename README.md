@@ -58,7 +58,7 @@ flowchart TB
     class APP,UI,BACKEND,CORE,TOOLS box
 ```
 
-> **Note:** The diagram above shows the **target architecture** with Tauri GUI. Current release is a **native macOS tray app** (without Tauri). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for current implementation details.
+> **Note:** The diagram above shows the **target architecture** with Tauri GUI (Voice Lab / Teacher / Settings). Current release is a **native macOS tray app** (without Tauri), and the Lab UI is **future-only**. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for current implementation details.
 
 > **Status:** current release (see `Cargo.toml`) — **Strictly Embedded Model** (~888MB binary, zero exceptions) + *Whisper Live* (streaming transcription).
 
@@ -187,7 +187,7 @@ flowchart TD
     B -->|Hold Ctrl| C[Start Recording]
     B -->|Double Option| C
     C --> D[Recording]
-    D -->|live chunks| E["Whisper STT (streaming)"]
+  D -->|live chunks| E[Whisper STT (streaming)]
     D -->|Release / Toggle| F[Stop]
     F --> G[Finalize last chunk]
     G --> H{AI Enabled?}
