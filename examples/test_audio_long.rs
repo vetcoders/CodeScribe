@@ -12,6 +12,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Model path: ~/.codescribe/models/ (unified standard)
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let default_model = PathBuf::from(&home).join(".codescribe/models/whisper-large-v3-turbo-mlx-q8");
+
     let (model, files): (PathBuf, Vec<PathBuf>) = if args[0] == "--model" {
         (
             PathBuf::from(&args[1]),
@@ -19,7 +23,7 @@ fn main() -> Result<()> {
         )
     } else {
         (
-            PathBuf::from("../codescribe-core/models/whisper-large-v3-mlx-q8"),
+            default_model,
             args.iter().map(PathBuf::from).collect(),
         )
     };
