@@ -76,4 +76,5 @@ docs/runtime-diagnosis.md
 /logs/*.log
 *.debug.log
 /core/models
-*.log
+/tmp/*.log
+codescribe.log

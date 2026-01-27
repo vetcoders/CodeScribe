@@ -132,6 +132,7 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 ### Transkrypcja (local/cloud)
 - `USE_LOCAL_STT` (RESTART NEEDED)
 - `LOCAL_MODEL`, `WHISPER_MODEL`, `WHISPER_LANGUAGE` (RESTART NEEDED)
+- `WHISPER_INITIAL_PROMPT` – prompt inicjalizujący dla Whisper (słownictwo domenowe, formatowanie) (RESTART NEEDED)
 - `STT_ENDPOINT`, `STT_API_KEY` (RESTART NEEDED)
 - `CODESCRIBE_MODEL_PATH`, `CODESCRIBE_MODELS_DIR` (RESTART NEEDED)
 

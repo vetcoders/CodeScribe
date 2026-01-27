@@ -568,6 +568,21 @@ impl LocalWhisperEngine {
             tokens.push(t);
         }
 
+        // Initial prompt: tokenize and prepend to decoder context (helps with vocabulary/formatting)
+        if let Some(ref prompt) = self.decoding_params.initial_prompt
+            && let Ok(encoding) = self.tokenizer.encode(prompt.as_str(), false)
+        {
+            let prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+            if !prompt_tokens.is_empty() {
+                tracing::debug!(
+                    "Initial prompt: {} ({} tokens)",
+                    prompt,
+                    prompt_tokens.len()
+                );
+                tokens.extend(prompt_tokens);
+            }
+        }
+
         let mut all_tokens = Vec::new();
 
         // Run encoder once

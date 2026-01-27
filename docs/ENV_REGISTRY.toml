@@ -210,6 +210,13 @@ reload = "restart"
 category = "stt"
 description = "Whisper transcription language code"
 
+[vars.WHISPER_INITIAL_PROMPT]
+default = ""
+type = "string"
+reload = "restart"
+category = "stt"
+description = "Initial prompt for Whisper (domain vocabulary, formatting hints)"
+
 [vars.CODESCRIBE_MODEL_PATH]
 default = ""
 type = "string"

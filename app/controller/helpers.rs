@@ -54,7 +54,7 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
     crate::voice_chat_ui::set_voice_chat_send_callback(Some(Arc::new(move |text: String| {
         let config = Arc::clone(&callback_config);
         tokio::spawn(async move {
-            crate::voice_chat_ui::update_voice_chat_status("Wysyłam...");
+            crate::voice_chat_ui::update_voice_chat_status("Sending...");
             crate::voice_chat_ui::set_voice_chat_sending(true);
 
             let (lang_str, transcript_mode) = {

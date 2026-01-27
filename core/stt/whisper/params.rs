@@ -24,6 +24,10 @@ pub struct DecodingParams {
     /// Log probability threshold - if avg logprob < this, decoding failed
     /// mlx_whisper default: -1.0
     pub logprob_threshold: f32,
+    /// Initial prompt to guide transcription (domain vocabulary, formatting hints)
+    /// Tokenized and prepended to decoder context after special tokens
+    /// Env: WHISPER_INITIAL_PROMPT
+    pub initial_prompt: Option<String>,
 }
 
 impl Default for DecodingParams {
@@ -38,6 +42,10 @@ impl Default for DecodingParams {
             no_speech_threshold: 0.5, // was 0.6 - stricter silence detection
             compression_ratio_threshold: 2.0, // was 2.4 - stricter hallucination detection
             logprob_threshold: -0.5,  // was -1.0 - reject low-confidence output
+            // Initial prompt from env - helps with domain vocabulary and formatting
+            initial_prompt: std::env::var("WHISPER_INITIAL_PROMPT")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
