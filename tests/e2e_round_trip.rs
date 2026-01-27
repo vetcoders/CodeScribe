@@ -398,7 +398,7 @@ fn test_punctuation_handling() -> Result<()> {
     eprintln!("Output: '{}'", output.trim());
 
     // Check that multiple sentences are preserved
-    let sentence_count = output.matches(|c| c == '.' || c == '!' || c == '?').count();
+    let sentence_count = output.matches(['.', '!', '?']).count();
     eprintln!("Sentence endings found: {}", sentence_count);
 
     // At least some punctuation should survive

@@ -30,11 +30,14 @@ impl Default for DecodingParams {
     fn default() -> Self {
         Self {
             temperature: 0.0,        // greedy (mlx_whisper default)
-            no_repeat_ngram_size: 4, // block 4-gram repetitions (increased for better coverage)
+            no_repeat_ngram_size: 3, // block 3-gram repetitions (faster-whisper default)
             suppress_blank: true,
-            no_speech_threshold: 0.6,         // mlx_whisper default
-            compression_ratio_threshold: 2.4, // mlx_whisper default
-            logprob_threshold: -1.0,          // mlx_whisper default
+            // Stricter thresholds (aligned with faster-whisper / API):
+            // - Reduces hallucinations by rejecting low-quality decodings
+            // - Matches lbrx-services/stt-engine defaults for consistency
+            no_speech_threshold: 0.5, // was 0.6 - stricter silence detection
+            compression_ratio_threshold: 2.0, // was 2.4 - stricter hallucination detection
+            logprob_threshold: -0.5,  // was -1.0 - reject low-confidence output
         }
     }
 }

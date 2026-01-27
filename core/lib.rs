@@ -16,7 +16,7 @@
 //!
 //! - **whisper** - Embedded Whisper model (~900MB in binary), zero I/O
 //! - **tts** - Embedded CSM-1B model (~1GB in binary), text-to-speech
-//! - **vad** - Voice activity detection using WebRTC VAD
+//! - **vad** - Voice activity detection using Silero VAD neural network
 //! - **embedder** - Text embeddings using E5 model (offline)
 //! - **audio** - Recording and audio loading
 //! - **config** - User configuration

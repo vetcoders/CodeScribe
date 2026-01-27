@@ -153,10 +153,7 @@ fn run_roundtrip(input: &str, language: &str, play_audio: bool) -> Result<()> {
             YELLOW, RESET
         );
     } else {
-        println!(
-            "   {}❌ POOR - Significant meaning loss{}",
-            "\x1b[31m", RESET
-        );
+        println!("   \x1b[31m❌ POOR - Significant meaning loss{}", RESET);
     }
 
     Ok(())
@@ -193,14 +190,14 @@ fn interactive_mode(language: &str, play_audio: bool) -> Result<()> {
             break;
         }
 
-        if input.starts_with("lang ") {
-            current_lang = input[5..].trim().to_string();
+        if let Some(lang) = input.strip_prefix("lang ") {
+            current_lang = lang.trim().to_string();
             println!("{}Language set to: {}{}", DIM, current_lang, RESET);
             continue;
         }
 
         if let Err(e) = run_roundtrip(input, &current_lang, play_audio) {
-            eprintln!("{}Error: {}{}", "\x1b[31m", e, RESET);
+            eprintln!("\x1b[31mError: {}{}", e, RESET);
         }
         println!();
     }

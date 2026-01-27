@@ -827,14 +827,13 @@ impl RecordingController {
         // Cancel any existing delayed start
         self.cancel_pending_hold_start().await;
 
-        // Reset VAD flag for new session
-        self.vad_triggered.store(false, Ordering::SeqCst);
+        // HOLD MODE: No VAD - user controls recording by releasing the key
+        // (VAD flag not used here, only in toggle mode)
 
         let state = Arc::clone(&self.state);
         let session_id = Arc::clone(&self.session_id);
         let recorder = Arc::clone(&self.recorder);
         let delay = Duration::from_millis(delay_ms);
-        let vad_flag = Arc::clone(&self.vad_triggered);
 
         let task = tokio::spawn(async move {
             // Wait for the configured delay
@@ -857,12 +856,10 @@ impl RecordingController {
             set_assistive_session(is_assistive);
 
             // Start the recorder (skip in tests: no CoreAudio device needed)
-            // hang_sec is configured via CODESCRIBE_VAD_MAX_SILENCE_SEC env var (single source of truth)
+            // HOLD MODE: No VAD auto-stop! User controls recording by releasing the key.
+            // If user wants to hold in silence for 45 minutes - that's their choice.
+            // VAD is ONLY active in toggle (handsoff) mode.
             let mut rec = recorder.lock().await;
-            rec.recorder.set_on_vad_stop(move || {
-                info!("VAD callback: setting vad_triggered flag");
-                vad_flag.store(true, Ordering::SeqCst);
-            });
             // Set streaming callback for overlay updates (routed by session mode)
             rec.set_delta_callback(Some(Arc::new(|text: &str| {
                 route_transcription_delta(text);
@@ -969,7 +966,7 @@ impl RecordingController {
         let vad_flag = Arc::clone(&self.vad_triggered);
 
         // Start the recorder with VAD callback
-        // hang_sec is configured via CODESCRIBE_VAD_MAX_SILENCE_SEC env var (single source of truth)
+        // hang_sec is configured via CODESCRIBE_VAD_SILENCE_SEC env var (single source of truth)
         let mut recorder = self.recorder.lock().await;
 
         recorder.recorder.set_on_vad_stop(move || {

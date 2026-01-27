@@ -1,0 +1,539 @@
+# ENV_REGISTRY.toml - Central registry of all environment variables
+#
+# SINGLE SOURCE OF TRUTH for CodeScribe environment configuration.
+# This file is validated by pre-commit hooks - any new env var MUST be added here.
+#
+# Schema per variable:
+#   [vars.<NAME>]
+#   default = "value"           # Default value (string)
+#   type = "string|bool|f32|u64"  # Value type
+#   reload = "hot|restart|rebuild"  # When changes take effect
+#   category = "vad|audio|llm|..." # Grouping
+#   description = "..."         # Human-readable description
+#   deprecated = "NEW_VAR"      # If deprecated, points to replacement
+#
+# Created by M&K (c)2026 VetCoders
+
+[meta]
+version = "1.0.0"
+updated = "2026-01-27"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VAD (Voice Activity Detection) - Silero Neural Network
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.CODESCRIBE_VAD_ENABLED]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "vad"
+description = "Enable/disable VAD auto-stop on silence"
+
+[vars.CODESCRIBE_VAD_THRESHOLD]
+default = "0.35"
+type = "f32"
+reload = "restart"
+category = "vad"
+description = "Speech probability threshold (0.0-1.0). Lower = more sensitive"
+range = "0.1-0.95"
+
+[vars.CODESCRIBE_VAD_SILENCE_SEC]
+default = "2.5"
+type = "f32"
+reload = "restart"
+category = "vad"
+description = "Silence duration (seconds) before auto-stop"
+range = "0.1-10.0"
+
+[vars.CODESCRIBE_VAD_MIN_SPEECH_SEC]
+default = "0.1"
+type = "f32"
+reload = "restart"
+category = "vad"
+description = "Minimum speech duration before triggering (filters clicks)"
+range = "0.01-1.0"
+
+[vars.CODESCRIBE_VAD_MAX_UTTERANCE_SEC]
+default = "60.0"
+type = "f32"
+reload = "restart"
+category = "vad"
+description = "Maximum utterance length before force flush"
+range = "1.0-300.0"
+
+[vars.CODESCRIBE_VAD_PRE_ROLL_SEC]
+default = "0.5"
+type = "f32"
+reload = "restart"
+category = "vad"
+description = "Pre-roll buffer (seconds) before speech onset"
+range = "0.0-2.0"
+
+# DEPRECATED - use new names
+[vars.AUTO_SILENCE]
+deprecated = "CODESCRIBE_VAD_ENABLED"
+description = "DEPRECATED: Use CODESCRIBE_VAD_ENABLED instead"
+
+[vars.CODESCRIBE_VAD_MAX_SILENCE_SEC]
+deprecated = "CODESCRIBE_VAD_SILENCE_SEC"
+description = "DEPRECATED: Use CODESCRIBE_VAD_SILENCE_SEC instead"
+
+[vars.CODESCRIBE_VAD_SENSITIVITY]
+deprecated = "CODESCRIBE_VAD_THRESHOLD"
+description = "DEPRECATED: Use CODESCRIBE_VAD_THRESHOLD instead"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Audio / Recording
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.AUDIO_INPUT_DEVICE]
+default = ""
+type = "string"
+reload = "restart"
+category = "audio"
+description = "Audio input device name (empty = system default)"
+
+[vars.BEEP_ON_START]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "audio"
+description = "Play beep when recording starts"
+
+[vars.SOUND_NAME]
+default = "Tink"
+type = "string"
+reload = "restart"
+category = "audio"
+description = "macOS system sound name for beep"
+
+[vars.SOUND_VOLUME]
+default = "1.0"
+type = "f32"
+reload = "restart"
+category = "audio"
+description = "Sound volume (0.0-1.0)"
+range = "0.0-1.0"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Streaming / Buffering
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.CODESCRIBE_BUFFERED_STREAM]
+default = "1"
+type = "bool"
+reload = "hot"
+category = "streaming"
+description = "Use buffered streaming mode (smoother output)"
+
+[vars.CODESCRIBE_BUFFER_DELAY_MS]
+default = "3000"
+type = "u64"
+reload = "hot"
+category = "streaming"
+description = "Initial buffer delay in milliseconds"
+
+[vars.CODESCRIBE_TYPING_CPS]
+default = "30"
+type = "f32"
+reload = "hot"
+category = "streaming"
+description = "Typing speed in characters per second"
+
+[vars.CODESCRIBE_EMIT_WORDS_MAX]
+default = "3"
+type = "u64"
+reload = "hot"
+category = "streaming"
+description = "Maximum words emitted per tick (buffered mode)"
+
+[vars.CODESCRIBE_STREAM_CHUNK_SEC]
+default = "15.0"
+type = "f32"
+reload = "hot"
+category = "streaming"
+description = "Streaming chunk duration in seconds"
+range = "0.5-30.0"
+
+[vars.CODESCRIBE_STREAM_OVERLAP_RATIO]
+default = "0.25"
+type = "f32"
+reload = "hot"
+category = "streaming"
+description = "Overlap ratio between chunks"
+range = "0.05-0.8"
+
+[vars.CODESCRIBE_STREAM_SIMILARITY]
+default = "0.93"
+type = "f32"
+reload = "hot"
+category = "streaming"
+description = "Similarity threshold for deduplication"
+
+[vars.CODESCRIBE_STREAM_NOVELTY]
+default = "0.12"
+type = "f32"
+reload = "hot"
+category = "streaming"
+description = "Novelty threshold for deduplication"
+
+[vars.CODESCRIBE_STREAM_DISABLE_EMBEDDINGS]
+default = "0"
+type = "bool"
+reload = "hot"
+category = "streaming"
+description = "Disable embedding-based deduplication"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Whisper / STT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.USE_LOCAL_STT]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "stt"
+description = "Use local Whisper model (vs cloud)"
+
+[vars.WHISPER_LANGUAGE]
+default = "pl"
+type = "string"
+reload = "restart"
+category = "stt"
+description = "Whisper transcription language code"
+
+[vars.CODESCRIBE_MODEL_PATH]
+default = ""
+type = "string"
+reload = "restart"
+category = "stt"
+description = "Override path to Whisper model directory"
+
+[vars.CODESCRIBE_MODELS_DIR]
+default = ""
+type = "string"
+reload = "restart"
+category = "stt"
+description = "Directory containing all models"
+
+[vars.STT_ENDPOINT]
+default = ""
+type = "string"
+reload = "restart"
+category = "stt"
+description = "Cloud STT API endpoint (when USE_LOCAL_STT=0)"
+
+[vars.STT_API_KEY]
+default = ""
+type = "string"
+reload = "restart"
+category = "stt"
+description = "Cloud STT API key"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LLM / AI Formatting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.AI_FORMATTING_ENABLED]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "llm"
+description = "Enable AI formatting of transcripts"
+
+[vars.LLM_ENDPOINT]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "Default LLM API endpoint"
+
+[vars.LLM_MODEL]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "Default LLM model name"
+
+[vars.LLM_API_KEY]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "Default LLM API key"
+
+[vars.LLM_FORMATTING_ENDPOINT]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "LLM endpoint for formatting mode (overrides LLM_ENDPOINT)"
+
+[vars.LLM_FORMATTING_MODEL]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "LLM model for formatting mode"
+
+[vars.LLM_FORMATTING_API_KEY]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "LLM API key for formatting mode"
+
+[vars.LLM_FORMATTING_TEMPERATURE]
+default = "0.1"
+type = "f32"
+reload = "hot"
+category = "llm"
+description = "Temperature for formatting mode"
+
+[vars.LLM_ASSISTIVE_ENDPOINT]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "LLM endpoint for assistive mode (overrides LLM_ENDPOINT)"
+
+[vars.LLM_ASSISTIVE_MODEL]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "LLM model for assistive mode"
+
+[vars.LLM_ASSISTIVE_API_KEY]
+default = ""
+type = "string"
+reload = "hot"
+category = "llm"
+description = "LLM API key for assistive mode"
+
+[vars.LLM_USE_STREAMING]
+default = "1"
+type = "bool"
+reload = "hot"
+category = "llm"
+description = "Use streaming responses from LLM"
+
+[vars.TRANSCRIPT_SEND_MODE]
+default = "streaming"
+type = "string"
+reload = "restart"
+category = "llm"
+description = "How to send transcripts (streaming|end_of_utterance)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Hotkeys
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.HOLD_MODS]
+default = "ctrl"
+type = "string"
+reload = "restart"
+category = "hotkeys"
+description = "Hold modifier keys (ctrl|ctrl_alt|ctrl_shift|ctrl_cmd)"
+
+[vars.HOLD_EXCLUSIVE]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "hotkeys"
+description = "Exclusive hold mode (no other keys during hold)"
+
+[vars.TOGGLE_TRIGGER]
+default = "double_option"
+type = "string"
+reload = "restart"
+category = "hotkeys"
+description = "Toggle recording trigger"
+
+[vars.HOLD_START_DELAY_MS]
+default = "800"
+type = "u64"
+reload = "restart"
+category = "hotkeys"
+description = "Delay before hold recording starts (ms)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UI / Overlay
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.SHOW_TRAY_GLYPH]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "ui"
+description = "Show tray icon glyph"
+
+[vars.HOLD_INDICATOR]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "ui"
+description = "Show hold indicator badge"
+
+[vars.HOLD_BADGE_SIZE]
+default = "12"
+type = "u64"
+reload = "restart"
+category = "ui"
+description = "Hold badge size in pixels"
+
+[vars.HOLD_BADGE_OFFSET_X]
+default = "10"
+type = "i64"
+reload = "restart"
+category = "ui"
+description = "Hold badge X offset"
+
+[vars.HOLD_BADGE_OFFSET_Y]
+default = "-10"
+type = "i64"
+reload = "restart"
+category = "ui"
+description = "Hold badge Y offset"
+
+[vars.OVERLAY_POSITION_MODE]
+default = "snapped_top_right"
+type = "string"
+reload = "restart"
+category = "ui"
+description = "Overlay position mode"
+
+[vars.OVERLAY_CUSTOM_X]
+default = "0"
+type = "i64"
+reload = "restart"
+category = "ui"
+description = "Custom overlay X position (when mode=custom)"
+
+[vars.OVERLAY_CUSTOM_Y]
+default = "0"
+type = "i64"
+reload = "restart"
+category = "ui"
+description = "Custom overlay Y position (when mode=custom)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Clipboard
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.RESTORE_CLIPBOARD]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "clipboard"
+description = "Restore clipboard after paste"
+
+[vars.RESTORE_CLIPBOARD_DELAY_MS]
+default = "1000"
+type = "u64"
+reload = "restart"
+category = "clipboard"
+description = "Delay before restoring clipboard (ms)"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Storage / History
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.HISTORY_ENABLED]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "storage"
+description = "Enable transcript history"
+
+[vars.DUMP_AUDIO_LOGS]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "storage"
+description = "Save audio files with transcripts"
+
+[vars.CODESCRIBE_DATA_DIR]
+default = ""
+type = "string"
+reload = "restart"
+category = "storage"
+description = "Override data directory (default: ~/.codescribe)"
+
+[vars.CODESCRIBE_APP_DIR]
+default = ""
+type = "string"
+reload = "restart"
+category = "storage"
+description = "Override app directory (fallback for DATA_DIR)"
+
+[vars.CODESCRIBE_ENV_PATH]
+default = ""
+type = "string"
+reload = "restart"
+category = "storage"
+description = "Override .env file path"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Build-time
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.CODESCRIBE_NO_EMBED]
+default = "0"
+type = "bool"
+reload = "rebuild"
+category = "build"
+description = "Skip embedding Whisper model in binary"
+
+[vars.CODESCRIBE_EMBED_TTS]
+default = "0"
+type = "bool"
+reload = "rebuild"
+category = "build"
+description = "Embed TTS model in binary"
+
+[vars.CODESCRIBE_EMBED_E5]
+default = "0"
+type = "bool"
+reload = "rebuild"
+category = "build"
+description = "Embed E5 embedder model in binary"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Debug / Test
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[vars.CODESCRIBE_DEBUG_TOKENS]
+default = "0"
+type = "bool"
+reload = "restart"
+category = "debug"
+description = "Debug token output from Whisper"
+
+[vars.CODESCRIBE_STREAM_LOG]
+default = "0"
+type = "bool"
+reload = "hot"
+category = "debug"
+description = "Enable streaming debug log"
+
+[vars.CODESCRIBE_STREAM_LOG_PATH]
+default = ""
+type = "string"
+reload = "hot"
+category = "debug"
+description = "Path for streaming debug log"
+
+[vars.RUST_LOG]
+default = ""
+type = "string"
+reload = "restart"
+category = "debug"
+description = "Rust logging filter"
+
+[vars.CODESCRIBE_LOG_STDOUT]
+default = "0"
+type = "bool"
+reload = "restart"
+category = "debug"
+description = "Log to stdout instead of file"
