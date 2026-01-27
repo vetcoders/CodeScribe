@@ -132,6 +132,9 @@ pub struct RecordingController {
 
     /// Task handle for conversation audio processing loop
     conversation_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+
+    /// Flag to skip Moshi init if models are not available (avoids spam)
+    moshi_unavailable: Arc<AtomicBool>,
 }
 
 impl RecordingController {
@@ -183,6 +186,7 @@ impl RecordingController {
             conversation_stop_flag: Arc::new(AtomicBool::new(false)),
             conversation_generation: Arc::new(AtomicU64::new(0)),
             conversation_task: Arc::new(Mutex::new(None)),
+            moshi_unavailable: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -235,6 +239,7 @@ impl RecordingController {
             conversation_stop_flag: Arc::new(AtomicBool::new(false)),
             conversation_generation: Arc::new(AtomicU64::new(0)),
             conversation_task: Arc::new(Mutex::new(None)),
+            moshi_unavailable: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -419,6 +424,12 @@ impl RecordingController {
     /// Initializes ConversationEngine and AudioPlayer, then starts the audio
     /// processing loop that feeds mic input to Moshi and plays responses.
     async fn start_conversation_mode(&self) -> Result<()> {
+        // Early exit if Moshi was already determined to be unavailable (no spam)
+        if self.moshi_unavailable.load(Ordering::SeqCst) {
+            debug!("Moshi unavailable (cached) - skipping conversation mode");
+            return Ok(());
+        }
+
         info!("Starting conversation mode (Moshi full-duplex)");
 
         // 1. Initialize ConversationEngine if needed (lazy init)
@@ -427,11 +438,23 @@ impl RecordingController {
             if engine_guard.is_none() {
                 info!("Lazy-initializing ConversationEngine...");
                 let config = MoshiConfig::default();
+
+                // Pre-validate: check if model files exist before trying to load
+                if let Err(e) = config.validate() {
+                    warn!(
+                        "Moshi models not available: {} (conversation mode disabled)",
+                        e
+                    );
+                    self.moshi_unavailable.store(true, Ordering::SeqCst);
+                    return Ok(()); // Silent return - not an error, just unavailable
+                }
+
                 match ConversationEngine::new(config) {
                     Ok(mut engine) => {
                         // Pre-initialize to load models now (rather than on first audio)
                         if let Err(e) = engine.init() {
                             error!("ConversationEngine init failed: {}", e);
+                            self.moshi_unavailable.store(true, Ordering::SeqCst);
                             crate::voice_chat_ui::add_voice_chat_error_message(&format!(
                                 "Moshi init failed: {}",
                                 e
@@ -443,6 +466,7 @@ impl RecordingController {
                     }
                     Err(e) => {
                         error!("Failed to create ConversationEngine: {}", e);
+                        self.moshi_unavailable.store(true, Ordering::SeqCst);
                         crate::voice_chat_ui::add_voice_chat_error_message(&format!(
                             "Moshi unavailable: {}",
                             e
