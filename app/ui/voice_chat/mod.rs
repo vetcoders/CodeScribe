@@ -69,7 +69,20 @@ fn show_voice_chat_overlay_impl() {
             let window = window_ptr as Id;
             let is_window: bool = msg_send![window, isKindOfClass: ns_window];
             if is_window {
+                // Ensure previously-created overlays remain visible and sized correctly.
                 let _: () = msg_send![window, orderFrontRegardless];
+                let _: () = msg_send![window, setAlphaValue: 1.0f64];
+
+                if let Some(blur_ptr) = state.blur_view {
+                    let blur_view = blur_ptr as Id;
+                    let w_frame: CGRect = msg_send![window, frame];
+                    let blur_frame = CGRect::new(
+                        &CGPoint::new(0.0, 0.0),
+                        &CGSize::new(w_frame.size.width, w_frame.size.height),
+                    );
+                    let _: () = msg_send![blur_view, setFrame: blur_frame];
+                }
+
                 info!("Voice chat overlay reused");
                 return;
             }
@@ -159,7 +172,11 @@ fn show_voice_chat_overlay_impl() {
 
         let ns_visual = Class::get("NSVisualEffectView").unwrap();
         let blur_view: Id = msg_send![ns_visual, alloc];
-        let blur_view: Id = msg_send![blur_view, initWithFrame: frame];
+        let blur_frame = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(window_width, window_height),
+        );
+        let blur_view: Id = msg_send![blur_view, initWithFrame: blur_frame];
         let _: () = msg_send![blur_view, setMaterial: NSVisualEffectMaterial::HUDWindow];
         let _: () = msg_send![blur_view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
         let _: () = msg_send![blur_view, setState: NSVisualEffectState::Active];
