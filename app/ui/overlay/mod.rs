@@ -543,8 +543,6 @@ fn show_transcription_overlay_impl() {
             let window = window_ptr as Id;
             let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
             window_show(window);
-            let nil: *mut Object = std::ptr::null_mut();
-            let _: () = msg_send![window, makeKeyAndOrderFront: nil];
             resize_overlay_to_fit_text(&mut state);
             info!("Transcription overlay reused");
             return;
@@ -909,8 +907,6 @@ fn show_transcription_overlay_impl() {
         // Show the window with fade-in animation
         window_set_alpha(window, 0.0);
         window_show(window);
-        let nil: *mut Object = std::ptr::null_mut();
-        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
         animate_fade(window, 1.0, 0.2);
 
         state.window = Some(window as usize);

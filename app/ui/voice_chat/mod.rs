@@ -375,8 +375,6 @@ fn show_voice_chat_overlay_impl() {
 
         window_set_alpha(window, 0.0);
         window_show(window);
-        let nil: *mut Object = std::ptr::null_mut();
-        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
         crate::ui_helpers::animate_fade(window, 1.0, 0.2);
 
         let has_messages = !state.messages.is_empty();
