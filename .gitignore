@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 .venv/
 .env
+.env.e2e
 .pids/
 .ruff_cache/
 .mypy_cache/
@@ -78,3 +79,4 @@ docs/runtime-diagnosis.md
 /core/models
 /tmp/*.log
 codescribe.log
+*.log

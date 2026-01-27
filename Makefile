@@ -13,6 +13,10 @@ SHELL := /bin/bash
 VERSION_FILE := Cargo.toml
 EDITOR ?= $(shell command -v code || command -v nvim || command -v vim || echo nano)
 ENV_LOAD := set -a; [ -f $$HOME/.codescribe/.env ] && source $$HOME/.codescribe/.env; set +a
+E2E_ENV_EXAMPLE := .env.example
+E2E_ENV_FILE := ./.env.e2e
+ENV_LOAD_E2E := set -a; [ -f $(E2E_ENV_FILE) ] && source $(E2E_ENV_FILE); set +a
+E2E_ENV_GEN := ./scripts/validate-envs.sh --env-example --env-example-path $(E2E_ENV_EXAMPLE) --emit-e2e-env $(E2E_ENV_FILE)
 
 # Test defaults (reference/cloud unless forced local)
 TEST_USE_LOCAL_LLM ?= 0
@@ -176,16 +180,19 @@ test-quick:
 
 test-e2e:
 	@echo "=== E2E Tests (mock) ==="
-	@$(ENV_LOAD); $(APPLY_TEST_LLM); cargo test e2e --release -- --nocapture
+	@$(E2E_ENV_GEN)
+	@$(ENV_LOAD_E2E); $(APPLY_TEST_LLM); cargo test e2e --release -- --nocapture
 
 test-e2e-real:
 	@echo "=== E2E Tests (real API) ==="
 	@echo "Requires: LLM_API_KEY, LLM_ASSISTIVE_API_KEY"
-	@$(ENV_LOAD); $(APPLY_TEST_LLM); cargo test e2e --release -- --ignored --nocapture
+	@$(E2E_ENV_GEN)
+	@$(ENV_LOAD_E2E); $(APPLY_TEST_LLM); cargo test e2e --release -- --ignored --nocapture
 
 test-sse:
 	@echo "=== SSE Streaming Tests ==="
-	@$(ENV_LOAD); $(APPLY_TEST_LLM); cargo test e2e_sse --release -- --ignored --nocapture
+	@$(E2E_ENV_GEN)
+	@$(ENV_LOAD_E2E); $(APPLY_TEST_LLM); cargo test e2e_sse --release -- --ignored --nocapture
 
 test-formatting:
 	@echo "=== AI Formatting Tests ==="
@@ -199,7 +206,8 @@ test-all:
 test-roundtrip:
 	@echo "=== Round-Trip Tests (TTS→STT→Embeddings) ==="
 	@echo "Tests actual embedded models pipeline integrity"
-	@$(ENV_LOAD); CODESCRIBE_E2E_ROUNDTRIP=1 cargo test --test e2e_round_trip --release -- --nocapture
+	@$(E2E_ENV_GEN)
+	@$(ENV_LOAD_E2E); CODESCRIBE_E2E_ROUNDTRIP=1 cargo test --test e2e_round_trip --release -- --nocapture
 
 demo:
 	@echo "=== Full Pipeline Demo ==="
