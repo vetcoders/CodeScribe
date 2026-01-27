@@ -148,17 +148,19 @@ fn frontmost_app_name() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn selected_text_from_frontmost(max_chars: usize, copy_delay_ms: u64) -> Option<String> {
-    // Prefer Accessibility selection if available (doesn't depend on clipboard).
-    if let Some(selected) = crate::ui::get_selected_text(max_chars) {
-        return Some(selected);
-    }
-
-    // If we can reliably detect that selection length is zero, do NOT fall back to Cmd+C.
-    // This prevents accidental leakage of arbitrary clipboard content into the Assistive prompt.
+    // If we can reliably detect that selection length is zero, treat as "no selection" and
+    // never use any fallback that might touch the clipboard.
     if let Some(sel_len) = crate::ui::get_selected_text_length()
         && sel_len == 0
     {
         return None;
+    }
+
+    // Prefer Accessibility selection if available (doesn't depend on clipboard).
+    // Guard: some apps may return non-empty AXSelectedText even when the selection length is 0;
+    // we handle that above.
+    if let Some(selected) = crate::ui::get_selected_text(max_chars) {
+        return Some(selected);
     }
 
     // Cmd+C fallback is opt-in (off by default). Some apps don't expose AX selection APIs.

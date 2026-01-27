@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -20,6 +21,13 @@ const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.93;
 const DEFAULT_NOVELTY_THRESHOLD: f32 = 0.12;
 const MAX_EMBED_CHARS: usize = 512;
 const MAX_DROPS_IN_ROW: u8 = 2;
+
+lazy_static! {
+    // Whisper sometimes emits trailing emoticon artifacts like ":D", ":-D", "::D", often repeated.
+    // We strip them only at the end of the utterance.
+    static ref TRAILING_SMILEY_D_RE: Regex =
+        Regex::new(r"(?i)(?:\s*:+-?d)+(?:\s*:+\s*)*$").expect("trailing :D regex");
+}
 
 #[derive(Debug, Deserialize)]
 struct LexiconEntry {
@@ -429,11 +437,32 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-fn cleanup_artifacts(text: &str) -> String {
-    if crate::ai_formatting::has_repetition_loop(text) {
-        return crate::ai_formatting::remove_simple_repetitions(text);
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return default;
+            }
+            let v = trimmed.to_ascii_lowercase();
+            !(v == "0" || v == "false" || v == "off" || v == "no")
+        }
+        Err(_) => default,
     }
-    text.to_string()
+}
+
+fn cleanup_artifacts(text: &str) -> String {
+    // Default ON: treat trailing ":D" bursts as ASR artifacts.
+    let mut out = if env_flag("CODESCRIBE_STRIP_TRAILING_SMILEY_D", true) {
+        TRAILING_SMILEY_D_RE.replace(text, "").to_string()
+    } else {
+        text.to_string()
+    };
+
+    if crate::ai_formatting::has_repetition_loop(&out) {
+        out = crate::ai_formatting::remove_simple_repetitions(&out);
+    }
+    out
 }
 
 fn normalize_whitespace(text: &str) -> String {
@@ -484,6 +513,14 @@ mod tests {
         let input = "To jest to jest to jest   bardzo  wazny \n test systemu.";
         let output = processor.process(input).expect("expected output");
         assert_eq!(output, "To jest bardzo wazny test systemu.");
+    }
+
+    #[test]
+    fn test_strip_trailing_smiley_d() {
+        let mut processor = StreamPostProcessor::new();
+        let input = "Siema, czy jestes tam? :D :";
+        let output = processor.process_utterance(input).expect("expected output");
+        assert_eq!(output, "Siema, czy jestes tam?");
     }
 
     #[test]
