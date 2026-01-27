@@ -321,6 +321,9 @@ impl RecordingController {
                         .unwrap_or_default();
                     *self.assistive_context.write().await = Some(ctx);
                 }
+                if let Some(ctx) = self.assistive_context.read().await.clone() {
+                    crate::voice_chat_ui::set_voice_chat_target_app(ctx.frontmost_app.clone());
+                }
 
                 crate::hide_transcription_overlay();
                 crate::show_voice_chat_overlay();
@@ -916,6 +919,14 @@ impl RecordingController {
                     .await
                     .unwrap_or_default();
                 *assistive_context.write().await = Some(ctx);
+                crate::voice_chat_ui::set_voice_chat_target_app(
+                    assistive_context
+                        .read()
+                        .await
+                        .clone()
+                        .unwrap_or_default()
+                        .frontmost_app,
+                );
 
                 crate::hide_transcription_overlay();
                 crate::show_voice_chat_overlay();
@@ -1040,6 +1051,14 @@ impl RecordingController {
                 .await
                 .unwrap_or_default();
             *self.assistive_context.write().await = Some(ctx);
+            crate::voice_chat_ui::set_voice_chat_target_app(
+                self.assistive_context
+                    .read()
+                    .await
+                    .clone()
+                    .unwrap_or_default()
+                    .frontmost_app,
+            );
 
             crate::hide_transcription_overlay();
             crate::show_voice_chat_overlay();

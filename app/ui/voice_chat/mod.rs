@@ -14,8 +14,9 @@ pub use api::{
     append_voice_chat_user_delta, clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay,
     is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
     reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_send_callback,
-    set_voice_chat_sending, set_voice_chat_text, set_voice_chat_user_text, show_agent_tab,
-    show_drawer_tab, update_conversation_state, update_drawer_after_save, update_voice_chat_status,
+    set_voice_chat_sending, set_voice_chat_target_app, set_voice_chat_text, set_voice_chat_user_text,
+    show_agent_tab, show_drawer_tab, update_conversation_state, update_drawer_after_save,
+    update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 
@@ -209,12 +210,34 @@ fn show_voice_chat_overlay_impl() {
         let tab_control = create_segmented_control(
             CGRect::new(
                 &CGPoint::new(170.0, window_height - 34.0),
-                &CGSize::new(160.0, 24.0),
+                &CGSize::new(120.0, 24.0),
             ),
             &["Drawer", "Agent"],
         );
         button_set_action(tab_control, action_handler, sel!(onTabChanged:));
         add_subview(blur_view, tab_control);
+
+        let paste_last_button = create_button(
+            CGRect::new(
+                &CGPoint::new(window_width - 160.0, window_height - 34.0),
+                &CGSize::new(24.0, 24.0),
+            ),
+            "⇲",
+            button_style::SMALL_SQUARE,
+        );
+        button_set_action(paste_last_button, action_handler, sel!(onPasteLastResponse:));
+        add_subview(blur_view, paste_last_button);
+
+        let copy_last_button = create_button(
+            CGRect::new(
+                &CGPoint::new(window_width - 128.0, window_height - 34.0),
+                &CGSize::new(24.0, 24.0),
+            ),
+            "⧉",
+            button_style::SMALL_SQUARE,
+        );
+        button_set_action(copy_last_button, action_handler, sel!(onCopyLastResponse:));
+        add_subview(blur_view, copy_last_button);
 
         let new_thread_button = create_button(
             CGRect::new(

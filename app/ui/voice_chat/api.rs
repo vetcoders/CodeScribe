@@ -190,6 +190,17 @@ pub fn show_drawer_tab() {
     });
 }
 
+/// Set the target app name to re-activate for paste actions.
+///
+/// This is best-effort and primarily used to paste assistant output back into
+/// the app where the user was working before interacting with the overlay.
+pub fn set_voice_chat_target_app(app_name: Option<String>) {
+    Queue::main().exec_async(move || {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.last_target_app = app_name;
+    });
+}
+
 /// Update the conversation mode state (Moshi full-duplex indicators)
 pub fn update_conversation_state(new_state: ConversationModeState) {
     Queue::main().exec_async(move || {

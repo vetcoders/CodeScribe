@@ -47,6 +47,10 @@ pub fn action_handler_class() -> *const Class {
                 on_copy_last_response as extern "C" fn(&Object, Sel, Id),
             );
             decl.add_method(
+                sel!(onPasteLastResponse:),
+                on_paste_last_response as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
                 sel!(onCopyMessage:),
                 on_copy_message as extern "C" fn(&Object, Sel, Id),
             );
@@ -151,6 +155,48 @@ extern "C" fn on_copy_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
     } else {
         info!("No assistant response to copy");
     }
+}
+
+extern "C" fn on_paste_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
+    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let text = state
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == ChatRole::Assistant)
+        .map(|m| m.text.clone());
+    let target_app = state.last_target_app.clone();
+    drop(state);
+
+    let Some(text) = text else {
+        info!("No assistant response to paste");
+        return;
+    };
+
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(app) = target_app.as_deref() {
+                let app = app.replace('"', "\\\"");
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &format!(r#"tell application "{}" to activate"#, app)])
+                    .status();
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+
+            // Best-effort: if activation fails, paste will likely go nowhere useful;
+            // clipboard still contains the response.
+            if let Err(e) = crate::os::clipboard::paste_text(&text) {
+                info!("Paste failed: {}", e);
+                copy_to_clipboard(&text);
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            copy_to_clipboard(&text);
+        }
+    });
 }
 
 extern "C" fn on_copy_message(_this: &Object, _cmd: Sel, sender: Id) {
