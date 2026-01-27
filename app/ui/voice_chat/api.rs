@@ -754,6 +754,7 @@ pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
 
 fn refresh_drawer_impl() {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.favorites = load_favorites_from_disk();
     state.drawer_entries = load_drawer_entries();
     let query = state
         .search_field
@@ -785,6 +786,7 @@ pub fn handle_card_delete(index: usize) {
     {
         warn!("Failed to delete {}: {}", entry.path.display(), err);
     }
+    state.favorites = load_favorites_from_disk();
     state.drawer_entries = load_drawer_entries();
     render_drawer_entries(&mut state, "");
 }
@@ -793,8 +795,48 @@ pub fn handle_card_favorite(index: usize) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = state.drawer_entries.get_mut(index) {
         entry.is_favorite = !entry.is_favorite;
+        let key = entry.path.to_string_lossy().to_string();
+        if entry.is_favorite {
+            state.favorites.insert(key);
+        } else {
+            state.favorites.remove(&key);
+        }
+        save_favorites_to_disk(&state.favorites);
     }
+    update_favorites_button_with_state(&mut state);
     render_drawer_entries(&mut state, "");
+}
+
+pub(super) fn toggle_drawer_favorites_only_impl() {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.drawer_favorites_only = !state.drawer_favorites_only;
+
+    // Jump to Drawer (this feature is Drawer-scoped).
+    update_active_tab_impl(Tab::Drawer);
+
+    update_favorites_button_with_state(&mut state);
+
+    let query = state
+        .search_field
+        .map(|field| unsafe { get_text_field_string(field as Id) })
+        .unwrap_or_default();
+    render_drawer_entries(&mut state, &query);
+}
+
+fn update_favorites_button_with_state(state: &mut VoiceChatOverlayState) {
+    unsafe {
+        let Some(btn_ptr) = state.favorites_button else {
+            return;
+        };
+        let btn = btn_ptr as Id;
+        let title = if state.drawer_favorites_only {
+            "♥"
+        } else {
+            "♡"
+        };
+        let title = ns_string(title);
+        let _: () = msg_send![btn, setTitle: title];
+    }
 }
 
 fn render_drawer_entries(state: &mut VoiceChatOverlayState, query: &str) {
@@ -807,6 +849,9 @@ fn render_drawer_entries(state: &mut VoiceChatOverlayState, query: &str) {
 
         let filter = query.trim().to_lowercase();
         for (index, entry) in state.drawer_entries.iter().enumerate() {
+            if state.drawer_favorites_only && !entry.is_favorite {
+                continue;
+            }
             if !filter.is_empty() {
                 let hay = entry.preview.to_lowercase();
                 if !hay.contains(&filter) {
@@ -929,6 +974,7 @@ pub fn load_drawer_entries() -> Vec<DrawerEntry> {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let dir = config_dir.join("transcriptions").join(today);
 
+    let favorites = load_favorites_from_disk();
     let files = list_draft_files(&dir);
     files
         .into_iter()
@@ -955,16 +1001,54 @@ pub fn load_drawer_entries() -> Vec<DrawerEntry> {
                 TranscriptionMode::Toggle
             };
             let is_ai_formatted = name.contains("_ai") && !name.contains("ai-failed");
+            let is_favorite = favorites.contains(&path.to_string_lossy().to_string());
             DrawerEntry {
                 path,
                 timestamp,
                 mode,
                 preview,
                 is_ai_formatted,
-                is_favorite: false,
+                is_favorite,
             }
         })
         .collect()
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct FavoritesFile {
+    version: u32,
+    paths: Vec<String>,
+}
+
+fn favorites_path() -> std::path::PathBuf {
+    let dir = codescribe_core::config::Config::config_dir();
+    dir.join("voice_chat_favorites.json")
+}
+
+fn load_favorites_from_disk() -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let path = favorites_path();
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return HashSet::new();
+    };
+    let Ok(file) = serde_json::from_str::<FavoritesFile>(&data) else {
+        return HashSet::new();
+    };
+    file.paths.into_iter().collect()
+}
+
+fn save_favorites_to_disk(favorites: &std::collections::HashSet<String>) {
+    let path = favorites_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = FavoritesFile {
+        version: 1,
+        paths: favorites.iter().cloned().collect(),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&file) {
+        let _ = std::fs::write(&path, json);
+    }
 }
 
 pub fn update_drawer_after_save(path: &std::path::Path) {

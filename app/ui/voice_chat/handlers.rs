@@ -13,7 +13,8 @@ use crate::ui_helpers::{get_text_field_string, ns_string, set_hidden, set_text_f
 use super::api::{
     clear_overlay_state, clear_voice_chat_text_impl, commit_last_user_message_impl,
     discard_last_message_impl, filter_drawer, handle_card_copy, handle_card_delete,
-    handle_card_edit, handle_card_favorite, send_draft_message_impl, update_active_tab_impl,
+    handle_card_edit, handle_card_favorite, send_draft_message_impl,
+    toggle_drawer_favorites_only_impl, update_active_tab_impl,
 };
 use super::state::{ChatRole, OVERLAY_STATE, Tab};
 
@@ -79,6 +80,10 @@ pub fn action_handler_class() -> *const Class {
             decl.add_method(
                 sel!(onNewThread:),
                 on_new_thread as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onToggleFavoritesOnly:),
+                on_toggle_favorites_only as extern "C" fn(&Object, Sel, Id),
             );
             decl.add_method(
                 sel!(onCommitMessage:),
@@ -277,6 +282,11 @@ extern "C" fn on_search_changed(_this: &Object, _cmd: Sel, sender: Id) {
 extern "C" fn on_new_thread(_this: &Object, _cmd: Sel, _sender: Id) {
     clear_voice_chat_text_impl();
     info!("New thread started");
+}
+
+extern "C" fn on_toggle_favorites_only(_this: &Object, _cmd: Sel, _sender: Id) {
+    toggle_drawer_favorites_only_impl();
+    info!("Toggled Drawer favorites-only filter");
 }
 
 extern "C" fn on_commit_message(_this: &Object, _cmd: Sel, _sender: Id) {

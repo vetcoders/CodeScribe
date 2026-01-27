@@ -241,6 +241,23 @@ fn show_voice_chat_overlay_impl() {
         );
         add_subview(blur_view, tab_control);
 
+        // Drawer favorites filter (hearts on/off)
+        let favorites_button = create_button(
+            CGRect::new(
+                &CGPoint::new(window_width - 192.0, window_height - 34.0),
+                &CGSize::new(24.0, 24.0),
+            ),
+            "♡",
+            button_style::SMALL_SQUARE,
+        );
+        button_set_action(
+            favorites_button,
+            action_handler,
+            sel!(onToggleFavoritesOnly:),
+        );
+        set_tooltip(favorites_button, "Pokaż tylko ulubione w Drawerze");
+        add_subview(blur_view, favorites_button);
+
         let paste_last_button = create_button(
             CGRect::new(
                 &CGPoint::new(window_width - 160.0, window_height - 34.0),
@@ -386,6 +403,7 @@ fn show_voice_chat_overlay_impl() {
         state.blur_view = Some(blur_view as usize);
         state.title_label = Some(title_label as usize);
         state.tab_control = Some(tab_control as usize);
+        state.favorites_button = Some(favorites_button as usize);
         state.close_button = Some(close_button as usize);
         state.settings_button = None;
         state.drawer_scroll_view = Some(drawer_scroll as usize);
