@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use codescribe::os::hotkeys;
 use codescribe::{ai_formatting, audio, whisper};
+use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -92,6 +93,8 @@ enum MigrateKind {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
+
     let cli = Cli::parse();
 
     // Handle --config flag
@@ -107,6 +110,58 @@ async fn main() -> Result<()> {
             assume_kind,
         }) => handle_migrate_history_command(dry_run, assume_kind),
         Some(Commands::Daemon) | None => run_daemon().await,
+    }
+}
+
+fn init_tracing() {
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    // Prefer `RUST_LOG`, fall back to legacy `LOG_LEVEL`.
+    let filter = match env::var("RUST_LOG") {
+        Ok(v) => v,
+        Err(_) => match env::var("LOG_LEVEL") {
+            Ok(v) => v.to_lowercase(),
+            Err(_) => "info".to_string(),
+        },
+    };
+
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let log_dir = PathBuf::from(home).join(".codescribe").join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("codescribe.log");
+
+    let stderr_layer = fmt::layer()
+        .with_ansi(true)
+        .with_target(true)
+        .with_thread_ids(true);
+
+    let filter_layer =
+        EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
+    if let Ok(file) = file {
+        let file = std::sync::Arc::new(file);
+        let file_layer = fmt::layer()
+            .with_ansi(false)
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_writer(move || (*file).try_clone().expect("Failed to clone log file"));
+
+        let _ = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(stderr_layer)
+            .with(file_layer)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(stderr_layer)
+            .try_init();
     }
 }
 
@@ -383,6 +438,9 @@ async fn run_daemon() -> Result<()> {
     #[cfg(target_os = "macos")]
     codescribe::set_dock_icon();
 
+    #[cfg(target_os = "macos")]
+    codescribe::os::permissions::request_all_permissions();
+
     codescribe::whisper::init().context("Failed to initialize Whisper")?;
     let controller = Arc::new(RecordingController::new());
     #[cfg(target_os = "macos")]
@@ -418,21 +476,32 @@ async fn run_daemon() -> Result<()> {
     });
 
     let (tx, rx) = unbounded::<HotkeyEvent>();
-    let hotkey_manager = hotkeys::HotkeyManager::new(tx).map_err(|e| anyhow::anyhow!(e))?;
-
-    let hotkey_controller = Arc::clone(&controller);
-    let hotkey_handle = Handle::current();
-    std::thread::spawn(move || {
-        for event in rx {
-            let controller = Arc::clone(&hotkey_controller);
-            let handle = hotkey_handle.clone();
-            handle.spawn(async move {
-                if let Err(e) = dispatch_hotkey_event(event, controller).await {
-                    eprintln!("Hotkey event error: {}", e);
-                }
-            });
+    let hotkey_manager = match hotkeys::HotkeyManager::new(tx) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!(
+                "Hotkeys disabled ({}). If this is macOS, check: System Settings > Privacy & Security > Accessibility.",
+                e
+            );
+            None
         }
-    });
+    };
+
+    if hotkey_manager.is_some() {
+        let hotkey_controller = Arc::clone(&controller);
+        let hotkey_handle = Handle::current();
+        std::thread::spawn(move || {
+            for event in rx {
+                let controller = Arc::clone(&hotkey_controller);
+                let handle = hotkey_handle.clone();
+                handle.spawn(async move {
+                    if let Err(e) = dispatch_hotkey_event(event, controller).await {
+                        eprintln!("Hotkey event error: {}", e);
+                    }
+                });
+            }
+        });
+    }
 
     // VAD monitor task - auto-finish recording when silence detected
     let vad_controller = Arc::clone(&controller);
@@ -452,7 +521,7 @@ async fn run_daemon() -> Result<()> {
     // Start Quality Loop daemon (always-on self-improvement)
     let quality_child = spawn_quality_daemon();
 
-    tray::run_with_hotkeys(Some(hotkey_manager))?;
+    tray::run_with_hotkeys(hotkey_manager)?;
 
     // Cleanup: kill quality daemon when tray exits
     if let Some(mut handle) = quality_child {

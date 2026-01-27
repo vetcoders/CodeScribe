@@ -6,6 +6,7 @@
 //! - Show Chat Overlay
 //! - Hold Hotkeys submenu (root level)
 //! - Open history folder
+//! - Copy diagnostics (permissions/config)
 //! - Quality status
 //! - Help/About
 //! - Quit
@@ -81,6 +82,11 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     let open_history_id = open_history_item.id().clone();
     menu.append(&open_history_item)?;
 
+    // 6a. Copy diagnostics
+    let copy_diag_item = MenuItem::new("Copy diagnostics", true, None);
+    let copy_diag_id = copy_diag_item.id().clone();
+    menu.append(&copy_diag_item)?;
+
     // 6b. Quality menu item (shows pending mismatches from daemon)
     let state = crate::quality_loop::read_daemon_state();
     let quality_label = if !state.available {
@@ -139,6 +145,7 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
             copy_last: copy_last_id,
             show_overlay: show_overlay_id,
             open_history: open_history_id,
+            copy_diagnostics: copy_diag_id,
             help: help_id,
             about: about_id,
             quit: quit_id,

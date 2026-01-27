@@ -82,6 +82,9 @@ pub enum TrayMenuEvent {
 
     // History (open folder)
     OpenHistoryFolder,
+
+    // Diagnostics
+    CopyDiagnostics,
 }
 
 // ============================================================================
@@ -116,6 +119,7 @@ pub struct MenuIds {
     pub copy_last: MenuId,
     pub show_overlay: MenuId,
     pub open_history: MenuId,
+    pub copy_diagnostics: MenuId,
     pub help: MenuId,
     pub about: MenuId,
     pub quit: MenuId,
