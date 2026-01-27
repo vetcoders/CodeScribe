@@ -1,22 +1,23 @@
 //! Silero VAD wrapper using ort directly.
 //!
-//! Custom implementation that shares ort runtime with fastembed.
+//! Custom implementation using ort runtime directly.
 //! Model: silero_vad.onnx v5 from https://github.com/snakers4/silero-vad
 //!
 //! Created by M&K (c)2026 VetCoders
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result};
-use ndarray::{Array1, Array2, Array3};
+use ndarray::Array3;
 use ort::session::Session;
 use ort::value::Tensor;
 use tracing::{debug, info};
 
 use super::config::VadConfig;
+use crate::hf_cache;
 
 /// Silero VAD sample rate (always 16kHz)
 pub const VAD_SAMPLE_RATE: u32 = 16000;
@@ -153,17 +154,15 @@ impl SileroVad {
 
     /// Predict on a single 512-sample chunk
     fn predict_chunk(&mut self, chunk: &[f32]) -> Result<f32> {
-        // Input: (batch=1, samples)
-        let input_array = Array2::from_shape_vec((1, chunk.len()), chunk.to_vec())?;
-
-        // Sample rate as i64
-        let sr_array = Array1::from_vec(vec![VAD_SAMPLE_RATE as i64]);
-
-        // Create input tensors (Tensor::from_array in ort rc.11)
-        let input = Tensor::from_array(input_array)?;
-        let sr = Tensor::from_array(sr_array)?;
-        let h = Tensor::from_array(self.state_h.clone())?;
-        let c = Tensor::from_array(self.state_c.clone())?;
+        // Create input tensors (ort rc.11 expects (shape, data) tuples)
+        let input = Tensor::from_array(([1usize, chunk.len()], chunk.to_vec()))?;
+        let sr = Tensor::from_array(([1usize], vec![VAD_SAMPLE_RATE as i64]))?;
+        let (h0, h1, h2) = self.state_h.dim();
+        let h_data: Vec<f32> = self.state_h.iter().copied().collect();
+        let (c0, c1, c2) = self.state_c.dim();
+        let c_data: Vec<f32> = self.state_c.iter().copied().collect();
+        let h = Tensor::from_array(([h0, h1, h2], h_data))?;
+        let c = Tensor::from_array(([c0, c1, c2], c_data))?;
 
         // Run inference with named inputs
         // Silero VAD v5 expects: input, sr, h, c
@@ -450,14 +449,28 @@ pub fn reset() {
     }
 }
 
-/// Get default model path (~/.codescribe/models/silero_vad.onnx)
-pub fn default_model_path() -> std::path::PathBuf {
+/// HuggingFace repo for Silero VAD model
+const SILERO_VAD_REPO: &str = "snakers4/silero-vad";
+const SILERO_VAD_FILE: &str = "silero_vad.onnx";
+
+/// Get default model path (HF cache first, then ~/.codescribe/models/)
+pub fn default_model_path() -> PathBuf {
+    // Try HF cache first (from `hf download snakers4/silero-vad`)
+    if let Some(snapshot) = hf_cache::find_snapshot(SILERO_VAD_REPO, &[SILERO_VAD_FILE]) {
+        let model_path = snapshot.join(SILERO_VAD_FILE);
+        if model_path.exists() {
+            debug!("Using Silero VAD from HF cache: {}", model_path.display());
+            return model_path;
+        }
+    }
+
+    // Fallback to legacy path
     directories::BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from("."))
         .join(".codescribe")
         .join("models")
-        .join("silero_vad.onnx")
+        .join(SILERO_VAD_FILE)
 }
 
 #[cfg(test)]

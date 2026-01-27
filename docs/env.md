@@ -35,8 +35,8 @@ Poniższe działają „same z siebie” — jeśli ich nie ustawisz, aplikacja 
 - `SOUND_NAME` – domyślnie `Tink` (RESTART NEEDED)
 - `SOUND_VOLUME` – domyślnie `1.0` (RESTART NEEDED)
 
-**Audio / silence**
-- `AUTO_SILENCE` – domyślnie `0` (RESTART NEEDED)
+**VAD (Voice Activity Detection)**
+- `CODESCRIBE_VAD_ENABLED` – domyślnie `1` (RESTART NEEDED)
 
 **Historia / storage**
 - `HISTORY_ENABLED` – domyślnie `1` (zawsze ON) (RESTART NEEDED)
@@ -48,13 +48,15 @@ Poniższe działają „same z siebie” — jeśli ich nie ustawisz, aplikacja 
 - `CODESCRIBE_BUFFERED_STREAM` – domyślnie `0` (HOT RELOADED)
 - `CODESCRIBE_BUFFER_DELAY_MS` – domyślnie `3000` (HOT RELOADED)
 - `CODESCRIBE_TYPING_CPS` – domyślnie `30` (HOT RELOADED)
+- `CODESCRIBE_EMIT_WORDS_MAX` – max słów na tick (buffered), domyślnie `3` (HOT RELOADED)
 
 **VAD (Silero neural network)**
-- `CODESCRIBE_VAD_THRESHOLD` – próg detekcji mowy 0.0-1.0, domyślnie `0.5` (RESTART NEEDED)
+- `CODESCRIBE_VAD_ENABLED` – włącz/wyłącz auto-stop, domyślnie `1` (RESTART NEEDED)
+- `CODESCRIBE_VAD_THRESHOLD` – próg detekcji mowy 0.0-1.0, domyślnie `0.35` (RESTART NEEDED)
+- `CODESCRIBE_VAD_SILENCE_SEC` – cisza przed auto-stop, domyślnie `2.5s` (RESTART NEEDED)
 - `CODESCRIBE_VAD_MIN_SPEECH_SEC` – min. czas mowy przed detekcją, domyślnie `0.1` (RESTART NEEDED)
-- `CODESCRIBE_VAD_MAX_SILENCE_SEC` – max. cisza przed końcem, domyślnie `1.2` (RESTART NEEDED)
 - `CODESCRIBE_VAD_MAX_UTTERANCE_SEC` – max. czas wypowiedzi, domyślnie `60` (RESTART NEEDED)
-- `CODESCRIBE_VAD_PRE_ROLL_SEC` – pre-roll w sekundach, domyślnie `0.3` (RESTART NEEDED)
+- `CODESCRIBE_VAD_PRE_ROLL_SEC` – pre-roll w sekundach, domyślnie `0.5` (RESTART NEEDED)
 
 > **Uwaga:** VAD config jest read-only po inicjalizacji (OnceLock). Zmiana wymaga restartu aplikacji.
 
@@ -108,8 +110,13 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 - `LLM_ASSISTIVE_*` **nadpisuje** `LLM_*` dla assistive (HOT RELOADED)
 
 **Streaming vs buffered**
+- `LLM_USE_STREAMING` – streaming odpowiedzi z LLM, domyślnie `1` (HOT RELOADED)
+  - `1` lub `true` = SSE streaming (domyślne, pokazuje tekst w czasie rzeczywistym)
+  - `0` lub `false` = buffered (czeka na pełną odpowiedź)
+- `TRANSCRIPT_SEND_MODE` – tryb wysyłania transkrypcji do UI (RESTART NEEDED)
+  - `streaming` = delty w czasie rzeczywistym
+  - `buffered` = pełna transkrypcja na końcu
 - `CODESCRIBE_BUFFERED_STREAM=1` → **ignoruje** chunking (`CODESCRIBE_STREAM_CHUNK_SEC`) (HOT RELOADED)
-- `TRANSCRIPT_SEND_MODE=streaming` wysyła delty do overlayu (RESTART NEEDED)
 
 **Overlay pozycja**
 - `OVERLAY_POSITION_MODE=custom` aktywuje `OVERLAY_CUSTOM_X/Y` (RESTART NEEDED)
@@ -120,11 +127,12 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 
 ### Audio
 - `AUDIO_INPUT_DEVICE` – nazwa urządzenia wejściowego (RESTART NEEDED)
-- `CODESCRIBE_VAD_THRESHOLD`, `CODESCRIBE_VAD_MAX_SILENCE_SEC`, `AUTO_SILENCE` (RESTART NEEDED)
+- `CODESCRIBE_VAD_ENABLED`, `CODESCRIBE_VAD_THRESHOLD`, `CODESCRIBE_VAD_SILENCE_SEC` (RESTART NEEDED)
 
 ### Transkrypcja (local/cloud)
 - `USE_LOCAL_STT` (RESTART NEEDED)
 - `LOCAL_MODEL`, `WHISPER_MODEL`, `WHISPER_LANGUAGE` (RESTART NEEDED)
+- `WHISPER_INITIAL_PROMPT` – prompt inicjalizujący dla Whisper (słownictwo domenowe, formatowanie) (RESTART NEEDED)
 - `STT_ENDPOINT`, `STT_API_KEY` (RESTART NEEDED)
 - `CODESCRIBE_MODEL_PATH`, `CODESCRIBE_MODELS_DIR` (RESTART NEEDED)
 
@@ -134,9 +142,10 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 - `CODESCRIBE_BUFFERED_STREAM` (HOT RELOADED)
 - `CODESCRIBE_BUFFER_DELAY_MS` (HOT RELOADED)
 - `CODESCRIBE_TYPING_CPS` (HOT RELOADED)
+- `CODESCRIBE_VAD_ENABLED` (RESTART NEEDED)
 - `CODESCRIBE_VAD_THRESHOLD` (RESTART NEEDED)
+- `CODESCRIBE_VAD_SILENCE_SEC` (RESTART NEEDED)
 - `CODESCRIBE_VAD_MIN_SPEECH_SEC` (RESTART NEEDED)
-- `CODESCRIBE_VAD_MAX_SILENCE_SEC` (RESTART NEEDED)
 - `CODESCRIBE_VAD_MAX_UTTERANCE_SEC` (RESTART NEEDED)
 - `CODESCRIBE_VAD_PRE_ROLL_SEC` (RESTART NEEDED)
 

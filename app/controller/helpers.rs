@@ -37,12 +37,15 @@ pub fn is_conversation_session() -> bool {
     IS_CONVERSATION_SESSION.load(Ordering::SeqCst)
 }
 
-/// Route transcription delta to transcription overlay (ALWAYS)
-/// Chat is a CONSUMER of transcription, not the display target.
+/// Route transcription delta to the active overlay.
+/// Assistive sessions stream into chat bubbles; non-assistive uses transcription overlay.
 pub fn route_transcription_delta(delta: &str) {
-    // Transcription ALWAYS goes to transcription_overlay
-    // Voice chat is a CONSUMER - user decides when to send to AI
-    crate::append_transcription_delta(delta);
+    if is_assistive_session() {
+        crate::voice_chat_ui::append_voice_chat_user_delta(delta);
+    } else {
+        // Non-assistive: transcription overlay preview
+        crate::append_transcription_delta(delta);
+    }
 }
 
 /// Setup the voice chat send callback with config
@@ -51,7 +54,7 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
     crate::voice_chat_ui::set_voice_chat_send_callback(Some(Arc::new(move |text: String| {
         let config = Arc::clone(&callback_config);
         tokio::spawn(async move {
-            crate::voice_chat_ui::update_voice_chat_status("Wysyłam...");
+            crate::voice_chat_ui::update_voice_chat_status("Sending...");
             crate::voice_chat_ui::set_voice_chat_sending(true);
 
             let (lang_str, transcript_mode) = {

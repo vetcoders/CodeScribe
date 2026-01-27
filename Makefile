@@ -6,13 +6,17 @@
         bump bump-patch bump-minor bump-major version \
         lint format test test-quick test-e2e test-e2e-real test-sse test-formatting test-all \
         demo demo-raw demo-assistive check fix clean help \
-        dmg dmg-signed dmg-full notarize download-model \
+        dmg dmg-signed dmg-full notarize download-model download-e5 \
         hooks
 
 SHELL := /bin/bash
 VERSION_FILE := Cargo.toml
 EDITOR ?= $(shell command -v code || command -v nvim || command -v vim || echo nano)
 ENV_LOAD := set -a; [ -f $$HOME/.codescribe/.env ] && source $$HOME/.codescribe/.env; set +a
+E2E_ENV_EXAMPLE := .env.example
+E2E_ENV_FILE := ./.env.e2e
+ENV_LOAD_E2E := set -a; [ -f $(E2E_ENV_FILE) ] && source $(E2E_ENV_FILE); set +a
+E2E_ENV_GEN := ./scripts/validate-envs.sh --env-example --env-example-path $(E2E_ENV_EXAMPLE) --emit-e2e-env $(E2E_ENV_FILE)
 
 # Test defaults (reference/cloud unless forced local)
 TEST_USE_LOCAL_LLM ?= 0
@@ -50,7 +54,7 @@ release:
 	@cargo build --release
 
 install:
-	@echo "Installing CodeScribe (with embedded model)..."
+	@echo "Installing CodeScribe (embedding optional via CODESCRIBE_EMBED_*)..."
 	@cargo install --path . --force
 	@mkdir -p ~/.codescribe
 	@pwd > ~/.codescribe/repo_path
@@ -176,16 +180,19 @@ test-quick:
 
 test-e2e:
 	@echo "=== E2E Tests (mock) ==="
-	@$(ENV_LOAD); $(APPLY_TEST_LLM); cargo test e2e --release -- --nocapture
+	@$(E2E_ENV_GEN)
+	@$(ENV_LOAD_E2E); $(APPLY_TEST_LLM); cargo test e2e --release -- --nocapture
 
 test-e2e-real:
 	@echo "=== E2E Tests (real API) ==="
 	@echo "Requires: LLM_API_KEY, LLM_ASSISTIVE_API_KEY"
-	@$(ENV_LOAD); $(APPLY_TEST_LLM); cargo test e2e --release -- --ignored --nocapture
+	@$(E2E_ENV_GEN)
+	@$(ENV_LOAD_E2E); $(APPLY_TEST_LLM); cargo test e2e --release -- --ignored --nocapture
 
 test-sse:
 	@echo "=== SSE Streaming Tests ==="
-	@$(ENV_LOAD); $(APPLY_TEST_LLM); cargo test e2e_sse --release -- --ignored --nocapture
+	@$(E2E_ENV_GEN)
+	@$(ENV_LOAD_E2E); $(APPLY_TEST_LLM); cargo test e2e_sse --release -- --ignored --nocapture
 
 test-formatting:
 	@echo "=== AI Formatting Tests ==="
@@ -196,9 +203,19 @@ test-all:
 	@$(MAKE) test
 	@echo "Done."
 
+test-roundtrip:
+	@echo "=== Round-Trip Tests (TTS→STT→Embeddings) ==="
+	@echo "Tests actual embedded models pipeline integrity"
+	@$(E2E_ENV_GEN)
+	@$(ENV_LOAD_E2E); CODESCRIBE_E2E_ROUNDTRIP=1 cargo test --test e2e_round_trip --release -- --nocapture
+
 demo:
 	@echo "=== Full Pipeline Demo ==="
 	@cargo run --release --example demo_full_pipeline -- $(AUDIO)
+
+demo-roundtrip:
+	@echo "=== Round-Trip Interactive Demo ==="
+	@cargo run --release --example roundtrip_live -- --interactive
 
 demo-raw:
 	@echo "=== Raw Transcription Demo ==="
@@ -254,19 +271,27 @@ help:
 	@echo ""
 	@echo "Build & Install:"
 	@echo "  make build           Build debug binary"
-	@echo "  make release         Build release binary (with embedded model)"
-	@echo "  make install         Install CLI (~888MB with embedded model)"
+	@echo "  make release         Build release binary (embedding optional via env)"
+	@echo "  make install         Install CLI (embedding optional via env)"
 	@echo "  make install-no-embed Install without model (needs CODESCRIBE_MODEL_PATH)"
 	@echo "  make config          Edit ~/.codescribe/.env"
 	@echo "  make bundle          Create CodeScribe.app bundle"
 	@echo "  make install-app     Install to /Applications"
 	@echo ""
 	@echo "Release & Distribution:"
-	@echo "  make dmg             Build DMG (ad-hoc signed)"
-	@echo "  make dmg-signed      Build DMG (Developer ID signed)"
-	@echo "  make dmg-full        Build DMG with embedded model (~888MB)"
-	@echo "  make notarize        Notarize DMG with Apple"
+	@echo "  make dmg             Create DMG from existing .app (unsigned)"
+	@echo "  make dmg-signed      Build .app + DMG + sign (NO notarize)"
+	@echo "  make dmg-full        Build .app + DMG + sign + notarize"
+	@echo "  make notarize        Notarize existing DMG (NOTARY_PROFILE required)"
+	@echo ""
+	@echo "Release env vars:"
+	@echo "  SIGN_IDENTITY=...        Codesign identity (Developer ID Application: ...)"
+	@echo "  NOTARY_PROFILE=...       notarytool profile name"
+	@echo "  BUNDLE_WHISPER=1          bundle local Whisper into .app"
+	@echo "  BUNDLE_FALLBACK_GIT=1     allow fallback git clone if no local model"
 	@echo "  make download-model  Download Whisper model from HF"
+	@echo "  make download-e5     Download E5 embedder model from HF"
+	@echo "  make download-silero-vad  Download Silero VAD model from HF"
 	@echo ""
 	@echo "Run:"
 	@echo "  make start           Start CodeScribe"
@@ -301,21 +326,31 @@ help:
 # ============================================================================
 
 dmg:
-	@./scripts/build-release.sh
+	@./packaging/create_dmg.sh
 
 dmg-signed:
-	@./scripts/build-release.sh --sign
+	@SIGN_IDENTITY="$(SIGN_IDENTITY)" NOTARY_PROFILE="$(NOTARY_PROFILE)" \
+		BUNDLE_WHISPER="$(BUNDLE_WHISPER)" BUNDLE_FALLBACK_GIT="$(BUNDLE_FALLBACK_GIT)" \
+		./packaging/release.sh --no-notary
 
 dmg-full:
-	@./scripts/build-release.sh --sign
+	@SIGN_IDENTITY="$(SIGN_IDENTITY)" NOTARY_PROFILE="$(NOTARY_PROFILE)" \
+		BUNDLE_WHISPER="$(BUNDLE_WHISPER)" BUNDLE_FALLBACK_GIT="$(BUNDLE_FALLBACK_GIT)" \
+		./packaging/release.sh
 
 notarize:
 	@if ls CodeScribe_*.dmg 1> /dev/null 2>&1; then \
 		DMG=$$(ls -t CodeScribe_*.dmg | head -1); \
-		./scripts/notarize.sh "$$DMG"; \
+		NOTARY_PROFILE="$(NOTARY_PROFILE)" ./scripts/notarize.sh "$$DMG"; \
 	else \
 		echo "No DMG found. Run 'make dmg-signed' first."; \
 	fi
 
 download-model:
 	@./scripts/download-model.sh
+
+download-e5:
+	@./scripts/download-e5.sh
+
+download-silero-vad:
+	@./scripts/download-silero-vad.sh

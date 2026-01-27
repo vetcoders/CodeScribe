@@ -17,9 +17,9 @@
 //                 snapshot_wav method (save current buffer without stopping)
 //
 // design rationale: uses cpal for cross-platform audio input. silence detection
-//                   is based on root mean square (rms) of audio chunks compared
-//                   to a db threshold. tokio is used for async collection to avoid
-//                   blocking. saving to a temp file simplifies passing audio data
+//                   uses Silero VAD neural network via centralized vad::VadConfig.
+//                   tokio is used for async collection to avoid blocking.
+//                   saving to a temp file simplifies passing audio data
 //                   to the transcription api.
 //
 // usage example:
@@ -51,10 +51,10 @@
 //   }
 //   ```
 //
-// configuration via environment variables:
-//   - CODESCRIBE_VAD_THRESHOLD: speech probability threshold 0.0-1.0 (default: 0.5)
-//   - CODESCRIBE_VAD_MAX_SILENCE_SEC: silence duration before auto-stop (default: 1.2)
-//   - AUTO_SILENCE: enable/disable silence detection (default: true)
+// Configuration via environment variables (SINGLE source of truth - vad::VadConfig):
+//   - CODESCRIBE_VAD_THRESHOLD: speech probability 0.0-1.0 (default: 0.35)
+//   - CODESCRIBE_VAD_SILENCE_SEC: silence before auto-stop (default: 2.5s)
+//   - CODESCRIBE_VAD_ENABLED: enable/disable VAD auto-stop (default: true)
 
 use crate::vad;
 use anyhow::{Context, Result};
@@ -76,14 +76,8 @@ const SAMPLE_RATE: u32 = 16000;
 /// Number of channels (1 for mono)
 const CHANNELS: u16 = 1;
 
-/// Speech probability threshold (0.0-1.0) for VAD
-/// Below this is considered silence. Default: 0.5
-const DEFAULT_SPEECH_THRESHOLD: f32 = 0.5;
-
-/// Silence duration threshold (seconds)
-/// Recording stops automatically after this duration of continuous silence.
-/// Synced with VadConfig::max_silence_duration_sec default (1.2s)
-const DEFAULT_HANG_SEC: f32 = 1.2;
+// VAD defaults are sourced from vad::VadConfig - no local constants needed.
+// See core/vad/config.rs for threshold (0.35) and max_silence (2.5s) defaults.
 
 /// Size of audio chunks to read from stream (samples)
 const BLOCK_SIZE: usize = 1024;
@@ -109,20 +103,15 @@ pub struct RecorderConfig {
 
 impl Default for RecorderConfig {
     fn default() -> Self {
+        // Use centralized VadConfig as single source of truth
+        let vad_cfg = vad::VadConfig::default();
         Self {
             sample_rate: SAMPLE_RATE,
             channels: CHANNELS,
-            speech_threshold: std::env::var("CODESCRIBE_VAD_THRESHOLD")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_SPEECH_THRESHOLD)
-                .clamp(0.1, 0.9),
-            hang_sec: std::env::var("CODESCRIBE_VAD_MAX_SILENCE_SEC")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(DEFAULT_HANG_SEC)
-                .clamp(0.1, 10.0),
-            auto_silence: std::env::var("AUTO_SILENCE")
+            // VadConfig already handles env var parsing and clamping
+            speech_threshold: vad_cfg.threshold,
+            hang_sec: vad_cfg.max_silence_duration_sec,
+            auto_silence: std::env::var("CODESCRIBE_VAD_ENABLED")
                 .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"))
                 .unwrap_or(true),
             block_size: BLOCK_SIZE,
@@ -439,6 +428,17 @@ impl Recorder {
     /// Returns the absolute path to the saved .wav file, or None if no audio
     /// was recorded or an error occurred.
     pub async fn stop(&mut self) -> Result<Option<PathBuf>> {
+        self.stop_internal(true).await
+    }
+
+    /// Stops the audio recording without saving a WAV file.
+    ///
+    /// Returns None if no audio was recorded or an error occurred.
+    pub async fn stop_without_saving(&mut self) -> Result<Option<PathBuf>> {
+        self.stop_internal(false).await
+    }
+
+    async fn stop_internal(&mut self, save_wav: bool) -> Result<Option<PathBuf>> {
         if !self.is_recording.load(Ordering::SeqCst) && self.stream.is_none() {
             warn!("Stop called but no active stream");
             self.last_duration = 0.0;
@@ -462,17 +462,14 @@ impl Recorder {
         self.is_recording.store(false, Ordering::SeqCst);
 
         // Get buffer data
-        let wav_data = {
-            let buf = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
-            if buf.is_empty() {
-                warn!("No audio data captured");
-                self.last_duration = 0.0;
-                return Ok(None);
-            }
-            buf.clone()
-        };
+        let mut buf = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        if buf.is_empty() {
+            warn!("No audio data captured");
+            self.last_duration = 0.0;
+            return Ok(None);
+        }
 
-        let num_frames = wav_data.len();
+        let num_frames = buf.len();
         self.last_duration = num_frames as f32 / self.actual_sample_rate as f32;
         self.diagnostics.frames = num_frames;
         self.diagnostics.bytes = num_frames * std::mem::size_of::<i16>();
@@ -482,6 +479,13 @@ impl Recorder {
             "Captured audio: {} frames ({:.2}s) at {}Hz",
             num_frames, self.last_duration, self.actual_sample_rate
         );
+
+        if !save_wav {
+            buf.clear();
+            return Ok(None);
+        }
+
+        let wav_data = buf.clone();
 
         // Create temp file
         let temp_path = std::env::temp_dir().join(format!(
@@ -502,10 +506,7 @@ impl Recorder {
         info!("Audio successfully saved to WAV file");
 
         // Clear buffer
-        self.buffer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        buf.clear();
 
         Ok(Some(temp_path))
     }
@@ -530,7 +531,7 @@ impl Drop for Recorder {
 
 // --- helper functions ---
 
-// Note: RMS-based silence detection replaced with WebRTC VAD (see vad module)
+// Note: RMS-based silence detection replaced with Silero VAD neural network (see vad module)
 
 /// Write audio samples to a WAV file.
 fn write_wav_file(path: &PathBuf, samples: &[i16], sample_rate: u32, channels: u16) -> Result<()> {
@@ -559,7 +560,7 @@ fn write_wav_file(path: &PathBuf, samples: &[i16], sample_rate: u32, channels: u
 mod tests {
     use super::*;
 
-    // Note: RMS tests removed - now using WebRTC VAD (see vad module tests)
+    // Note: RMS tests removed - now using Silero VAD neural network (see vad module tests)
 
     #[test]
     fn test_recorder_config_default() {

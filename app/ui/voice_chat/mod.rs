@@ -11,11 +11,11 @@ mod state;
 // Re-export public API
 pub use api::{
     add_voice_chat_error_message, add_voice_chat_user_message, append_voice_chat_assistant_delta,
-    clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay, is_auto_send_enabled,
-    is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
+    append_voice_chat_user_delta, clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay,
+    is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
     reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_send_callback,
-    set_voice_chat_sending, set_voice_chat_text, show_agent_tab, show_drawer_tab,
-    update_conversation_state, update_drawer_after_save, update_voice_chat_status,
+    set_voice_chat_sending, set_voice_chat_text, set_voice_chat_user_text, show_agent_tab,
+    show_drawer_tab, update_conversation_state, update_drawer_after_save, update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 
@@ -32,8 +32,8 @@ use tracing::{info, warn};
 
 use crate::ui_helpers::{
     NS_FLOATING_WINDOW_LEVEL, add_subview, button_set_action, button_style, color_clear,
-    create_button, create_segmented_control, create_vertical_stack_view, ns_string, set_hidden,
-    window_set_alpha, window_show,
+    create_button, create_segmented_control, create_vertical_stack_view, ns_string,
+    overlay_window_class, set_hidden, window_set_alpha, window_show,
 };
 
 use api::update_active_tab_impl;
@@ -45,6 +45,7 @@ pub type Id = *mut Object;
 
 /// Show the voice chat overlay window
 pub fn show_voice_chat_overlay() {
+    info!("show_voice_chat_overlay requested");
     Queue::main().exec_async(|| {
         show_voice_chat_overlay_impl();
     });
@@ -52,6 +53,7 @@ pub fn show_voice_chat_overlay() {
 
 /// Show the voice chat overlay with custom configuration
 pub fn show_voice_chat_overlay_with_config(_config: VoiceChatOverlayConfig) {
+    info!("show_voice_chat_overlay_with_config requested");
     Queue::main().exec_async(|| {
         show_voice_chat_overlay_impl();
     });
@@ -59,6 +61,7 @@ pub fn show_voice_chat_overlay_with_config(_config: VoiceChatOverlayConfig) {
 
 fn show_voice_chat_overlay_impl() {
     unsafe {
+        info!("show_voice_chat_overlay_impl starting");
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
         let ns_window = Class::get("NSWindow").unwrap();
@@ -128,7 +131,8 @@ fn show_voice_chat_overlay_impl() {
             },
         };
 
-        let window: Id = msg_send![ns_window, alloc];
+        let window_class = overlay_window_class();
+        let window: Id = msg_send![window_class, alloc];
         let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::FullSizeContentView;
         let backing = NSBackingStoreType::Buffered;
         let window: Id = msg_send![
@@ -155,8 +159,12 @@ fn show_voice_chat_overlay_impl() {
         let content_view: Id = msg_send![window, contentView];
 
         let ns_visual = Class::get("NSVisualEffectView").unwrap();
+        let blur_frame = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(window_width, window_height),
+        );
         let blur_view: Id = msg_send![ns_visual, alloc];
-        let blur_view: Id = msg_send![blur_view, initWithFrame: frame];
+        let blur_view: Id = msg_send![blur_view, initWithFrame: blur_frame];
         let _: () = msg_send![blur_view, setMaterial: NSVisualEffectMaterial::HUDWindow];
         let _: () = msg_send![blur_view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
         let _: () = msg_send![blur_view, setState: NSVisualEffectState::Active];

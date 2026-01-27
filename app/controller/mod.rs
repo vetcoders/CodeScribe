@@ -110,6 +110,9 @@ pub struct RecordingController {
     /// Flag set by VAD (silence detection) when recording should auto-stop
     vad_triggered: Arc<AtomicBool>,
 
+    /// Assistive hands-off loop active (Right Option toggle)
+    assistive_loop_active: Arc<AtomicBool>,
+
     // ═══════════════════════════════════════════════════════════
     // Conversation mode (Moshi full-duplex)
     // ═══════════════════════════════════════════════════════════
@@ -129,6 +132,9 @@ pub struct RecordingController {
 
     /// Task handle for conversation audio processing loop
     conversation_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+
+    /// Flag to skip Moshi init if models are not available (avoids spam)
+    moshi_unavailable: Arc<AtomicBool>,
 }
 
 impl RecordingController {
@@ -173,12 +179,14 @@ impl RecordingController {
             hold_start_task: Arc::new(Mutex::new(None)),
             serial_lock: Arc::new(Mutex::new(())),
             vad_triggered: Arc::new(AtomicBool::new(false)),
+            assistive_loop_active: Arc::new(AtomicBool::new(false)),
             // Conversation mode (lazy init)
             conversation_engine: Arc::new(Mutex::new(None)),
             audio_player: Arc::new(Mutex::new(None)),
             conversation_stop_flag: Arc::new(AtomicBool::new(false)),
             conversation_generation: Arc::new(AtomicU64::new(0)),
             conversation_task: Arc::new(Mutex::new(None)),
+            moshi_unavailable: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -224,12 +232,14 @@ impl RecordingController {
             hold_start_task: Arc::new(Mutex::new(None)),
             serial_lock: Arc::new(Mutex::new(())),
             vad_triggered: Arc::new(AtomicBool::new(false)),
+            assistive_loop_active: Arc::new(AtomicBool::new(false)),
             // Conversation mode (lazy init)
             conversation_engine: Arc::new(Mutex::new(None)),
             audio_player: Arc::new(Mutex::new(None)),
             conversation_stop_flag: Arc::new(AtomicBool::new(false)),
             conversation_generation: Arc::new(AtomicU64::new(0)),
             conversation_task: Arc::new(Mutex::new(None)),
+            moshi_unavailable: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -373,6 +383,7 @@ impl RecordingController {
             }
             State::RecToggle => {
                 info!("Toggle pressed again; finishing recording");
+                self.assistive_loop_active.store(false, Ordering::SeqCst);
                 self.finish_recording().await?;
             }
             _ => {
@@ -413,6 +424,12 @@ impl RecordingController {
     /// Initializes ConversationEngine and AudioPlayer, then starts the audio
     /// processing loop that feeds mic input to Moshi and plays responses.
     async fn start_conversation_mode(&self) -> Result<()> {
+        // Early exit if Moshi was already determined to be unavailable (no spam)
+        if self.moshi_unavailable.load(Ordering::SeqCst) {
+            debug!("Moshi unavailable (cached) - skipping conversation mode");
+            return Ok(());
+        }
+
         info!("Starting conversation mode (Moshi full-duplex)");
 
         // 1. Initialize ConversationEngine if needed (lazy init)
@@ -421,11 +438,23 @@ impl RecordingController {
             if engine_guard.is_none() {
                 info!("Lazy-initializing ConversationEngine...");
                 let config = MoshiConfig::default();
+
+                // Pre-validate: check if model files exist before trying to load
+                if let Err(e) = config.validate() {
+                    warn!(
+                        "Moshi models not available: {} (conversation mode disabled)",
+                        e
+                    );
+                    self.moshi_unavailable.store(true, Ordering::SeqCst);
+                    return Ok(()); // Silent return - not an error, just unavailable
+                }
+
                 match ConversationEngine::new(config) {
                     Ok(mut engine) => {
                         // Pre-initialize to load models now (rather than on first audio)
                         if let Err(e) = engine.init() {
                             error!("ConversationEngine init failed: {}", e);
+                            self.moshi_unavailable.store(true, Ordering::SeqCst);
                             crate::voice_chat_ui::add_voice_chat_error_message(&format!(
                                 "Moshi init failed: {}",
                                 e
@@ -437,6 +466,7 @@ impl RecordingController {
                     }
                     Err(e) => {
                         error!("Failed to create ConversationEngine: {}", e);
+                        self.moshi_unavailable.store(true, Ordering::SeqCst);
                         crate::voice_chat_ui::add_voice_chat_error_message(&format!(
                             "Moshi unavailable: {}",
                             e
@@ -785,6 +815,8 @@ impl RecordingController {
 
     /// Schedule delayed recording start for hold mode
     async fn schedule_hold_start(&self) -> Result<()> {
+        // Hold mode never runs the assistive loop
+        self.assistive_loop_active.store(false, Ordering::SeqCst);
         // Check backend health before starting (skip in tests: no backend available)
         if !cfg!(test) {
             match crate::client::check_health().await {
@@ -819,14 +851,13 @@ impl RecordingController {
         // Cancel any existing delayed start
         self.cancel_pending_hold_start().await;
 
-        // Reset VAD flag for new session
-        self.vad_triggered.store(false, Ordering::SeqCst);
+        // HOLD MODE: No VAD - user controls recording by releasing the key
+        // (VAD flag not used here, only in toggle mode)
 
         let state = Arc::clone(&self.state);
         let session_id = Arc::clone(&self.session_id);
         let recorder = Arc::clone(&self.recorder);
         let delay = Duration::from_millis(delay_ms);
-        let vad_flag = Arc::clone(&self.vad_triggered);
 
         let task = tokio::spawn(async move {
             // Wait for the configured delay
@@ -845,13 +876,19 @@ impl RecordingController {
 
             info!("Starting hold recording (session={})", new_session_id);
 
+            // Set session mode for delta routing BEFORE starting recorder
+            set_assistive_session(is_assistive);
+
             // Start the recorder (skip in tests: no CoreAudio device needed)
-            // hang_sec is configured via CODESCRIBE_VAD_MAX_SILENCE_SEC env var (single source of truth)
+            // HOLD MODE: No VAD auto-stop! User controls recording by releasing the key.
+            // If user wants to hold in silence for 45 minutes - that's their choice.
+            // VAD is ONLY active in toggle (handsoff) mode.
             let mut rec = recorder.lock().await;
-            rec.recorder.set_on_vad_stop(move || {
-                info!("VAD callback: setting vad_triggered flag");
-                vad_flag.store(true, Ordering::SeqCst);
-            });
+            rec.recorder.config.auto_silence = false;
+            // Set streaming callback for overlay updates (routed by session mode)
+            rec.set_delta_callback(Some(Arc::new(|text: &str| {
+                route_transcription_delta(text);
+            })));
             if !cfg!(test)
                 && let Err(e) = rec.start(Some(language.as_str().to_string())).await
             {
@@ -872,17 +909,17 @@ impl RecordingController {
             };
             show_badge_for_mode(badge_mode);
 
-            // Set session mode for delta routing
-            set_assistive_session(is_assistive);
-
-            // ALWAYS show transcription overlay for live preview
-            crate::clear_transcription_text();
-            crate::show_transcription_overlay();
             if is_assistive {
+                crate::hide_transcription_overlay();
                 crate::show_voice_chat_overlay();
                 crate::show_agent_tab();
+                crate::voice_chat_ui::update_voice_chat_status("Listening...");
+            } else {
+                // Non-assistive: transcription overlay preview
+                crate::clear_transcription_text();
+                crate::show_transcription_overlay();
+                crate::enter_recording_mode();
             }
-            crate::enter_recording_mode();
 
             // Transition to REC_HOLD
             *state.write().await = State::RecHold;
@@ -935,6 +972,14 @@ impl RecordingController {
         let new_session_id = Uuid::new_v4().to_string();
         *self.session_id.write().await = Some(new_session_id.clone());
 
+        if is_assistive {
+            *self.assistive_mode.write().await = true;
+            *self.force_raw_mode.write().await = false;
+            *self.force_ai_mode.write().await = false;
+        }
+        self.assistive_loop_active
+            .store(is_assistive, Ordering::SeqCst);
+
         info!("Starting toggle recording (session={})", new_session_id);
 
         let config = self.config.read().await;
@@ -946,8 +991,12 @@ impl RecordingController {
         let vad_flag = Arc::clone(&self.vad_triggered);
 
         // Start the recorder with VAD callback
-        // hang_sec is configured via CODESCRIBE_VAD_MAX_SILENCE_SEC env var (single source of truth)
+        // hang_sec is configured via CODESCRIBE_VAD_SILENCE_SEC env var (single source of truth)
         let mut recorder = self.recorder.lock().await;
+        recorder.recorder.config.auto_silence = std::env::var("CODESCRIBE_VAD_ENABLED")
+            .ok()
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"))
+            .unwrap_or(true);
 
         recorder.recorder.set_on_vad_stop(move || {
             info!("VAD callback: setting vad_triggered flag");
@@ -981,14 +1030,17 @@ impl RecordingController {
         // Set session mode for delta routing
         set_assistive_session(is_assistive);
 
-        // ALWAYS show transcription overlay for live preview
-        crate::clear_transcription_text();
-        crate::show_transcription_overlay();
         if is_assistive {
+            crate::hide_transcription_overlay();
             crate::show_voice_chat_overlay();
             crate::show_agent_tab();
+            crate::voice_chat_ui::update_voice_chat_status("Listening...");
+        } else {
+            // Non-assistive: transcription overlay preview
+            crate::clear_transcription_text();
+            crate::show_transcription_overlay();
+            crate::enter_recording_mode();
         }
-        crate::enter_recording_mode();
 
         // Transition to REC_TOGGLE
         *self.state.write().await = State::RecToggle;
@@ -997,7 +1049,50 @@ impl RecordingController {
         // Update tray status to Listening
         let _ = update_tray_status(TrayStatus::Listening);
 
+        if is_assistive {
+            self.spawn_assistive_vad_watch(new_session_id);
+        }
+
         Ok(())
+    }
+
+    fn spawn_assistive_vad_watch(&self, expected_session: String) {
+        let vad_flag = Arc::clone(&self.vad_triggered);
+        let state = Arc::clone(&self.state);
+        let session_id = Arc::clone(&self.session_id);
+        let loop_active = Arc::clone(&self.assistive_loop_active);
+
+        tokio::spawn(async move {
+            loop {
+                if !loop_active.load(Ordering::SeqCst) {
+                    break;
+                }
+                if *state.read().await != State::RecToggle {
+                    break;
+                }
+                if vad_flag.load(Ordering::SeqCst) {
+                    let current = session_id.read().await.clone();
+                    if current.as_deref() != Some(expected_session.as_str()) {
+                        break;
+                    }
+                    vad_flag.store(false, Ordering::SeqCst);
+                    if let Some(controller) = OVERLAY_CONTROLLER.get().cloned() {
+                        if let Err(e) = controller.finish_recording().await {
+                            warn!("Assistive VAD auto-stop failed: {}", e);
+                            break;
+                        }
+                        if controller.assistive_loop_active.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            if let Err(e) = controller.start_toggle_recording(true).await {
+                                warn!("Assistive loop restart failed: {}", e);
+                            }
+                        }
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
     }
 
     /// Stop recording, transcribe, format, and paste the result
@@ -1041,6 +1136,7 @@ impl RecordingController {
         let assistive = *self.assistive_mode.read().await;
         let force_raw = *self.force_raw_mode.read().await;
         let force_ai = *self.force_ai_mode.read().await;
+        let keep_assistive_loop = assistive && self.assistive_loop_active.load(Ordering::SeqCst);
 
         // Switch badge to processing mode (orange, pulsing)
         show_badge_for_mode(BadgeMode::Processing);
@@ -1055,6 +1151,12 @@ impl RecordingController {
         *self.force_raw_mode.write().await = false;
         *self.force_ai_mode.write().await = false;
         *self.session_id.write().await = None;
+        // Keep assistive loop alive only when explicitly enabled and no manual stop was requested
+        if result.is_ok() && keep_assistive_loop {
+            self.assistive_loop_active.store(true, Ordering::SeqCst);
+        } else {
+            self.assistive_loop_active.store(false, Ordering::SeqCst);
+        }
 
         // Hide red dot indicator
         hide_hold_badge();
@@ -1139,6 +1241,9 @@ impl RecordingController {
             }
         };
 
+        let chat_active = crate::voice_chat_ui::is_voice_chat_overlay_visible();
+        let assistive_loop = assistive && self.assistive_loop_active.load(Ordering::SeqCst);
+
         let mut raw_text_opt = None;
         let mut cloud_text_opt = None;
         let mut cloud_handle: Option<JoinHandle<Result<String>>> = None;
@@ -1194,7 +1299,20 @@ impl RecordingController {
             }
         }
 
-        let raw_text = raw_text_opt.ok_or_else(|| anyhow::anyhow!("Empty transcript"))?;
+        let raw_text = match raw_text_opt {
+            Some(text) if !text.trim().is_empty() => text,
+            Some(_) | None => {
+                if assistive_loop {
+                    if chat_active {
+                        crate::voice_chat_ui::set_voice_chat_sending(false);
+                        crate::voice_chat_ui::update_voice_chat_status("Listening...");
+                    }
+                    warn!("Empty transcript in assistive loop; skipping");
+                    return Ok(());
+                }
+                return Err(anyhow::anyhow!("Empty transcript"));
+            }
+        };
 
         info!("Raw transcript captured ({} chars)", raw_text.len());
 
@@ -1231,7 +1349,7 @@ impl RecordingController {
             warn!("Detected repetition loop in transcription - will clean up");
         }
 
-        let chat_active = crate::voice_chat_ui::is_voice_chat_overlay_visible();
+        // chat_active already captured above
 
         // Determine final text based on mode (NEW architecture):
         //
@@ -1249,7 +1367,8 @@ impl RecordingController {
             info!("Assistive mode (Ctrl+Shift): augmenting transcript via AI");
 
             if chat_active {
-                crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
+                // Finalize the streaming user draft into a bubble
+                crate::voice_chat_ui::set_voice_chat_user_text(&clean_text);
                 crate::voice_chat_ui::show_agent_tab();
                 crate::voice_chat_ui::set_voice_chat_sending(true);
                 crate::voice_chat_ui::update_voice_chat_status("Thinking...");

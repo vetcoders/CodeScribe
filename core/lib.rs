@@ -16,8 +16,8 @@
 //!
 //! - **whisper** - Embedded Whisper model (~900MB in binary), zero I/O
 //! - **tts** - Embedded CSM-1B model (~1GB in binary), text-to-speech
-//! - **vad** - Voice activity detection using WebRTC VAD
-//! - **embedder** - Text embeddings using E5 model via fastembed
+//! - **vad** - Voice activity detection using Silero VAD neural network
+//! - **embedder** - Text embeddings using E5 model (offline)
 //! - **audio** - Recording and audio loading
 //! - **config** - User configuration
 //! - **ai_formatting** - Post-processing with LLMs
@@ -31,7 +31,9 @@
 pub mod audio;
 pub mod config;
 pub mod conversation;
+pub mod demux;
 pub mod embedder;
+mod hf_cache;
 pub mod ipc;
 pub mod llm;
 pub mod pipeline;
@@ -86,7 +88,7 @@ pub mod vad_api {
 // Public API - Embedder (text embeddings)
 // ═══════════════════════════════════════════════════════════
 
-/// Text embeddings using E5 model via fastembed
+/// Text embeddings using E5 model (offline)
 pub mod embedder_api {
     pub use crate::embedder::{
         DEFAULT_MODEL, EMBEDDING_DIM, EmbedderConfig, EmbedderEngine, embed, embed_batch, init,

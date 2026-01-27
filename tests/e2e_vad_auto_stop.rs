@@ -185,10 +185,10 @@ fn test_recorder_vad_config_defaults() {
         config.speech_threshold
     );
 
-    // Hang time should be reasonable (0.3-3.0 seconds)
-    // Default is 1.2s from CODESCRIBE_VAD_MAX_SILENCE_SEC env var
+    // Hang time should be reasonable (0.5-5.0 seconds)
+    // Default is 2.5s from CODESCRIBE_VAD_SILENCE_SEC env var
     assert!(
-        config.hang_sec >= 0.3 && config.hang_sec <= 3.0,
+        config.hang_sec >= 0.5 && config.hang_sec <= 5.0,
         "hang_sec should be between 0.3 and 3.0s, got: {}",
         config.hang_sec
     );
@@ -243,12 +243,12 @@ fn test_vad_flow_documentation() {
     //
     // 2. User speaks into microphone
     //    - Audio chunks are processed by Silero VAD
-    //    - Speech probability is above threshold (CODESCRIBE_VAD_THRESHOLD, default 0.5)
+    //    - Speech probability is above threshold (CODESCRIBE_VAD_THRESHOLD, default 0.35)
     //    - VAD does not trigger
     //
     // 3. User stops speaking (silence for hang_sec seconds)
     //    - Speech probability drops below threshold
-    //    - After hang_sec (CODESCRIBE_VAD_MAX_SILENCE_SEC, default 1.2s), VAD triggers
+    //    - After hang_sec (CODESCRIBE_VAD_SILENCE_SEC, default 2.5s), VAD triggers
     //    - on_vad_stop callback is invoked
     //    - vad_triggered atomic flag set to true
     //
