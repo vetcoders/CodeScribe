@@ -525,6 +525,7 @@ fn update_overlay_text_and_layout(state: &mut TranscriptionOverlayState) {
 
 /// Show the transcription overlay window
 pub fn show_transcription_overlay() {
+    info!("show_transcription_overlay requested");
     // Cancel any pending auto-hide
     AUTO_HIDE_GENERATION.fetch_add(1, Ordering::SeqCst);
     AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
@@ -536,6 +537,7 @@ pub fn show_transcription_overlay() {
 
 fn show_transcription_overlay_impl() {
     unsafe {
+        info!("show_transcription_overlay_impl starting");
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
         // Reuse existing window if any
@@ -1112,6 +1114,7 @@ pub fn enter_recording_mode() {
 
 /// Hide the transcription overlay window (with fade-out animation)
 pub fn hide_transcription_overlay() {
+    info!("hide_transcription_overlay requested");
     // Cancel any pending auto-hide
     AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
 
@@ -1145,7 +1148,9 @@ fn hide_transcription_overlay_impl() {
             });
         });
 
-        debug!("Transcription overlay hidden");
+        info!("Transcription overlay hidden");
+    } else {
+        debug!("Transcription overlay hide: no window to close");
     }
     state.text_field = None;
     state.status_field = None;

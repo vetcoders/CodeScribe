@@ -3,9 +3,9 @@
 //! Exports embedded model data and configuration.
 //! Generates embedded_model_data.rs and embedded_tts_data.rs in OUT_DIR for release builds.
 //!
-//! Release builds DO NOT embed models by default (keeps binary <3GB).
-//! Opt-in with CODESCRIBE_EMBED_MODEL / CODESCRIBE_EMBED_E5 / CODESCRIBE_EMBED_TTS.
-//! Use CODESCRIBE_NO_EMBED=1 to force skipping even if opt-ins are set.
+//! Release builds EMBED Whisper model by default for zero-dependency distribution.
+//! Opt-out with CODESCRIBE_NO_EMBED=1 to skip embedding.
+//! Additional models (TTS, E5) require opt-in via CODESCRIBE_EMBED_TTS / CODESCRIBE_EMBED_E5.
 //!
 //! Created by M&K (c)2026 VetCoders
 
@@ -38,10 +38,6 @@ fn main() {
 
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let is_release = profile == "release";
-    let embed_model_set = env::var("CODESCRIBE_EMBED_MODEL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .is_some();
     let no_embed = env::var("CODESCRIBE_NO_EMBED").is_ok();
 
     if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
@@ -169,7 +165,11 @@ fn main() {
             println!("cargo:warning=E5 embedding disabled (set CODESCRIBE_EMBED_E5=1 to embed)");
         }
 
-        if is_release && embed_model_set && model_exists && !no_embed {
+        // Release builds embed Whisper by default (zero-dependency distribution)
+        // Skip with CODESCRIBE_NO_EMBED=1 or if model not found
+        let should_embed_whisper = is_release && model_exists && !no_embed;
+
+        if should_embed_whisper {
             // Release + model found → embed it
             println!(
                 "cargo:warning=Embedding model from: {}",
@@ -193,17 +193,24 @@ fn main() {
                 "cargo:rustc-env=CODESCRIBE_MODEL_DIR={}",
                 model_path.display()
             );
-        } else if is_release {
+        } else if is_release && no_embed {
+            // Explicit opt-out
+            println!("cargo:warning=CODESCRIBE_NO_EMBED set - skipping Whisper embedding");
             println!(
-                "cargo:warning=Whisper embedding disabled (set CODESCRIBE_EMBED_MODEL=1 to embed)"
+                "cargo:warning=Binary will require CODESCRIBE_MODEL_PATH or HF cache at runtime"
             );
-            println!("cargo:warning=Runtime requires CODESCRIBE_MODEL_PATH or HF cache");
+            println!("cargo:rustc-env=CODESCRIBE_MODEL_DIR=");
+        } else if is_release && !model_exists {
+            // Release but model not found
+            println!("cargo:warning=Whisper model not found - cannot embed");
+            println!(
+                "cargo:warning=Download with: hf download {}",
+                DEFAULT_WHISPER_REPO
+            );
+            println!("cargo:warning=Or set CODESCRIBE_MODEL_PATH at runtime");
+            println!("cargo:rustc-env=CODESCRIBE_MODEL_DIR=");
         } else {
-            // Debug build OR explicit no-embed → skip embedding
-            if is_release && no_embed {
-                println!("cargo:warning=CODESCRIBE_NO_EMBED set - skipping model embedding");
-                println!("cargo:warning=Binary will require CODESCRIBE_MODEL_PATH at runtime");
-            }
+            // Debug build → skip embedding (use runtime loading)
             println!("cargo:rustc-env=CODESCRIBE_MODEL_DIR=");
         }
     }

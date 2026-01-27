@@ -45,6 +45,7 @@ pub type Id = *mut Object;
 
 /// Show the voice chat overlay window
 pub fn show_voice_chat_overlay() {
+    info!("show_voice_chat_overlay requested");
     Queue::main().exec_async(|| {
         show_voice_chat_overlay_impl();
     });
@@ -52,6 +53,7 @@ pub fn show_voice_chat_overlay() {
 
 /// Show the voice chat overlay with custom configuration
 pub fn show_voice_chat_overlay_with_config(_config: VoiceChatOverlayConfig) {
+    info!("show_voice_chat_overlay_with_config requested");
     Queue::main().exec_async(|| {
         show_voice_chat_overlay_impl();
     });
@@ -59,6 +61,7 @@ pub fn show_voice_chat_overlay_with_config(_config: VoiceChatOverlayConfig) {
 
 fn show_voice_chat_overlay_impl() {
     unsafe {
+        info!("show_voice_chat_overlay_impl starting");
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
         let ns_window = Class::get("NSWindow").unwrap();

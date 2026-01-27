@@ -154,6 +154,7 @@ pub fn reset_voice_chat_activity() {
 
 /// Hide the voice chat overlay window
 pub fn hide_voice_chat_overlay() {
+    info!("hide_voice_chat_overlay requested");
     Queue::main().exec_async(|| {
         hide_voice_chat_overlay_impl();
     });
@@ -559,9 +560,12 @@ fn hide_voice_chat_overlay_impl() {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(window_ptr) = state.window {
             let window = window_ptr as Id;
+            info!("Voice chat overlay hide: closing window");
             crate::ui_helpers::animate_fade(window, 0.0, 0.15);
             crate::ui_helpers::window_close(window);
             clear_overlay_state(&mut state);
+        } else {
+            debug!("Voice chat overlay hide: no window to close");
         }
     }
     clear_search_field();

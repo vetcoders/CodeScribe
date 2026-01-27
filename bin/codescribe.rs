@@ -408,16 +408,32 @@ async fn run_daemon() -> Result<()> {
     let menu_controller = Arc::clone(&controller);
     let menu_handle = Handle::current();
     std::thread::spawn(move || {
+        use tray::TrayMenuEvent;
         for event in menu_rx {
+            // Apply hotkey settings directly from event (avoids race condition with .env save)
+            match &event {
+                TrayMenuEvent::SetHoldMods(mods) => {
+                    hotkeys::set_hold_mods(*mods);
+                }
+                TrayMenuEvent::SetToggleTrigger(trigger) => {
+                    hotkeys::set_toggle_trigger(*trigger);
+                }
+                TrayMenuEvent::ToggleHoldExclusive => {
+                    let config = Config::load();
+                    hotkeys::set_exclusive_mode(!config.hold_exclusive);
+                }
+                _ => {}
+            }
+
+            // Update controller with fresh config for non-hotkey settings
             let controller = Arc::clone(&menu_controller);
             let handle = menu_handle.clone();
             handle.spawn(async move {
                 let config = Config::load();
-                sync_hotkey_config(&config);
                 controller.set_config(config).await;
             });
 
-            if matches!(event, tray::TrayMenuEvent::Quit) {
+            if matches!(event, TrayMenuEvent::Quit) {
                 break;
             }
         }
