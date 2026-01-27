@@ -350,44 +350,27 @@ mod macos {
             return false;
         }
 
-        let exclusive = EXCLUSIVE_MODE.load(AtomicOrdering::SeqCst);
-        let current = ModifierFlags {
-            ctrl,
-            alt: option,
-            shift,
-            cmd,
-        };
-        let required = match hold_mods {
-            HoldMods::Ctrl => ModifierFlags {
-                ctrl: true,
-                alt: false,
-                shift: false,
-                cmd: false,
-            },
-            HoldMods::CtrlAlt => ModifierFlags {
-                ctrl: true,
-                alt: true,
-                shift: false,
-                cmd: false,
-            },
-            HoldMods::CtrlShift => ModifierFlags {
-                ctrl: true,
-                alt: false,
-                shift: true,
-                cmd: false,
-            },
-            HoldMods::CtrlCmd => ModifierFlags {
-                ctrl: true,
-                alt: false,
-                shift: false,
-                cmd: true,
-            },
-        };
-
-        current.matches(&required, exclusive)
+        // IMPORTANT:
+        // We intentionally IGNORE Shift/Cmd in the hold combo matching.
+        // Shift/Cmd act as *mode modifiers* on top of the base hold gesture.
+        //
+        // If we included Shift/Cmd in the matching (especially with "exclusive" mode),
+        // pressing Shift while holding Ctrl would look like "Hold Up", causing rapid
+        // start/stop thrashing and, in worst cases, system-level freezes (event tap churn).
+        match hold_mods {
+            HoldMods::Ctrl => ctrl,
+            HoldMods::CtrlAlt => ctrl && option,
+            HoldMods::CtrlShift => ctrl && shift,
+            HoldMods::CtrlCmd => ctrl && cmd,
+        }
     }
 
     fn compute_hold_mode(shift: bool, cmd: bool) -> HoldMode {
+        // "Exclusive" disables the Shift/Cmd mode layer.
+        if EXCLUSIVE_MODE.load(AtomicOrdering::SeqCst) {
+            return HoldMode::Raw;
+        }
+
         if cmd {
             HoldMode::Selection
         } else if shift {
