@@ -3,7 +3,7 @@
 //! Contains all the public functions for controlling the overlay and
 //! internal helper functions for state updates.
 
-use core_graphics::geometry::CGPoint;
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
@@ -610,10 +610,24 @@ pub(super) fn update_chat_view_with_state(
             }
         }
 
-        if scroll_to_bottom && let Some(scroll_view_ptr) = state.agent_scroll_view {
+        // Ensure the document view size matches its arranged subviews; otherwise scrolling can
+        // jump to empty space and look like messages "disappear".
+        if let Some(scroll_view_ptr) = state.agent_scroll_view {
             let scroll_view = scroll_view_ptr as Id;
-            let content_view: Id = msg_send![scroll_view, contentView];
-            let _: () = msg_send![content_view, scrollToPoint: CGPoint::new(0.0, f64::MAX)];
+
+            let fitting: CGSize = msg_send![container, fittingSize];
+            let frame: CGRect = msg_send![container, frame];
+            let new_size = CGSize::new(frame.size.width, fitting.height.max(frame.size.height));
+            let _: () = msg_send![container, setFrameSize: new_size];
+
+            if scroll_to_bottom {
+                let content_view: Id = msg_send![scroll_view, contentView];
+                let bounds: CGRect = msg_send![content_view, bounds];
+                let doc_frame: CGRect = msg_send![container, frame];
+                let max_y = (doc_frame.size.height - bounds.size.height).max(0.0);
+                let _: () = msg_send![content_view, scrollToPoint: CGPoint::new(0.0, max_y)];
+                let _: () = msg_send![scroll_view, reflectScrolledClipView: content_view];
+            }
         }
     }
 }
