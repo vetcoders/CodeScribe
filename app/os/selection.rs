@@ -48,6 +48,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
 /// - `ASSISTIVE_CONTEXT_MAX_CHARS` (default: 5000)
 /// - `ASSISTIVE_CONTEXT_INCLUDE_APP` (default: 1)
 /// - `ASSISTIVE_CONTEXT_COPY_DELAY_MS` (default: 150)
+/// - `ASSISTIVE_CONTEXT_COPY_FALLBACK` (default: 0) - enable Cmd+C fallback when AX selection is unavailable
 pub fn capture_assistive_context() -> AssistiveContext {
     // Unit tests should not trigger osascript / clipboard / event simulation.
     if cfg!(test) {
@@ -152,9 +153,23 @@ fn selected_text_from_frontmost(max_chars: usize, copy_delay_ms: u64) -> Option<
         return Some(selected);
     }
 
+    // If we can reliably detect that selection length is zero, do NOT fall back to Cmd+C.
+    // This prevents accidental leakage of arbitrary clipboard content into the Assistive prompt.
+    if let Some(sel_len) = crate::ui::get_selected_text_length()
+        && sel_len == 0
+    {
+        return None;
+    }
+
+    // Cmd+C fallback is opt-in (off by default). Some apps don't expose AX selection APIs.
+    if !env_flag("ASSISTIVE_CONTEXT_COPY_FALLBACK", false) {
+        return None;
+    }
+
     // Fallback: snapshot clipboard + Cmd+C + restore.
     // This can fail in some apps and can mis-detect "no selection" when clipboard doesn't change.
     let snapshot = ClipboardSnapshot::capture().ok();
+    let prev_text = snapshot.as_ref().and_then(|s| s.text.clone());
 
     if let Err(e) = clipboard::simulate_cmd_c() {
         warn!("Assistive context: failed to simulate Cmd+C: {}", e);
@@ -180,6 +195,14 @@ fn selected_text_from_frontmost(max_chars: usize, copy_delay_ms: u64) -> Option<
     copied = copied.trim().to_string();
     if copied.is_empty() {
         return None;
+    }
+
+    // If clipboard didn't change, treat as "no selection" to avoid leaking arbitrary clipboard data.
+    if let Some(prev) = prev_text {
+        if copied == prev.trim() {
+            debug!("Assistive context: clipboard unchanged; treating as no selection");
+            return None;
+        }
     }
 
     if copied.len() > max_chars {
