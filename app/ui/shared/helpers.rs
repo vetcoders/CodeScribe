@@ -760,25 +760,55 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         let ns_text_field = Class::get("NSTextField").unwrap();
         let ns_color = Class::get("NSColor").unwrap();
         let ns_font = Class::get("NSFont").unwrap();
+        let ns_dict = Class::get("NSDictionary").unwrap();
 
-        // Calculate text dimensions (approximate)
         let font_size = 13.0;
         let padding = 12.0;
+        let line_height = font_size * 1.4;
         let copy_button_height = if config.message_index.is_some() {
             20.0
         } else {
             0.0
         };
-        let chars_per_line = (config.max_width - padding * 2.0) / (font_size * 0.6);
-        let text_len = config.text.len() as f64;
-        let estimated_lines = (text_len / chars_per_line).ceil().max(1.0);
-        let line_height = font_size * 1.4;
-        let text_height = estimated_lines * line_height;
+
+        // Font (prefer JetBrains Mono if installed)
+        let jb_name = ns_string("JetBrainsMono-Regular");
+        let jb_font: Id = msg_send![ns_font, fontWithName: jb_name size: font_size];
+        let font: Id = if jb_font.is_null() {
+            msg_send![ns_font, monospacedSystemFontOfSize: font_size weight: 0.0f64]
+        } else {
+            jb_font
+        };
+
+        // Set text (with streaming indicator if needed)
+        let display_text = if config.is_streaming && config.text.is_empty() {
+            "• • •".to_string() // Pulsing dots placeholder
+        } else if config.is_streaming {
+            format!("{} …", config.text)
+        } else {
+            config.text.clone()
+        };
+
+        // Measure text height/width using NSString boundingRectWithSize (handles newlines/wrapping).
+        // This is much more reliable than a char-count heuristic and prevents clipped bubbles.
+        let text_max_width = (config.max_width - padding * 2.0).max(40.0);
+        let text_str = ns_string(&display_text);
+        let font_key = ns_string("NSFontAttributeName");
+        let attrs: Id = msg_send![ns_dict, dictionaryWithObject: font forKey: font_key];
+        let opts: u64 = 1 | 2; // NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+        let text_rect: CGRect = msg_send![
+            text_str,
+            boundingRectWithSize: CGSize::new(text_max_width, 10_000.0)
+            options: opts
+            attributes: attrs
+        ];
+        let text_height = text_rect.size.height.ceil().max(line_height);
         let bubble_height = text_height + padding * 2.0 + copy_button_height;
 
-        // Bubble width: content-aware but capped
-        let content_width = (text_len * font_size * 0.6).min(config.max_width - padding * 2.0);
-        let bubble_width = content_width + padding * 2.0;
+        // Bubble width: content-aware but capped.
+        // Use measured width where possible (but don't exceed max width).
+        let content_width = text_rect.size.width.min(text_max_width).max(1.0);
+        let bubble_width = (content_width + padding * 2.0).min(config.max_width);
 
         // Container view (for alignment)
         let container: Id = msg_send![ns_view, alloc];
@@ -861,7 +891,7 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         // Text label inside bubble
         let text_frame = CGRect::new(
             &CGPoint::new(padding, padding / 2.0),
-            &CGSize::new(bubble_width - padding * 2.0, text_height),
+            &CGSize::new((bubble_width - padding * 2.0).max(1.0), text_height),
         );
         let text_label: Id = msg_send![ns_text_field, alloc];
         let text_label: Id = msg_send![text_label, initWithFrame: text_frame];
@@ -898,25 +928,8 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         let text_color: Id = msg_send![ns_color, colorWithRed: tr green: tg blue: tb alpha: ta];
         let _: () = msg_send![text_label, setTextColor: text_color];
 
-        // Font (prefer JetBrains Mono if installed)
-        let jb_name = ns_string("JetBrainsMono-Regular");
-        let jb_font: Id = msg_send![ns_font, fontWithName: jb_name size: font_size];
-        let font: Id = if jb_font.is_null() {
-            msg_send![ns_font, monospacedSystemFontOfSize: font_size weight: 0.0f64]
-        } else {
-            jb_font
-        };
         let _: () = msg_send![text_label, setFont: font];
 
-        // Set text (with streaming indicator if needed)
-        let display_text = if config.is_streaming && config.text.is_empty() {
-            "• • •".to_string() // Pulsing dots placeholder
-        } else if config.is_streaming {
-            format!("{} …", config.text)
-        } else {
-            config.text.clone()
-        };
-        let text_str = ns_string(&display_text);
         let _: () = msg_send![text_label, setStringValue: text_str];
 
         // Word wrap
