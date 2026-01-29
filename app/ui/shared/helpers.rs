@@ -396,7 +396,8 @@ pub fn create_scrollable_text_view(frame: CGRect, editable: bool) -> (Id, Id) {
         // Create scroll view
         let scroll: Id = msg_send![ns_scroll_view, alloc];
         let scroll: Id = msg_send![scroll, initWithFrame: frame];
-        let _: () = msg_send![scroll, setHasVerticalScroller: true];
+        // Keep scrollbars invisible; scrolling still works via trackpad/mouse wheel.
+        let _: () = msg_send![scroll, setHasVerticalScroller: false];
         let _: () = msg_send![scroll, setHasHorizontalScroller: false];
         let _: () = msg_send![scroll, setDrawsBackground: false];
         let _: () = msg_send![scroll, setBorderType: 0_isize]; // NSNoBorder

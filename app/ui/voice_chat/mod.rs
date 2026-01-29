@@ -44,6 +44,14 @@ use state::{OVERLAY_STATE, Tab};
 // Type alias for Objective-C object pointers
 pub type Id = *mut Object;
 
+// NSViewAutoresizingMaskOptions (bitmask)
+const NSVIEW_MIN_X_MARGIN: isize = 1;
+const NSVIEW_WIDTH_SIZABLE: isize = 2;
+const NSVIEW_MAX_X_MARGIN: isize = 4;
+const NSVIEW_MIN_Y_MARGIN: isize = 8;
+const NSVIEW_HEIGHT_SIZABLE: isize = 16;
+const NSVIEW_MAX_Y_MARGIN: isize = 32;
+
 /// Show the voice chat overlay window
 pub fn show_voice_chat_overlay() {
     Queue::main().exec_async(|| {
@@ -144,7 +152,9 @@ fn show_voice_chat_overlay_impl() {
 
         let overlay_window_class = overlay_window_class();
         let window: Id = msg_send![overlay_window_class, alloc];
-        let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::FullSizeContentView;
+        let style_mask = NSWindowStyleMask::Borderless
+            | NSWindowStyleMask::FullSizeContentView
+            | NSWindowStyleMask::Resizable;
         let backing = NSBackingStoreType::Buffered;
         let window: Id = msg_send![
             window,
@@ -160,6 +170,7 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![window, setOpaque: false];
         let _: () = msg_send![window, setBackgroundColor: color_clear()];
         let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
+        let _: () = msg_send![window, setContentMinSize: CGSize::new(380.0, 360.0)];
         // Make sure the overlay shows up even when the user is in a fullscreen Space.
         let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary;
@@ -182,6 +193,10 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![blur_view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
         let _: () = msg_send![blur_view, setState: NSVisualEffectState::Active];
         let _: () = msg_send![blur_view, setWantsLayer: true];
+        let _: () = msg_send![
+            blur_view,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
+        ];
         let layer: Id = msg_send![blur_view, layer];
         if !layer.is_null() {
             let _: () = msg_send![layer, setCornerRadius: 16.0f64];
@@ -205,6 +220,10 @@ fn show_voice_chat_overlay_impl() {
         let header_view: Id = msg_send![Class::get("NSView").unwrap(), alloc];
         let header_view: Id = msg_send![header_view, initWithFrame: header_frame];
         let _: () = msg_send![header_view, setWantsLayer: true];
+        let _: () = msg_send![
+            header_view,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MIN_Y_MARGIN
+        ];
         let header_layer: Id = msg_send![header_view, layer];
         if !header_layer.is_null() {
             let color: Id = msg_send![Class::get("NSColor").unwrap(), colorWithRed: 0.15 green: 0.15 blue: 0.15 alpha: 0.6];
@@ -228,6 +247,10 @@ fn show_voice_chat_overlay_impl() {
             selectable: false,
             editable: false,
         });
+        let _: () = msg_send![
+            title_label,
+            setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
+        ];
         add_subview(blur_view, title_label);
 
         // Header right-side controls (right-aligned, consistent spacing).
@@ -262,6 +285,10 @@ fn show_voice_chat_overlay_impl() {
             tab_control,
             "Przełącz widok: Drawer (historia) / Agent (czat)",
         );
+        let _: () = msg_send![
+            tab_control,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MIN_Y_MARGIN
+        ];
         add_subview(blur_view, tab_control);
 
         let export_button = create_button(
@@ -274,6 +301,10 @@ fn show_voice_chat_overlay_impl() {
         );
         button_set_action(export_button, action_handler, sel!(onExportMenu:));
         set_tooltip(export_button, "Eksportuj rozmowę (Markdown)");
+        let _: () = msg_send![
+            export_button,
+            setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
+        ];
         add_subview(blur_view, export_button);
 
         // Drawer favorites filter (hearts on/off)
@@ -291,6 +322,10 @@ fn show_voice_chat_overlay_impl() {
             sel!(onToggleFavoritesOnly:),
         );
         set_tooltip(favorites_button, "Pokaż tylko ulubione w Drawerze");
+        let _: () = msg_send![
+            favorites_button,
+            setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
+        ];
         add_subview(blur_view, favorites_button);
 
         let more_button = create_button(
@@ -303,6 +338,10 @@ fn show_voice_chat_overlay_impl() {
         );
         button_set_action(more_button, action_handler, sel!(onMoreMenu:));
         set_tooltip(more_button, "Więcej akcji");
+        let _: () = msg_send![
+            more_button,
+            setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
+        ];
         add_subview(blur_view, more_button);
 
         let close_button = create_button(
@@ -315,6 +354,10 @@ fn show_voice_chat_overlay_impl() {
         );
         button_set_action(close_button, action_handler, sel!(onClose:));
         set_tooltip(close_button, "Zamknij okno");
+        let _: () = msg_send![
+            close_button,
+            setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
+        ];
         add_subview(blur_view, close_button);
 
         // Drawer scroll view + stack
@@ -328,13 +371,19 @@ fn show_voice_chat_overlay_impl() {
         let ns_scroll = Class::get("NSScrollView").unwrap();
         let drawer_scroll: Id = msg_send![ns_scroll, alloc];
         let drawer_scroll: Id = msg_send![drawer_scroll, initWithFrame: drawer_frame];
-        let _: () = msg_send![drawer_scroll, setHasVerticalScroller: true];
+        // Hide scrollers; scrolling still works via trackpad/mouse wheel.
+        let _: () = msg_send![drawer_scroll, setHasVerticalScroller: false];
         let _: () = msg_send![drawer_scroll, setDrawsBackground: false];
+        let _: () = msg_send![
+            drawer_scroll,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
+        ];
 
         let drawer_container = create_vertical_stack_view(CGRect::new(
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(drawer_frame.size.width, drawer_frame.size.height),
         ));
+        let _: () = msg_send![drawer_container, setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE];
         let _: () = msg_send![drawer_scroll, setDocumentView: drawer_container];
         add_subview(blur_view, drawer_scroll);
 
@@ -350,8 +399,13 @@ fn show_voice_chat_overlay_impl() {
         );
         let agent_scroll: Id = msg_send![ns_scroll, alloc];
         let agent_scroll: Id = msg_send![agent_scroll, initWithFrame: agent_scroll_frame];
-        let _: () = msg_send![agent_scroll, setHasVerticalScroller: true];
+        // Hide scrollers; scrolling still works via trackpad/mouse wheel.
+        let _: () = msg_send![agent_scroll, setHasVerticalScroller: false];
         let _: () = msg_send![agent_scroll, setDrawsBackground: false];
+        let _: () = msg_send![
+            agent_scroll,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
+        ];
         let agent_container = create_vertical_stack_view(CGRect::new(
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(
@@ -359,6 +413,7 @@ fn show_voice_chat_overlay_impl() {
                 agent_scroll_frame.size.height,
             ),
         ));
+        let _: () = msg_send![agent_container, setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE];
         let _: () = msg_send![agent_scroll, setDocumentView: agent_container];
         add_subview(blur_view, agent_scroll);
 
@@ -374,6 +429,7 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![search_field, setPlaceholderString: placeholder];
         let _: () = msg_send![search_field, setTarget: action_handler];
         let _: () = msg_send![search_field, setAction: sel!(onSearchChanged:)];
+        let _: () = msg_send![search_field, setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MAX_Y_MARGIN];
         add_subview(blur_view, search_field);
 
         // Agent input bar
@@ -384,6 +440,8 @@ fn show_voice_chat_overlay_impl() {
         );
         let input_bar: Id = msg_send![input_bar, initWithFrame: input_frame];
         let _: () = msg_send![input_bar, setWantsLayer: true];
+        let _: () =
+            msg_send![input_bar, setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MAX_Y_MARGIN];
         let input_layer: Id = msg_send![input_bar, layer];
         if !input_layer.is_null() {
             let color: Id = msg_send![Class::get("NSColor").unwrap(), colorWithRed: 0.15 green: 0.15 blue: 0.15 alpha: 0.6];
@@ -399,6 +457,10 @@ fn show_voice_chat_overlay_impl() {
         );
         let (agent_input_scroll, agent_input_text_view) =
             create_scrollable_text_view(text_area_frame, true);
+        let _: () = msg_send![
+            agent_input_scroll,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
+        ];
         let ns_font = Class::get("NSFont").unwrap();
         let text_font: Id = msg_send![ns_font, systemFontOfSize: 13.0f64];
         let _: () = msg_send![agent_input_text_view, setFont: text_font];
@@ -417,6 +479,10 @@ fn show_voice_chat_overlay_impl() {
             button_style::ROUNDED,
         );
         button_set_action(agent_send_button, action_handler, sel!(onSend:));
+        let _: () = msg_send![
+            agent_send_button,
+            setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MAX_Y_MARGIN
+        ];
         let _: () = msg_send![input_bar, addSubview: agent_send_button];
 
         // Initial visibility
