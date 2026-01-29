@@ -5,7 +5,7 @@
 //! - Show Chat Overlay
 //! - Open history folder
 //! - Copy last transcript
-//! - Advanced submenu (hotkeys/prompts/diagnostics/quality)
+//! - Tools submenu (prompts/diagnostics + advanced hotkeys)
 //! - Help/About
 //! - Quit
 //!
@@ -36,7 +36,7 @@ thread_local! {
 /// Open history...
 /// Copy last transcript
 /// ─────────────
-/// Advanced… ▸
+/// Tools ▸
 /// ─────────────
 /// Help
 /// About
@@ -75,20 +75,11 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     // 5. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 6. Advanced submenu (power-user options)
-    let advanced_menu = Submenu::new("Advanced…", true);
+    // 6. Tools submenu (daily stuff up front; hotkeys hidden under Advanced)
+    let tools_menu = Submenu::new("Tools", true);
 
-    // 6a. Hotkeys submenu
-    let (hold_hotkeys_menu, hold_ids) = build_hold_hotkeys_submenu()?;
-    advanced_menu.append(&hold_hotkeys_menu)?;
-
-    advanced_menu.append(&PredefinedMenuItem::separator())?;
-
-    // 6b. Prompts submenu
-    let prompts_menu = Submenu::new("Prompts", true);
-    let prompts_note = MenuItem::new("Location: ~/.codescribe/prompts", false, None);
-    prompts_menu.append(&prompts_note)?;
-    prompts_menu.append(&PredefinedMenuItem::separator())?;
+    // 6a. Prompts submenu (most common)
+    let prompts_menu = Submenu::new("Edit prompts…", true);
     let open_assistive_prompt_item = MenuItem::new("Assistive…", true, None);
     let open_assistive_prompt_id = open_assistive_prompt_item.id().clone();
     prompts_menu.append(&open_assistive_prompt_item)?;
@@ -97,22 +88,16 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     let open_formatting_prompt_id = open_formatting_prompt_item.id().clone();
     prompts_menu.append(&open_formatting_prompt_item)?;
 
-    prompts_menu.append(&PredefinedMenuItem::separator())?;
-
     let open_prompts_folder_item = MenuItem::new("Open prompts folder", true, None);
     let open_prompts_folder_id = open_prompts_folder_item.id().clone();
     prompts_menu.append(&open_prompts_folder_item)?;
 
-    advanced_menu.append(&prompts_menu)?;
+    tools_menu.append(&prompts_menu)?;
 
-    advanced_menu.append(&PredefinedMenuItem::separator())?;
+    tools_menu.append(&PredefinedMenuItem::separator())?;
 
-    // 6c. Diagnostics submenu
+    // 6b. Diagnostics submenu
     let diagnostics_menu = Submenu::new("Diagnostics", true);
-    let diag_note = MenuItem::new("Copy includes permissions + env status", false, None);
-    diagnostics_menu.append(&diag_note)?;
-    diagnostics_menu.append(&PredefinedMenuItem::separator())?;
-
     let copy_diag_item = MenuItem::new("Copy diagnostics", true, None);
     let copy_diag_id = copy_diag_item.id().clone();
     diagnostics_menu.append(&copy_diag_item)?;
@@ -135,9 +120,17 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
         *cell.borrow_mut() = Some(quality_item);
     });
 
-    advanced_menu.append(&diagnostics_menu)?;
+    tools_menu.append(&diagnostics_menu)?;
 
-    menu.append(&advanced_menu)?;
+    // 6c. Advanced (rare)
+    let advanced_menu = Submenu::new("Advanced…", true);
+
+    // Hotkeys submenu
+    let (hold_hotkeys_menu, hold_ids) = build_hold_hotkeys_submenu()?;
+    advanced_menu.append(&hold_hotkeys_menu)?;
+    tools_menu.append(&advanced_menu)?;
+
+    menu.append(&tools_menu)?;
 
     // 7. Separator
     menu.append(&PredefinedMenuItem::separator())?;
@@ -237,7 +230,7 @@ mod tests {
             "Show Chat Overlay".to_string(),
             "Open history...".to_string(),
             "Copy last transcript".to_string(),
-            "Advanced…".to_string(),
+            "Tools".to_string(),
             "Help".to_string(),
             "About".to_string(),
             "Quit".to_string(),
