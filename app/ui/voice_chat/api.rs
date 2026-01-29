@@ -1044,6 +1044,7 @@ pub fn handle_card_copy(index: usize) {
 pub fn handle_card_edit(index: usize) {
     let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(entry) = state.drawer_entries.get(index) {
+        tracing::info!("Drawer Edit clicked: {}", entry.path.display());
         let ok = open_file_in_editor(&entry.path);
         if !ok {
             #[cfg(target_os = "macos")]

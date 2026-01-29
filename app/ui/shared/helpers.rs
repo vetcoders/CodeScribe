@@ -1295,6 +1295,23 @@ pub unsafe fn resize_bubble_container_for_text(container: Id, text_label: Id, di
 
 /// Open a file in the default editor (TextEdit, etc.)
 pub fn open_file_in_editor(path: &std::path::Path) -> bool {
+    // Most reliable approach in the app-bundle environment: call `/usr/bin/open`.
+    // NSWorkspace sometimes reports success but doesn't surface the editor window (or respects
+    // odd per-app settings). `open -e` is predictable.
+    #[cfg(target_os = "macos")]
+    {
+        let path = path.to_path_buf();
+        let run = |args: &[&str]| -> bool {
+            let mut cmd = std::process::Command::new("/usr/bin/open");
+            cmd.args(args).arg(&path);
+            cmd.status().map(|s| s.success()).unwrap_or(false)
+        };
+
+        if run(&["-e"]) || run(&["-t"]) || run(&[]) {
+            return true;
+        }
+    }
+
     unsafe {
         let ns_workspace = Class::get("NSWorkspace").unwrap();
         let workspace: Id = msg_send![ns_workspace, sharedWorkspace];
@@ -1320,33 +1337,8 @@ pub fn open_file_in_editor(path: &std::path::Path) -> bool {
         }
     }
 
-    // Last resort: use the system `open` command (TextEdit / default handler).
-    #[cfg(target_os = "macos")]
-    {
-        let path = path.to_path_buf();
-        let run = |args: &[&str]| -> bool {
-            let mut cmd = std::process::Command::new("/usr/bin/open");
-            cmd.args(args).arg(&path);
-            cmd.status().map(|s| s.success()).unwrap_or(false)
-        };
-
-        // Force TextEdit first (most predictable "edit" behavior).
-        if run(&["-e"]) {
-            return true;
-        }
-        // Fallback to "default text editor".
-        if run(&["-t"]) {
-            return true;
-        }
-        // Final fallback: default application for the file type.
-        run(&[])
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = path;
-        false
-    }
+    let _ = path;
+    false
 }
 
 /// List draft files from a directory, sorted by modification time (newest first)
