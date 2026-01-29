@@ -191,4 +191,4 @@ Grant in **System Settings > Privacy & Security**:
 
 ---
 
-*Created by M&K (c)2026 VetCoders*
+*Copyright © 2024–2026 VetCoders*

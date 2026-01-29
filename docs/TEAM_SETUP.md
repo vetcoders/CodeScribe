@@ -178,4 +178,4 @@ For full CI, configure a self-hosted macOS runner (Dragon recommended).
 - If using local STT: confirm the app is using the embedded engine (default in release builds)
 
 ---
-*Created by M&K (c)2026 VetCoders*
+*Copyright © 2024–2026 VetCoders*

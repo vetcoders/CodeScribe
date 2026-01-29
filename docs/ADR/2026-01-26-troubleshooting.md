@@ -298,4 +298,4 @@ Include in your report:
 
 ---
 
-*Created by M&K (c)2026 VetCoders*
+*Copyright © 2024–2026 VetCoders*

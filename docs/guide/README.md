@@ -96,4 +96,4 @@ CodeScribe lives in your menu bar. The icon color indicates status:
 
 ---
 
-*Created by M&K (c)2026 VetCoders*
+*Copyright © 2024–2026 VetCoders*

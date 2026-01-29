@@ -415,4 +415,4 @@ When `HOLD_EXCLUSIVE=true` (default):
 
 ---
 
-*Created by M&K (c)2026 VetCoders*
+*Copyright © 2024–2026 VetCoders*

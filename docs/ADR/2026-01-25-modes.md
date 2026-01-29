@@ -184,4 +184,4 @@ The overlay appears near your cursor or in a fixed position (configurable).
 
 ---
 
-*Created by M&K (c)2026 VetCoders*
+*Copyright © 2024–2026 VetCoders*

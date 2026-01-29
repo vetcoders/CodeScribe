@@ -561,5 +561,5 @@ codescribe loop --daemon --interval 3600 --apply
 
 ---
 
-*Created by M&K (c)2026 VetCoders*
+*Copyright © 2024–2026 VetCoders*
 *Klaudiusz & Maciej — from SyntaxError to Clinical Safety*
