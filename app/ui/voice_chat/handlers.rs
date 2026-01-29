@@ -2,6 +2,7 @@
 //!
 //! Contains Objective-C class registration and action handler functions.
 
+use core_graphics::geometry::{CGPoint, CGRect};
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{msg_send, sel, sel_impl};
@@ -92,6 +93,26 @@ pub fn action_handler_class() -> *const Class {
             decl.add_method(
                 sel!(onDiscardMessage:),
                 on_discard_message as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onExportMenu:),
+                on_export_menu as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onExportAllCopy:),
+                on_export_all_copy as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onExportAllSave:),
+                on_export_all_save as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onExportAssistantCopy:),
+                on_export_assistant_copy as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onExportAssistantSave:),
+                on_export_assistant_save as extern "C" fn(&Object, Sel, Id),
             );
             let cls = decl.register();
             ACTION_HANDLER_CLASS = cls;
@@ -297,6 +318,123 @@ extern "C" fn on_commit_message(_this: &Object, _cmd: Sel, _sender: Id) {
 extern "C" fn on_discard_message(_this: &Object, _cmd: Sel, _sender: Id) {
     discard_last_message_impl();
     info!("Draft message discarded");
+}
+
+extern "C" fn on_export_menu(this: &Object, _cmd: Sel, sender: Id) {
+    unsafe {
+        let ns_menu = Class::get("NSMenu").unwrap();
+        let ns_menu_item = Class::get("NSMenuItem").unwrap();
+
+        let menu: Id = msg_send![ns_menu, new];
+        let target: Id = (this as *const Object) as Id;
+
+        // Submenu: All
+        let all_item: Id = msg_send![ns_menu_item, alloc];
+        let all_item: Id = msg_send![
+            all_item,
+            initWithTitle: ns_string("All")
+            action: std::ptr::null_mut::<Object>()
+            keyEquivalent: ns_string("")
+        ];
+        let all_menu: Id = msg_send![ns_menu, new];
+
+        let all_copy: Id = msg_send![ns_menu_item, alloc];
+        let all_copy: Id = msg_send![
+            all_copy,
+            initWithTitle: ns_string("Copy as Markdown")
+            action: sel!(onExportAllCopy:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![all_copy, setTarget: target];
+        let _: () = msg_send![all_menu, addItem: all_copy];
+
+        let all_save: Id = msg_send![ns_menu_item, alloc];
+        let all_save: Id = msg_send![
+            all_save,
+            initWithTitle: ns_string("Save as Markdown (to history)")
+            action: sel!(onExportAllSave:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![all_save, setTarget: target];
+        let _: () = msg_send![all_menu, addItem: all_save];
+
+        let _: () = msg_send![all_item, setSubmenu: all_menu];
+        let _: () = msg_send![menu, addItem: all_item];
+
+        // Submenu: Assistant only
+        let asst_item: Id = msg_send![ns_menu_item, alloc];
+        let asst_item: Id = msg_send![
+            asst_item,
+            initWithTitle: ns_string("Assistant only")
+            action: std::ptr::null_mut::<Object>()
+            keyEquivalent: ns_string("")
+        ];
+        let asst_menu: Id = msg_send![ns_menu, new];
+
+        let asst_copy: Id = msg_send![ns_menu_item, alloc];
+        let asst_copy: Id = msg_send![
+            asst_copy,
+            initWithTitle: ns_string("Copy as Markdown")
+            action: sel!(onExportAssistantCopy:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![asst_copy, setTarget: target];
+        let _: () = msg_send![asst_menu, addItem: asst_copy];
+
+        let asst_save: Id = msg_send![ns_menu_item, alloc];
+        let asst_save: Id = msg_send![
+            asst_save,
+            initWithTitle: ns_string("Save as Markdown (to history)")
+            action: sel!(onExportAssistantSave:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![asst_save, setTarget: target];
+        let _: () = msg_send![asst_menu, addItem: asst_save];
+
+        let _: () = msg_send![asst_item, setSubmenu: asst_menu];
+        let _: () = msg_send![menu, addItem: asst_item];
+
+        // Pop up anchored at the button.
+        let bounds: CGRect = msg_send![sender, bounds];
+        let location = CGPoint::new(0.0, bounds.size.height);
+        let nil_item: *mut Object = std::ptr::null_mut();
+        let _: bool = msg_send![
+            menu,
+            popUpMenuPositioningItem: nil_item
+            atLocation: location
+            inView: sender
+        ];
+    }
+}
+
+extern "C" fn on_export_all_copy(_this: &Object, _cmd: Sel, _sender: Id) {
+    let md = super::api::export_chat_markdown(false);
+    copy_to_clipboard(&md);
+    info!("Exported chat (all) to clipboard as Markdown");
+}
+
+extern "C" fn on_export_all_save(_this: &Object, _cmd: Sel, _sender: Id) {
+    if let Some(path) = super::api::save_chat_markdown_to_history(false) {
+        info!("Saved chat (all) export to {}", path.display());
+        super::api::refresh_drawer();
+    } else {
+        info!("Failed to save chat (all) export");
+    }
+}
+
+extern "C" fn on_export_assistant_copy(_this: &Object, _cmd: Sel, _sender: Id) {
+    let md = super::api::export_chat_markdown(true);
+    copy_to_clipboard(&md);
+    info!("Exported chat (assistant-only) to clipboard as Markdown");
+}
+
+extern "C" fn on_export_assistant_save(_this: &Object, _cmd: Sel, _sender: Id) {
+    if let Some(path) = super::api::save_chat_markdown_to_history(true) {
+        info!("Saved chat (assistant-only) export to {}", path.display());
+        super::api::refresh_drawer();
+    } else {
+        info!("Failed to save chat (assistant-only) export");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════

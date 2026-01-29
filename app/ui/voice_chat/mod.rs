@@ -231,7 +231,7 @@ fn show_voice_chat_overlay_impl() {
 
         // Keep the tab control between the title and the right-side icon cluster.
         // The overlay window is typically ~450px wide; fixed coordinates can overlap.
-        let right_cluster_start_x = window_width - 192.0;
+        let right_cluster_start_x = window_width - 224.0;
         let tab_x = title_x + title_w + 10.0;
         // Don't enforce a minimum width here; on narrower windows, forcing a min can make the
         // segmented control overlap the right-side icon cluster.
@@ -266,6 +266,18 @@ fn show_voice_chat_overlay_impl() {
         );
         set_tooltip(favorites_button, "Pokaż tylko ulubione w Drawerze");
         add_subview(blur_view, favorites_button);
+
+        let export_button = create_button(
+            CGRect::new(
+                &CGPoint::new(window_width - 224.0, window_height - 34.0),
+                &CGSize::new(24.0, 24.0),
+            ),
+            "⇩",
+            button_style::SMALL_SQUARE,
+        );
+        button_set_action(export_button, action_handler, sel!(onExportMenu:));
+        set_tooltip(export_button, "Eksportuj rozmowę (Markdown)");
+        add_subview(blur_view, export_button);
 
         let paste_last_button = create_button(
             CGRect::new(
