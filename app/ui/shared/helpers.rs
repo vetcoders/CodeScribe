@@ -1311,6 +1311,29 @@ pub fn open_file_in_editor(path: &std::path::Path) -> bool {
             );
             return false;
         }
+
+        let open_via_nsworkspace_textedit = || -> bool {
+            unsafe {
+                let ns_workspace = match Class::get("NSWorkspace") {
+                    Some(c) => c,
+                    None => return false,
+                };
+                let workspace: Id = msg_send![ns_workspace, sharedWorkspace];
+                if workspace.is_null() {
+                    return false;
+                }
+
+                let path_str = path.to_string_lossy();
+                let ns_path = ns_string(&path_str);
+                let app = ns_string("TextEdit");
+
+                // Prefer explicit app open (avoids "Open…" panel / wrong default handler).
+                let ok: bool = msg_send![workspace, openFile: ns_path withApplication: app];
+                info!("NSWorkspace openFile:withApplication(TextEdit) ok={}", ok);
+                ok
+            }
+        };
+
         let run_open = |args: &[&str]| -> bool {
             let out = std::process::Command::new("/usr/bin/open")
                 .args(args)
@@ -1375,7 +1398,7 @@ pub fn open_file_in_editor(path: &std::path::Path) -> bool {
         // Force TextEdit and try to surface it; otherwise it can open "somewhere" (another Space)
         // and look like a no-op from the user's POV.
         // Prefer `open -a TextEdit <file>` (explicit app + file). Fallback to `-e` if needed.
-        if run_open(&["-a", "TextEdit"]) || run_open(&["-e"]) {
+        if open_via_nsworkspace_textedit() || run_open(&["-a", "TextEdit"]) || run_open(&["-e"]) {
             // Give launch a moment so NSRunningApplication can see the process.
             std::thread::sleep(Duration::from_millis(75));
             activate_textedit_best_effort();
