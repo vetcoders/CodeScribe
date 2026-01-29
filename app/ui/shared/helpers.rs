@@ -362,9 +362,15 @@ pub fn create_card_view(frame: CGRect, title: &str, subtitle: &str, preview: &st
         let _: () = msg_send![subtitle_field, setTextColor: subtitle_color];
         let _: () = msg_send![card, addSubview: subtitle_field];
 
+        // Leave room for the actions row ("Copy / Edit / Delete / ♥") at the bottom.
+        let preview_bottom = 36.0;
+        let preview_top = 56.0;
         let preview_frame = CGRect::new(
-            &CGPoint::new(12.0, 12.0),
-            &CGSize::new(frame.size.width - 24.0, frame.size.height - 56.0),
+            &CGPoint::new(12.0, preview_bottom),
+            &CGSize::new(
+                frame.size.width - 24.0,
+                (frame.size.height - preview_top - preview_bottom).max(18.0),
+            ),
         );
         let preview_field: Id = msg_send![ns_text_field, alloc];
         let preview_field: Id = msg_send![preview_field, initWithFrame: preview_frame];

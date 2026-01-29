@@ -903,11 +903,10 @@ fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
             if let Some(container_ptr) = state.agent_container {
                 let container = container_ptr as Id;
                 let container_frame: CGRect = msg_send![container, frame];
-                let new_container = CGRect::new(
-                    &CGPoint::new(0.0, 0.0),
-                    &CGSize::new(container_frame.size.width, new_agent_frame.size.height),
-                );
-                let _: () = msg_send![container, setFrame: new_container];
+                // IMPORTANT: do NOT clamp the document view height to the visible clip height.
+                // That disables scrolling and makes long agent replies unscrollable.
+                let new_size = CGSize::new(new_agent_frame.size.width, container_frame.size.height);
+                let _: () = msg_send![container, setFrameSize: new_size];
             }
         }
     }
