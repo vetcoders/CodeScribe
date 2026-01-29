@@ -239,12 +239,8 @@ fn show_voice_chat_overlay_impl() {
 
         let mut x = window_width - right_pad - btn_w;
         let close_button_x = x;
-        x -= gap + 28.0;
-        let new_thread_button_x = x;
         x -= gap + btn_w;
-        let copy_last_button_x = x;
-        x -= gap + btn_w;
-        let paste_last_button_x = x;
+        let more_button_x = x;
         x -= gap + btn_w;
         let favorites_button_x = x;
         x -= gap + btn_w;
@@ -297,45 +293,17 @@ fn show_voice_chat_overlay_impl() {
         set_tooltip(favorites_button, "Pokaż tylko ulubione w Drawerze");
         add_subview(blur_view, favorites_button);
 
-        let paste_last_button = create_button(
+        let more_button = create_button(
             CGRect::new(
-                &CGPoint::new(paste_last_button_x, header_btn_y),
+                &CGPoint::new(more_button_x, header_btn_y),
                 &CGSize::new(btn_w, btn_h),
             ),
-            "⇲",
+            "⋯",
             button_style::SMALL_SQUARE,
         );
-        button_set_action(
-            paste_last_button,
-            action_handler,
-            sel!(onPasteLastResponse:),
-        );
-        set_tooltip(paste_last_button, "Wklej ostatnią odpowiedź AI");
-        add_subview(blur_view, paste_last_button);
-
-        let copy_last_button = create_button(
-            CGRect::new(
-                &CGPoint::new(copy_last_button_x, header_btn_y),
-                &CGSize::new(btn_w, btn_h),
-            ),
-            "⧉",
-            button_style::SMALL_SQUARE,
-        );
-        button_set_action(copy_last_button, action_handler, sel!(onCopyLastResponse:));
-        set_tooltip(copy_last_button, "Skopiuj ostatnią odpowiedź AI");
-        add_subview(blur_view, copy_last_button);
-
-        let new_thread_button = create_button(
-            CGRect::new(
-                &CGPoint::new(new_thread_button_x, header_btn_y),
-                &CGSize::new(28.0, btn_h),
-            ),
-            "↻",
-            button_style::SMALL_SQUARE,
-        );
-        button_set_action(new_thread_button, action_handler, sel!(onNewThread:));
-        set_tooltip(new_thread_button, "Nowy wątek (wyczyść czat)");
-        add_subview(blur_view, new_thread_button);
+        button_set_action(more_button, action_handler, sel!(onMoreMenu:));
+        set_tooltip(more_button, "Więcej akcji");
+        add_subview(blur_view, more_button);
 
         let close_button = create_button(
             CGRect::new(

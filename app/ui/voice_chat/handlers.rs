@@ -114,6 +114,10 @@ pub fn action_handler_class() -> *const Class {
                 sel!(onExportAssistantSave:),
                 on_export_assistant_save as extern "C" fn(&Object, Sel, Id),
             );
+            decl.add_method(
+                sel!(onMoreMenu:),
+                on_more_menu as extern "C" fn(&Object, Sel, Id),
+            );
             // NSTextView delegate (auto-resize input bar as content grows/shrinks).
             decl.add_method(
                 sel!(textDidChange:),
@@ -439,6 +443,60 @@ extern "C" fn on_export_assistant_save(_this: &Object, _cmd: Sel, _sender: Id) {
         super::api::refresh_drawer();
     } else {
         info!("Failed to save chat (assistant-only) export");
+    }
+}
+
+extern "C" fn on_more_menu(this: &Object, _cmd: Sel, sender: Id) {
+    unsafe {
+        let ns_menu = Class::get("NSMenu").unwrap();
+        let ns_menu_item = Class::get("NSMenuItem").unwrap();
+
+        let menu: Id = msg_send![ns_menu, new];
+        let target: Id = (this as *const Object) as Id;
+
+        let new_thread: Id = msg_send![ns_menu_item, alloc];
+        let new_thread: Id = msg_send![
+            new_thread,
+            initWithTitle: ns_string("New thread")
+            action: sel!(onNewThread:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![new_thread, setTarget: target];
+        let _: () = msg_send![menu, addItem: new_thread];
+
+        let sep: Id = msg_send![ns_menu_item, separatorItem];
+        let _: () = msg_send![menu, addItem: sep];
+
+        let copy_last: Id = msg_send![ns_menu_item, alloc];
+        let copy_last: Id = msg_send![
+            copy_last,
+            initWithTitle: ns_string("Copy last response")
+            action: sel!(onCopyLastResponse:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![copy_last, setTarget: target];
+        let _: () = msg_send![menu, addItem: copy_last];
+
+        let paste_last: Id = msg_send![ns_menu_item, alloc];
+        let paste_last: Id = msg_send![
+            paste_last,
+            initWithTitle: ns_string("Paste last response")
+            action: sel!(onPasteLastResponse:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![paste_last, setTarget: target];
+        let _: () = msg_send![menu, addItem: paste_last];
+
+        // Pop up anchored at the button.
+        let bounds: CGRect = msg_send![sender, bounds];
+        let location = CGPoint::new(0.0, bounds.size.height);
+        let nil_item: *mut Object = std::ptr::null_mut();
+        let _: bool = msg_send![
+            menu,
+            popUpMenuPositioningItem: nil_item
+            atLocation: location
+            inView: sender
+        ];
     }
 }
 
