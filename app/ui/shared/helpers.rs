@@ -769,7 +769,7 @@ pub struct BubbleConfig {
 /// Returns (container_view, text_label) tuple for later updates
 pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
     unsafe {
-        let ns_view = flipped_view_class();
+        let ns_view = bubble_container_view_class();
         let ns_text_field = bubble_text_field_class();
         let ns_color = Class::get("NSColor").unwrap();
         let ns_font = Class::get("NSFont").unwrap();
@@ -1311,10 +1311,37 @@ pub fn open_file_in_editor(path: &std::path::Path) -> bool {
         let ns_url = Class::get("NSURL").unwrap();
         let url: Id = msg_send![ns_url, fileURLWithPath: ns_path];
         if url.is_null() {
-            return false;
+            // last resort below (shell open)
+        } else {
+            let ok2: bool = msg_send![workspace, openURL: url];
+            if ok2 {
+                return true;
+            }
         }
-        let ok2: bool = msg_send![workspace, openURL: url];
-        ok2
+    }
+
+    // Last resort: use the system `open` command (TextEdit / default handler).
+    #[cfg(target_os = "macos")]
+    {
+        let path = path.to_path_buf();
+        if std::process::Command::new("open")
+            .arg("-t")
+            .arg(&path)
+            .status()
+            .is_ok()
+        {
+            return true;
+        }
+        return std::process::Command::new("open")
+            .arg(&path)
+            .status()
+            .is_ok();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
     }
 }
 
@@ -1411,21 +1438,47 @@ extern "C" fn is_flipped(_this: &Object, _cmd: Sel) -> bool {
     true
 }
 
-fn flipped_view_class() -> &'static Class {
+fn bubble_container_view_class() -> &'static Class {
     static mut CLS: *const Class = std::ptr::null();
     static ONCE: Once = Once::new();
     ONCE.call_once(|| unsafe {
         let superclass = Class::get("NSView").expect("NSView class missing");
-        let mut decl = ClassDecl::new("CodeScribeFlippedView", superclass)
-            .expect("CodeScribeFlippedView already defined");
+        let mut decl = ClassDecl::new("CodeScribeBubbleContainerView", superclass)
+            .expect("CodeScribeBubbleContainerView already defined");
         decl.add_method(
             sel!(isFlipped),
             is_flipped as extern "C" fn(&Object, Sel) -> bool,
+        );
+        decl.add_method(
+            sel!(scrollWheel:),
+            bubble_container_scroll_wheel as extern "C" fn(&Object, Sel, Id),
         );
         let cls = decl.register();
         CLS = cls as *const Class;
     });
     unsafe { &*CLS }
+}
+
+extern "C" fn bubble_container_scroll_wheel(this: &Object, _cmd: Sel, event: Id) {
+    unsafe {
+        let view: Id = (this as *const Object) as Id;
+        if view.is_null() || event.is_null() {
+            return;
+        }
+
+        // When the pointer is over a bubble background, AppKit may not route wheel events to the
+        // surrounding scroll view. Forward explicitly so long messages stay scrollable.
+        let scroll: Id = msg_send![view, enclosingScrollView];
+        if !scroll.is_null() {
+            let _: () = msg_send![scroll, scrollWheel: event];
+            return;
+        }
+
+        let next: Id = msg_send![view, nextResponder];
+        if !next.is_null() {
+            let _: () = msg_send![next, scrollWheel: event];
+        }
+    }
 }
 
 fn bubble_text_field_class() -> &'static Class {
