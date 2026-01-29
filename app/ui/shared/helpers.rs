@@ -764,7 +764,7 @@ pub struct BubbleConfig {
 pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
     unsafe {
         let ns_view = flipped_view_class();
-        let ns_text_field = Class::get("NSTextField").unwrap();
+        let ns_text_field = bubble_text_field_class();
         let ns_color = Class::get("NSColor").unwrap();
         let ns_font = Class::get("NSFont").unwrap();
         let ns_dict = Class::get("NSDictionary").unwrap();
@@ -1296,8 +1296,19 @@ pub fn open_file_in_editor(path: &std::path::Path) -> bool {
         let path_str = path.to_string_lossy();
         let ns_path = ns_string(&path_str);
 
-        let result: bool = msg_send![workspace, openFile: ns_path];
-        result
+        let ok: bool = msg_send![workspace, openFile: ns_path];
+        if ok {
+            return true;
+        }
+
+        // Fallback: open via file:// URL (some apps prefer this path).
+        let ns_url = Class::get("NSURL").unwrap();
+        let url: Id = msg_send![ns_url, fileURLWithPath: ns_path];
+        if url.is_null() {
+            return false;
+        }
+        let ok2: bool = msg_send![workspace, openURL: url];
+        ok2
     }
 }
 
@@ -1334,6 +1345,28 @@ pub fn list_draft_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 /// Create a vertical NSStackView for stacking views
 pub fn create_vertical_stack_view(frame: CGRect) -> Id {
+    unsafe {
+        let ns_stack_view = Class::get("NSStackView").unwrap();
+
+        let stack: Id = msg_send![ns_stack_view, alloc];
+        let stack: Id = msg_send![stack, initWithFrame: frame];
+
+        // Vertical orientation (1 = NSUserInterfaceLayoutOrientationVertical)
+        let _: () = msg_send![stack, setOrientation: 1_isize];
+        // Top alignment
+        let _: () = msg_send![stack, setAlignment: 1_isize]; // NSLayoutAttributeLeft
+        // Spacing between views
+        let _: () = msg_send![stack, setSpacing: 8.0f64];
+
+        stack
+    }
+}
+
+/// Create a flipped vertical NSStackView (y-axis grows downward).
+///
+/// This is useful for chat-like UIs where we want "top-down" coordinates and stable bubble
+/// sizing during streaming.
+pub fn create_flipped_vertical_stack_view(frame: CGRect) -> Id {
     unsafe {
         let ns_stack_view = flipped_stack_view_class();
 
@@ -1387,6 +1420,45 @@ fn flipped_view_class() -> &'static Class {
         CLS = cls as *const Class;
     });
     unsafe { &*CLS }
+}
+
+fn bubble_text_field_class() -> &'static Class {
+    static mut CLS: *const Class = std::ptr::null();
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| unsafe {
+        let superclass = Class::get("NSTextField").expect("NSTextField class missing");
+        let mut decl = ClassDecl::new("CodeScribeBubbleTextField", superclass)
+            .expect("CodeScribeBubbleTextField already defined");
+        decl.add_method(
+            sel!(scrollWheel:),
+            bubble_text_scroll_wheel as extern "C" fn(&Object, Sel, Id),
+        );
+        let cls = decl.register();
+        CLS = cls as *const Class;
+    });
+    unsafe { &*CLS }
+}
+
+extern "C" fn bubble_text_scroll_wheel(this: &Object, _cmd: Sel, event: Id) {
+    unsafe {
+        let view: Id = (this as *const Object) as Id;
+        if view.is_null() || event.is_null() {
+            return;
+        }
+
+        // Selectable text fields sometimes "eat" scroll wheel events without scrolling anything.
+        // Forward the wheel to the enclosing scroll view so Agent/Drawer can always scroll.
+        let scroll: Id = msg_send![view, enclosingScrollView];
+        if !scroll.is_null() {
+            let _: () = msg_send![scroll, scrollWheel: event];
+            return;
+        }
+
+        let next: Id = msg_send![view, nextResponder];
+        if !next.is_null() {
+            let _: () = msg_send![next, scrollWheel: event];
+        }
+    }
 }
 
 /// Add a view to NSStackView

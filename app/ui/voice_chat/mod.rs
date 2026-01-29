@@ -33,8 +33,9 @@ use tracing::{info, warn};
 
 use crate::ui_helpers::{
     NS_FLOATING_WINDOW_LEVEL, add_subview, button_set_action, button_style, color_clear,
-    create_button, create_scrollable_text_view, create_segmented_control,
-    create_vertical_stack_view, ns_string, set_hidden, set_tooltip, window_set_alpha, window_show,
+    create_button, create_flipped_vertical_stack_view, create_scrollable_text_view,
+    create_segmented_control, create_vertical_stack_view, ns_string, set_hidden, set_tooltip,
+    window_set_alpha, window_show,
 };
 
 use api::update_active_tab_impl;
@@ -425,7 +426,7 @@ fn show_voice_chat_overlay_impl() {
             agent_scroll,
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
         ];
-        let agent_container = create_vertical_stack_view(CGRect::new(
+        let agent_container = create_flipped_vertical_stack_view(CGRect::new(
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(
                 agent_scroll_frame.size.width,
