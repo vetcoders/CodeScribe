@@ -324,14 +324,13 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
         // When switching to Agent, make sure the input field can actually receive text.
         // We do NOT force activation (to avoid stealing focus), but if the window is already
         // key, we nudge first responder to the input field for better UX.
-        if tab == Tab::Agent {
-            if let (Some(window_ptr), Some(input_ptr)) = (state.window, state.agent_input_text_view)
-            {
-                let window = window_ptr as Id;
-                let is_key: bool = msg_send![window, isKeyWindow];
-                if is_key {
-                    let _: bool = msg_send![window, makeFirstResponder: input_ptr as Id];
-                }
+        if tab == Tab::Agent
+            && let (Some(window_ptr), Some(input_ptr)) = (state.window, state.agent_input_text_view)
+        {
+            let window = window_ptr as Id;
+            let is_key: bool = msg_send![window, isKeyWindow];
+            if is_key {
+                let _: bool = msg_send![window, makeFirstResponder: input_ptr as Id];
             }
         }
     }
@@ -652,6 +651,21 @@ pub(super) fn update_chat_view_with_state(
         stack_view_clear(container);
         state.agent_bubble_views.clear();
 
+        // Size bubbles to the current visible content width (supports resizable overlay).
+        let max_width = state
+            .agent_scroll_view
+            .map(|p| {
+                let scroll_view = p as Id;
+                let content_view: Id = msg_send![scroll_view, contentView];
+                if content_view.is_null() {
+                    return 390.0;
+                }
+                let bounds: CGRect = msg_send![content_view, bounds];
+                bounds.size.width
+            })
+            .unwrap_or(390.0)
+            .clamp(240.0, 1200.0);
+
         let mut last_bubble: Option<Id> = None;
         for (index, message) in state.messages.iter().enumerate() {
             let role = match message.role {
@@ -662,7 +676,7 @@ pub(super) fn update_chat_view_with_state(
             let (bubble, text_label) = create_bubble_view(BubbleConfig {
                 text: message.text.clone(),
                 role,
-                max_width: 390.0,
+                max_width,
                 is_streaming: message.is_streaming,
                 is_error: message.is_error,
                 message_index: Some(index),
@@ -692,8 +706,7 @@ pub(super) fn update_chat_view_with_state(
 
             let _: () = msg_send![container, layoutSubtreeIfNeeded];
             let fitting: CGSize = msg_send![container, fittingSize];
-            let frame: CGRect = msg_send![container, frame];
-            let new_size = CGSize::new(frame.size.width, fitting.height.max(frame.size.height));
+            let new_size = CGSize::new(max_width, fitting.height.max(1.0));
             let _: () = msg_send![container, setFrameSize: new_size];
 
             if scroll_to_bottom {
@@ -764,7 +777,7 @@ fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
         let text = get_text_view_string(text_view);
         let hard_lines = (text.matches('\n').count() + 1).max(1);
         // Heuristic for wrapped lines: assume ~52 chars per visual line at this width.
-        let wrapped_lines = ((text.chars().count() + 51) / 52).max(1);
+        let wrapped_lines = text.chars().count().div_ceil(52).max(1);
         let visual_lines = hard_lines.max(wrapped_lines);
 
         let min_h = 56.0;

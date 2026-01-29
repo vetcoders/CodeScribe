@@ -171,6 +171,13 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![window, setBackgroundColor: color_clear()];
         let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
         let _: () = msg_send![window, setContentMinSize: CGSize::new(380.0, 360.0)];
+        // Prevent "infinite" resizing; cap at the current screen's visible frame.
+        let ns_screen = Class::get("NSScreen").unwrap();
+        let screen: Id = msg_send![ns_screen, mainScreen];
+        if !screen.is_null() {
+            let visible: CGRect = msg_send![screen, visibleFrame];
+            let _: () = msg_send![window, setContentMaxSize: visible.size];
+        }
         // Make sure the overlay shows up even when the user is in a fullscreen Space.
         let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary;
