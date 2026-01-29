@@ -9,7 +9,7 @@ use tracing::{debug, info};
 use crate::config::{Config, HoldMods, ToggleTrigger};
 use crate::os::clipboard;
 use crate::os::permissions;
-use crate::tray::state::{HOLD_MENU_ITEMS, TOGGLE_MENU_ITEMS, send_menu_event};
+use crate::tray::state::{HOTKEYS_MENU_ITEMS, send_menu_event};
 use crate::tray::types::{MenuIds, TrayMenuEvent};
 
 /// Handle menu item click and send appropriate event
@@ -37,21 +37,11 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
     } else if event_id == &menu_ids.quit {
         send_menu_event(TrayMenuEvent::Quit);
     }
-    // Hold Hotkeys submenu
-    else if event_id == &menu_ids.hold_ctrl {
-        handle_set_hold_mods(HoldMods::Ctrl);
-    } else if event_id == &menu_ids.hold_ctrl_opt {
-        handle_set_hold_mods(HoldMods::CtrlAlt);
-    }
-    // Toggle trigger submenu
-    else if event_id == &menu_ids.toggle_double_opt {
-        handle_set_toggle_trigger(ToggleTrigger::DoubleOption);
-    } else if event_id == &menu_ids.toggle_double_ralt {
-        handle_set_toggle_trigger(ToggleTrigger::DoubleRightOption);
-    } else if event_id == &menu_ids.toggle_disabled {
-        handle_set_toggle_trigger(ToggleTrigger::None);
-    } else if event_id == &menu_ids.shortcuts_reset {
-        handle_reset_shortcuts();
+    // Hotkeys submenu
+    else if event_id == &menu_ids.hotkeys_toggle_assistive {
+        handle_toggle_assistive_toggle();
+    } else if event_id == &menu_ids.hotkeys_reset {
+        handle_reset_hotkeys();
     }
     // Quality - Open Report
     else if event_id == &menu_ids.quality_open_report {
@@ -115,64 +105,74 @@ fn handle_open_prompts_folder() {
 }
 
 // ============================================================================
-// Hold Hotkeys Handlers
+// Hotkeys Handlers
 // ============================================================================
 
-/// Set hold modifier keys and update menu checkmarks
-fn handle_set_hold_mods(mods: HoldMods) {
-    info!("Setting hold mods to: {:?}", mods);
-    send_menu_event(TrayMenuEvent::SetHoldMods(mods));
-
-    // Update menu checkmarks (radio behavior)
-    HOLD_MENU_ITEMS.with(|items_cell| {
-        if let Some(ref items) = *items_cell.borrow() {
-            items.ctrl.set_checked(mods == HoldMods::Ctrl);
-            items.ctrl_opt.set_checked(mods == HoldMods::CtrlAlt);
-            items.label.set_text(format!("Current: {}", mods.label()));
-        }
-    });
-
-    // Persist to config
+/// Toggle the assistive "right Option" trigger on/off.
+fn handle_toggle_assistive_toggle() {
     let config = Config::load();
-    let _ = config.save_to_env("HOLD_MODS", mods.as_str());
-}
+    let currently_enabled = config.toggle_trigger != ToggleTrigger::None;
+    let new_trigger = if currently_enabled {
+        ToggleTrigger::None
+    } else {
+        ToggleTrigger::DoubleRightOption
+    };
 
-/// Set toggle trigger and update menu checkmarks
-fn handle_set_toggle_trigger(trigger: ToggleTrigger) {
-    info!("Setting toggle trigger to: {:?}", trigger);
-    send_menu_event(TrayMenuEvent::SetToggleTrigger(trigger));
+    info!(
+        "Toggling assistive right-Option trigger: {} -> {:?}",
+        if currently_enabled { "ON" } else { "OFF" },
+        new_trigger
+    );
 
-    // Update menu checkmarks (radio behavior)
-    TOGGLE_MENU_ITEMS.with(|items_cell| {
+    // Persist to config + notify daemon to re-sync hotkeys deterministically.
+    let _ = config.save_to_env("TOGGLE_TRIGGER", new_trigger.as_str());
+    send_menu_event(TrayMenuEvent::SetToggleTrigger(new_trigger));
+
+    // Update menu visuals.
+    HOTKEYS_MENU_ITEMS.with(|items_cell| {
         if let Some(ref items) = *items_cell.borrow() {
             items
-                .double_opt
-                .set_checked(trigger == ToggleTrigger::DoubleOption);
-            items
-                .double_ralt
-                .set_checked(trigger == ToggleTrigger::DoubleRightOption);
-            items.disabled.set_checked(trigger == ToggleTrigger::None);
-            items.label.set_text(format!("Toggle: {}", trigger.label()));
+                .toggle_assistive
+                .set_checked(new_trigger != ToggleTrigger::None);
+            items.toggle_label.set_text(format!(
+                "Right Option toggle (assistive): {}",
+                if new_trigger != ToggleTrigger::None {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            ));
         }
     });
-
-    // Persist to config
-    let config = Config::load();
-    let _ = config.save_to_env("TOGGLE_TRIGGER", trigger.as_str());
 }
 
-/// Reset shortcuts to a safe, recommended default.
-fn handle_reset_shortcuts() {
-    info!("Resetting shortcuts to recommended defaults");
+/// Reset hotkeys to a safe, recommended default.
+fn handle_reset_hotkeys() {
+    info!("Resetting hotkeys to recommended defaults");
+
+    let config = Config::load();
+
     // Ensure Shift/Cmd mode layer is enabled.
-    let config = Config::load();
     let _ = config.save_to_env("HOLD_EXCLUSIVE", "0");
+    // Recommended: Hold Ctrl for RAW; Shift/Cmd as modes.
+    let _ = config.save_to_env("HOLD_MODS", HoldMods::Ctrl.as_str());
+    // Recommended: enable assistive toggle (right Option) by default.
+    let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::DoubleRightOption.as_str());
 
-    // Apply defaults via existing handlers (also updates checkmarks + sends events).
-    handle_set_hold_mods(HoldMods::Ctrl);
-    handle_set_toggle_trigger(ToggleTrigger::DoubleRightOption);
-
+    send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Ctrl));
+    send_menu_event(TrayMenuEvent::SetToggleTrigger(
+        ToggleTrigger::DoubleRightOption,
+    ));
     send_menu_event(TrayMenuEvent::ResetShortcuts);
+
+    HOTKEYS_MENU_ITEMS.with(|items_cell| {
+        if let Some(ref items) = *items_cell.borrow() {
+            items.toggle_assistive.set_checked(true);
+            items
+                .toggle_label
+                .set_text("Right Option toggle (assistive): ON");
+        }
+    });
 }
 
 /// Open history folder in Finder

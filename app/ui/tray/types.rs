@@ -98,19 +98,10 @@ pub enum TrayMenuEvent {
 // Menu Item Storage Structs
 // ============================================================================
 
-/// Hold Hotkeys menu items for radio-button behavior
-pub struct HoldMenuItems {
-    pub ctrl: CheckMenuItem,
-    pub ctrl_opt: CheckMenuItem,
-    pub label: MenuItem,
-}
-
-/// Toggle Trigger menu items for radio-button behavior
-pub struct ToggleMenuItems {
-    pub double_opt: CheckMenuItem,
-    pub double_ralt: CheckMenuItem,
-    pub disabled: CheckMenuItem,
-    pub label: MenuItem,
+/// Hotkeys menu items that need runtime updates.
+pub struct HotkeysMenuItems {
+    pub toggle_assistive: CheckMenuItem,
+    pub toggle_label: MenuItem,
 }
 
 // ============================================================================
@@ -132,13 +123,9 @@ pub struct MenuIds {
     pub about: MenuId,
     pub quit: MenuId,
 
-    // Hold Hotkeys submenu
-    pub hold_ctrl: MenuId,
-    pub hold_ctrl_opt: MenuId,
-    pub toggle_double_opt: MenuId,
-    pub toggle_double_ralt: MenuId,
-    pub toggle_disabled: MenuId,
-    pub shortcuts_reset: MenuId,
+    // Hotkeys submenu
+    pub hotkeys_toggle_assistive: MenuId,
+    pub hotkeys_reset: MenuId,
 
     // Quality
     pub quality_open_report: MenuId,

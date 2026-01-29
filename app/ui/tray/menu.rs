@@ -162,14 +162,7 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     menu.append(&quit_item)?;
 
     // Destructure hold_ids tuple
-    let (
-        hold_ctrl_id,
-        hold_ctrl_opt_id,
-        toggle_double_opt_id,
-        toggle_double_ralt_id,
-        toggle_disabled_id,
-        shortcuts_reset_id,
-    ) = hold_ids;
+    let (hotkeys_toggle_assistive_id, hotkeys_reset_id) = hold_ids;
 
     Ok((
         menu,
@@ -184,13 +177,9 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
             help: help_id,
             about: about_id,
             quit: quit_id,
-            // Hold Hotkeys submenu
-            hold_ctrl: hold_ctrl_id,
-            hold_ctrl_opt: hold_ctrl_opt_id,
-            toggle_double_opt: toggle_double_opt_id,
-            toggle_double_ralt: toggle_double_ralt_id,
-            toggle_disabled: toggle_disabled_id,
-            shortcuts_reset: shortcuts_reset_id,
+            // Hotkeys submenu
+            hotkeys_toggle_assistive: hotkeys_toggle_assistive_id,
+            hotkeys_reset: hotkeys_reset_id,
             // Quality
             quality_open_report: quality_open_report_id,
         },
