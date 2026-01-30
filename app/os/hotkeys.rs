@@ -187,9 +187,9 @@ impl Default for ModifierFlags {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use std::sync::mpsc;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::thread;
 
     // CGEvent types and flags

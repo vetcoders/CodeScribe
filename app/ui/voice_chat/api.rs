@@ -7,6 +7,7 @@ use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
@@ -25,6 +26,9 @@ use super::state::{
 
 // Type alias for Objective-C object pointers
 pub type Id = *mut Object;
+
+static AGENT_DOC_SYNC_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static DRAWER_DOC_SYNC_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 // ═══════════════════════════════════════════════════════════
 // Public API
@@ -336,6 +340,9 @@ fn try_update_last_message_view_in_place(state: &mut VoiceChatOverlayState) -> b
         let display_text = display_text_for_message(last_message);
         resize_bubble_container_for_text(container, label, &display_text);
 
+        // Sync document size (scheduled) so scrolling stays correct for long/streaming messages.
+        schedule_agent_doc_sync();
+
         // Keep the latest message in view while streaming.
         if let Some(scroll_view_ptr) = state.agent_scroll_view {
             let _ = scroll_view_ptr;
@@ -547,6 +554,67 @@ fn ensure_streaming_user_message(state: &mut VoiceChatOverlayState) {
     }
 }
 
+/// Keep the scroll view document view sized to the stack's fitting content.
+///
+/// This prevents overlapping bubbles and ensures scrolling works for long content.
+unsafe fn sync_stack_view_document_size(scroll_view: Id, stack_view: Id) {
+    let clip: Id = msg_send![scroll_view, contentView];
+    let clip_bounds: CGRect = msg_send![clip, bounds];
+    let available_w = clip_bounds.size.width.max(1.0);
+
+    // Ask Auto Layout what size the stack wants to be.
+    let fitting: CGSize = msg_send![stack_view, fittingSize];
+    let desired_h = fitting.height.max(1.0);
+
+    let current: CGRect = msg_send![stack_view, frame];
+    if (current.size.width - available_w).abs() < 0.5
+        && (current.size.height - desired_h).abs() < 0.5
+    {
+        return;
+    }
+
+    let _: () = msg_send![stack_view, setFrameSize: CGSize::new(available_w, desired_h)];
+    let _: () = msg_send![stack_view, setNeedsLayout: true];
+    // Avoid forcing layout immediately; doing so inside AppKit's display cycle can cause
+    // recursive layout and hard crashes. Let AppKit reflow on the next pass.
+}
+
+fn schedule_agent_doc_sync() {
+    if AGENT_DOC_SYNC_SCHEDULED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    Queue::main().exec_async(|| {
+        AGENT_DOC_SYNC_SCHEDULED.store(false, Ordering::SeqCst);
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(scroll_view_ptr), Some(container_ptr)) =
+            (state.agent_scroll_view, state.agent_container)
+        {
+            unsafe {
+                sync_stack_view_document_size(scroll_view_ptr as Id, container_ptr as Id);
+            }
+        }
+    });
+}
+
+fn schedule_drawer_doc_sync() {
+    if DRAWER_DOC_SYNC_SCHEDULED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    Queue::main().exec_async(|| {
+        DRAWER_DOC_SYNC_SCHEDULED.store(false, Ordering::SeqCst);
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(scroll_view_ptr), Some(container_ptr)) =
+            (state.drawer_scroll_view, state.drawer_container)
+        {
+            unsafe {
+                sync_stack_view_document_size(scroll_view_ptr as Id, container_ptr as Id);
+            }
+        }
+    });
+}
+
 pub(super) fn update_chat_view_with_state(
     state: &mut VoiceChatOverlayState,
     scroll_to_bottom: bool,
@@ -589,6 +657,10 @@ pub(super) fn update_chat_view_with_state(
                 stack_view_add(container, action_bar);
             }
         }
+
+        // Schedule a document size sync (frame/bounds reads inside AppKit's layout pass can
+        // cause recursive safe-area/layout crashes on newer macOS).
+        schedule_agent_doc_sync();
 
         if scroll_to_bottom && let Some(scroll_view_ptr) = state.agent_scroll_view {
             let scroll_view = scroll_view_ptr as Id;
@@ -702,9 +774,7 @@ fn build_attachments_block(paths: &[std::path::PathBuf]) -> String {
         };
 
         let mut buf = Vec::new();
-        let _ = (&mut f)
-            .take(MAX_FILE_BYTES as u64)
-            .read_to_end(&mut buf);
+        let _ = (&mut f).take(MAX_FILE_BYTES as u64).read_to_end(&mut buf);
 
         let Ok(mut s) = String::from_utf8(buf) else {
             let ext = path
@@ -868,14 +938,7 @@ fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
             );
             let _: () = msg_send![agent_scroll, setFrame: new_agent_frame];
 
-            if let Some(container_ptr) = state.agent_container {
-                let container = container_ptr as Id;
-                let container_frame: CGRect = msg_send![container, frame];
-                // IMPORTANT: do NOT clamp the document view height to the visible clip height.
-                // That disables scrolling and makes long agent replies unscrollable.
-                let new_size = CGSize::new(new_agent_frame.size.width, container_frame.size.height);
-                let _: () = msg_send![container, setFrameSize: new_size];
-            }
+            schedule_agent_doc_sync();
         }
     }
 }
@@ -1077,6 +1140,8 @@ fn render_drawer_entries(state: &mut VoiceChatOverlayState, query: &str) {
             let card = create_drawer_card(entry, index, state.action_handler);
             stack_view_add(container, card);
         }
+
+        schedule_drawer_doc_sync();
     }
 }
 

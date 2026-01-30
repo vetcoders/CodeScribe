@@ -400,7 +400,7 @@ fn strip_image_attachments(user_message: &str) -> (String, Vec<PathBuf>) {
 }
 
 fn encode_image_as_data_url(path: &PathBuf) -> Option<String> {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
     const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024; // 8MB per image
 

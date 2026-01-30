@@ -1231,7 +1231,6 @@ pub unsafe fn resize_bubble_container_for_text(container: Id, text_label: Id, di
         update_stack_item_height(container, bubble_height);
 
         let _: () = msg_send![container, setNeedsLayout: true];
-        let _: () = msg_send![container, layoutSubtreeIfNeeded];
         let _: () = msg_send![container, setNeedsDisplay: true];
     }
 }
@@ -1288,7 +1287,9 @@ pub fn pick_files_open_panel(title: &str) -> Vec<std::path::PathBuf> {
             if c_str.is_null() {
                 continue;
             }
-            let s = std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string();
+            let s = std::ffi::CStr::from_ptr(c_str)
+                .to_string_lossy()
+                .to_string();
             if s.is_empty() {
                 continue;
             }
@@ -1306,6 +1307,11 @@ pub fn pick_files_open_panel(title: &str) -> Vec<std::path::PathBuf> {
 
 /// Open a file in the default editor (TextEdit, etc.)
 pub fn open_file_in_editor(path: &std::path::Path) -> bool {
+    if !path.exists() {
+        tracing::warn!("open_file_in_editor: path does not exist: {}", path.display());
+        return false;
+    }
+
     unsafe {
         let ns_workspace = Class::get("NSWorkspace").unwrap();
         let workspace: Id = msg_send![ns_workspace, sharedWorkspace];
@@ -1313,8 +1319,16 @@ pub fn open_file_in_editor(path: &std::path::Path) -> bool {
         let path_str = path.to_string_lossy();
         let ns_path = ns_string(&path_str);
 
-        let result: bool = msg_send![workspace, openFile: ns_path];
-        result
+        // Prefer TextEdit for predictable "Edit" behavior in Drawer.
+        // `openFile:withApplication:` tends to work better when TextEdit is already running.
+        let textedit = ns_string("TextEdit");
+        let ok: bool = msg_send![workspace, openFile: ns_path withApplication: textedit];
+        if ok {
+            return true;
+        }
+
+        let ok: bool = msg_send![workspace, openFile: ns_path];
+        ok
     }
 }
 
@@ -1391,11 +1405,18 @@ pub unsafe fn stack_view_add(stack: Id, view: Id) {
 /// `stack` must be a valid `NSStackView` instance.
 pub unsafe fn stack_view_clear(stack: Id) {
     unsafe {
+        // IMPORTANT:
+        // For NSStackView, removing only fromSuperview can leave the view in arrangedSubviews,
+        // which causes layout glitches (overlapping/duplicated rows).
         let arranged: Id = msg_send![stack, arrangedSubviews];
         let count: usize = msg_send![arranged, count];
 
         for i in (0..count).rev() {
             let view: Id = msg_send![arranged, objectAtIndex: i];
+            if view.is_null() {
+                continue;
+            }
+            let _: () = msg_send![stack, removeArrangedSubview: view];
             let _: () = msg_send![view, removeFromSuperview];
         }
     }
