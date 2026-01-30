@@ -3,7 +3,7 @@
 //! Contains all the public functions for controlling the overlay and
 //! internal helper functions for state updates.
 
-use core_graphics::geometry::{CGPoint, CGRect};
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
@@ -251,6 +251,9 @@ pub fn update_active_tab_impl(tab: Tab) {
         if let Some(agent_input_bar) = state.agent_input_bar {
             crate::ui_helpers::set_hidden(agent_input_bar as Id, show_drawer);
         }
+        if let Some(agent_attach) = state.agent_attach_button {
+            crate::ui_helpers::set_hidden(agent_attach as Id, show_drawer);
+        }
         if let Some(agent_send) = state.agent_send_button {
             crate::ui_helpers::set_hidden(agent_send as Id, show_drawer);
         }
@@ -372,6 +375,9 @@ pub(super) fn clear_voice_chat_text_impl() {
     state.messages.clear();
     state.manual_draft.clear();
     state.is_sending = false;
+    state.attached_files.clear();
+    state.attached_files_last_sent = None;
+    reset_attach_button_ui_locked(&mut state);
 
     if let Some(input_view) = state.agent_input_text_view {
         unsafe { set_text_view_string(input_view as Id, "") };
@@ -388,8 +394,7 @@ pub(super) fn clear_voice_chat_text_impl() {
 /// SAFETY: OVERLAY_STATE must be fully released before invoking the send
 /// callback, which may re-acquire the lock from another thread/queue.
 pub fn send_draft_message_impl() {
-    // Phase 1: extract draft and update state (OVERLAY_STATE held)
-    let draft = {
+    let callback = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let draft = if let Some(text_view) = state.agent_input_text_view {
             unsafe { get_text_view_string(text_view as Id) }
@@ -402,6 +407,18 @@ pub fn send_draft_message_impl() {
         if draft.is_empty() {
             return;
         }
+
+        let attachments_to_send = attachment_should_include_locked(&state);
+        if let Some((fingerprint, _paths, summary)) = attachments_to_send.as_ref() {
+            state.push_message(ChatMessage {
+                role: ChatRole::System,
+                text: format!("📎 Załączniki (wysłane raz): {}", summary),
+                is_streaming: false,
+                is_error: false,
+            });
+            state.attached_files_last_sent = Some(*fingerprint);
+        }
+
         state.push_message(ChatMessage {
             role: ChatRole::User,
             text: draft.clone(),
@@ -417,19 +434,25 @@ pub fn send_draft_message_impl() {
         }
         update_chat_view_with_state(&mut state, true);
         update_send_button_with_state(&mut state);
-        draft
-        // OVERLAY_STATE released here
+
+        let handler = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        (handler.clone(), draft, attachments_to_send)
     };
 
-    // Phase 2: read callback (separate lock scope)
-    let handler = {
-        let guard = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
-        guard.clone()
-    };
-
-    // Phase 3: invoke callback with NO locks held
-    if let Some(handler) = handler {
-        handler(draft);
+    if let (Some(handler), draft, attachments_to_send) = callback {
+        if let Some((_fingerprint, paths, _summary)) = attachments_to_send {
+            std::thread::spawn(move || {
+                let block = build_attachments_block(&paths);
+                let payload = if block.is_empty() {
+                    draft
+                } else {
+                    format!("{draft}\n\n{block}")
+                };
+                Queue::main().exec_async(move || handler(payload));
+            });
+        } else {
+            handler(draft);
+        }
     } else {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.is_sending = false;
@@ -438,8 +461,7 @@ pub fn send_draft_message_impl() {
 }
 
 pub(super) fn commit_last_user_message_impl() {
-    // Phase 1: extract text and mark sending (OVERLAY_STATE held)
-    let text = {
+    let callback = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(last_message) = state.messages.last() else {
             return;
@@ -448,22 +470,37 @@ pub(super) fn commit_last_user_message_impl() {
             return;
         }
         let text = last_message.text.clone();
+        let attachments_to_send = attachment_should_include_locked(&state);
+        if let Some((fingerprint, _paths, summary)) = attachments_to_send.as_ref() {
+            state.push_message(ChatMessage {
+                role: ChatRole::System,
+                text: format!("📎 Załączniki (wysłane raz): {}", summary),
+                is_streaming: false,
+                is_error: false,
+            });
+            state.attached_files_last_sent = Some(*fingerprint);
+        }
         state.is_sending = true;
         update_chat_view_with_state(&mut state, true);
         update_send_button_with_state(&mut state);
-        text
-        // OVERLAY_STATE released here
+        let handler = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        (handler.clone(), text, attachments_to_send)
     };
 
-    // Phase 2: read callback (separate lock scope)
-    let handler = {
-        let guard = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
-        guard.clone()
-    };
-
-    // Phase 3: invoke callback with NO locks held
-    if let Some(handler) = handler {
-        handler(text);
+    if let (Some(handler), text, attachments_to_send) = callback {
+        if let Some((_fingerprint, paths, _summary)) = attachments_to_send {
+            std::thread::spawn(move || {
+                let block = build_attachments_block(&paths);
+                let payload = if block.is_empty() {
+                    text
+                } else {
+                    format!("{text}\n\n{block}")
+                };
+                Queue::main().exec_async(move || handler(payload));
+            });
+        } else {
+            handler(text);
+        }
     } else {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.is_sending = false;
@@ -585,6 +622,233 @@ fn update_send_button_with_state(state: &mut VoiceChatOverlayState) {
     }
 }
 
+fn reset_attach_button_ui_locked(state: &mut VoiceChatOverlayState) {
+    unsafe {
+        let Some(btn_ptr) = state.agent_attach_button else {
+            return;
+        };
+        let btn = btn_ptr as Id;
+        let _: () = msg_send![btn, setTitle: ns_string("📎")];
+        crate::ui_helpers::set_tooltip(btn, "Załącz pliki (kontekst dla asystenta)");
+    }
+}
+
+fn attachment_should_include_locked(
+    state: &VoiceChatOverlayState,
+) -> Option<(u64, Vec<std::path::PathBuf>, String)> {
+    if state.attached_files.is_empty() {
+        return None;
+    }
+    let fingerprint = attachment_fingerprint(&state.attached_files);
+    if state.attached_files_last_sent == Some(fingerprint) {
+        return None;
+    }
+    let summary = attachment_summary(&state.attached_files);
+    Some((fingerprint, state.attached_files.clone(), summary))
+}
+
+fn attachment_summary(paths: &[std::path::PathBuf]) -> String {
+    let mut names: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    names.sort();
+    if names.len() <= 3 {
+        names.join(", ")
+    } else {
+        format!("{}, … (+{})", names[..3].join(", "), names.len() - 3)
+    }
+}
+
+fn attachment_fingerprint(paths: &[std::path::PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for p in paths {
+        p.hash(&mut hasher);
+        if let Ok(meta) = std::fs::metadata(p) {
+            meta.len().hash(&mut hasher);
+            meta.modified().ok().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn build_attachments_block(paths: &[std::path::PathBuf]) -> String {
+    use std::io::Read;
+
+    const MAX_TOTAL_CHARS: usize = 120_000;
+    const MAX_FILE_CHARS: usize = 40_000;
+    const MAX_FILE_BYTES: usize = 512 * 1024; // cap IO; we only inline a prefix anyway
+
+    let mut out = String::new();
+    out.push_str("ATTACHMENTS (file context)\n");
+
+    let mut total_chars = out.chars().count();
+    for path in paths {
+        if total_chars >= MAX_TOTAL_CHARS {
+            break;
+        }
+
+        let display = path.to_string_lossy();
+        out.push_str("\n---\n");
+        out.push_str(&format!("FILE: {display}\n"));
+
+        let Ok(mut f) = std::fs::File::open(path) else {
+            out.push_str("(failed to open)\n");
+            continue;
+        };
+
+        let mut buf = Vec::new();
+        let _ = (&mut f)
+            .take(MAX_FILE_BYTES as u64)
+            .read_to_end(&mut buf);
+
+        let Ok(mut s) = String::from_utf8(buf) else {
+            out.push_str("(skipped: not UTF-8 text)\n");
+            continue;
+        };
+
+        // Normalize + cap per-file.
+        if s.chars().count() > MAX_FILE_CHARS {
+            s = s.chars().take(MAX_FILE_CHARS).collect();
+            s.push_str("\n… (truncated)\n");
+        }
+
+        // Cap total.
+        let remaining = MAX_TOTAL_CHARS.saturating_sub(total_chars);
+        if remaining == 0 {
+            break;
+        }
+        let mut snippet: String = s.chars().take(remaining).collect();
+        if snippet.len() < s.len() {
+            snippet.push_str("\n… (truncated)\n");
+        }
+
+        out.push_str("```text\n");
+        out.push_str(&snippet);
+        if !snippet.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("```\n");
+
+        total_chars = out.chars().count();
+    }
+
+    out
+}
+
+/// Resize the Agent input bar based on current draft text.
+///
+/// Keeps it compact by default, and grows it when the user types/pastes longer messages.
+pub fn resize_agent_input_to_draft() {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    resize_agent_input_locked(&mut state);
+}
+
+fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
+    unsafe {
+        let (
+            Some(window_ptr),
+            Some(bar_ptr),
+            Some(scroll_ptr),
+            Some(text_view_ptr),
+            Some(attach_ptr),
+            Some(send_ptr),
+        ) = (
+            state.window,
+            state.agent_input_bar,
+            state.agent_input_scroll_view,
+            state.agent_input_text_view,
+            state.agent_attach_button,
+            state.agent_send_button,
+        )
+        else {
+            return;
+        };
+
+        let window = window_ptr as Id;
+        let input_bar = bar_ptr as Id;
+        let input_scroll = scroll_ptr as Id;
+        let text_view = text_view_ptr as Id;
+        let attach_btn = attach_ptr as Id;
+        let send_btn = send_ptr as Id;
+
+        let window_frame: CGRect = msg_send![window, frame];
+        let window_width = window_frame.size.width;
+        let window_height = window_frame.size.height;
+
+        let text = get_text_view_string(text_view);
+        let hard_lines = (text.matches('\n').count() + 1).max(1);
+        // Heuristic for wrapped lines: assume ~52 chars per visual line at this width.
+        let wrapped_lines = text.chars().count().div_ceil(52).max(1);
+        let visual_lines = hard_lines.max(wrapped_lines);
+
+        // Keep the input compact by default (single-line-ish), then grow smoothly up to a cap.
+        let min_h = 44.0;
+        let max_h = 140.0;
+        let line_h = 18.0;
+        let desired_h = if text.trim().is_empty() {
+            min_h
+        } else {
+            (min_h + (visual_lines.saturating_sub(1) as f64) * line_h).clamp(min_h, max_h)
+        };
+
+        let current_bar: CGRect = msg_send![input_bar, frame];
+        if (current_bar.size.height - desired_h).abs() < 0.5 {
+            return;
+        }
+
+        // Resize input bar (anchored to bottom).
+        let new_bar_frame = CGRect::new(
+            &CGPoint::new(current_bar.origin.x, current_bar.origin.y),
+            &CGSize::new(window_width - 32.0, desired_h),
+        );
+        let _: () = msg_send![input_bar, setFrame: new_bar_frame];
+
+        // Resize the scrollable text view inside the bar.
+        let text_area_frame = CGRect::new(
+            &CGPoint::new(12.0, 10.0),
+            &CGSize::new(window_width - 140.0, (desired_h - 20.0).max(24.0)),
+        );
+        let _: () = msg_send![input_scroll, setFrame: text_area_frame];
+
+        // Recenter buttons vertically.
+        let send_y = ((desired_h - 32.0) / 2.0).max(8.0);
+        let attach_frame = CGRect::new(
+            &CGPoint::new(window_width - 120.0, send_y),
+            &CGSize::new(36.0, 32.0),
+        );
+        let _: () = msg_send![attach_btn, setFrame: attach_frame];
+        let send_frame = CGRect::new(
+            &CGPoint::new(window_width - 76.0, send_y),
+            &CGSize::new(36.0, 32.0),
+        );
+        let _: () = msg_send![send_btn, setFrame: send_frame];
+
+        // Resize Agent scroll view so it doesn't overlap with input.
+        if let Some(agent_scroll_ptr) = state.agent_scroll_view {
+            let agent_scroll = agent_scroll_ptr as Id;
+            let header_height = 44.0;
+            let bottom = desired_h + 18.0;
+            let top = window_height - header_height - 10.0;
+            let new_agent_frame = CGRect::new(
+                &CGPoint::new(16.0, bottom),
+                &CGSize::new(window_width - 32.0, (top - bottom).max(0.0)),
+            );
+            let _: () = msg_send![agent_scroll, setFrame: new_agent_frame];
+
+            if let Some(container_ptr) = state.agent_container {
+                let container = container_ptr as Id;
+                let container_frame: CGRect = msg_send![container, frame];
+                // IMPORTANT: do NOT clamp the document view height to the visible clip height.
+                // That disables scrolling and makes long agent replies unscrollable.
+                let new_size = CGSize::new(new_agent_frame.size.width, container_frame.size.height);
+                let _: () = msg_send![container, setFrameSize: new_size];
+            }
+        }
+    }
+}
+
 fn create_commit_action_bar(action_handler: Option<usize>) -> Id {
     unsafe {
         let ns_view = Class::get("NSView").unwrap();
@@ -675,7 +939,10 @@ pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
     state.agent_input_scroll_view = None;
     state.agent_input_text_view = None;
     state.agent_input_field = None;
+    state.agent_attach_button = None;
     state.agent_send_button = None;
+    state.attached_files.clear();
+    state.attached_files_last_sent = None;
     state.active_tab = Tab::Drawer;
     state.is_sending = false;
     state.manual_draft.clear();
