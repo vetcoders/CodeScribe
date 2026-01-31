@@ -111,11 +111,16 @@ install-app: bundle
 	@mkdir -p /Applications
 	@rsync -a --delete bundle/CodeScribe.app/ /Applications/CodeScribe.app/
 	@if [ "$(CODESCRIBE_CODESIGN_IDENTITY)" = "-" ]; then \
-		echo "Skipping codesign (CODESCRIBE_CODESIGN_IDENTITY='-')"; \
+		echo "Codesigning ad-hoc (no signing identity found)."; \
+		echo "NOTE: macOS Accessibility/Input Monitoring may need re-grant after reinstall."; \
+		echo "TIP: create a local codesign cert (e.g. 'CodeScribe Dev') and set CODESCRIBE_CODESIGN_IDENTITY to keep permissions stable."; \
+		codesign --force --deep --sign - --identifier com.codescribe.app /Applications/CodeScribe.app; \
 	else \
 		echo "Codesigning with identity: $(CODESCRIBE_CODESIGN_IDENTITY)"; \
 		codesign --force --deep --sign "$(CODESCRIBE_CODESIGN_IDENTITY)" --identifier com.codescribe.app /Applications/CodeScribe.app; \
 	fi
+	@echo "Codesign summary:"
+	@codesign --display --verbose=2 /Applications/CodeScribe.app 2>&1 | sed -n '1,12p' || true
 	@echo "Installed: /Applications/CodeScribe.app"
 
 # ============================================================================

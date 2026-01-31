@@ -10,7 +10,7 @@ LLM_FORMATTING_API_KEY=
 # === Core mode ===
 USE_LOCAL_STT=1
 LOCAL_MODEL=whisper-large-v3-turbo-mlx-q8
-WHISPER_LANGUAGE=
+WHISPER_LANGUAGE=pl
 
 # === Hotkeys ===
 HOLD_MODS=ctrl
@@ -28,17 +28,15 @@ HOLD_BADGE_OFFSET_Y=-10
 
 # Two reasonable configurations (choose 1)
 
-## ✅ A) "Hands-off stable" (recommended for VAD)
-
-# less aggressive, does not cut off sentences
-
-CODESCRIBE_BUFFERED_STREAM=1
-CODESCRIBE_STREAM_CHUNK_SEC=3.0
-CODESCRIBE_STREAM_OVERLAP_RATIO=0.2
-CODESCRIBE_BUFFER_DELAY_MS=1800
-CODESCRIBE_TYPING_CPS=35
-# Number of words emitted per tick (buffered mode)
-CODESCRIBE_EMIT_WORDS_MAX=3
+## ✅ B) "Live preview" (recommended default)
+# Shows live deltas in the small overlay while holding Ctrl.
+CODESCRIBE_BUFFERED_STREAM=0
+CODESCRIBE_STREAM_CHUNK_SEC=2.0
+CODESCRIBE_STREAM_OVERLAP_RATIO=0.25
+# (optional) keep these for experimentation / smoother feel:
+# CODESCRIBE_BUFFER_DELAY_MS=1800
+# CODESCRIBE_TYPING_CPS=35
+# CODESCRIBE_EMIT_WORDS_MAX=3
 # VAD config (centralized in core/vad/config.rs)
 # Simple controls (preferred):
 ##### CODESCRIBE_VAD_SENSITIVITY=0.5 #####
@@ -54,15 +52,16 @@ CODESCRIBE_STREAM_NOVELTY=0.20
 # Embedder model override (HuggingFace cache repo id)
 # CODESCRIBE_EMBEDDER_REPO=intfloat/multilingual-e5-small
 
-# ➡️ fewer cuts, more natural phrases, stable overlay.
 # ---------------------------------------------------------------------------
 
-## ✅ B) "Almost live" (streaming without VAD)
-
-# CODESCRIBE_BUFFERED_STREAM=0
-# CODESCRIBE_STREAM_CHUNK_SEC=4.0
-# CODESCRIBE_STREAM_SIMILARITY=0.90
-# CODESCRIBE_STREAM_NOVELTY=0.20
+## ✅ A) "Hands-off stable" (buffered, less jitter)
+# Emits at end-of-utterance with a small delay; can feel more stable but is not "live".
+# CODESCRIBE_BUFFERED_STREAM=1
+# CODESCRIBE_STREAM_CHUNK_SEC=3.0
+# CODESCRIBE_STREAM_OVERLAP_RATIO=0.2
+# CODESCRIBE_BUFFER_DELAY_MS=1800
+# CODESCRIBE_TYPING_CPS=35
+# CODESCRIBE_EMIT_WORDS_MAX=3
 
 # === LLM / Assistive & Formatting ===
 AI_FORMATTING_ENABLED=1
