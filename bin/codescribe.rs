@@ -584,8 +584,17 @@ async fn run_daemon() -> Result<()> {
         }
     });
 
-    // Start Quality Loop daemon (always-on self-improvement)
-    let quality_child = spawn_quality_daemon();
+    // Quality Loop daemon (self-improvement) — OFF by default.
+    //
+    // The daemon is useful, but if it survives app restarts it can confuse macOS
+    // permissions / input monitoring workflows. Turn it on explicitly when needed.
+    let quality_child = if env_bool("CODESCRIBE_AUTOSTART_QUALITY_DAEMON", false) {
+        spawn_quality_daemon()
+    } else {
+        stop_quality_daemon_if_running();
+        codescribe::quality_loop::mark_daemon_unavailable();
+        None
+    };
 
     tray::run_with_hotkeys(hotkey_manager)?;
 
@@ -596,6 +605,16 @@ async fn run_daemon() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(default)
 }
 
 fn apply_vad_preset(config: &Config, preset: tray::VadPreset) {
@@ -624,6 +643,39 @@ fn apply_vad_preset(config: &Config, preset: tray::VadPreset) {
     // "Simple override" keys used by core/vad/config.rs.
     let _ = config.save_to_env("CODESCRIBE_VAD_SENSITIVITY", &format!("{sensitivity:.2}"));
     let _ = config.save_to_env("CODESCRIBE_VAD_SILENCE_SEC", &format!("{silence_sec:.2}"));
+}
+
+fn stop_quality_daemon_if_running() {
+    let config_dir = codescribe::config::Config::config_dir();
+    let pid_path = config_dir.join("logs").join("quality_daemon.pid");
+
+    let pid = std::fs::read_to_string(&pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(0);
+    if pid <= 0 {
+        let _ = std::fs::remove_file(&pid_path);
+        return;
+    }
+
+    if !is_process_alive(pid) {
+        let _ = std::fs::remove_file(&pid_path);
+        return;
+    }
+
+    // Best-effort safety check: only kill if it looks like codescribe-loop.
+    let is_codescribe_loop = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.contains("codescribe-loop"))
+        .unwrap_or(false);
+
+    if is_codescribe_loop {
+        let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+        let _ = std::fs::remove_file(&pid_path);
+    }
 }
 
 /// Spawn `codescribe-loop --daemon` as a background child process.
