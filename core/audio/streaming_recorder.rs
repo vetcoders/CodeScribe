@@ -1,5 +1,5 @@
 use crate::audio::recorder::{Recorder, RecorderConfig};
-use crate::stream_postprocess::{LexiconPostProcessor, StreamPostProcessor};
+use crate::stream_postprocess::StreamPostProcessor;
 use crate::stt::whisper;
 use crate::stt::whisper::append_with_overlap_dedup;
 use crate::stt::whisper::singleton::engine as get_engine;
@@ -169,8 +169,10 @@ impl StreamingRecorder {
     pub async fn stop_without_saving(&mut self) -> Result<String> {
         info!("Stopping streaming recorder (no WAV)...");
 
-        // 1. Stop recording without writing a WAV file
-        let _ = self.recorder.stop_without_saving().await?;
+        // Recorder::stop() always writes a temp WAV today; delete it immediately.
+        if let Some(path) = self.recorder.stop().await? {
+            let _ = tokio::fs::remove_file(path).await;
+        }
 
         // 2. Wait for worker to finish processing remaining chunks
         if let Some(handle) = self.transcription_handle.take() {
@@ -1098,19 +1100,19 @@ impl VadIterState {
 
 struct TranscriptionPipeline {
     language: Option<String>,
-    postprocessor: LexiconPostProcessor,
+    postprocessor: StreamPostProcessor,
 }
 
 impl TranscriptionPipeline {
     fn new(language: Option<String>) -> Self {
         Self {
             language,
-            postprocessor: LexiconPostProcessor::new(),
+            postprocessor: StreamPostProcessor::new(),
         }
     }
 
     fn postprocess(&mut self, text: &str) -> Option<String> {
-        self.postprocessor.process(text)
+        self.postprocessor.process_utterance(text)
     }
 }
 
@@ -1428,12 +1430,7 @@ async fn process_chunk(
                 let cleaned = if let Some(processor) = postprocessor.as_mut() {
                     processor.process(&text)
                 } else {
-                    let cleaned = crate::stream_postprocess::normalize_whitespace(&text);
-                    if cleaned.trim().is_empty() {
-                        None
-                    } else {
-                        Some(cleaned)
-                    }
+                    normalize_whitespace_basic(&text)
                 };
 
                 if let Some(cleaned) = cleaned {
@@ -1465,6 +1462,20 @@ async fn process_chunk(
         Err(e) => {
             error!("Transcription task join error: {}", e);
         }
+    }
+}
+
+fn normalize_whitespace_basic(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let cleaned = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
     }
 }
 

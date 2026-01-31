@@ -339,7 +339,7 @@ enum InputContent {
     Image { image_url: String },
 }
 
-fn image_mime_from_path(path: &PathBuf) -> Option<&'static str> {
+fn image_mime_from_path(path: &std::path::Path) -> Option<&'static str> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -400,13 +400,11 @@ fn strip_image_attachments(user_message: &str) -> (String, Vec<PathBuf>) {
 }
 
 fn encode_image_as_data_url(path: &PathBuf) -> Option<String> {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
     const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024; // 8MB per image
 
-    let Some(mime) = image_mime_from_path(path) else {
-        return None;
-    };
+    let mime = image_mime_from_path(path)?;
 
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > MAX_IMAGE_BYTES {
