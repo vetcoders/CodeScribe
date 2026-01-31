@@ -949,9 +949,7 @@ fn build_attachments_block(paths: &[std::path::PathBuf]) -> String {
         };
 
         let mut buf = Vec::new();
-        let _ = (&mut f)
-            .take(MAX_FILE_BYTES as u64)
-            .read_to_end(&mut buf);
+        let _ = (&mut f).take(MAX_FILE_BYTES as u64).read_to_end(&mut buf);
 
         let Ok(mut s) = String::from_utf8(buf) else {
             let ext = path

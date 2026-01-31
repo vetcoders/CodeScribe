@@ -85,6 +85,7 @@ pub enum TrayMenuEvent {
     // Diagnostics
     CopyDiagnostics,
     InstallSileroVad,
+    SetVadPreset(VadPreset),
 
     // Prompts
     OpenAssistivePrompt,
@@ -93,6 +94,13 @@ pub enum TrayMenuEvent {
 
     // Hotkeys
     ResetShortcuts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VadPreset {
+    Sensitive,
+    Balanced,
+    Conservative,
 }
 
 // ============================================================================
@@ -133,4 +141,9 @@ pub struct MenuIds {
 
     // Models
     pub silero_vad_install: MenuId,
+
+    // VAD presets
+    pub vad_preset_sensitive: MenuId,
+    pub vad_preset_balanced: MenuId,
+    pub vad_preset_conservative: MenuId,
 }

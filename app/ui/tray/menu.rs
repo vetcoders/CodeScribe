@@ -15,20 +15,35 @@ use std::cell::RefCell;
 
 use anyhow::Result;
 use muda::accelerator::{Accelerator, Code, Modifiers};
-use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 use codescribe_core::vad;
 
 use crate::config::Config;
 use crate::tray::submenus::build_hold_hotkeys_submenu;
-use crate::tray::types::MenuIds;
+use crate::tray::types::{MenuIds, VadPreset};
 
 // Thread-local storage for menu items that need dynamic updates
 thread_local! {
     pub static STATUS_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
     pub static QUALITY_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
     pub static SILERO_VAD_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
+    pub static VAD_PRESET_MENU_ITEMS: RefCell<Option<VadPresetMenuItems>> = const { RefCell::new(None) };
 }
+
+struct VadPresetMenuItems {
+    sensitive: CheckMenuItem,
+    balanced: CheckMenuItem,
+    conservative: CheckMenuItem,
+}
+
+const PRESET_SENSITIVE_THRESHOLD: f32 = 0.35;
+const PRESET_BALANCED_THRESHOLD: f32 = 0.5;
+const PRESET_CONSERVATIVE_THRESHOLD: f32 = 0.7;
+
+const PRESET_SENSITIVE_SILENCE_SEC: f32 = 1.8;
+const PRESET_BALANCED_SILENCE_SEC: f32 = 1.2;
+const PRESET_CONSERVATIVE_SILENCE_SEC: f32 = 0.8;
 
 /// Build the tray menu
 ///
@@ -134,6 +149,47 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
         *cell.borrow_mut() = Some(silero_vad_item);
     });
 
+    // VAD presets submenu (radio-ish checkboxes)
+    let vad_preset_menu = Submenu::new("VAD preset", true);
+    let active = current_vad_preset();
+
+    let sensitive = CheckMenuItem::new(
+        "Sensitive (less chopping, quiet speech)",
+        true,
+        active == Some(VadPreset::Sensitive),
+        None,
+    );
+    let vad_preset_sensitive_id = sensitive.id().clone();
+    vad_preset_menu.append(&sensitive)?;
+
+    let balanced = CheckMenuItem::new(
+        "Balanced (default)",
+        true,
+        active == Some(VadPreset::Balanced),
+        None,
+    );
+    let vad_preset_balanced_id = balanced.id().clone();
+    vad_preset_menu.append(&balanced)?;
+
+    let conservative = CheckMenuItem::new(
+        "Conservative (noisy room, may cut more)",
+        true,
+        active == Some(VadPreset::Conservative),
+        None,
+    );
+    let vad_preset_conservative_id = conservative.id().clone();
+    vad_preset_menu.append(&conservative)?;
+
+    VAD_PRESET_MENU_ITEMS.with(|cell| {
+        *cell.borrow_mut() = Some(VadPresetMenuItems {
+            sensitive,
+            balanced,
+            conservative,
+        });
+    });
+
+    diagnostics_menu.append(&vad_preset_menu)?;
+
     tools_menu.append(&diagnostics_menu)?;
 
     // 6c. Advanced (rare)
@@ -191,6 +247,10 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
             quality_open_report: quality_open_report_id,
             // Models
             silero_vad_install: silero_vad_install_id,
+            // VAD presets
+            vad_preset_sensitive: vad_preset_sensitive_id,
+            vad_preset_balanced: vad_preset_balanced_id,
+            vad_preset_conservative: vad_preset_conservative_id,
         },
     ))
 }
@@ -236,6 +296,57 @@ pub fn update_quality_label() {
             item.set_text(&label);
         }
     });
+}
+
+pub fn update_vad_preset_checks() {
+    let active = current_vad_preset();
+    VAD_PRESET_MENU_ITEMS.with(|cell| {
+        let borrowed = cell.borrow();
+        let Some(items) = borrowed.as_ref() else {
+            return;
+        };
+
+        items
+            .sensitive
+            .set_checked(active == Some(VadPreset::Sensitive));
+        items
+            .balanced
+            .set_checked(active == Some(VadPreset::Balanced));
+        items
+            .conservative
+            .set_checked(active == Some(VadPreset::Conservative));
+    });
+}
+
+fn current_vad_preset() -> Option<VadPreset> {
+    let threshold = std::env::var("CODESCRIBE_VAD_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(PRESET_BALANCED_THRESHOLD);
+    let silence = std::env::var("CODESCRIBE_VAD_MAX_SILENCE_SEC")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(PRESET_BALANCED_SILENCE_SEC);
+
+    const EPS: f32 = 0.05;
+
+    if (threshold - PRESET_SENSITIVE_THRESHOLD).abs() <= EPS
+        && (silence - PRESET_SENSITIVE_SILENCE_SEC).abs() <= EPS
+    {
+        return Some(VadPreset::Sensitive);
+    }
+    if (threshold - PRESET_BALANCED_THRESHOLD).abs() <= EPS
+        && (silence - PRESET_BALANCED_SILENCE_SEC).abs() <= EPS
+    {
+        return Some(VadPreset::Balanced);
+    }
+    if (threshold - PRESET_CONSERVATIVE_THRESHOLD).abs() <= EPS
+        && (silence - PRESET_CONSERVATIVE_SILENCE_SEC).abs() <= EPS
+    {
+        return Some(VadPreset::Conservative);
+    }
+
+    None
 }
 
 fn silero_vad_label() -> String {

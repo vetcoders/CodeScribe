@@ -1341,7 +1341,9 @@ pub fn pick_files_open_panel(title: &str) -> Vec<std::path::PathBuf> {
             if c_str.is_null() {
                 continue;
             }
-            let s = std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string();
+            let s = std::ffi::CStr::from_ptr(c_str)
+                .to_string_lossy()
+                .to_string();
             if s.is_empty() {
                 continue;
             }

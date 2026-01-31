@@ -302,7 +302,8 @@ fn update_attach_button_ui_locked(state: &mut super::state::VoiceChatOverlayStat
         let _: () = msg_send![btn, setTitle: ns_string(&title)];
 
         if count == 0 {
-            let _: () = msg_send![btn, setToolTip: ns_string("Załącz pliki (kontekst dla asystenta)")];
+            let _: () =
+                msg_send![btn, setToolTip: ns_string("Załącz pliki (kontekst dla asystenta)")];
         } else {
             let mut names: Vec<String> = state
                 .attached_files

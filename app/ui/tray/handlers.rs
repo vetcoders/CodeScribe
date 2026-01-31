@@ -10,7 +10,7 @@ use crate::config::{Config, HoldMods, ToggleTrigger};
 use crate::os::clipboard;
 use crate::os::permissions;
 use crate::tray::state::{HOTKEYS_MENU_ITEMS, send_menu_event};
-use crate::tray::types::{MenuIds, TrayMenuEvent};
+use crate::tray::types::{MenuIds, TrayMenuEvent, VadPreset};
 
 /// Handle menu item click and send appropriate event
 /// Note: Settings handlers removed - settings now in Chat Overlay Settings tab
@@ -48,6 +48,12 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         handle_open_quality_report();
     } else if event_id == &menu_ids.silero_vad_install {
         handle_install_silero_vad();
+    } else if event_id == &menu_ids.vad_preset_sensitive {
+        send_menu_event(TrayMenuEvent::SetVadPreset(VadPreset::Sensitive));
+    } else if event_id == &menu_ids.vad_preset_balanced {
+        send_menu_event(TrayMenuEvent::SetVadPreset(VadPreset::Balanced));
+    } else if event_id == &menu_ids.vad_preset_conservative {
+        send_menu_event(TrayMenuEvent::SetVadPreset(VadPreset::Conservative));
     } else {
         debug!("Unknown menu event id: {:?}", event_id);
     }
