@@ -2,6 +2,7 @@
 //!
 //! This module provides a floating overlay window with:
 //! - Drawer tab: clipboard-style transcription cards
+//! - Transcription tab: live transcription preview for raw dictation
 //! - Agent tab: chat bubbles with streaming LLM responses
 
 mod api;
@@ -10,13 +11,15 @@ mod state;
 
 // Re-export public API
 pub use api::{
-    add_voice_chat_error_message, add_voice_chat_user_message, append_voice_chat_assistant_delta,
-    append_voice_chat_user_delta, clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay,
-    is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
-    reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_send_callback,
-    set_voice_chat_sending, set_voice_chat_target_app, set_voice_chat_text,
-    set_voice_chat_user_text, show_agent_tab, show_drawer_tab, update_conversation_state,
-    update_drawer_after_save, update_voice_chat_context_summary, update_voice_chat_status,
+    add_voice_chat_error_message, add_voice_chat_user_message, append_transcription_delta,
+    append_voice_chat_assistant_delta, append_voice_chat_user_delta, clear_transcription_text,
+    clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay, is_auto_send_enabled,
+    is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
+    reset_voice_chat_activity, send_voice_chat_draft, set_transcription_text,
+    set_voice_chat_send_callback, set_voice_chat_sending, set_voice_chat_target_app,
+    set_voice_chat_text, set_voice_chat_user_text, show_agent_tab, show_drawer_tab,
+    show_transcription_tab, update_conversation_state, update_drawer_after_save,
+    update_voice_chat_context_summary, update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 
@@ -291,13 +294,10 @@ fn show_voice_chat_overlay_impl() {
                 &CGPoint::new(tab_x, header_btn_y),
                 &CGSize::new(tab_w, btn_h),
             ),
-            &["Drawer", "Agent"],
+            &["Drawer", "Transkrypcja", "Agent"],
         );
         button_set_action(tab_control, action_handler, sel!(onTabChanged:));
-        set_tooltip(
-            tab_control,
-            "Przełącz widok: Drawer (historia) / Agent (czat)",
-        );
+        set_tooltip(tab_control, "Przełącz widok: Drawer / Transkrypcja / Agent");
         let _: () = msg_send![
             tab_control,
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MIN_Y_MARGIN
@@ -404,6 +404,21 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![drawer_container, setAutoresizingMask: NSVIEW_WIDTH_SIZABLE];
         let _: () = msg_send![drawer_scroll, setDocumentView: drawer_container];
         add_subview(blur_view, drawer_scroll);
+
+        // Transcription scroll view (live dictation preview)
+        let (transcription_scroll, transcription_text_view) =
+            create_scrollable_text_view(drawer_frame, false);
+        let _: () = msg_send![
+            transcription_scroll,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
+        ];
+        let ns_font = Class::get("NSFont").unwrap();
+        let text_font: Id = msg_send![ns_font, systemFontOfSize: 14.0f64];
+        let _: () = msg_send![transcription_text_view, setFont: text_font];
+        let _: () = msg_send![transcription_text_view, setRichText: false];
+        let _: () = msg_send![transcription_text_view, setEditable: false];
+        let _: () = msg_send![transcription_text_view, setSelectable: true];
+        add_subview(blur_view, transcription_scroll);
 
         // Agent scroll view + stack
         let agent_scroll_frame_bottom = agent_input_height + 18.0;
@@ -528,6 +543,7 @@ fn show_voice_chat_overlay_impl() {
         // Initial visibility
         set_hidden(agent_scroll, true);
         set_hidden(input_bar, true);
+        set_hidden(transcription_scroll, true);
 
         state.window = Some(window as usize);
         state.window_delegate = Some(window_delegate as usize);
@@ -548,6 +564,8 @@ fn show_voice_chat_overlay_impl() {
         state.agent_input_field = None;
         state.agent_attach_button = Some(agent_attach_button as usize);
         state.agent_send_button = Some(agent_send_button as usize);
+        state.transcription_scroll_view = Some(transcription_scroll as usize);
+        state.transcription_text_view = Some(transcription_text_view as usize);
         state.action_handler = Some(action_handler as usize);
         state.active_tab = Tab::Drawer;
 

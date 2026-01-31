@@ -128,6 +128,12 @@ pub struct RecordingController {
     /// Must be captured BEFORE showing any overlay window, because overlays
     /// may steal focus and destroy the user's selection context.
     assistive_context: Arc<RwLock<Option<AssistiveContext>>>,
+    /// True when we opened the unified overlay solely to show a raw transcription preview.
+    ///
+    /// This lets us preserve the old behavior:
+    /// - If the user had the overlay already open (Drawer/Agent), don't close it after dictation.
+    /// - If we popped it open just for raw dictation, auto-hide it after processing.
+    opened_voice_chat_overlay_for_transcription: Arc<AtomicBool>,
 
     // ═══════════════════════════════════════════════════════════
     // Conversation mode (Moshi full-duplex)
@@ -197,6 +203,7 @@ impl RecordingController {
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
+            opened_voice_chat_overlay_for_transcription: Arc::new(AtomicBool::new(false)),
             // Conversation mode (lazy init)
             conversation_engine: Arc::new(Mutex::new(None)),
             audio_player: Arc::new(Mutex::new(None)),
@@ -233,10 +240,10 @@ impl RecordingController {
         }
 
         // Initialize Whisper engine (singleton)
-        if !cfg!(test) {
-            if let Err(e) = crate::whisper::init() {
-                warn!("Failed to initialize Whisper engine: {}", e);
-            }
+        if !cfg!(test)
+            && let Err(e) = crate::whisper::init()
+        {
+            warn!("Failed to initialize Whisper engine: {}", e);
         }
 
         setup_voice_chat_send_callback(Arc::clone(&config));
@@ -255,6 +262,7 @@ impl RecordingController {
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
+            opened_voice_chat_overlay_for_transcription: Arc::new(AtomicBool::new(false)),
             // Conversation mode (lazy init)
             conversation_engine: Arc::new(Mutex::new(None)),
             audio_player: Arc::new(Mutex::new(None)),
@@ -355,10 +363,13 @@ impl RecordingController {
 
                             if matches!(current_state, State::RecHold | State::RecToggle) {
                                 set_assistive_session(false);
-                                crate::hide_voice_chat_overlay();
-                                crate::clear_transcription_text();
-                                crate::show_transcription_overlay();
-                                crate::enter_recording_mode();
+                                self.opened_voice_chat_overlay_for_transcription
+                                    .store(false, Ordering::SeqCst);
+                                crate::hide_transcription_overlay();
+                                crate::show_voice_chat_overlay();
+                                crate::voice_chat_ui::show_transcription_tab();
+                                crate::voice_chat_ui::clear_transcription_text();
+                                crate::voice_chat_ui::update_voice_chat_status("Listening...");
                             }
                         }
                         HoldMode::Chat => {
@@ -948,6 +959,8 @@ impl RecordingController {
         let delay = Duration::from_millis(delay_ms);
         let vad_flag = Arc::clone(&self.vad_triggered);
         let assistive_context = Arc::clone(&self.assistive_context);
+        let opened_overlay_for_transcription =
+            Arc::clone(&self.opened_voice_chat_overlay_for_transcription);
 
         let task = tokio::spawn(async move {
             // Wait for the configured delay
@@ -1002,6 +1015,7 @@ impl RecordingController {
             set_assistive_session(is_assistive);
 
             if is_assistive {
+                opened_overlay_for_transcription.store(false, Ordering::SeqCst);
                 // Capture context BEFORE showing any overlay (overlays can steal focus).
                 let ctx = match hold_mode {
                     HoldMode::Selection => tokio::task::spawn_blocking(capture_assistive_context)
@@ -1042,10 +1056,14 @@ impl RecordingController {
                         .unwrap_or_default()
                         .frontmost_app,
                 );
-                // Non-assistive: transcription overlay preview
-                crate::clear_transcription_text();
-                crate::show_transcription_overlay();
-                crate::enter_recording_mode();
+                // Non-assistive: live dictation preview in unified overlay
+                let was_visible = crate::voice_chat_ui::is_voice_chat_overlay_visible();
+                opened_overlay_for_transcription.store(!was_visible, Ordering::SeqCst);
+                crate::hide_transcription_overlay();
+                crate::show_voice_chat_overlay();
+                crate::voice_chat_ui::show_transcription_tab();
+                crate::voice_chat_ui::clear_transcription_text();
+                crate::voice_chat_ui::update_voice_chat_status("Listening...");
             }
 
             // Transition to REC_HOLD
@@ -1156,6 +1174,8 @@ impl RecordingController {
         set_assistive_session(is_assistive);
 
         if is_assistive {
+            self.opened_voice_chat_overlay_for_transcription
+                .store(false, Ordering::SeqCst);
             // Toggle-assistive is a hands-off chat loop (no selection).
             // Capture only target app (no clipboard).
             let ctx = tokio::task::spawn_blocking(capture_frontmost_app_only)
@@ -1189,10 +1209,15 @@ impl RecordingController {
                     .unwrap_or_default()
                     .frontmost_app,
             );
-            // Non-assistive: transcription overlay preview
-            crate::clear_transcription_text();
-            crate::show_transcription_overlay();
-            crate::enter_recording_mode();
+            // Non-assistive: live dictation preview in unified overlay
+            let was_visible = crate::voice_chat_ui::is_voice_chat_overlay_visible();
+            self.opened_voice_chat_overlay_for_transcription
+                .store(!was_visible, Ordering::SeqCst);
+            crate::hide_transcription_overlay();
+            crate::show_voice_chat_overlay();
+            crate::voice_chat_ui::show_transcription_tab();
+            crate::voice_chat_ui::clear_transcription_text();
+            crate::voice_chat_ui::update_voice_chat_status("Listening...");
         }
 
         // Transition to REC_TOGGLE
@@ -1333,9 +1358,21 @@ impl RecordingController {
                     };
 
                     if show_decision_overlay {
+                        let opened = self
+                            .opened_voice_chat_overlay_for_transcription
+                            .swap(false, Ordering::SeqCst);
+                        if opened {
+                            crate::voice_chat_ui::hide_voice_chat_overlay();
+                        }
                         crate::enter_decision_mode();
                         crate::schedule_auto_hide();
                     } else {
+                        let opened = self
+                            .opened_voice_chat_overlay_for_transcription
+                            .swap(false, Ordering::SeqCst);
+                        if opened {
+                            crate::voice_chat_ui::hide_voice_chat_overlay();
+                        }
                         crate::hide_transcription_overlay();
                     }
                 }
@@ -1345,6 +1382,12 @@ impl RecordingController {
                 let _ = update_tray_status(TrayStatus::Idle);
 
                 // Hide overlay immediately on error
+                let opened = self
+                    .opened_voice_chat_overlay_for_transcription
+                    .swap(false, Ordering::SeqCst);
+                if opened {
+                    crate::voice_chat_ui::hide_voice_chat_overlay();
+                }
                 crate::hide_transcription_overlay();
             }
         }
@@ -1907,6 +1950,11 @@ impl RecordingController {
             formatted_text.len(),
             mode_label
         );
+        if !assistive {
+            // Keep the unified overlay's transcription preview in sync with what we will paste/save.
+            // This makes it easier to understand differences between streaming preview and final-pass output.
+            crate::voice_chat_ui::set_transcription_text(&formatted_text);
+        }
 
         // Save audio to transcriptions folder if enabled (pair with RAW for reports)
         if config.dump_audio_logs

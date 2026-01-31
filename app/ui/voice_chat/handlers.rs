@@ -399,10 +399,10 @@ extern "C" fn on_window_did_end_live_resize(_this: &Object, _cmd: Sel, notificat
 extern "C" fn on_tab_changed(_this: &Object, _cmd: Sel, sender: Id) {
     unsafe {
         let selected: isize = msg_send![sender, selectedSegment];
-        let tab = if selected == 0 {
-            Tab::Drawer
-        } else {
-            Tab::Agent
+        let tab = match selected {
+            0 => Tab::Drawer,
+            1 => Tab::Transcription,
+            _ => Tab::Agent,
         };
         update_active_tab_impl(tab);
         info!("Tab changed to: {:?}", tab);

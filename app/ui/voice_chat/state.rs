@@ -51,6 +51,7 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Drawer,
+    Transcription,
     Agent,
 }
 
@@ -127,6 +128,11 @@ pub struct VoiceChatOverlayState {
     /// Fingerprint of the last attachment set that was sent to the assistant.
     pub attached_files_last_sent: Option<u64>,
 
+    // Transcription tab (one-overlay mode)
+    pub transcription_scroll_view: Option<usize>,
+    pub transcription_text_view: Option<usize>,
+    pub transcription_text: String,
+
     // Active tab
     pub active_tab: Tab,
 
@@ -175,6 +181,9 @@ impl Default for VoiceChatOverlayState {
             agent_send_button: None,
             attached_files: Vec::new(),
             attached_files_last_sent: None,
+            transcription_scroll_view: None,
+            transcription_text_view: None,
+            transcription_text: String::new(),
             active_tab: Tab::Drawer,
             messages: Vec::new(),
             manual_draft: String::new(),

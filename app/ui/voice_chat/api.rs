@@ -248,6 +248,60 @@ pub fn show_drawer_tab() {
     });
 }
 
+/// Switch to Transcription tab programmatically
+pub fn show_transcription_tab() {
+    Queue::main().exec_async(|| {
+        update_active_tab_impl(Tab::Transcription);
+    });
+}
+
+/// Append a delta (streaming token) to the transcription preview.
+pub fn append_transcription_delta(delta: &str) {
+    let delta_owned = delta.to_string();
+    Queue::main().exec_async(move || {
+        append_transcription_delta_impl(&delta_owned);
+    });
+}
+
+fn append_transcription_delta_impl(delta: &str) {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    apply_delta_with_backspace(&mut state.transcription_text, delta);
+    if let Some(text_view) = state.transcription_text_view {
+        unsafe { set_text_view_string(text_view as Id, &state.transcription_text) };
+    }
+}
+
+/// Set the full transcription text (used for final-pass replacement).
+pub fn set_transcription_text(text: &str) {
+    let text_owned = text.to_string();
+    Queue::main().exec_async(move || {
+        set_transcription_text_impl(&text_owned);
+    });
+}
+
+fn set_transcription_text_impl(text: &str) {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.transcription_text = text.to_string();
+    if let Some(text_view) = state.transcription_text_view {
+        unsafe { set_text_view_string(text_view as Id, &state.transcription_text) };
+    }
+}
+
+/// Clear the transcription preview text.
+pub fn clear_transcription_text() {
+    Queue::main().exec_async(|| {
+        clear_transcription_text_impl();
+    });
+}
+
+fn clear_transcription_text_impl() {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.transcription_text.clear();
+    if let Some(text_view) = state.transcription_text_view {
+        unsafe { set_text_view_string(text_view as Id, "") };
+    }
+}
+
 /// Set the target app name to re-activate for paste actions.
 ///
 /// This is best-effort and primarily used to paste assistant output back into
@@ -300,28 +354,40 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
         if let Some(tab_control) = state.tab_control {
             let _: () = msg_send![
                 tab_control as Id,
-                setSelectedSegment: if tab == Tab::Drawer { 0_isize } else { 1_isize }
+                setSelectedSegment: match tab {
+                    Tab::Drawer => 0_isize,
+                    Tab::Transcription => 1_isize,
+                    Tab::Agent => 2_isize,
+                }
             ];
         }
 
         let show_drawer = tab == Tab::Drawer;
+        let show_transcription = tab == Tab::Transcription;
+        let show_agent = tab == Tab::Agent;
         if let Some(drawer_view) = state.drawer_scroll_view {
             crate::ui_helpers::set_hidden(drawer_view as Id, !show_drawer);
         }
         if let Some(search_field) = state.search_field {
             crate::ui_helpers::set_hidden(search_field as Id, !show_drawer);
         }
+        if let Some(favorites_button) = state.favorites_button {
+            crate::ui_helpers::set_hidden(favorites_button as Id, !show_drawer);
+        }
+        if let Some(trans_view) = state.transcription_scroll_view {
+            crate::ui_helpers::set_hidden(trans_view as Id, !show_transcription);
+        }
         if let Some(agent_view) = state.agent_scroll_view {
-            crate::ui_helpers::set_hidden(agent_view as Id, show_drawer);
+            crate::ui_helpers::set_hidden(agent_view as Id, !show_agent);
         }
         if let Some(agent_input_bar) = state.agent_input_bar {
-            crate::ui_helpers::set_hidden(agent_input_bar as Id, show_drawer);
+            crate::ui_helpers::set_hidden(agent_input_bar as Id, !show_agent);
         }
         if let Some(agent_attach) = state.agent_attach_button {
-            crate::ui_helpers::set_hidden(agent_attach as Id, show_drawer);
+            crate::ui_helpers::set_hidden(agent_attach as Id, !show_agent);
         }
         if let Some(agent_send) = state.agent_send_button {
-            crate::ui_helpers::set_hidden(agent_send as Id, show_drawer);
+            crate::ui_helpers::set_hidden(agent_send as Id, !show_agent);
         }
 
         // When switching to Agent, make sure the input field can actually receive text.
@@ -588,30 +654,7 @@ fn ensure_agent_tab_visible(state: &mut VoiceChatOverlayState) {
         }
 
         // Force Agent tab for any live/assistive messaging.
-        state.active_tab = Tab::Agent;
-        if let Some(tab_control) = state.tab_control {
-            let _: () = msg_send![tab_control as Id, setSelectedSegment: 1_isize];
-        }
-
-        let show_drawer = false;
-        if let Some(drawer_view) = state.drawer_scroll_view {
-            crate::ui_helpers::set_hidden(drawer_view as Id, !show_drawer);
-        }
-        if let Some(search_field) = state.search_field {
-            crate::ui_helpers::set_hidden(search_field as Id, !show_drawer);
-        }
-        if let Some(agent_view) = state.agent_scroll_view {
-            crate::ui_helpers::set_hidden(agent_view as Id, show_drawer);
-        }
-        if let Some(agent_input_bar) = state.agent_input_bar {
-            crate::ui_helpers::set_hidden(agent_input_bar as Id, show_drawer);
-        }
-        if let Some(agent_attach) = state.agent_attach_button {
-            crate::ui_helpers::set_hidden(agent_attach as Id, show_drawer);
-        }
-        if let Some(agent_send) = state.agent_send_button {
-            crate::ui_helpers::set_hidden(agent_send as Id, show_drawer);
-        }
+        update_active_tab_locked(state, Tab::Agent);
     }
 }
 
