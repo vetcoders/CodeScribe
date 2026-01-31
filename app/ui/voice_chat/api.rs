@@ -1150,11 +1150,45 @@ fn build_attachments_block(paths: &[std::path::PathBuf]) -> String {
             return Ok((text, "pdftotext (minimal text)"));
         }
 
-        // Default OCR languages: Polish + English (matches our typical WHISPER_LANGUAGE=pl).
-        let ocr_lang = std::env::var("CODESCRIBE_ATTACH_PDF_OCR_LANG")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| "pol+eng".to_string());
+        fn default_ocr_lang() -> String {
+            if let Some(v) = std::env::var("CODESCRIBE_ATTACH_PDF_OCR_LANG")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+            {
+                return v;
+            }
+
+            // Prefer Polish+English when available, otherwise fall back to English.
+            let mut has_pol = false;
+            let mut has_eng = false;
+            if command_exists("tesseract") {
+                let mut cmd = Command::new("tesseract");
+                cmd.arg("--list-langs");
+                if let Ok(stdout) = run_command_stdout(cmd) {
+                    for line in String::from_utf8_lossy(&stdout).lines() {
+                        let l = line.trim();
+                        if l == "pol" {
+                            has_pol = true;
+                        }
+                        if l == "eng" {
+                            has_eng = true;
+                        }
+                    }
+                }
+            }
+
+            if has_pol && has_eng {
+                "pol+eng".to_string()
+            } else if has_eng {
+                "eng".to_string()
+            } else if has_pol {
+                "pol".to_string()
+            } else {
+                "eng".to_string()
+            }
+        }
+
+        let ocr_lang = default_ocr_lang();
 
         if command_exists("ocrmypdf")
             && command_exists("pdftotext")
@@ -1171,6 +1205,47 @@ fn build_attachments_block(paths: &[std::path::PathBuf]) -> String {
         }
 
         Ok((text, "pdftotext (minimal text)"))
+    }
+
+    fn extract_pdf_quicklook_ocr(
+        path: &std::path::Path,
+        language: &str,
+    ) -> Result<(String, &'static str), String> {
+        if !command_exists("qlmanage") {
+            return Err("Missing qlmanage".to_string());
+        }
+        if !command_exists("tesseract") {
+            return Err("Missing tesseract".to_string());
+        }
+
+        let dir = temp_dir("codescribe_pdf_ql")?;
+        let mut cmd = Command::new("qlmanage");
+        cmd.args(["-t", "-s", "1400", "-o"]).arg(&dir).arg(path);
+        let _ = run_command_stdout(cmd)?;
+
+        let mut images: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("png"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        images.sort();
+
+        let Some(img) = images.first() else {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err("QuickLook produced no PNG".to_string());
+        };
+
+        let mut cmd = Command::new("tesseract");
+        cmd.arg(img).arg("stdout").args(["-l", language]);
+        let stdout = run_command_stdout(cmd)?;
+        let text = String::from_utf8_lossy(&stdout).into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok((text, "quicklook+tesseract"))
     }
 
     let mut out = String::new();
@@ -1193,15 +1268,20 @@ fn build_attachments_block(paths: &[std::path::PathBuf]) -> String {
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
         if ext == "pdf" {
-            if !command_exists("pdftotext") {
-                out.push_str(
-                    "(PDF: missing pdftotext. Install poppler and retry, or paste text manually.)\n",
-                );
-                continue;
-            }
+            let ocr_lang = std::env::var("CODESCRIBE_ATTACH_PDF_OCR_LANG")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "pol+eng".to_string());
 
-            match extract_pdf_text_auto(path, pdf_pages) {
-                Ok((mut text, method)) => {
+            let extracted = if command_exists("pdftotext") {
+                extract_pdf_text_auto(path, pdf_pages).ok()
+            } else {
+                // Offline-friendly fallback: render first page via QuickLook and OCR it.
+                extract_pdf_quicklook_ocr(path, &ocr_lang).ok()
+            };
+
+            match extracted {
+                Some((mut text, method)) => {
                     // Cap per-file and total.
                     if text.chars().count() > MAX_FILE_CHARS {
                         text = text.chars().take(MAX_FILE_CHARS).collect();
@@ -1217,8 +1297,13 @@ fn build_attachments_block(paths: &[std::path::PathBuf]) -> String {
                         snippet.push_str("\n… (truncated)\n");
                     }
 
+                    let pages_hint = if method == "quicklook+tesseract" {
+                        "1".to_string()
+                    } else {
+                        pdf_pages.to_string()
+                    };
                     out.push_str(&format!(
-                        "(PDF text extracted via {method}; pages: {pdf_pages})\n"
+                        "(PDF text extracted via {method}; pages: {pages_hint})\n"
                     ));
                     out.push_str("```text\n");
                     out.push_str(&snippet);
@@ -1227,8 +1312,11 @@ fn build_attachments_block(paths: &[std::path::PathBuf]) -> String {
                     }
                     out.push_str("```\n");
                 }
-                Err(e) => {
-                    out.push_str(&format!("(PDF: extraction failed: {e})\n"));
+                None => {
+                    out.push_str(
+                        "(PDF: nie umiem teraz wyciągnąć tekstu. Najprościej: skopiuj 1–2 strony jako tekst albo wrzuć screenshot (vision).\n\
+Tools (opcjonalnie): `brew install poppler ocrmypdf tesseract-lang`.)\n",
+                    );
                 }
             }
 
