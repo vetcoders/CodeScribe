@@ -230,21 +230,19 @@ fn handle_reset_hotkeys() {
     let _ = config.save_to_env("HOLD_EXCLUSIVE", "0");
     // Recommended: Hold Ctrl for RAW; Shift/Cmd as modes.
     let _ = config.save_to_env("HOLD_MODS", HoldMods::Ctrl.as_str());
-    // Recommended: enable assistive toggle (right Option) by default.
-    let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::DoubleRightOption.as_str());
+    // Recommended default: keep toggle OFF to avoid accidental mode switches.
+    let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::None.as_str());
 
     send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Ctrl));
-    send_menu_event(TrayMenuEvent::SetToggleTrigger(
-        ToggleTrigger::DoubleRightOption,
-    ));
+    send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::None));
     send_menu_event(TrayMenuEvent::ResetShortcuts);
 
     HOTKEYS_MENU_ITEMS.with(|items_cell| {
         if let Some(ref items) = *items_cell.borrow() {
-            items.toggle_assistive.set_checked(true);
+            items.toggle_assistive.set_checked(false);
             items
                 .toggle_label
-                .set_text("Right Option toggle (assistive): ON");
+                .set_text("Right Option toggle (assistive): OFF");
         }
     });
 }

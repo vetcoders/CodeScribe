@@ -15,7 +15,7 @@ WHISPER_LANGUAGE=pl
 # === Hotkeys ===
 HOLD_MODS=ctrl
 HOLD_EXCLUSIVE=1
-TOGGLE_TRIGGER=double_option
+TOGGLE_TRIGGER=none
 HOLD_START_DELAY_MS=800
 
 # === Overlay / UI ===
