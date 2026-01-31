@@ -166,16 +166,18 @@ impl RecordingController {
             route_transcription_delta(delta);
         })));
 
-        let model_manager = ModelManager::new().expect("Failed to initialize model manager");
-        if let Ok(models) = model_manager.list_models()
-            && !models.is_empty()
-        {
-            info!("Available local models: {:?}", models);
-        }
+        if !cfg!(test) {
+            let model_manager = ModelManager::new().expect("Failed to initialize model manager");
+            if let Ok(models) = model_manager.list_models()
+                && !models.is_empty()
+            {
+                info!("Available local models: {:?}", models);
+            }
 
-        // Initialize Whisper engine (singleton)
-        if let Err(e) = crate::whisper::init() {
-            warn!("Failed to initialize Whisper engine: {}", e);
+            // Initialize Whisper engine (singleton)
+            if let Err(e) = crate::whisper::init() {
+                warn!("Failed to initialize Whisper engine: {}", e);
+            }
         }
 
         let config = Arc::new(RwLock::new(config));
@@ -221,16 +223,20 @@ impl RecordingController {
             route_transcription_delta(delta);
         })));
 
-        let model_manager = ModelManager::new().expect("Failed to initialize model manager");
-        if let Ok(models) = model_manager.list_models()
-            && !models.is_empty()
-        {
-            info!("Available local models: {:?}", models);
+        if !cfg!(test) {
+            let model_manager = ModelManager::new().expect("Failed to initialize model manager");
+            if let Ok(models) = model_manager.list_models()
+                && !models.is_empty()
+            {
+                info!("Available local models: {:?}", models);
+            }
         }
 
         // Initialize Whisper engine (singleton)
-        if let Err(e) = crate::whisper::init() {
-            warn!("Failed to initialize Whisper engine: {}", e);
+        if !cfg!(test) {
+            if let Err(e) = crate::whisper::init() {
+                warn!("Failed to initialize Whisper engine: {}", e);
+            }
         }
 
         setup_voice_chat_send_callback(Arc::clone(&config));
@@ -1440,8 +1446,51 @@ impl RecordingController {
             warn!("Cloud STT disabled: STT_ENDPOINT/STT_API_KEY missing");
         }
 
+        // Optional "final pass" local STT:
+        // Streaming can be great for live UX, but it can also produce duplicates/truncations
+        // depending on chunking/VAD. For final output (paste/save), prefer transcribing the
+        // full recorded audio file when available.
+        //
+        // Default: enabled (set CODESCRIBE_LOCAL_STT_FINAL_PASS=0 to disable).
+        let local_final_pass_enabled = std::env::var("CODESCRIBE_LOCAL_STT_FINAL_PASS")
+            .ok()
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"))
+            .unwrap_or(true);
+
+        if use_local_stt && local_final_pass_enabled {
+            if let Some(path) = &audio_path {
+                let wav_path = path.as_path().to_path_buf();
+                let lang = language_opt.map(str::to_string);
+
+                if chat_active {
+                    crate::voice_chat_ui::update_voice_chat_status("Finalizing…");
+                }
+
+                info!(
+                    "Running final-pass local STT from audio file (overrides streaming): {}",
+                    wav_path.display()
+                );
+
+                match tokio::task::spawn_blocking(move || {
+                    crate::whisper::transcribe_file(&wav_path, lang.as_deref())
+                })
+                .await
+                {
+                    Ok(Ok(text)) if !text.trim().is_empty() => {
+                        info!("Final-pass transcription captured ({} chars)", text.len());
+                        raw_text_opt = Some(text);
+                    }
+                    Ok(Ok(_)) => warn!("Final-pass transcription returned empty text"),
+                    Ok(Err(e)) => warn!("Final-pass transcription failed: {}", e),
+                    Err(e) => warn!("Final-pass transcription task failed: {}", e),
+                }
+            } else {
+                warn!("Final-pass local STT skipped: no audio file available");
+            }
+        }
+
         // 1. Try Streaming Result (Local)
-        if use_local_stt {
+        if use_local_stt && raw_text_opt.is_none() {
             if !streaming_text.trim().is_empty() {
                 info!(
                     "Using streaming transcription result ({} chars)",

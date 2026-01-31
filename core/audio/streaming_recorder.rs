@@ -905,17 +905,25 @@ impl SpeechSession {
 }
 
 fn hardcoded_gate_config() -> GateConfig {
+    // IMPORTANT:
+    // Use the shared VAD config (env-driven) so tray presets and ~/.codescribe/.env
+    // actually affect segmentation. Hardcoding short silence windows (e.g. 0.2s)
+    // causes ultra-fragmented utterances and garbage/duplicated transcripts.
+    let vad_cfg = vad::VadConfig::default();
+    let speech_pad_sec = std::env::var("CODESCRIBE_VAD_SPEECH_PAD_SEC")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.064)
+        .clamp(0.0, 2.0);
+
     GateConfig {
-        vad: vad::VadConfig {
-            threshold: 0.50,
-            min_speech_duration_sec: 0.05,
-            max_silence_duration_sec: 0.20,
-            max_utterance_sec: 300.0,
-            pre_roll_sec: 0.064,
-        },
-        // Silero reference defaults (64ms) for padding at boundaries.
-        pre_roll_sec: 0.064,
-        speech_pad_sec: 0.064,
+        // Single source of truth for thresholds/silence/utterance limits.
+        // Reads env vars like CODESCRIBE_VAD_* (including our tray presets).
+        vad: vad_cfg.clone(),
+        // Pre-roll defaults to VadConfig (env-driven).
+        pre_roll_sec: vad_cfg.pre_roll_sec,
+        // Extra padding after speech end (tunable separately).
+        speech_pad_sec,
         mode: gate_mode_from_env(),
     }
 }
