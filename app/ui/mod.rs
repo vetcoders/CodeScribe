@@ -381,8 +381,9 @@ pub fn get_selected_text(max_chars: usize) -> Option<String> {
             return None;
         }
 
-        if max_chars > 0 && s.len() > max_chars {
-            s.truncate(max_chars);
+        let char_count = s.chars().count();
+        if max_chars > 0 && char_count > max_chars {
+            s = s.chars().take(max_chars).collect();
             s.push('…');
         }
 
