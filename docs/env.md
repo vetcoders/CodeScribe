@@ -35,9 +35,6 @@ Poniższe działają „same z siebie” — jeśli ich nie ustawisz, aplikacja 
 - `SOUND_NAME` – domyślnie `Tink` (RESTART NEEDED)
 - `SOUND_VOLUME` – domyślnie `1.0` (RESTART NEEDED)
 
-**Audio / silence**
-- `AUTO_SILENCE` – domyślnie `0` (RESTART NEEDED)
-
 **Historia / storage**
 - `HISTORY_ENABLED` – domyślnie `1` (zawsze ON) (RESTART NEEDED)
 - `DUMP_AUDIO_LOGS` – domyślnie `1` (zawsze ON) (RESTART NEEDED)
@@ -45,18 +42,17 @@ Poniższe działają „same z siebie” — jeśli ich nie ustawisz, aplikacja 
 **Streaming (chunky)**
 - `CODESCRIBE_STREAM_CHUNK_SEC` – domyślnie `15.0` (HOT RELOADED)
 - `CODESCRIBE_STREAM_OVERLAP_RATIO` – domyślnie `0.25` (HOT RELOADED)
-- `CODESCRIBE_BUFFERED_STREAM` – domyślnie `0` (HOT RELOADED)
+- `CODESCRIBE_BUFFERED_STREAM` – domyślnie `1` (HOT RELOADED)
 - `CODESCRIBE_BUFFER_DELAY_MS` – domyślnie `3000` (HOT RELOADED)
 - `CODESCRIBE_TYPING_CPS` – domyślnie `30` (HOT RELOADED)
+- `CODESCRIBE_EMIT_WORDS_MAX` – max słów na tick (buffered), domyślnie `3` (HOT RELOADED)
 
-**VAD (Silero neural network)**
-- `CODESCRIBE_VAD_THRESHOLD` – próg detekcji mowy 0.0-1.0, domyślnie `0.5` (RESTART NEEDED)
-- `CODESCRIBE_VAD_MIN_SPEECH_SEC` – min. czas mowy przed detekcją, domyślnie `0.1` (RESTART NEEDED)
-- `CODESCRIBE_VAD_MAX_SILENCE_SEC` – max. cisza przed końcem, domyślnie `1.2` (RESTART NEEDED)
-- `CODESCRIBE_VAD_MAX_UTTERANCE_SEC` – max. czas wypowiedzi, domyślnie `60` (RESTART NEEDED)
-- `CODESCRIBE_VAD_PRE_ROLL_SEC` – pre-roll w sekundach, domyślnie `0.3` (RESTART NEEDED)
+**VAD gate (Silero)**
+- `CODESCRIBE_VAD_GATE_MODE` – `simple` (domyślnie) lub `iter` (vad_iter z temp_end/prev_end) (RESTART NEEDED)
+- `CODESCRIBE_VAD_ITER=1` – skrót do `iter` (RESTART NEEDED)
 
-> **Uwaga:** VAD config jest read-only po inicjalizacji (OnceLock). Zmiana wymaga restartu aplikacji.
+> **Uwaga:** Live gate derives `pre_roll` and `speech_pad` from `CODESCRIBE_VAD_PRE_ROLL_SEC`
+> (default 0.064 for streaming). Override `speech_pad` separately via `CODESCRIBE_VAD_SPEECH_PAD_SEC`.
 
 **Post‑process (gating)**
 - `CODESCRIBE_STREAM_SIMILARITY` – domyślnie z kodu (HOT RELOADED)
@@ -75,6 +71,10 @@ Poniżej — kiedy coś staje się wymagane.
 Wymagane **tylko jeśli** `USE_LOCAL_STT=0` (RESTART NEEDED):
 - `STT_ENDPOINT` (RESTART NEEDED)
 - `STT_API_KEY` (RESTART NEEDED)
+
+**Loop-only override (quality reports)**
+Jeśli chcesz wymusić cloud STT **tylko** dla quality loop bez zmiany appki:
+- `CODESCRIBE_LOOP_USE_CLOUD_STT=1` (RESTART NEEDED)
 
 **2) AI Formatting / Assistive (gdy włączasz AI)**
 Wymagane **tylko jeśli** `AI_FORMATTING_ENABLED=1` i chcesz LLM:
@@ -108,8 +108,13 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 - `LLM_ASSISTIVE_*` **nadpisuje** `LLM_*` dla assistive (HOT RELOADED)
 
 **Streaming vs buffered**
+- `LLM_USE_STREAMING` – streaming odpowiedzi z LLM, domyślnie `1` (HOT RELOADED)
+  - `1` lub `true` = SSE streaming (domyślne, pokazuje tekst w czasie rzeczywistym)
+  - `0` lub `false` = buffered (czeka na pełną odpowiedź)
+- `TRANSCRIPT_SEND_MODE` – tryb wysyłania transkrypcji do UI (RESTART NEEDED)
+  - `streaming` = delty w czasie rzeczywistym
+  - `buffered` = pełna transkrypcja na końcu
 - `CODESCRIBE_BUFFERED_STREAM=1` → **ignoruje** chunking (`CODESCRIBE_STREAM_CHUNK_SEC`) (HOT RELOADED)
-- `TRANSCRIPT_SEND_MODE=streaming` wysyła delty do overlayu (RESTART NEEDED)
 
 **Overlay pozycja**
 - `OVERLAY_POSITION_MODE=custom` aktywuje `OVERLAY_CUSTOM_X/Y` (RESTART NEEDED)
@@ -120,11 +125,18 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 
 ### Audio
 - `AUDIO_INPUT_DEVICE` – nazwa urządzenia wejściowego (RESTART NEEDED)
-- `CODESCRIBE_VAD_THRESHOLD`, `CODESCRIBE_VAD_MAX_SILENCE_SEC`, `AUTO_SILENCE` (RESTART NEEDED)
+- `CODESCRIBE_VAD_GATE_MODE`, `CODESCRIBE_VAD_ITER` (RESTART NEEDED)
 
 ### Transkrypcja (local/cloud)
 - `USE_LOCAL_STT` (RESTART NEEDED)
 - `LOCAL_MODEL`, `WHISPER_MODEL`, `WHISPER_LANGUAGE` (RESTART NEEDED)
+- `WHISPER_INITIAL_PROMPT` – prompt inicjalizujący dla Whisper (słownictwo domenowe, formatowanie) (RESTART NEEDED)
+  - **Co to robi:** Whisper używa initial prompt jako "kondycjonowania" - dostaje te słowa jako kontekst i lepiej rozpoznaje podobne terminy
+  - **Kiedy używać:** Gdy masz domenowe słownictwo (nazwy narzędzi, leki, nazwy własne) które Whisper przekręca
+  - **Format:** Lista słów/fraz oddzielona przecinkami
+  - **Przykład programisty:** `CodeScribe, LibraxisAI, loctree, clippy, semgrep, cargo, Rust, GitHub, Docker`
+  - **Przykład weterynarza:** `Alfaksalon, Robenacoxib, Meloksykam, Gabapentyna, NSAID, USG`
+  - **Polskie słowa:** Dodaj często używane polskie słowa jeśli model je przekręca: `dziękuję, proszę, właściwie`
 - `STT_ENDPOINT`, `STT_API_KEY` (RESTART NEEDED)
 - `CODESCRIBE_MODEL_PATH`, `CODESCRIBE_MODELS_DIR` (RESTART NEEDED)
 
@@ -134,11 +146,9 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 - `CODESCRIBE_BUFFERED_STREAM` (HOT RELOADED)
 - `CODESCRIBE_BUFFER_DELAY_MS` (HOT RELOADED)
 - `CODESCRIBE_TYPING_CPS` (HOT RELOADED)
-- `CODESCRIBE_VAD_THRESHOLD` (RESTART NEEDED)
-- `CODESCRIBE_VAD_MIN_SPEECH_SEC` (RESTART NEEDED)
-- `CODESCRIBE_VAD_MAX_SILENCE_SEC` (RESTART NEEDED)
-- `CODESCRIBE_VAD_MAX_UTTERANCE_SEC` (RESTART NEEDED)
-- `CODESCRIBE_VAD_PRE_ROLL_SEC` (RESTART NEEDED)
+- `CODESCRIBE_VAD_GATE_MODE` (RESTART NEEDED)
+- `CODESCRIBE_VAD_ITER` (RESTART NEEDED)
+- `CODESCRIBE_VAD_SPEECH_PAD_SEC` – speech padding after offset, defaults to pre_roll value (RESTART NEEDED)
 
 ### Post‑process (gating / embeddings)
 - `CODESCRIBE_STREAM_SIMILARITY` (HOT RELOADED)
@@ -240,6 +250,8 @@ make test-sse
 USE_LOCAL_STT=1
 # (optional) język:
 # WHISPER_LANGUAGE=pl
+# (optional) Silero gate:
+# CODESCRIBE_VAD_GATE_MODE=iter
 ```
 
 **2) Local + AI formatting**
@@ -259,7 +271,7 @@ STT_API_KEY=...
 
 **4) Strojenie streaming / powtórki**
 ```
-CODESCRIBE_STREAM_CHUNK_SEC=12
+CODESCRIBE_STREAM_CHUNK_SEC=4
 CODESCRIBE_STREAM_SIMILARITY=0.90
 CODESCRIBE_STREAM_NOVELTY=0.20
 ```

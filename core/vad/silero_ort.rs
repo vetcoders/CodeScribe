@@ -1,22 +1,24 @@
 //! Silero VAD wrapper using ort directly.
 //!
-//! Custom implementation that shares ort runtime with fastembed.
+//! Custom implementation using ort runtime directly.
 //! Model: silero_vad.onnx v5 from https://github.com/snakers4/silero-vad
 //!
 //! Created by M&K (c)2026 VetCoders
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result};
-use ndarray::{Array1, Array2, Array3};
+use ndarray::ArrayD;
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::Value;
 use tracing::{debug, info};
 
 use super::config::VadConfig;
+use super::embedded;
+use crate::hf_cache;
 
 /// Silero VAD sample rate (always 16kHz)
 pub const VAD_SAMPLE_RATE: u32 = 16000;
@@ -24,9 +26,15 @@ pub const VAD_SAMPLE_RATE: u32 = 16000;
 /// Chunk size for Silero (512 samples = 32ms at 16kHz)
 const CHUNK_SIZE: usize = 512;
 
-/// State dimensions for Silero v5 model
-const STATE_DIM: usize = 64;
-const STATE_LAYERS: usize = 2;
+/// Context size for Silero v5 (64 samples at 16kHz).
+/// Each inference call requires prepending the last 64 samples from the
+/// previous chunk.  Without this the model receives incomplete input and
+/// returns unreliable speech probabilities.
+const CONTEXT_SIZE: usize = 64;
+
+/// Unified state shape for Silero v5: [2, 1, 128].
+/// v4 used separate h/c tensors with dim 64; v5 merged them.
+const STATE_SHAPE: [usize; 3] = [2, 1, 128];
 
 /// Global VAD worker
 static VAD_WORKER: OnceLock<VadWorker> = OnceLock::new();
@@ -77,31 +85,47 @@ impl Resampler {
     }
 }
 
-/// Silero VAD model wrapper
+/// Silero VAD v5 model wrapper.
+///
+/// v5 API differences from v4:
+///  - Unified state tensor `[2, 1, 128]` (v4 had separate h/c `[2, 1, 64]`)
+///  - Input order: `input, state, sr` (v4: `input, sr, h, c`)
+///  - Output names: `output`, `stateN` (v4: positional)
+///  - Context window: 64 samples prepended to each 512-sample chunk
 pub struct SileroVad {
     session: Session,
-    state_h: Array3<f32>,
-    state_c: Array3<f32>,
+    state: ArrayD<f32>,
+    context: Vec<f32>,
     config: VadConfig,
     resampler: Option<Resampler>,
 }
 
 impl SileroVad {
-    /// Load Silero VAD model from path
+    /// Load Silero VAD model from embedded bytes (if available) or path
     pub fn new(model_path: &Path, config: VadConfig) -> Result<Self> {
-        info!("Loading Silero VAD model from: {}", model_path.display());
-
-        let session = Session::builder()?
-            .with_intra_threads(1)?
-            .commit_from_file(model_path)
-            .context("Failed to load Silero VAD ONNX model")?;
+        let session = if let Some(model_bytes) = embedded::get_embedded_data() {
+            info!(
+                "Loading Silero VAD model from embedded bytes ({:.2} MB)",
+                model_bytes.len() as f64 / 1_000_000.0
+            );
+            Session::builder()?
+                .with_intra_threads(1)?
+                .commit_from_memory(model_bytes)
+                .context("Failed to load embedded Silero VAD ONNX model")?
+        } else {
+            info!("Loading Silero VAD model from: {}", model_path.display());
+            Session::builder()?
+                .with_intra_threads(1)?
+                .commit_from_file(model_path)
+                .context("Failed to load Silero VAD ONNX model")?
+        };
 
         debug!("Silero VAD model loaded successfully");
 
         Ok(Self {
             session,
-            state_h: Array3::zeros((STATE_LAYERS, 1, STATE_DIM)),
-            state_c: Array3::zeros((STATE_LAYERS, 1, STATE_DIM)),
+            state: ArrayD::zeros(STATE_SHAPE.as_slice()),
+            context: vec![0.0; CONTEXT_SIZE],
             config,
             resampler: None,
         })
@@ -116,87 +140,76 @@ impl SileroVad {
         }
     }
 
-    /// Get speech probability for audio chunk (0.0 - 1.0)
+    /// Get speech probability for a single CHUNK_SIZE (512) frame at 16kHz.
     ///
-    /// Automatically resamples if input rate was set.
+    /// The caller is responsible for providing exactly CHUNK_SIZE samples
+    /// already at 16kHz.  The internal resampler path is kept for
+    /// backwards-compat but callers in streaming_recorder pre-resample.
     pub fn predict(&mut self, samples: &[f32]) -> Result<f32> {
         if samples.is_empty() {
             return Ok(0.0);
         }
 
-        // Resample if needed (get owned Vec to avoid borrow issues)
+        // Resample if needed
         let samples_16k: Vec<f32> = if let Some(ref mut resampler) = self.resampler {
             resampler.resample(samples)
         } else {
             samples.to_vec()
         };
 
-        // Process in chunks and return max probability
         let mut max_prob = 0.0f32;
-
         for chunk in samples_16k.chunks(CHUNK_SIZE) {
-            // Pad chunk if needed
-            let padded: Vec<f32> = if chunk.len() < CHUNK_SIZE {
-                let mut p = chunk.to_vec();
-                p.resize(CHUNK_SIZE, 0.0);
-                p
-            } else {
-                chunk.to_vec()
-            };
-
-            let prob = self.predict_chunk(&padded)?;
+            if chunk.len() < CHUNK_SIZE {
+                break;
+            }
+            let prob = self.predict_chunk(chunk)?;
             max_prob = max_prob.max(prob);
         }
-
         Ok(max_prob)
     }
 
-    /// Predict on a single 512-sample chunk
+    /// Predict on a single 512-sample chunk using Silero v5 API.
+    ///
+    /// Prepends 64-sample context, sends `[input, state, sr]`,
+    /// reads `output` (prob) and `stateN` (updated state).
     fn predict_chunk(&mut self, chunk: &[f32]) -> Result<f32> {
-        // Input: (batch=1, samples)
-        let input_array = Array2::from_shape_vec((1, chunk.len()), chunk.to_vec())?;
+        // Build context + chunk → [1, 576]
+        let mut input_data = Vec::with_capacity(CONTEXT_SIZE + chunk.len());
+        input_data.extend_from_slice(&self.context);
+        input_data.extend_from_slice(chunk);
 
-        // Sample rate as i64
-        let sr_array = Array1::from_vec(vec![VAD_SAMPLE_RATE as i64]);
+        // Update context for next call
+        let ctx_start = chunk.len().saturating_sub(CONTEXT_SIZE);
+        self.context[..].copy_from_slice(&chunk[ctx_start..]);
 
-        // Create input tensors (Tensor::from_array in ort rc.11)
-        let input = Tensor::from_array(input_array)?;
-        let sr = Tensor::from_array(sr_array)?;
-        let h = Tensor::from_array(self.state_h.clone())?;
-        let c = Tensor::from_array(self.state_c.clone())?;
+        // Input tensors — v5 order: input, state, sr
+        let input = ndarray::Array2::from_shape_vec([1, input_data.len()], input_data)
+            .map_err(|e| anyhow::anyhow!("input shape: {}", e))?;
+        let sr = ndarray::Array1::from_vec(vec![VAD_SAMPLE_RATE as i64]);
+        let state = std::mem::replace(&mut self.state, ArrayD::zeros(STATE_SHAPE.as_slice()));
 
-        // Run inference with named inputs
-        // Silero VAD v5 expects: input, sr, h, c
-        let outputs = self.session.run(ort::inputs![
-            "input" => input,
-            "sr" => sr,
-            "h" => h,
-            "c" => c
+        let input_value = Value::from_array(input)?;
+        let state_value = Value::from_array(state)?;
+        let sr_value = Value::from_array(sr)?;
+
+        let outputs = self.session.run([
+            (&input_value).into(),
+            (&state_value).into(),
+            (&sr_value).into(),
         ])?;
 
-        // Extract probability from first output
+        // Read probability from "output"
         let prob = {
-            let output_value = &outputs[0];
-            let (_shape, data) = output_value.try_extract_tensor::<f32>()?;
+            let (_shape, data) = outputs["output"].try_extract_tensor::<f32>()?;
             data.first().copied().unwrap_or(0.0)
         };
 
-        // Update states if model returns them (outputs 1 and 2)
-        if outputs.len() > 2 {
-            // Extract new h state (let chains - Rust 2024)
-            if let Ok((_shape, h_data)) = outputs[1].try_extract_tensor::<f32>()
-                && let Ok(arr) =
-                    Array3::from_shape_vec((STATE_LAYERS, 1, STATE_DIM), h_data.to_vec())
-            {
-                self.state_h = arr;
-            }
-
-            // Extract new c state
-            if let Ok((_shape, c_data)) = outputs[2].try_extract_tensor::<f32>()
-                && let Ok(arr) =
-                    Array3::from_shape_vec((STATE_LAYERS, 1, STATE_DIM), c_data.to_vec())
-            {
-                self.state_c = arr;
+        // Read updated state from "stateN"
+        {
+            let (shape, data) = outputs["stateN"].try_extract_tensor::<f32>()?;
+            let shape_usize: Vec<usize> = shape.as_ref().iter().map(|&d| d as usize).collect();
+            if let Ok(arr) = ArrayD::from_shape_vec(shape_usize.as_slice(), data.to_vec()) {
+                self.state = arr;
             }
         }
 
@@ -205,8 +218,8 @@ impl SileroVad {
 
     /// Reset internal state
     pub fn reset(&mut self) {
-        self.state_h.fill(0.0);
-        self.state_c.fill(0.0);
+        self.state = ArrayD::zeros(STATE_SHAPE.as_slice());
+        self.context.fill(0.0);
     }
 
     /// Get current threshold
@@ -223,12 +236,8 @@ use std::sync::{Arc, atomic::AtomicU32};
 
 /// Message to VAD worker (fire-and-forget, no response channel)
 enum VadMessage {
-    Predict {
-        samples: Vec<f32>,
-        sample_rate: u32,
-    },
+    Predict { samples: Vec<f32>, sample_rate: u32 },
     Reset,
-    #[allow(dead_code)]
     Shutdown,
 }
 
@@ -241,6 +250,8 @@ struct VadWorker {
     initialized: AtomicBool,
     /// Last computed probability (f32 as bits for atomic access)
     last_prob: Arc<AtomicU32>,
+    /// Worker thread handle for clean shutdown
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl VadWorker {
@@ -265,7 +276,7 @@ impl VadWorker {
         // Oneshot channel to confirm model loaded successfully
         let (init_tx, init_rx) = mpsc::sync_channel::<Result<()>>(1);
 
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let mut vad = match SileroVad::new(&path, config) {
                 Ok(v) => {
                     // Signal success to main thread
@@ -312,6 +323,7 @@ impl VadWorker {
                     sender: tx,
                     initialized: AtomicBool::new(true),
                     last_prob,
+                    thread: Some(handle),
                 })
             }
             Ok(Err(e)) => {
@@ -342,6 +354,17 @@ impl VadWorker {
 
     fn reset(&self) {
         let _ = self.sender.try_send(VadMessage::Reset);
+    }
+}
+
+impl Drop for VadWorker {
+    fn drop(&mut self) {
+        // Send shutdown signal; if the channel is full or closed, the thread
+        // will exit anyway when the sender is dropped and `for msg in rx` ends.
+        let _ = self.sender.try_send(VadMessage::Shutdown);
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -389,7 +412,7 @@ pub fn init_with_config(model_path: &Path, config: VadConfig) -> Result<()> {
     }
 
     // Try to create worker - if it fails, VAD stays uninitialized
-    // (speech_probability will return 1.0, disabling auto-stop)
+    // (speech_probability will return 1.0, effectively disabling segmentation)
     match VadWorker::new(model_path, config.clone()) {
         Ok(worker) => {
             // Only set config/path AFTER successful init
@@ -400,7 +423,7 @@ pub fn init_with_config(model_path: &Path, config: VadConfig) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            tracing::error!("VAD init failed: {} - auto-stop disabled", e);
+            tracing::error!("VAD init failed: {} - segmentation disabled", e);
             Err(e)
         }
     }
@@ -423,8 +446,8 @@ pub fn is_initialized() -> bool {
 /// This "eventual consistency" approach avoids blocking the audio thread.
 /// After a few calls, the returned value will reflect recent audio.
 ///
-/// **Important:** Returns 1.0 when VAD not initialized (assume speech)
-/// to prevent immediate auto-stop in recorders.
+/// **Important:** Returns 1.0 when VAD not initialized (assume speech),
+/// which effectively disables silence-based segmentation.
 pub fn speech_probability(samples: &[f32], sample_rate: u32) -> f32 {
     if let Some(worker) = VAD_WORKER.get() {
         // Submit new audio (non-blocking)
@@ -432,7 +455,7 @@ pub fn speech_probability(samples: &[f32], sample_rate: u32) -> f32 {
         // Return last computed probability (instant, atomic read)
         worker.last_probability()
     } else {
-        // VAD not initialized - assume speech to prevent premature auto-stop
+        // VAD not initialized - assume speech to prevent premature segmentation
         1.0
     }
 }
@@ -450,14 +473,37 @@ pub fn reset() {
     }
 }
 
-/// Get default model path (~/.codescribe/models/silero_vad.onnx)
-pub fn default_model_path() -> std::path::PathBuf {
+/// HuggingFace repo for Silero VAD model
+const SILERO_VAD_REPO: &str = "snakers4/silero-vad";
+const SILERO_VAD_FILE: &str = "silero_vad.onnx";
+
+/// Get default model path (bundled/models dir -> HF cache -> ~/.codescribe/models/)
+pub fn default_model_path() -> PathBuf {
+    // 1) Bundled / models dir (app Resources/models or ./models)
+    if let Ok(manager) = crate::config::models::ModelManager::new() {
+        let candidate = manager.models_dir().join(SILERO_VAD_FILE);
+        if candidate.exists() {
+            debug!("Using Silero VAD from models dir: {}", candidate.display());
+            return candidate;
+        }
+    }
+
+    // Try HF cache first (from `hf download snakers4/silero-vad`)
+    if let Some(snapshot) = hf_cache::find_snapshot(SILERO_VAD_REPO, &[SILERO_VAD_FILE]) {
+        let model_path = snapshot.join(SILERO_VAD_FILE);
+        if model_path.exists() {
+            debug!("Using Silero VAD from HF cache: {}", model_path.display());
+            return model_path;
+        }
+    }
+
+    // Fallback to legacy path
     directories::BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from("."))
         .join(".codescribe")
         .join("models")
-        .join("silero_vad.onnx")
+        .join(SILERO_VAD_FILE)
 }
 
 #[cfg(test)]

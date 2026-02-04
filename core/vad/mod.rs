@@ -1,6 +1,6 @@
 //! Voice Activity Detection (VAD) module using Silero neural network.
 //!
-//! Custom wrapper that shares ort runtime with fastembed (no dependency conflicts).
+//! Custom wrapper that uses a shared ort runtime (no dependency conflicts).
 //! Uses worker thread to avoid blocking audio callbacks.
 //!
 //! ## Quick Start
@@ -26,6 +26,7 @@
 //! Created by M&K (c)2026 VetCoders
 
 pub mod config;
+pub mod embedded;
 pub mod silero_ort;
 
 pub use config::VadConfig;

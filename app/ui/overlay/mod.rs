@@ -31,7 +31,8 @@ use tracing::{debug, info, warn};
 
 use crate::ui_helpers::{
     add_subview, animate_fade, button_set_action, button_style, clamp_overlay_position,
-    color_white, create_button, set_hidden, set_text, window_close, window_set_alpha, window_show,
+    color_white, create_button, overlay_window_class, set_hidden, set_text, window_close,
+    window_set_alpha, window_show,
 };
 use objc::declare::ClassDecl;
 use objc::runtime::Sel;
@@ -525,6 +526,7 @@ fn update_overlay_text_and_layout(state: &mut TranscriptionOverlayState) {
 
 /// Show the transcription overlay window
 pub fn show_transcription_overlay() {
+    info!("show_transcription_overlay requested");
     // Cancel any pending auto-hide
     AUTO_HIDE_GENERATION.fetch_add(1, Ordering::SeqCst);
     AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
@@ -536,6 +538,7 @@ pub fn show_transcription_overlay() {
 
 fn show_transcription_overlay_impl() {
     unsafe {
+        info!("show_transcription_overlay_impl starting");
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
         // Reuse existing window if any
@@ -576,7 +579,6 @@ fn show_transcription_overlay_impl() {
             return;
         }
 
-        let ns_window = ns_window_class.unwrap();
         let ns_text_field = ns_text_field_class.unwrap();
         let ns_screen = ns_screen_class.unwrap();
         let ns_string = ns_string_class.unwrap();
@@ -642,7 +644,8 @@ fn show_transcription_overlay_impl() {
         };
 
         // Create borderless window for modern look
-        let window: Id = msg_send![ns_window, alloc];
+        let window_class = overlay_window_class();
+        let window: Id = msg_send![window_class, alloc];
         if window.is_null() {
             warn!("Failed to alloc NSWindow");
             return;
@@ -961,7 +964,7 @@ pub fn append_transcription_delta(delta: &str) {
 
 fn append_transcription_delta_impl(delta: &str) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.accumulated_text.push_str(delta);
+    codescribe_core::contracts::TranscriptDelta::from_raw(delta).apply(&mut state.accumulated_text);
     update_overlay_text_and_layout(&mut state);
 }
 
@@ -1102,6 +1105,7 @@ pub fn enter_recording_mode() {
 
 /// Hide the transcription overlay window (with fade-out animation)
 pub fn hide_transcription_overlay() {
+    info!("hide_transcription_overlay requested");
     // Cancel any pending auto-hide
     AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
 
@@ -1135,7 +1139,9 @@ fn hide_transcription_overlay_impl() {
             });
         });
 
-        debug!("Transcription overlay hidden");
+        info!("Transcription overlay hidden");
+    } else {
+        debug!("Transcription overlay hide: no window to close");
     }
     state.text_field = None;
     state.status_field = None;

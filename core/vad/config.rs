@@ -26,31 +26,36 @@ pub struct VadConfig {
 
 impl Default for VadConfig {
     fn default() -> Self {
+        // CLEAN API: One env var per parameter, no competing aliases
+        // See docs/ENV_REGISTRY.toml for full documentation
         Self {
-            // Clamp threshold to valid probability range [0.1, 0.95]
-            threshold: env_f32_clamped("CODESCRIBE_VAD_THRESHOLD", 0.5, 0.1, 0.95),
-            // Clamp durations to reasonable ranges
+            // Speech probability threshold (0.0-1.0)
+            // Lower = more sensitive (catches quiet speech), Higher = more conservative
+            // Default 0.35 - catches quiet speech without triggering on silence
+            threshold: env_f32_clamped("CODESCRIBE_VAD_THRESHOLD", 0.35, 0.1, 0.95),
+
+            // Minimum speech duration before triggering (filters clicks/pops)
             min_speech_duration_sec: env_f32_clamped(
                 "CODESCRIBE_VAD_MIN_SPEECH_SEC",
                 0.1,
                 0.01,
                 1.0,
             ),
-            // Sync with default_env.txt: 1.2s (was 0.8s)
-            max_silence_duration_sec: env_f32_clamped(
-                "CODESCRIBE_VAD_MAX_SILENCE_SEC",
-                1.2,
-                0.1,
-                10.0,
-            ),
-            // Sync with default_env.txt: 60s (was 30s)
+
+            // Silence duration before utterance flush (allows natural pauses)
+            // Default 2.5s - human speech pauses are typically 1-2s
+            max_silence_duration_sec: env_f32_clamped("CODESCRIBE_VAD_SILENCE_SEC", 2.5, 0.1, 10.0),
+
+            // Maximum utterance length (force flush after this)
             max_utterance_sec: env_f32_clamped(
                 "CODESCRIBE_VAD_MAX_UTTERANCE_SEC",
                 60.0,
                 1.0,
                 300.0,
             ),
-            pre_roll_sec: env_f32_clamped("CODESCRIBE_VAD_PRE_ROLL_SEC", 0.3, 0.0, 2.0),
+
+            // Pre-roll buffer (captures context before speech onset)
+            pre_roll_sec: env_f32_clamped("CODESCRIBE_VAD_PRE_ROLL_SEC", 0.5, 0.0, 2.0),
         }
     }
 }
@@ -94,15 +99,26 @@ impl VadConfig {
 }
 
 fn env_f32(key: &str, default: f32) -> f32 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(default)
+    match std::env::var(key) {
+        Ok(val) => match val.parse::<f32>() {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!("{key}={val:?} is not a valid f32, using default {default}");
+                default
+            }
+        },
+        Err(_) => default,
+    }
 }
 
 /// Parse env var as f32 with clamping to valid range
 fn env_f32_clamped(key: &str, default: f32, min: f32, max: f32) -> f32 {
-    env_f32(key, default).clamp(min, max)
+    let raw = env_f32(key, default);
+    let clamped = raw.clamp(min, max);
+    if raw != clamped {
+        tracing::warn!("{key}={raw} out of range [{min}, {max}], clamped to {clamped}");
+    }
+    clamped
 }
 
 #[cfg(test)]

@@ -1,11 +1,8 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use anyhow::Result;
-use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -23,8 +20,6 @@ const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.93;
 const DEFAULT_NOVELTY_THRESHOLD: f32 = 0.12;
 const MAX_EMBED_CHARS: usize = 512;
 const MAX_DROPS_IN_ROW: u8 = 2;
-
-static EMBEDDER: OnceLock<Mutex<Option<TextEmbedding>>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 struct LexiconEntry {
@@ -243,31 +238,19 @@ impl SemanticGate {
             return None;
         }
 
-        let embedder = EMBEDDER.get_or_init(|| Mutex::new(None));
-        let mut guard = embedder.lock().ok()?;
-
-        if guard.is_none() {
-            match init_embedder() {
-                Ok(model) => {
-                    *guard = Some(model);
-                }
-                Err(e) => {
-                    warn!("Failed to initialize ParaphraseMLMiniLM embedder: {}", e);
-                    return None;
-                }
+        let input = truncate_for_embedding(text);
+        match crate::embedder::embed(&input) {
+            Ok(vec) => Some(vec),
+            Err(e) => {
+                warn!("Failed to embed text for semantic gate: {}", e);
+                None
             }
         }
-
-        let model = guard.as_mut()?;
-        let input = truncate_for_embedding(text);
-        let embeddings = model.embed(vec![input.as_str()], None).ok()?;
-        embeddings.into_iter().next()
     }
 }
 
 #[derive(Debug)]
 pub struct StreamPostProcessor {
-    lexicon: Lexicon,
     gate: SemanticGate,
     stats: StreamPostProcessStats,
 }
@@ -287,7 +270,6 @@ pub struct StreamPostProcessStats {
 impl StreamPostProcessor {
     pub fn new() -> Self {
         Self {
-            lexicon: Lexicon::from_builtin(),
             gate: SemanticGate::new(),
             stats: StreamPostProcessStats {
                 embeddings_enabled: embeddings_enabled(),
@@ -296,12 +278,13 @@ impl StreamPostProcessor {
         }
     }
 
-    /// Process a streaming chunk — applies lexicon, cleanup, and semantic gate.
+    /// Process a streaming chunk — applies cleanup + semantic gate only.
+    /// Lexicon is handled in buffered mode.
     pub fn process(&mut self, text: &str) -> Option<String> {
         self.process_internal(text, true)
     }
 
-    /// Process a complete utterance — applies lexicon and cleanup, no semantic gate.
+    /// Process a complete utterance — cleanup only, no semantic gate.
     /// Use this for VAD-segmented utterances where each segment is naturally distinct.
     pub fn process_utterance(&mut self, text: &str) -> Option<String> {
         self.process_internal(text, false)
@@ -309,24 +292,16 @@ impl StreamPostProcessor {
 
     fn process_internal(&mut self, text: &str, apply_gate: bool) -> Option<String> {
         self.stats.input_chunks += 1;
-        self.lexicon.maybe_reload();
-
         if text.trim().is_empty() {
             self.stats.dropped_chunks += 1;
             return None;
         }
 
-        let mut cleaned = self.lexicon.apply(text);
-        if cleaned != text {
-            self.stats.lexicon_rewrites += 1;
-        }
-
-        let cleaned_after_cleanup = cleanup_artifacts(&cleaned);
-        if cleaned_after_cleanup != cleaned {
+        let cleaned_after_cleanup = cleanup_artifacts(text);
+        if cleaned_after_cleanup != text {
             self.stats.repetition_cleanups += 1;
         }
-        cleaned = cleaned_after_cleanup;
-        cleaned = normalize_whitespace(&cleaned);
+        let cleaned = normalize_whitespace(&cleaned_after_cleanup);
 
         if cleaned.trim().is_empty() {
             self.stats.dropped_chunks += 1;
@@ -354,7 +329,39 @@ impl StreamPostProcessor {
     }
 }
 
+pub struct LexiconPostProcessor {
+    lexicon: Lexicon,
+}
+
+impl LexiconPostProcessor {
+    pub fn new() -> Self {
+        Self {
+            lexicon: Lexicon::from_builtin(),
+        }
+    }
+
+    pub fn process(&mut self, text: &str) -> Option<String> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        self.lexicon.maybe_reload();
+        let cleaned = self.lexicon.apply(text);
+        let cleaned_after_cleanup = cleanup_artifacts(&cleaned);
+        let cleaned_after_cleanup = normalize_whitespace(&cleaned_after_cleanup);
+        if cleaned_after_cleanup.trim().is_empty() {
+            return None;
+        }
+        Some(cleaned_after_cleanup)
+    }
+}
+
 impl Default for StreamPostProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for LexiconPostProcessor {
     fn default() -> Self {
         Self::new()
     }
@@ -377,7 +384,10 @@ fn env_f32(key: &str, default: f32) -> f32 {
 fn env_bool(key: &str) -> bool {
     std::env::var(key)
         .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
         .unwrap_or(false)
 }
 
@@ -449,7 +459,7 @@ fn cleanup_artifacts(text: &str) -> String {
     text.to_string()
 }
 
-fn normalize_whitespace(text: &str) -> String {
+pub(crate) fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -468,23 +478,6 @@ fn is_suspicious(text: &str) -> bool {
     ratio < 0.5 || crate::ai_formatting::has_repetition_loop(text)
 }
 
-fn init_embedder() -> Result<TextEmbedding> {
-    let cache_dir = embedding_cache_dir();
-    std::fs::create_dir_all(&cache_dir)?;
-
-    info!("Initializing ParaphraseMLMiniLM embedder (this can take a while on first run)");
-    let options = TextInitOptions::new(EmbeddingModel::ParaphraseMLMiniLML12V2Q)
-        .with_max_length(256)
-        .with_cache_dir(cache_dir)
-        .with_show_download_progress(true);
-
-    TextEmbedding::try_new(options)
-}
-
-fn embedding_cache_dir() -> PathBuf {
-    Config::config_dir().join("embeddings")
-}
-
 fn truncate_for_embedding(text: &str) -> String {
     if text.len() <= MAX_EMBED_CHARS {
         return text.to_string();
@@ -499,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_lexicon_rewrite() {
-        let mut processor = StreamPostProcessor::new();
+        let mut processor = LexiconPostProcessor::new();
         let input = "Uzywam doker do kontenerow i mam api key do github.";
         let output = processor.process(input).expect("expected output");
         assert!(
@@ -640,28 +633,18 @@ mod tests {
     }
 
     #[test]
-    fn test_postprocessor_always_applies_lexicon_contract() {
-        // Contract: every call to process() applies lexicon rewrites
-        // regardless of semantic gate state or chunk history
-        let mut processor = StreamPostProcessor::new();
+    fn test_lexicon_applied_in_buffered_processor() {
+        let mut processor = LexiconPostProcessor::new();
 
-        // First call — lexicon should rewrite known terms
         let out1 = processor
             .process("Uzywam doker do kontenerow")
             .expect("non-empty");
-        assert!(
-            out1.contains("Docker"),
-            "First call should apply lexicon: {out1}"
-        );
+        assert!(out1.contains("Docker"), "Expected lexicon rewrite: {out1}");
 
-        // Second call with different text — still applies lexicon
         let out2 = processor
             .process("Mam git hub repository z kodem")
             .expect("non-empty");
-        assert!(
-            out2.contains("GitHub"),
-            "Second call should apply lexicon: {out2}"
-        );
+        assert!(out2.contains("GitHub"), "Expected lexicon rewrite: {out2}");
     }
 
     #[test]

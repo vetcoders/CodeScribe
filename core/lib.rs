@@ -16,8 +16,8 @@
 //!
 //! - **whisper** - Embedded Whisper model (~900MB in binary), zero I/O
 //! - **tts** - Embedded CSM-1B model (~1GB in binary), text-to-speech
-//! - **vad** - Voice activity detection using WebRTC VAD
-//! - **embedder** - Text embeddings using E5 model via fastembed
+//! - **vad** - Voice activity detection using Silero VAD neural network
+//! - **embedder** - Text embeddings using E5 model (offline)
 //! - **audio** - Recording and audio loading
 //! - **config** - User configuration
 //! - **ai_formatting** - Post-processing with LLMs
@@ -31,7 +31,9 @@
 pub mod audio;
 pub mod config;
 pub mod conversation;
+pub mod demux;
 pub mod embedder;
+mod hf_cache;
 pub mod ipc;
 pub mod llm;
 pub mod pipeline;
@@ -86,7 +88,7 @@ pub mod vad_api {
 // Public API - Embedder (text embeddings)
 // ═══════════════════════════════════════════════════════════
 
-/// Text embeddings using E5 model via fastembed
+/// Text embeddings using E5 model (offline)
 pub mod embedder_api {
     pub use crate::embedder::{
         DEFAULT_MODEL, EMBEDDING_DIM, EmbedderConfig, EmbedderEngine, embed, embed_batch, init,
@@ -123,6 +125,7 @@ pub use config::{get_assistive_prompt_path, get_formatting_prompt_path, reset_to
 // ═══════════════════════════════════════════════════════════
 
 pub use llm::{ai_formatting, client};
+pub use pipeline::contracts;
 pub use pipeline::stream_postprocess;
 pub use quality::{quality_loop, quality_report};
 pub use util::{safe_path, status};

@@ -51,7 +51,17 @@ impl LocalWhisperEngine {
         tracing::debug!("LocalWhisperEngine using device: {:?}", device);
 
         let config_path = model_path.join("config.json");
-        let weights_path = model_path.join("weights.safetensors");
+        let weights_path = if model_path.join("weights.safetensors").exists() {
+            model_path.join("weights.safetensors")
+        } else {
+            model_path.join("model.safetensors")
+        };
+        if !weights_path.exists() {
+            anyhow::bail!(
+                "Whisper weights not found (expected weights.safetensors or model.safetensors) in {}",
+                model_path.display()
+            );
+        }
         let tokenizer_path = model_path.join("tokenizer.json");
         let mel_filters_path = model_path.join("mel_filters.npz");
 
@@ -556,6 +566,21 @@ impl LocalWhisperEngine {
         }
         if let Some(t) = self.tokenizer.token_to_id("<|notimestamps|>") {
             tokens.push(t);
+        }
+
+        // Initial prompt: tokenize and prepend to decoder context (helps with vocabulary/formatting)
+        if let Some(ref prompt) = self.decoding_params.initial_prompt
+            && let Ok(encoding) = self.tokenizer.encode(prompt.as_str(), false)
+        {
+            let prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
+            if !prompt_tokens.is_empty() {
+                tracing::debug!(
+                    "Initial prompt: {} ({} tokens)",
+                    prompt,
+                    prompt_tokens.len()
+                );
+                tokens.extend(prompt_tokens);
+            }
         }
 
         let mut all_tokens = Vec::new();

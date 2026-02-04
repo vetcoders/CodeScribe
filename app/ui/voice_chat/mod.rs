@@ -11,11 +11,12 @@ mod state;
 // Re-export public API
 pub use api::{
     add_voice_chat_error_message, add_voice_chat_user_message, append_voice_chat_assistant_delta,
-    clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay, is_auto_send_enabled,
-    is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
+    append_voice_chat_user_delta, clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay,
+    is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
     reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_send_callback,
-    set_voice_chat_sending, set_voice_chat_text, show_agent_tab, show_drawer_tab,
-    update_conversation_state, update_drawer_after_save, update_voice_chat_status,
+    set_voice_chat_sending, set_voice_chat_target_app, set_voice_chat_text,
+    set_voice_chat_user_text, show_agent_tab, show_drawer_tab, update_conversation_state,
+    update_drawer_after_save, update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 
@@ -32,8 +33,9 @@ use tracing::{info, warn};
 
 use crate::ui_helpers::{
     NS_FLOATING_WINDOW_LEVEL, add_subview, button_set_action, button_style, color_clear,
-    create_button, create_segmented_control, create_vertical_stack_view, ns_string, set_hidden,
-    window_set_alpha, window_show,
+    create_button, create_scrollable_text_view, create_segmented_control,
+    create_vertical_stack_view, ns_string, overlay_window_class, set_hidden, window_set_alpha,
+    window_show,
 };
 
 use api::update_active_tab_impl;
@@ -45,6 +47,7 @@ pub type Id = *mut Object;
 
 /// Show the voice chat overlay window
 pub fn show_voice_chat_overlay() {
+    info!("show_voice_chat_overlay requested");
     Queue::main().exec_async(|| {
         show_voice_chat_overlay_impl();
     });
@@ -52,6 +55,7 @@ pub fn show_voice_chat_overlay() {
 
 /// Show the voice chat overlay with custom configuration
 pub fn show_voice_chat_overlay_with_config(_config: VoiceChatOverlayConfig) {
+    info!("show_voice_chat_overlay_with_config requested");
     Queue::main().exec_async(|| {
         show_voice_chat_overlay_impl();
     });
@@ -59,6 +63,7 @@ pub fn show_voice_chat_overlay_with_config(_config: VoiceChatOverlayConfig) {
 
 fn show_voice_chat_overlay_impl() {
     unsafe {
+        info!("show_voice_chat_overlay_impl starting");
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
 
         let ns_window = Class::get("NSWindow").unwrap();
@@ -128,7 +133,8 @@ fn show_voice_chat_overlay_impl() {
             },
         };
 
-        let window: Id = msg_send![ns_window, alloc];
+        let window_class = overlay_window_class();
+        let window: Id = msg_send![window_class, alloc];
         let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::FullSizeContentView;
         let backing = NSBackingStoreType::Buffered;
         let window: Id = msg_send![
@@ -155,8 +161,12 @@ fn show_voice_chat_overlay_impl() {
         let content_view: Id = msg_send![window, contentView];
 
         let ns_visual = Class::get("NSVisualEffectView").unwrap();
+        let blur_frame = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(window_width, window_height),
+        );
         let blur_view: Id = msg_send![ns_visual, alloc];
-        let blur_view: Id = msg_send![blur_view, initWithFrame: frame];
+        let blur_view: Id = msg_send![blur_view, initWithFrame: blur_frame];
         let _: () = msg_send![blur_view, setMaterial: NSVisualEffectMaterial::HUDWindow];
         let _: () = msg_send![blur_view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
         let _: () = msg_send![blur_view, setState: NSVisualEffectState::Active];
@@ -173,7 +183,7 @@ fn show_voice_chat_overlay_impl() {
 
         let header_height = 44.0;
         let footer_height = 44.0;
-        let agent_input_height = 52.0;
+        let agent_input_height = 96.0;
 
         // Header
         let header_frame = CGRect::new(
@@ -191,10 +201,12 @@ fn show_voice_chat_overlay_impl() {
         }
         add_subview(blur_view, header_view);
 
+        let title_x = 16.0;
+        let title_w = 120.0;
         let title_label = crate::ui_helpers::create_label(crate::ui_helpers::LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(16.0, window_height - 30.0),
-                &CGSize::new(160.0, 20.0),
+                &CGPoint::new(title_x, window_height - 30.0),
+                &CGSize::new(title_w, 20.0),
             ),
             text: "CodeScribe".to_string(),
             font_size: 13.0,
@@ -206,15 +218,48 @@ fn show_voice_chat_overlay_impl() {
         });
         add_subview(blur_view, title_label);
 
+        // Keep the tab control between the title and the right-side icon cluster.
+        // The overlay window is typically ~450px wide; fixed coordinates can overlap.
+        let right_cluster_start_x = window_width - 192.0;
+        let tab_x = title_x + title_w + 10.0;
+        // Don't enforce a minimum width here; on narrower windows, forcing a min can make the
+        // segmented control overlap the right-side icon cluster.
+        let tab_w = (right_cluster_start_x - 8.0 - tab_x).max(0.0);
         let tab_control = create_segmented_control(
             CGRect::new(
-                &CGPoint::new(170.0, window_height - 34.0),
-                &CGSize::new(160.0, 24.0),
+                &CGPoint::new(tab_x, window_height - 34.0),
+                &CGSize::new(tab_w, 24.0),
             ),
             &["Drawer", "Agent"],
         );
         button_set_action(tab_control, action_handler, sel!(onTabChanged:));
         add_subview(blur_view, tab_control);
+
+        let paste_last_button = create_button(
+            CGRect::new(
+                &CGPoint::new(window_width - 160.0, window_height - 34.0),
+                &CGSize::new(24.0, 24.0),
+            ),
+            "⇲",
+            button_style::SMALL_SQUARE,
+        );
+        button_set_action(
+            paste_last_button,
+            action_handler,
+            sel!(onPasteLastResponse:),
+        );
+        add_subview(blur_view, paste_last_button);
+
+        let copy_last_button = create_button(
+            CGRect::new(
+                &CGPoint::new(window_width - 128.0, window_height - 34.0),
+                &CGSize::new(24.0, 24.0),
+            ),
+            "⧉",
+            button_style::SMALL_SQUARE,
+        );
+        button_set_action(copy_last_button, action_handler, sel!(onCopyLastResponse:));
+        add_subview(blur_view, copy_last_button);
 
         let new_thread_button = create_button(
             CGRect::new(
@@ -270,13 +315,25 @@ fn show_voice_chat_overlay_impl() {
         add_subview(blur_view, drawer_scroll);
 
         // Agent scroll view + stack
+        let agent_scroll_frame_bottom = agent_input_height + 18.0;
+        let agent_scroll_frame_top = window_height - header_height - 10.0;
+        let agent_scroll_frame = CGRect::new(
+            &CGPoint::new(16.0, agent_scroll_frame_bottom),
+            &CGSize::new(
+                window_width - 32.0,
+                (agent_scroll_frame_top - agent_scroll_frame_bottom).max(0.0),
+            ),
+        );
         let agent_scroll: Id = msg_send![ns_scroll, alloc];
-        let agent_scroll: Id = msg_send![agent_scroll, initWithFrame: drawer_frame];
+        let agent_scroll: Id = msg_send![agent_scroll, initWithFrame: agent_scroll_frame];
         let _: () = msg_send![agent_scroll, setHasVerticalScroller: true];
         let _: () = msg_send![agent_scroll, setDrawsBackground: false];
         let agent_container = create_vertical_stack_view(CGRect::new(
             &CGPoint::new(0.0, 0.0),
-            &CGSize::new(drawer_frame.size.width, drawer_frame.size.height),
+            &CGSize::new(
+                agent_scroll_frame.size.width,
+                agent_scroll_frame.size.height,
+            ),
         ));
         let _: () = msg_send![agent_scroll, setDocumentView: agent_container];
         add_subview(blur_view, agent_scroll);
@@ -332,18 +389,23 @@ fn show_voice_chat_overlay_impl() {
         }
         add_subview(blur_view, input_bar);
 
-        let ns_text_field = Class::get("NSTextField").unwrap();
-        let agent_input: Id = msg_send![ns_text_field, alloc];
-        let agent_input: Id = msg_send![agent_input, initWithFrame: CGRect::new(&CGPoint::new(12.0, 12.0), &CGSize::new(window_width - 90.0, 28.0))];
-        let _: () = msg_send![agent_input, setBezeled: true];
-        let _: () = msg_send![agent_input, setPlaceholderString: ns_string("Napisz polecenie...")];
-        let _: () = msg_send![agent_input, setTarget: action_handler];
-        let _: () = msg_send![agent_input, setAction: sel!(onInputSubmit:)];
-        let _: () = msg_send![input_bar, addSubview: agent_input];
+        let text_area_frame = CGRect::new(
+            &CGPoint::new(12.0, 10.0),
+            &CGSize::new(window_width - 90.0, agent_input_height - 20.0),
+        );
+        let (agent_input_scroll, agent_input_text_view) =
+            create_scrollable_text_view(text_area_frame, true);
+        let ns_font = Class::get("NSFont").unwrap();
+        let text_font: Id = msg_send![ns_font, systemFontOfSize: 13.0f64];
+        let _: () = msg_send![agent_input_text_view, setFont: text_font];
+        // Plain text: avoid rich text / style surprises when pasting.
+        let _: () = msg_send![agent_input_text_view, setRichText: false];
+        let _: () = msg_send![input_bar, addSubview: agent_input_scroll];
 
+        let send_y = ((agent_input_height - 32.0) / 2.0).max(8.0);
         let agent_send_button = create_button(
             CGRect::new(
-                &CGPoint::new(window_width - 76.0, 10.0),
+                &CGPoint::new(window_width - 76.0, send_y),
                 &CGSize::new(36.0, 32.0),
             ),
             ">",
@@ -351,6 +413,22 @@ fn show_voice_chat_overlay_impl() {
         );
         button_set_action(agent_send_button, action_handler, sel!(onSend:));
         let _: () = msg_send![input_bar, addSubview: agent_send_button];
+
+        // Accessibility labels (VoiceOver)
+        let _: () = msg_send![close_button, setAccessibilityLabel: ns_string("Close overlay")];
+        let _: () = msg_send![settings_button, setAccessibilityLabel: ns_string("Settings")];
+        let _: () = msg_send![agent_send_button, setAccessibilityLabel: ns_string("Send message")];
+        let _: () = msg_send![tab_control, setAccessibilityLabel: ns_string("View selector")];
+        let _: () =
+            msg_send![search_field, setAccessibilityLabel: ns_string("Search transcriptions")];
+        let _: () =
+            msg_send![agent_input_text_view, setAccessibilityLabel: ns_string("Message input")];
+        let _: () =
+            msg_send![paste_last_button, setAccessibilityLabel: ns_string("Paste last response")];
+        let _: () =
+            msg_send![copy_last_button, setAccessibilityLabel: ns_string("Copy last response")];
+        let _: () =
+            msg_send![new_thread_button, setAccessibilityLabel: ns_string("New conversation")];
 
         // Initial visibility
         set_hidden(agent_scroll, true);
@@ -368,7 +446,10 @@ fn show_voice_chat_overlay_impl() {
         state.search_field = Some(search_field as usize);
         state.agent_scroll_view = Some(agent_scroll as usize);
         state.agent_container = Some(agent_container as usize);
-        state.agent_input_field = Some(agent_input as usize);
+        state.agent_input_bar = Some(input_bar as usize);
+        state.agent_input_scroll_view = Some(agent_input_scroll as usize);
+        state.agent_input_text_view = Some(agent_input_text_view as usize);
+        state.agent_input_field = None;
         state.agent_send_button = Some(agent_send_button as usize);
         state.action_handler = Some(action_handler as usize);
         state.active_tab = Tab::Drawer;
@@ -380,14 +461,17 @@ fn show_voice_chat_overlay_impl() {
         crate::ui_helpers::animate_fade(window, 1.0, 0.2);
 
         let has_messages = !state.messages.is_empty();
+        let desired_tab = if has_messages {
+            Tab::Agent
+        } else {
+            state.active_tab
+        };
         drop(state);
         api::refresh_drawer();
-        if has_messages {
-            update_active_tab_impl(Tab::Agent);
+        update_active_tab_impl(desired_tab);
+        if has_messages || matches!(desired_tab, Tab::Agent) {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             api::update_chat_view_with_state(&mut state, true);
-        } else {
-            update_active_tab_impl(Tab::Drawer);
         }
     }
 }

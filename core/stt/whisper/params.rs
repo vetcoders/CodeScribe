@@ -10,7 +10,7 @@ pub struct DecodingParams {
     /// mlx_whisper default: 0
     pub temperature: f32,
     /// Prevent repetitions of n-grams with this size (0 = disabled)
-    /// faster-whisper default: 3
+    /// Size 5 catches more variants than default 3 (e.g., "jest." vs "jest")
     pub no_repeat_ngram_size: usize,
     /// Suppress blank/silence tokens early
     pub suppress_blank: bool,
@@ -24,17 +24,33 @@ pub struct DecodingParams {
     /// Log probability threshold - if avg logprob < this, decoding failed
     /// mlx_whisper default: -1.0
     pub logprob_threshold: f32,
+    /// Initial prompt to guide transcription (domain vocabulary, formatting hints)
+    /// Tokenized and prepended to decoder context after special tokens
+    /// Env: WHISPER_INITIAL_PROMPT
+    pub initial_prompt: Option<String>,
 }
 
 impl Default for DecodingParams {
     fn default() -> Self {
         Self {
-            temperature: 0.0,        // greedy (mlx_whisper default)
-            no_repeat_ngram_size: 4, // block 4-gram repetitions (increased for better coverage)
+            temperature: 0.0, // greedy (mlx_whisper default)
+            // Block 5-gram repetitions during decoding (preventive, not reactive)
+            // Size 5 catches more repetition variants than default 3:
+            // - "jest." vs "jest" variations
+            // - longer phrase loops like "w tej chwili w tej chwili"
+            // faster-whisper/whisper.cpp often use 4-5 for better quality
+            no_repeat_ngram_size: 5,
             suppress_blank: true,
-            no_speech_threshold: 0.6,         // mlx_whisper default
-            compression_ratio_threshold: 2.4, // mlx_whisper default
-            logprob_threshold: -1.0,          // mlx_whisper default
+            // Stricter thresholds (aligned with faster-whisper / API):
+            // - Reduces hallucinations by rejecting low-quality decodings
+            // - Matches lbrx-services/stt-engine defaults for consistency
+            no_speech_threshold: 0.5, // was 0.6 - stricter silence detection
+            compression_ratio_threshold: 2.0, // was 2.4 - stricter hallucination detection
+            logprob_threshold: -0.5,  // was -1.0 - reject low-confidence output
+            // Initial prompt from env - helps with domain vocabulary and formatting
+            initial_prompt: std::env::var("WHISPER_INITIAL_PROMPT")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }

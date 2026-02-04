@@ -12,6 +12,9 @@ use codescribe::{ai_formatting, audio, whisper};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tracing::{debug, info, warn};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 /// CodeScribe CLI - Local speech-to-text transcription
 ///
@@ -92,6 +95,7 @@ enum MigrateKind {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
     let cli = Cli::parse();
 
     // Handle --config flag
@@ -108,6 +112,39 @@ async fn main() -> Result<()> {
         }) => handle_migrate_history_command(dry_run, assume_kind),
         Some(Commands::Daemon) | None => run_daemon().await,
     }
+}
+
+static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
+    std::sync::OnceLock::new();
+
+fn init_tracing() {
+    // Ensure ~/.codescribe/.env is loaded before we read RUST_LOG.
+    let _ = codescribe::config::Config::load();
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let log_dir = codescribe::config::Config::config_dir().join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = tracing_appender::rolling::never(&log_dir, "codescribe.log");
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let _ = LOG_GUARD.set(guard);
+
+    let log_to_stdout = std::env::var("CODESCRIBE_LOG_STDOUT")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false);
+
+    let _ = if log_to_stdout {
+        subscriber
+            .with_writer(file_writer.and(std::io::stdout))
+            .try_init()
+    } else {
+        subscriber.with_writer(file_writer).try_init()
+    };
 }
 
 /// Handle --config flag: create default config and open in editor
@@ -327,42 +364,35 @@ async fn handle_transcribe_file(
 }
 
 async fn handle_transcribe_live(language: Option<String>) -> Result<()> {
-    use tokio::sync::mpsc;
-
     eprintln!("CodeScribe Live Transcription");
     eprintln!("Press Ctrl+C to stop.");
 
     whisper::init()?;
 
-    let mut recorder = codescribe::audio::streaming_recorder::StreamingRecorder::new()?;
-    let (vad_tx, mut vad_rx) = mpsc::unbounded_channel::<()>();
-    recorder.recorder.set_on_vad_stop({
-        let vad_tx = vad_tx.clone();
-        move || {
-            let _ = vad_tx.send(());
-        }
-    });
+    let config = codescribe::audio::recorder::RecorderConfig::default();
+    let mut recorder =
+        codescribe::audio::streaming_recorder::StreamingRecorder::with_config(config)?;
 
     let emitter = StreamEmitter::new();
-    recorder.set_delta_callback(Some(Arc::new({
-        let emitter = Arc::clone(&emitter);
-        move |delta: &str| {
-            emitter.emit_raw(delta);
-        }
-    })));
+    recorder.set_delta_callback(Some(Arc::new(
+        codescribe_core::pipeline::sinks::CallbackSink::new(Arc::new({
+            let emitter = Arc::clone(&emitter);
+            move |delta: &str| {
+                emitter.emit_delta(delta);
+            }
+        })),
+    )));
 
-    recorder.start(language).await?;
+    // Live CLI should stream continuously (no VAD-gated buffering).
+    recorder.start_with_buffered(language, false).await?;
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             eprintln!("Stopping live transcription (Ctrl+C)...");
         }
-        _ = vad_rx.recv() => {
-            eprintln!("Stopping live transcription (VAD)...");
-        }
     }
 
-    let _ = recorder.stop().await?;
+    let _ = recorder.stop_without_saving().await?;
     emitter.finish();
 
     Ok(())
@@ -382,11 +412,19 @@ async fn run_daemon() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     codescribe::set_dock_icon();
+    #[cfg(target_os = "macos")]
+    codescribe::install_basic_edit_menu();
 
     codescribe::whisper::init().context("Failed to initialize Whisper")?;
     let controller = Arc::new(RecordingController::new());
     #[cfg(target_os = "macos")]
     codescribe::controller::register_overlay_controller(Arc::clone(&controller));
+    #[cfg(target_os = "macos")]
+    {
+        if codescribe::should_show_bootstrap() {
+            codescribe::schedule_bootstrap();
+        }
+    }
 
     let config = Config::load();
     sync_hotkey_config(&config);
@@ -402,16 +440,32 @@ async fn run_daemon() -> Result<()> {
     let menu_controller = Arc::clone(&controller);
     let menu_handle = Handle::current();
     std::thread::spawn(move || {
+        use tray::TrayMenuEvent;
         for event in menu_rx {
+            // Apply hotkey settings directly from event (avoids race condition with .env save)
+            match &event {
+                TrayMenuEvent::SetHoldMods(mods) => {
+                    hotkeys::set_hold_mods(*mods);
+                }
+                TrayMenuEvent::SetToggleTrigger(trigger) => {
+                    hotkeys::set_toggle_trigger(*trigger);
+                }
+                TrayMenuEvent::ToggleHoldExclusive => {
+                    let config = Config::load();
+                    hotkeys::set_exclusive_mode(!config.hold_exclusive);
+                }
+                _ => {}
+            }
+
+            // Update controller with fresh config for non-hotkey settings
             let controller = Arc::clone(&menu_controller);
             let handle = menu_handle.clone();
             handle.spawn(async move {
                 let config = Config::load();
-                sync_hotkey_config(&config);
                 controller.set_config(config).await;
             });
 
-            if matches!(event, tray::TrayMenuEvent::Quit) {
+            if matches!(event, TrayMenuEvent::Quit) {
                 break;
             }
         }
@@ -431,21 +485,6 @@ async fn run_daemon() -> Result<()> {
                     eprintln!("Hotkey event error: {}", e);
                 }
             });
-        }
-    });
-
-    // VAD monitor task - auto-finish recording when silence detected
-    let vad_controller = Arc::clone(&controller);
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            if vad_controller.is_vad_triggered() {
-                eprintln!("VAD triggered - auto-finishing recording");
-                vad_controller.clear_vad_triggered();
-                if let Err(e) = vad_controller.finish_recording().await {
-                    eprintln!("VAD finish_recording error: {}", e);
-                }
-            }
         }
     });
 
@@ -473,6 +512,15 @@ struct QualityDaemonHandle {
 fn spawn_quality_daemon() -> Option<QualityDaemonHandle> {
     use std::process::{Command, Stdio};
 
+    if matches!(
+        std::env::var("CODESCRIBE_QUALITY_DAEMON").as_deref(),
+        Ok("0") | Ok("false") | Ok("off")
+    ) {
+        info!("Quality daemon disabled via CODESCRIBE_QUALITY_DAEMON=0");
+        codescribe::quality_loop::mark_daemon_unavailable();
+        return None;
+    }
+
     // Strategy: find codescribe-loop binary next to current exe, or in PATH
     let loop_bin = find_sibling_binary("codescribe-loop");
 
@@ -483,7 +531,7 @@ fn spawn_quality_daemon() -> Option<QualityDaemonHandle> {
             if which_exists("codescribe-loop") {
                 PathBuf::from("codescribe-loop")
             } else {
-                eprintln!("[quality-daemon] codescribe-loop not found; skipping auto-start");
+                debug!("[quality-daemon] codescribe-loop not found; skipping auto-start");
                 codescribe::quality_loop::mark_daemon_unavailable();
                 return None;
             }
@@ -499,7 +547,7 @@ fn spawn_quality_daemon() -> Option<QualityDaemonHandle> {
         && let Ok(pid) = pid_str.trim().parse::<i32>()
         && is_process_alive(pid)
     {
-        eprintln!(
+        debug!(
             "[quality-daemon] Already running (pid={}); skipping auto-start",
             pid
         );
@@ -515,7 +563,7 @@ fn spawn_quality_daemon() -> Option<QualityDaemonHandle> {
     {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[quality-daemon] Failed to open log file: {}", e);
+            warn!("[quality-daemon] Failed to open log file: {}", e);
             codescribe::quality_loop::mark_daemon_unavailable();
             return None;
         }
@@ -537,7 +585,7 @@ fn spawn_quality_daemon() -> Option<QualityDaemonHandle> {
     {
         Ok(child) => {
             let _ = std::fs::write(&pid_path, child.id().to_string());
-            eprintln!(
+            info!(
                 "[quality-daemon] Started (pid={}, bin={}, log={})",
                 child.id(),
                 bin_path.display(),
@@ -546,7 +594,7 @@ fn spawn_quality_daemon() -> Option<QualityDaemonHandle> {
             Some(QualityDaemonHandle { child, pid_path })
         }
         Err(e) => {
-            eprintln!("[quality-daemon] Failed to spawn: {}", e);
+            warn!("[quality-daemon] Failed to spawn: {}", e);
             codescribe::quality_loop::mark_daemon_unavailable();
             None
         }
@@ -600,6 +648,7 @@ fn emit_stdout(text: &str) -> Result<()> {
 struct StreamEmitter {
     last_len: Mutex<usize>,
     had_output: AtomicBool,
+    buffer: Mutex<String>,
 }
 
 impl StreamEmitter {
@@ -607,6 +656,7 @@ impl StreamEmitter {
         Arc::new(Self {
             last_len: Mutex::new(0),
             had_output: AtomicBool::new(false),
+            buffer: Mutex::new(String::new()),
         })
     }
 
@@ -617,6 +667,19 @@ impl StreamEmitter {
         if emit_stdout(text).is_ok() {
             self.had_output.store(true, Ordering::SeqCst);
         }
+    }
+
+    fn emit_delta(&self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+
+        let snapshot = {
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            apply_delta_to_string(&mut buffer, delta);
+            buffer.clone()
+        };
+        self.emit_cumulative(&snapshot);
     }
 
     fn emit_cumulative(&self, cumulative: &str) {
@@ -635,6 +698,10 @@ impl StreamEmitter {
             let _ = emit_stdout("\n");
         }
     }
+}
+
+fn apply_delta_to_string(target: &mut String, delta: &str) {
+    codescribe_core::contracts::TranscriptDelta::from_raw(delta).apply(target);
 }
 
 fn sync_hotkey_config(config: &codescribe::config::Config) {
@@ -678,6 +745,19 @@ async fn dispatch_hotkey_event(
                 key_type: HotkeyType::Toggle,
                 action: HotkeyAction::Press,
                 assistive: true,
+                force_ai: false,
+            };
+            controller.handle_hotkey_event(input).await?;
+        }
+        HotkeyEvent::Conversation { action } => {
+            let mapped_action = match action {
+                HoldAction::Down => HotkeyAction::Down,
+                HoldAction::Up => HotkeyAction::Up,
+            };
+            let input = HotkeyInput {
+                key_type: HotkeyType::Conversation,
+                action: mapped_action,
+                assistive: false,
                 force_ai: false,
             };
             controller.handle_hotkey_event(input).await?;

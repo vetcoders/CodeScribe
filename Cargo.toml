@@ -3,7 +3,7 @@ resolver = "2"
 members = [".", "core"]
 
 [workspace.package]
-version = "0.7.8"
+version = "0.7.10"
 edition = "2024"
 authors = ["VetCoders <hello@vetcoders.io>"]
 
@@ -16,7 +16,7 @@ tracing = "0.1"
 
 [package]
 name = "codescribe"
-version = "0.7.8"
+version = "0.7.10"
 edition = "2024"
 description = "Speech-to-text tray app for macOS - Pure Rust"
 authors = ["VetCoders <hello@vetcoders.io>"]
@@ -79,6 +79,7 @@ directories = "6"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Error handling
 anyhow = "1"
@@ -122,8 +123,8 @@ serial_test = "3"
 
 [lints.rust]
 # Allow unexpected_cfgs from objc crate's msg_send! macro (uses cargo-clippy cfg internally)
-# embed_model is set by build.rs when model is available
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(embed_model)'] }
+# embed_model/embed_tts/embed_e5 are set by build.rs when models are available
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(embed_model)', 'cfg(embed_tts)', 'cfg(embed_e5)'] }
 
 [profile.release]
 opt-level = "z"

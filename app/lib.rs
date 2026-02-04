@@ -48,8 +48,13 @@ pub mod dev;
 #[cfg(target_os = "macos")]
 pub use ui::{
     BadgeMode, HoldBadgeConfig, focused_element_accepts_text, get_caret_position,
-    get_cursor_position, hide_hold_badge, set_dock_icon, show_badge_for_mode, show_hold_badge,
-    show_hold_badge_with_config,
+    get_cursor_position, hide_hold_badge, install_basic_edit_menu, set_dock_icon,
+    show_badge_for_mode, show_hold_badge, show_hold_badge_with_config,
+};
+
+#[cfg(target_os = "macos")]
+pub use ui::bootstrap::{
+    hide_bootstrap_overlay, schedule_bootstrap, should_show_bootstrap, show_bootstrap_overlay,
 };
 
 #[cfg(target_os = "macos")]
@@ -58,11 +63,12 @@ pub use ui::tray;
 #[cfg(target_os = "macos")]
 pub use voice_chat_ui::{
     VoiceChatOverlayConfig, add_voice_chat_error_message, add_voice_chat_user_message,
-    append_voice_chat_assistant_delta, clear_voice_chat_text, filter_drawer,
-    hide_voice_chat_overlay, is_auto_send_enabled, is_voice_chat_overlay_visible, refresh_drawer,
-    reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_send_callback,
-    set_voice_chat_sending, set_voice_chat_text, show_agent_tab, show_drawer_tab,
-    show_voice_chat_overlay, show_voice_chat_overlay_with_config, update_voice_chat_status,
+    append_voice_chat_assistant_delta, append_voice_chat_user_delta, clear_voice_chat_text,
+    filter_drawer, hide_voice_chat_overlay, is_auto_send_enabled, is_voice_chat_overlay_visible,
+    refresh_drawer, reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_send_callback,
+    set_voice_chat_sending, set_voice_chat_text, set_voice_chat_user_text, show_agent_tab,
+    show_drawer_tab, show_voice_chat_overlay, show_voice_chat_overlay_with_config,
+    update_voice_chat_status,
 };
 
 #[cfg(target_os = "macos")]
