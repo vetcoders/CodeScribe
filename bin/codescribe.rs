@@ -481,6 +481,12 @@ async fn run_daemon() -> Result<()> {
                 // for hotkey-related fields and only reload the rest from disk.
                 let mut config = Config::load();
                 match &event_for_async {
+                    tray::TrayMenuEvent::StopRecording => {
+                        if let Err(e) = controller.panic_stop("tray_menu").await {
+                            eprintln!("Panic stop failed: {}", e);
+                        }
+                        return;
+                    }
                     tray::TrayMenuEvent::SetHoldMods(mods) => {
                         config.hold_mods = *mods;
                     }

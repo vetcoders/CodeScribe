@@ -60,22 +60,27 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
         *cell.borrow_mut() = Some(status_item);
     });
 
-    // 2. Show Chat Overlay
+    // 2. Stop recording (panic)
+    let stop_recording_item = MenuItem::new("Stop recording (panic)", true, None);
+    let stop_recording_id = stop_recording_item.id().clone();
+    menu.append(&stop_recording_item)?;
+
+    // 3. Show Chat Overlay
     let show_overlay_item = MenuItem::new("Show Chat Overlay", true, None);
     let show_overlay_id = show_overlay_item.id().clone();
     menu.append(&show_overlay_item)?;
 
-    // 3. Open history folder
+    // 4. Open history folder
     let open_history_item = MenuItem::new("Open history...", true, None);
     let open_history_id = open_history_item.id().clone();
     menu.append(&open_history_item)?;
 
-    // 4. Copy last transcript
+    // 5. Copy last transcript
     let copy_last_item = MenuItem::new("Copy last transcript", true, None);
     let copy_last_id = copy_last_item.id().clone();
     menu.append(&copy_last_item)?;
 
-    // 5. Separator
+    // 6. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
     // 6. Hotkeys (promoted to root level)
@@ -270,6 +275,7 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     Ok((
         menu,
         MenuIds {
+            stop_recording: stop_recording_id,
             copy_last: copy_last_id,
             show_overlay: show_overlay_id,
             run_onboarding: onboarding_id,
@@ -428,6 +434,7 @@ mod tests {
     fn menu_labels_for_test() -> Vec<String> {
         vec![
             "Status: Idle".to_string(),
+            "Stop recording (panic)".to_string(),
             "Show Chat Overlay".to_string(),
             "Open history...".to_string(),
             "Copy last transcript".to_string(),

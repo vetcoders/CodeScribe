@@ -437,6 +437,45 @@ impl Recorder {
         Ok(())
     }
 
+    /// Emergency stop: stop the audio stream and discard any buffered audio.
+    ///
+    /// This is intended for "panic stop" UX (stuck hotkeys / user wants to abort).
+    /// Unlike `stop()`, it does **not** write a WAV file and does not clone the buffer.
+    pub async fn cancel(&mut self) -> Result<()> {
+        if !self.is_recording.load(Ordering::SeqCst) && self.stream.is_none() {
+            warn!("Cancel called but no active stream");
+            self.last_duration = 0.0;
+            return Ok(());
+        }
+
+        info!("Canceling recording (discarding buffer)...");
+
+        // Signal stop
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(()).await;
+        }
+
+        // Stop stream
+        if let Some(stream) = self.stream.take() {
+            drop(stream); // Dropping the stream stops it
+            info!("Audio stream stopped");
+        }
+
+        self.device = None;
+        self.is_recording.store(false, Ordering::SeqCst);
+
+        // Discard buffered audio
+        self.buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        self.last_duration = 0.0;
+        self.diagnostics = RecorderDiagnostics::default();
+
+        Ok(())
+    }
+
     /// Stops the audio recording and saves the buffer to a temp WAV file.
     ///
     /// Stops and closes the audio stream, concatenates the buffered audio chunks,

@@ -138,6 +138,9 @@ pub struct RecordingController {
     /// Lock to serialize finish_recording calls
     serial_lock: Arc<Mutex<()>>,
 
+    /// Panic/abort flag: when set, long-running processing should bail out ASAP.
+    abort_requested: Arc<AtomicBool>,
+
     /// Flag set by VAD (silence detection) when recording should auto-stop
     vad_triggered: Arc<AtomicBool>,
 
@@ -223,6 +226,7 @@ impl RecordingController {
             session_id: Arc::new(RwLock::new(None)),
             hold_start_task: Arc::new(Mutex::new(None)),
             serial_lock: Arc::new(Mutex::new(())),
+            abort_requested: Arc::new(AtomicBool::new(false)),
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
@@ -284,6 +288,7 @@ impl RecordingController {
             session_id: Arc::new(RwLock::new(None)),
             hold_start_task: Arc::new(Mutex::new(None)),
             serial_lock: Arc::new(Mutex::new(())),
+            abort_requested: Arc::new(AtomicBool::new(false)),
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
@@ -332,6 +337,46 @@ impl RecordingController {
             task.abort();
             let _ = task.await; // Suppress cancellation errors
         }
+    }
+
+    /// Emergency stop/reset: stop recording (if active) and request in-flight processing to abort.
+    ///
+    /// This is intentionally best-effort and should never block user input.
+    pub async fn panic_stop(&self, reason: &str) -> Result<()> {
+        warn!("Panic stop requested: {}", reason);
+
+        // Ensure any pending delayed hold-start is canceled.
+        self.cancel_pending_hold_start().await;
+
+        // Signal in-flight processing to bail out early if possible.
+        self.abort_requested.store(true, Ordering::SeqCst);
+
+        // Stop hands-off loops/conversation immediately.
+        self.assistive_loop_active.store(false, Ordering::SeqCst);
+        self.conversation_stop_flag.store(true, Ordering::SeqCst);
+
+        // Best-effort: cancel active recording without blocking.
+        if let Ok(mut recorder) = self.recorder.try_lock() {
+            let _ = recorder.cancel().await;
+        } else {
+            warn!("panic_stop: recorder busy; cancel will be handled by abort flag");
+        }
+
+        // Reset UI immediately (best-effort; processing task will also reset on completion).
+        *self.state.write().await = State::Idle;
+        *self.assistive_mode.write().await = false;
+        *self.hold_mode.write().await = HoldMode::Raw;
+        *self.force_raw_mode.write().await = false;
+        *self.force_ai_mode.write().await = false;
+        *self.session_id.write().await = None;
+        *self.assistive_context.write().await = None;
+
+        hide_hold_badge();
+        crate::voice_chat_ui::update_voice_chat_status("Ready");
+        crate::hide_transcription_overlay();
+        let _ = crate::tray::update_tray_status(crate::tray::TrayStatus::Idle);
+
+        Ok(())
     }
 
     /// Handle hotkey event - main entry point for state machine
@@ -473,9 +518,18 @@ impl RecordingController {
             }
         }
 
-        // Ignore all hotkeys when busy
+        // Busy handling:
+        // - Default: ignore to avoid re-entrancy / overlapping sessions.
+        // - Exception: RAW toggle can act as a "panic stop" to recover from stuck processing.
         if current_state == State::Busy {
-            info!("App busy; ignoring hotkey event");
+            if matches!(event.key_type, HotkeyType::Toggle)
+                && event.action == HotkeyAction::Press
+                && event.force_raw
+            {
+                self.panic_stop("hotkey_raw_toggle_during_busy").await?;
+            } else {
+                info!("App busy; ignoring hotkey event");
+            }
             return Ok(());
         }
 
@@ -1443,6 +1497,11 @@ impl RecordingController {
         force_raw: bool,
         force_ai: bool,
     ) -> Result<()> {
+        if self.abort_requested.swap(false, Ordering::SeqCst) {
+            warn!("process_recording: abort requested; skipping");
+            return Ok(());
+        }
+
         if cfg!(test) {
             info!(
                 "process_recording: skipped in tests (assistive={}, hold_mode={:?}, force_raw={}, force_ai={})",
@@ -1456,6 +1515,11 @@ impl RecordingController {
         let (streaming_text, raw_audio_path_opt) =
             recorder.stop().await.context("Failed to stop recorder")?;
         drop(recorder); // Release lock
+
+        if self.abort_requested.swap(false, Ordering::SeqCst) {
+            warn!("process_recording: abort requested after stop; skipping");
+            return Ok(());
+        }
 
         // Check audio path validity (if present)
         let audio_path = if let Some(path) = raw_audio_path_opt {
@@ -1611,6 +1675,11 @@ impl RecordingController {
         };
 
         info!("Raw transcript captured ({} chars)", raw_text.len());
+
+        if self.abort_requested.swap(false, Ordering::SeqCst) {
+            warn!("process_recording: abort requested after raw transcript; skipping");
+            return Ok(());
+        }
 
         // ALWAYS-ON: Final post-processing pass (lexicon + cleanup + semantic gate)
         // This ensures ALL output paths receive clean text regardless of mode.

@@ -160,6 +160,27 @@ impl StreamingRecorder {
         let transcript = self.transcript_buffer.lock().await.clone();
         Ok(transcript)
     }
+
+    /// Emergency stop: stop audio capture, abort the transcription worker, and discard buffers.
+    ///
+    /// This is designed for "panic stop" UX when the app gets into a bad state.
+    pub async fn cancel(&mut self) -> Result<()> {
+        info!("Canceling streaming recorder (discard WAV + transcript)...");
+
+        // 1) Stop audio stream and discard buffered audio
+        self.recorder.cancel().await?;
+
+        // 2) Abort worker (if any) to avoid waiting on a stuck pipeline
+        if let Some(handle) = self.transcription_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        // 3) Clear transcript buffer
+        *self.transcript_buffer.lock().await = String::new();
+
+        Ok(())
+    }
 }
 
 // Note: calculate_rms_db removed - now using vad::speech_probability for voice detection

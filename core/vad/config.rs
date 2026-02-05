@@ -46,11 +46,13 @@ impl Default for VadConfig {
                 0.01,
                 1.0,
             ),
-            // Sync with default_env.txt: 1.2s (was 0.8s)
+            // Sync with default_env.txt: 2.5s (was 1.2s)
             max_silence_duration_sec: if simple_silence >= 0.0 {
                 simple_silence.clamp(0.1, 10.0)
             } else {
-                env_f32_clamped("CODESCRIBE_VAD_MAX_SILENCE_SEC", 1.2, 0.1, 10.0)
+                // NOTE: default is intentionally forgiving. 1.2s tends to auto-stop mid-thought
+                // during real dictation. Users can tighten it via env or tray presets.
+                env_f32_clamped("CODESCRIBE_VAD_MAX_SILENCE_SEC", 2.5, 0.1, 10.0)
             },
             // Sync with default_env.txt: 60s (was 30s)
             max_utterance_sec: env_f32_clamped(

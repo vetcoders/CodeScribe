@@ -105,6 +105,9 @@ pub enum TrayMenuEvent {
 
     // Hotkeys
     ResetShortcuts,
+
+    /// Emergency stop/reset (best-effort)
+    StopRecording,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +147,7 @@ pub struct NotesMenuItems {
 /// Note: Settings options moved to Settings tab in Chat Overlay
 pub struct MenuIds {
     // Top-level
+    pub stop_recording: MenuId,
     pub copy_last: MenuId,
     pub show_overlay: MenuId,
     pub run_onboarding: MenuId,

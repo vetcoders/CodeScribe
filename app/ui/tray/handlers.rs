@@ -29,7 +29,11 @@ fn hotkeys_state_summary() -> String {
 /// Note: Settings handlers removed - settings now in Chat Overlay Settings tab
 pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
     // Top-level items
-    if event_id == &menu_ids.copy_last {
+    if event_id == &menu_ids.stop_recording {
+        send_menu_event(TrayMenuEvent::StopRecording);
+        #[cfg(target_os = "macos")]
+        notify("CodeScribe", "Stopping (panic)…");
+    } else if event_id == &menu_ids.copy_last {
         handle_copy_last();
     } else if event_id == &menu_ids.show_overlay {
         crate::show_voice_chat_overlay();
