@@ -8,7 +8,7 @@ use objc::runtime::{Class, Object, Sel};
 use objc::{msg_send, sel, sel_impl};
 use std::path::PathBuf;
 use std::sync::Once;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::ui::bootstrap;
 use crate::ui_helpers::{
@@ -341,7 +341,15 @@ extern "C" fn on_perform_drag_operation(_this: &Object, _cmd: Sel, dragging_info
         if paths.is_empty() {
             return false;
         }
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        // Avoid blocking the main thread if overlay state is currently held by a background task.
+        let mut state = match OVERLAY_STATE.try_lock() {
+            Ok(s) => s,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                warn!("on_perform_drag_operation: overlay state busy; ignoring drop");
+                return false;
+            }
+        };
         for p in paths {
             if !state.attached_files.contains(&p) {
                 state.attached_files.push(p);
@@ -387,10 +395,13 @@ extern "C" fn on_attach_menu(this: &Object, _cmd: Sel, sender: Id) {
         let _: () = msg_send![attach, setTarget: target];
         let _: () = msg_send![menu, addItem: attach];
 
-        let count = {
-            let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            state.attached_files.len()
-        };
+        // IMPORTANT: don't block the main thread on OVERLAY_STATE.
+        // UI actions can be re-entrant (nested runloops) and a blocking lock here
+        // can freeze the app ("Application Not Responding").
+        let count = OVERLAY_STATE
+            .try_lock()
+            .map(|state| state.attached_files.len())
+            .unwrap_or(0);
         if count > 0 {
             let sep: Id = msg_send![ns_menu_item, separatorItem];
             let _: () = msg_send![menu, addItem: sep];
@@ -426,7 +437,14 @@ extern "C" fn on_attach_pick(_this: &Object, _cmd: Sel, _sender: Id) {
         return;
     }
 
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = match OVERLAY_STATE.try_lock() {
+        Ok(s) => s,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            warn!("on_attach_pick: overlay state busy; dropping picked attachments");
+            return;
+        }
+    };
     for p in picked {
         if !state.attached_files.contains(&p) {
             state.attached_files.push(p);
@@ -437,7 +455,14 @@ extern "C" fn on_attach_pick(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_attach_clear(_this: &Object, _cmd: Sel, _sender: Id) {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = match OVERLAY_STATE.try_lock() {
+        Ok(s) => s,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            warn!("on_attach_clear: overlay state busy; ignoring");
+            return;
+        }
+    };
     state.attached_files.clear();
     state.attached_files_last_sent = None;
     update_attach_button_ui_locked(&mut state);
@@ -487,9 +512,21 @@ extern "C" fn on_close(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_window_will_close(_this: &Object, _cmd: Sel, _notification: Id) {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    clear_overlay_state(&mut state);
-    debug!("Voice chat overlay closed by user");
+    // Best-effort cleanup. Avoid blocking AppKit close path (can cause hangs).
+    match OVERLAY_STATE.try_lock() {
+        Ok(mut state) => {
+            clear_overlay_state(&mut state);
+            debug!("Voice chat overlay closed by user");
+        }
+        Err(std::sync::TryLockError::Poisoned(e)) => {
+            let mut state = e.into_inner();
+            clear_overlay_state(&mut state);
+            debug!("Voice chat overlay closed by user (poisoned state recovered)");
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            warn!("on_window_will_close: overlay state busy; skipping cleanup to avoid hang");
+        }
+    }
 }
 
 unsafe fn clamp_overlay_window_to_visible(window: Id) {
