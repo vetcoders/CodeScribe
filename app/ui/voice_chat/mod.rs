@@ -46,6 +46,7 @@ use crate::ui_helpers::{
     create_flipped_vertical_stack_view, create_glass_effect_view, create_label,
     create_scrollable_text_view, create_vertical_stack_view, layout_region_frame_for_view,
     ns_string, set_button_symbol, set_focus_ring, set_hidden, set_tooltip,
+    set_visual_effect_blending, set_visual_effect_material, set_visual_effect_state,
     style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha, window_show,
 };
 
@@ -246,9 +247,9 @@ fn show_voice_chat_overlay_impl() {
             &CGSize::new(window_width, window_height),
         );
         let blur_view: Id = msg_send![blur_view, initWithFrame: blur_frame];
-        let _: () = msg_send![blur_view, setMaterial: NSVisualEffectMaterial::WindowBackground];
-        let _: () = msg_send![blur_view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
-        let _: () = msg_send![blur_view, setState: NSVisualEffectState::Active];
+        set_visual_effect_material(blur_view, NSVisualEffectMaterial::WindowBackground);
+        set_visual_effect_blending(blur_view, NSVisualEffectBlendingMode::BehindWindow);
+        set_visual_effect_state(blur_view, NSVisualEffectState::Active);
         let _: () = msg_send![blur_view, setWantsLayer: true];
         let _: () = msg_send![
             blur_view,
@@ -623,10 +624,9 @@ fn show_voice_chat_overlay_impl() {
                 &CGSize::new(content_frame.size.width, content_frame.size.height),
             )
         ];
-        let _: () = msg_send![sidebar_view, setMaterial: NSVisualEffectMaterial::Sidebar];
-        let _: () =
-            msg_send![sidebar_view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
-        let _: () = msg_send![sidebar_view, setState: NSVisualEffectState::Active];
+        set_visual_effect_material(sidebar_view, NSVisualEffectMaterial::Sidebar);
+        set_visual_effect_blending(sidebar_view, NSVisualEffectBlendingMode::BehindWindow);
+        set_visual_effect_state(sidebar_view, NSVisualEffectState::Active);
         let _: () = msg_send![sidebar_view, setWantsLayer: true];
         let sidebar_layer: Id = msg_send![sidebar_view, layer];
         if !sidebar_layer.is_null() {
@@ -1028,7 +1028,7 @@ fn show_voice_chat_overlay_impl() {
             "",
             button_style::ROUNDED,
         );
-        let has_symbol = set_button_symbol(agent_attach_button, "paperclip");
+        let has_symbol = set_button_symbol(agent_attach_button, "doc.badge.plus");
         if !has_symbol {
             let _: () = msg_send![agent_attach_button, setTitle: ns_string("Attach")];
         }

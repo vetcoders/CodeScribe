@@ -21,7 +21,7 @@ use super::api::{
     discard_last_message_impl, filter_drawer, handle_card_copy, handle_card_delete,
     handle_card_edit, handle_card_favorite, reflow_agent_after_resize_impl,
     reflow_overlay_after_resize_impl, send_draft_message_impl, toggle_drawer_favorites_only_impl,
-    update_active_tab_impl,
+    update_active_tab_impl, update_attach_button_ui,
 };
 use super::state::{ChatRole, OVERLAY_STATE, Tab};
 
@@ -342,14 +342,22 @@ extern "C" fn on_perform_drag_operation(_this: &Object, _cmd: Sel, dragging_info
         if paths.is_empty() {
             return false;
         }
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        for p in paths {
-            if !state.attached_files.contains(&p) {
-                state.attached_files.push(p);
+        let (btn_ptr, count, names) = {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            for p in paths {
+                if !state.attached_files.contains(&p) {
+                    state.attached_files.push(p);
+                }
             }
-        }
-        state.attached_files_last_sent = None;
-        update_attach_button_ui_locked(&mut state);
+            state.attached_files_last_sent = None;
+            let names: Vec<String> = state
+                .attached_files
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect();
+            (state.agent_attach_button, state.attached_files.len(), names)
+        };
+        update_attach_button_ui(btn_ptr, count, names);
         true
     }
 }
@@ -427,57 +435,32 @@ extern "C" fn on_attach_pick(_this: &Object, _cmd: Sel, _sender: Id) {
         return;
     }
 
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    for p in picked {
-        if !state.attached_files.contains(&p) {
-            state.attached_files.push(p);
+    let (btn_ptr, count, names) = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        for p in picked {
+            if !state.attached_files.contains(&p) {
+                state.attached_files.push(p);
+            }
         }
-    }
-    state.attached_files_last_sent = None;
-    update_attach_button_ui_locked(&mut state);
+        state.attached_files_last_sent = None;
+        let names: Vec<String> = state
+            .attached_files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        (state.agent_attach_button, state.attached_files.len(), names)
+    };
+    update_attach_button_ui(btn_ptr, count, names);
 }
 
 extern "C" fn on_attach_clear(_this: &Object, _cmd: Sel, _sender: Id) {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.attached_files.clear();
-    state.attached_files_last_sent = None;
-    update_attach_button_ui_locked(&mut state);
-}
-
-fn update_attach_button_ui_locked(state: &mut super::state::VoiceChatOverlayState) {
-    unsafe {
-        let Some(btn_ptr) = state.agent_attach_button else {
-            return;
-        };
-        let btn = btn_ptr as Id;
-        let count = state.attached_files.len();
-        let has_symbol = crate::ui_helpers::set_button_symbol(btn, "paperclip");
-        let title = if count == 0 {
-            if has_symbol {
-                String::new()
-            } else {
-                "Attach".to_string()
-            }
-        } else {
-            count.to_string()
-        };
-        let _: () = msg_send![btn, setTitle: ns_string(&title)];
-
-        if count == 0 {
-            let _: () = msg_send![btn, setToolTip: ns_string("Attach files (assistant context)")];
-        } else {
-            let mut names: Vec<String> = state
-                .attached_files
-                .iter()
-                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .collect();
-            names.sort();
-            let shown: Vec<String> = names.into_iter().take(3).collect();
-            let suffix = if count > 3 { "…" } else { "" };
-            let tip = format!("Attached: {}{}", shown.join(", "), suffix);
-            let _: () = msg_send![btn, setToolTip: ns_string(&tip)];
-        }
-    }
+    let (btn_ptr, count, names) = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.attached_files.clear();
+        state.attached_files_last_sent = None;
+        (state.agent_attach_button, 0, Vec::new())
+    };
+    update_attach_button_ui(btn_ptr, count, names);
 }
 
 extern "C" fn on_close(_this: &Object, _cmd: Sel, _sender: Id) {

@@ -22,7 +22,8 @@ use crate::ui::bootstrap::handlers::action_handler_class;
 use crate::ui_helpers::{
     LabelConfig, add_subview, button, button_set_action, create_checkbox, create_floating_window,
     create_label, create_secure_text_input, create_slider, create_text_input, ns_string,
-    set_text_field_string, ui_colors, ui_tokens, window_close, window_content_view, window_show,
+    set_text_field_string, set_visual_effect_blending, set_visual_effect_material,
+    set_visual_effect_state, ui_colors, ui_tokens, window_close, window_content_view, window_show,
 };
 
 mod handlers;
@@ -52,6 +53,10 @@ struct BootstrapState {
     keys_preset_popup: Option<usize>,
     keys_exclusive_checkbox: Option<usize>,
     config_cache: Option<Config>,
+    // Onboarding additions
+    permission_labels: [Option<usize>; 3], // Mic, Accessibility, Input Monitoring
+    quality_daemon_checkbox: Option<usize>,
+    completion_view: Option<usize>,
 }
 
 lazy_static! {
@@ -131,7 +136,7 @@ fn show_bootstrap_overlay_impl() {
         }
         let visible: CGRect = msg_send![screen, visibleFrame];
         let window_width = 720.0;
-        let window_height = 520.0;
+        let window_height = 640.0;
         let x = visible.origin.x + (visible.size.width - window_width) * 0.5;
         let y = visible.origin.y + (visible.size.height - window_height) * 0.5;
         let frame = CGRect::new(
@@ -185,9 +190,9 @@ pub unsafe fn attach_settings_view(
         let ns_visual = Class::get("NSVisualEffectView").unwrap();
         let root: Id = msg_send![ns_visual, alloc];
         let root: Id = msg_send![root, initWithFrame: frame];
-        let _: () = msg_send![root, setMaterial: NSVisualEffectMaterial::WindowBackground];
-        let _: () = msg_send![root, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
-        let _: () = msg_send![root, setState: NSVisualEffectState::Active];
+        set_visual_effect_material(root, NSVisualEffectMaterial::WindowBackground);
+        set_visual_effect_blending(root, NSVisualEffectBlendingMode::BehindWindow);
+        set_visual_effect_state(root, NSVisualEffectState::Active);
         let _: () = msg_send![root, setWantsLayer: true];
         let _: () = msg_send![
             root,
@@ -218,6 +223,72 @@ pub unsafe fn attach_settings_view(
     }
 }
 
+// ============================================================================
+// Permission checks (macOS system APIs)
+// ============================================================================
+
+fn check_permissions() -> [bool; 3] {
+    unsafe {
+        // Mic: AVCaptureDevice authorizationStatusForMediaType:
+        let mic_ok = if let Some(av_class) = Class::get("AVCaptureDevice") {
+            let audio_type = ns_string("soun"); // AVMediaTypeAudio fourcc
+            let status: isize = msg_send![av_class, authorizationStatusForMediaType: audio_type];
+            status == 3 // AVAuthorizationStatusAuthorized
+        } else {
+            false
+        };
+
+        // Accessibility: AXIsProcessTrusted()
+        unsafe extern "C" {
+            fn AXIsProcessTrusted() -> bool;
+        }
+        let ax_ok = AXIsProcessTrusted();
+
+        // Input Monitoring: CGPreflightListenEventAccess() (macOS 10.15+)
+        unsafe extern "C" {
+            fn CGPreflightListenEventAccess() -> bool;
+        }
+        let input_ok = CGPreflightListenEventAccess();
+
+        [mic_ok, ax_ok, input_ok]
+    }
+}
+
+fn permission_color(granted: bool) -> Id {
+    if granted {
+        // System green
+        unsafe {
+            let ns_color = Class::get("NSColor").unwrap();
+            msg_send![ns_color, systemGreenColor]
+        }
+    } else {
+        // System red
+        unsafe {
+            let ns_color = Class::get("NSColor").unwrap();
+            msg_send![ns_color, systemRedColor]
+        }
+    }
+}
+
+pub(super) fn refresh_permission_indicators() {
+    let perms = check_permissions();
+    let names = ["Mic", "Accessibility", "Input"];
+
+    Queue::main().exec_async(move || unsafe {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        for (i, granted) in perms.iter().enumerate() {
+            if let Some(label_ptr) = state.permission_labels[i] {
+                let label = label_ptr as Id;
+                let dot = if *granted { "\u{25CF}" } else { "\u{25CB}" }; // ● vs ○
+                let text = format!("{} {}", dot, names[i]);
+                set_text_field_string(label, &text);
+                let color = permission_color(*granted);
+                let _: () = msg_send![label, setTextColor: color];
+            }
+        }
+    });
+}
+
 unsafe fn build_settings_ui(
     root_view: Id,
     settings_width: f64,
@@ -227,6 +298,7 @@ unsafe fn build_settings_ui(
     config: &Config,
 ) {
     unsafe {
+        use core_graphics::geometry::{CGPoint, CGRect, CGSize};
         let ns_view = Class::get("NSView").unwrap();
 
         let settings_width = settings_width.max(SIDEBAR_WIDTH + 240.0);
@@ -236,15 +308,15 @@ unsafe fn build_settings_ui(
         let content_h = settings_height - 52.0;
 
         // ====================================================================
-        // Title: "Settings"
+        // Title: "Welcome to CodeScribe"
         // ====================================================================
         let title_label = create_label(LabelConfig {
-            frame: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, settings_height - 40.0),
-                &core_graphics::geometry::CGSize::new(settings_width - 40.0, 24.0),
+            frame: CGRect::new(
+                &CGPoint::new(20.0, settings_height - 36.0),
+                &CGSize::new(settings_width - 40.0, 28.0),
             ),
-            text: "Settings".to_string(),
-            font_size: ui_tokens::TITLE_FONT_SIZE,
+            text: "Welcome to CodeScribe".to_string(),
+            font_size: 18.0,
             bold: true,
             text_color: crate::ui_helpers::color_label(),
             background_color: None,
@@ -253,12 +325,25 @@ unsafe fn build_settings_ui(
         });
         add_subview(root_view, title_label);
 
+        let subtitle_label = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(20.0, settings_height - 54.0),
+                &CGSize::new(settings_width - 40.0, 16.0),
+            ),
+            text: "Native macOS speech-to-text with AI formatting".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: false,
+            text_color: crate::ui_helpers::color_secondary_label(),
+            ..Default::default()
+        });
+        add_subview(root_view, subtitle_label);
+
         // ====================================================================
         // Sidebar (left, 120px wide, darker background)
         // ====================================================================
-        let sidebar_frame = core_graphics::geometry::CGRect::new(
-            &core_graphics::geometry::CGPoint::new(0.0, 0.0),
-            &core_graphics::geometry::CGSize::new(SIDEBAR_WIDTH, content_h),
+        let sidebar_frame = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(SIDEBAR_WIDTH, content_h),
         );
         let sidebar: Id = msg_send![ns_view, alloc];
         let sidebar: Id = msg_send![sidebar, initWithFrame: sidebar_frame];
@@ -278,10 +363,8 @@ unsafe fn build_settings_ui(
 
         for (i, (name, sel)) in tab_names.iter().zip(tab_sels.iter()).enumerate() {
             let btn_y = content_h - 44.0 * (i as f64 + 1.0);
-            let btn_frame = core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(0.0, btn_y),
-                &core_graphics::geometry::CGSize::new(SIDEBAR_WIDTH, 36.0),
-            );
+            let btn_frame =
+                CGRect::new(&CGPoint::new(0.0, btn_y), &CGSize::new(SIDEBAR_WIDTH, 36.0));
 
             let tab_btn = create_sidebar_tab_button(btn_frame, name, i == TAB_SETUP);
             button_set_action(tab_btn, action_handler, *sel);
@@ -292,9 +375,9 @@ unsafe fn build_settings_ui(
         // ====================================================================
         // Content area views (one per tab)
         // ====================================================================
-        let content_frame = core_graphics::geometry::CGRect::new(
-            &core_graphics::geometry::CGPoint::new(content_x, 0.0),
-            &core_graphics::geometry::CGSize::new(content_width, content_h),
+        let content_frame = CGRect::new(
+            &CGPoint::new(content_x, 0.0),
+            &CGSize::new(content_width, content_h),
         );
 
         // --- Setup tab (index 0) ---
@@ -302,151 +385,105 @@ unsafe fn build_settings_ui(
         let setup_view: Id = msg_send![setup_view, initWithFrame: content_frame];
         add_subview(root_view, setup_view);
 
-        // Step 1: Test mic
-        let step1_label = create_label(LabelConfig {
-            frame: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, content_h - 50.0),
-                &core_graphics::geometry::CGSize::new(220.0, 20.0),
-            ),
-            text: "1) Test mic".to_string(),
-            font_size: ui_tokens::BODY_FONT_SIZE,
-            bold: true,
-            text_color: crate::ui_helpers::color_label(),
-            background_color: None,
-            selectable: false,
-            editable: false,
-        });
-        add_subview(setup_view, step1_label);
+        let pad = ui_tokens::EDGE_PADDING;
+        let field_w = content_width - pad * 2.0;
+        let primary = crate::ui_helpers::color_label();
+        let secondary = crate::ui_helpers::color_secondary_label();
+        let mut y = content_h - 10.0;
 
-        let step1_status = create_label(LabelConfig {
-            frame: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(260.0, content_h - 50.0),
-                &core_graphics::geometry::CGSize::new(80.0, 20.0),
-            ),
-            text: "pending".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: false,
-            text_color: crate::ui_helpers::color_secondary_label(),
-            background_color: None,
-            selectable: false,
-            editable: false,
-        });
-        add_subview(setup_view, step1_status);
+        // ── Permission indicators ────────────────────────────────────
+        let perms = check_permissions();
+        let perm_names = ["Mic", "Accessibility", "Input"];
+        let perm_w = 130.0;
+        let mut perm_labels: [Option<usize>; 3] = [None; 3];
 
-        let step1_btn = button(
-            core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(content_width - 110.0, content_h - 54.0),
-                &core_graphics::geometry::CGSize::new(80.0, 26.0),
+        for (i, (name, granted)) in perm_names.iter().zip(perms.iter()).enumerate() {
+            let dot = if *granted { "\u{25CF}" } else { "\u{25CB}" };
+            let text = format!("{} {}", dot, name);
+            let lbl = create_label(LabelConfig {
+                frame: CGRect::new(
+                    &CGPoint::new(pad + perm_w * i as f64, y),
+                    &CGSize::new(perm_w, 18.0),
+                ),
+                text,
+                font_size: ui_tokens::SMALL_FONT_SIZE,
+                bold: true,
+                text_color: permission_color(*granted),
+                ..Default::default()
+            });
+            add_subview(setup_view, lbl);
+            perm_labels[i] = Some(lbl as usize);
+        }
+
+        let refresh_btn = button(
+            CGRect::new(
+                &CGPoint::new(content_width - 100.0, y - 2.0),
+                &CGSize::new(80.0, 22.0),
             ),
-            "Test",
+            "Refresh",
         );
-        button_set_action(step1_btn, action_handler, sel!(onTestMic:));
-        add_subview(setup_view, step1_btn);
+        button_set_action(refresh_btn, action_handler, sel!(onRefreshPermissions:));
+        add_subview(setup_view, refresh_btn);
+        y -= 32.0;
 
-        // Step 2: Show overlay
-        let step2_label = create_label(LabelConfig {
-            frame: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, content_h - 90.0),
-                &core_graphics::geometry::CGSize::new(220.0, 20.0),
-            ),
-            text: "2) Show chat overlay".to_string(),
-            font_size: ui_tokens::BODY_FONT_SIZE,
-            bold: true,
-            text_color: crate::ui_helpers::color_label(),
-            background_color: None,
-            selectable: false,
-            editable: false,
-        });
-        add_subview(setup_view, step2_label);
+        // ── Quick-start steps ────────────────────────────────────────
+        let step_defs: [(&str, objc::runtime::Sel, &str); 3] = [
+            ("1) Test mic", sel!(onTestMic:), "Test"),
+            ("2) Show chat overlay", sel!(onShowOverlay:), "Show"),
+            ("3) Press hotkey", sel!(onHotkeyDone:), "Done"),
+        ];
+        let mut step_status_labels: [Option<usize>; 3] = [None; 3];
 
-        let step2_status = create_label(LabelConfig {
-            frame: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(260.0, content_h - 90.0),
-                &core_graphics::geometry::CGSize::new(80.0, 20.0),
-            ),
-            text: "pending".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: false,
-            text_color: crate::ui_helpers::color_secondary_label(),
-            background_color: None,
-            selectable: false,
-            editable: false,
-        });
-        add_subview(setup_view, step2_status);
+        for (i, (label_text, sel, btn_text)) in step_defs.iter().enumerate() {
+            let step_label = create_label(LabelConfig {
+                frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(200.0, 20.0)),
+                text: label_text.to_string(),
+                font_size: ui_tokens::BODY_FONT_SIZE,
+                bold: true,
+                text_color: primary,
+                ..Default::default()
+            });
+            add_subview(setup_view, step_label);
 
-        let step2_btn = button(
-            core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(content_width - 110.0, content_h - 94.0),
-                &core_graphics::geometry::CGSize::new(80.0, 26.0),
-            ),
-            "Show",
-        );
-        button_set_action(step2_btn, action_handler, sel!(onShowOverlay:));
-        add_subview(setup_view, step2_btn);
+            let status_lbl = create_label(LabelConfig {
+                frame: CGRect::new(&CGPoint::new(pad + 210.0, y), &CGSize::new(80.0, 20.0)),
+                text: "pending".to_string(),
+                font_size: ui_tokens::SMALL_FONT_SIZE,
+                text_color: secondary,
+                ..Default::default()
+            });
+            add_subview(setup_view, status_lbl);
+            step_status_labels[i] = Some(status_lbl as usize);
 
-        // Step 3: Press hotkey
-        let step3_label = create_label(LabelConfig {
-            frame: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, content_h - 130.0),
-                &core_graphics::geometry::CGSize::new(220.0, 20.0),
-            ),
-            text: "3) Press hotkey (Ctrl+Shift)".to_string(),
-            font_size: ui_tokens::BODY_FONT_SIZE,
-            bold: true,
-            text_color: crate::ui_helpers::color_label(),
-            background_color: None,
-            selectable: false,
-            editable: false,
-        });
-        add_subview(setup_view, step3_label);
+            let step_btn = button(
+                CGRect::new(
+                    &CGPoint::new(content_width - 100.0, y - 2.0),
+                    &CGSize::new(80.0, 24.0),
+                ),
+                btn_text,
+            );
+            button_set_action(step_btn, action_handler, *sel);
+            add_subview(setup_view, step_btn);
+            y -= 34.0;
+        }
+        y -= 6.0;
 
-        let step3_status = create_label(LabelConfig {
-            frame: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(260.0, content_h - 130.0),
-                &core_graphics::geometry::CGSize::new(80.0, 20.0),
-            ),
-            text: "pending".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: false,
-            text_color: crate::ui_helpers::color_secondary_label(),
-            background_color: None,
-            selectable: false,
-            editable: false,
-        });
-        add_subview(setup_view, step3_status);
-
-        let step3_btn = button(
-            core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(content_width - 110.0, content_h - 134.0),
-                &core_graphics::geometry::CGSize::new(80.0, 26.0),
-            ),
-            "Done",
-        );
-        button_set_action(step3_btn, action_handler, sel!(onHotkeyDone:));
-        add_subview(setup_view, step3_btn);
-
-        // LLM Configuration section
-        let llm_y_start = content_h - 180.0;
-        let llm_section = create_label(LabelConfig {
-            frame: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, llm_y_start),
-                &core_graphics::geometry::CGSize::new(content_width - 40.0, 18.0),
-            ),
-            text: "AI Provider (optional)".to_string(),
+        // ── Formatting AI (optional) ─────────────────────────────────
+        let _fmt_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 18.0)),
+            text: "Formatting AI (optional)".to_string(),
             font_size: ui_tokens::SMALL_FONT_SIZE,
             bold: true,
-            text_color: crate::ui_helpers::color_secondary_label(),
+            text_color: secondary,
             ..Default::default()
         });
-        add_subview(setup_view, llm_section);
+        add_subview(setup_view, _fmt_header);
+        y -= 26.0;
 
         let llm_endpoint_val = config.llm_endpoint.as_deref().unwrap_or("");
         let llm_endpoint_field = create_text_input(
-            core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, llm_y_start - 28.0),
-                &core_graphics::geometry::CGSize::new(content_width - 40.0, 22.0),
-            ),
-            "LLM Endpoint (e.g. https://api.openai.com/v1/responses)",
+            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
+            "Endpoint (e.g. https://api.openai.com/v1/responses)",
             llm_endpoint_val,
         );
         button_set_action(
@@ -455,34 +492,108 @@ unsafe fn build_settings_ui(
             sel!(onLlmEndpointChanged:),
         );
         add_subview(setup_view, llm_endpoint_field);
+        y -= 28.0;
 
         let llm_model_val = std::env::var("LLM_MODEL").unwrap_or_default();
         let llm_model_field = create_text_input(
-            core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, llm_y_start - 56.0),
-                &core_graphics::geometry::CGSize::new(content_width - 40.0, 22.0),
-            ),
-            "LLM Model (e.g. gpt-4.1-mini)",
+            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
+            "Model (e.g. gpt-4.1-mini)",
             &llm_model_val,
         );
         button_set_action(llm_model_field, action_handler, sel!(onLlmModelChanged:));
         add_subview(setup_view, llm_model_field);
+        y -= 28.0;
 
         let llm_key_field = create_secure_text_input(
-            core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, llm_y_start - 84.0),
-                &core_graphics::geometry::CGSize::new(content_width - 40.0, 22.0),
-            ),
+            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
             "API Key (stored in Keychain)",
         );
         button_set_action(llm_key_field, action_handler, sel!(onLlmKeyChanged:));
         add_subview(setup_view, llm_key_field);
+        y -= 34.0;
 
-        // Footer buttons (inside setup_view)
+        // ── Assistive AI (optional) ──────────────────────────────────
+        let _assist_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 18.0)),
+            text: "Assistive AI (optional)".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(setup_view, _assist_header);
+        y -= 26.0;
+
+        let assist_endpoint_val = std::env::var("LLM_ASSISTIVE_ENDPOINT").unwrap_or_default();
+        let assist_endpoint_field = create_text_input(
+            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
+            "Endpoint (e.g. https://api.openai.com/v1/responses)",
+            &assist_endpoint_val,
+        );
+        button_set_action(
+            assist_endpoint_field,
+            action_handler,
+            sel!(onAssistiveEndpointChanged:),
+        );
+        add_subview(setup_view, assist_endpoint_field);
+        y -= 28.0;
+
+        let assist_model_val = std::env::var("LLM_ASSISTIVE_MODEL").unwrap_or_default();
+        let assist_model_field = create_text_input(
+            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
+            "Model (e.g. gpt-5.2)",
+            &assist_model_val,
+        );
+        button_set_action(
+            assist_model_field,
+            action_handler,
+            sel!(onAssistiveModelChanged:),
+        );
+        add_subview(setup_view, assist_model_field);
+        y -= 28.0;
+
+        let assist_key_field = create_secure_text_input(
+            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
+            "API Key (stored in Keychain)",
+        );
+        button_set_action(
+            assist_key_field,
+            action_handler,
+            sel!(onAssistiveKeyChanged:),
+        );
+        add_subview(setup_view, assist_key_field);
+        y -= 34.0;
+
+        // ── Quality daemon toggle ────────────────────────────────────
+        let quality_on = std::env::var("CODESCRIBE_AUTOSTART_QUALITY_DAEMON")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        let quality_check = create_checkbox(
+            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 20.0)),
+            "Auto-tune transcription quality (recommended)",
+            quality_on,
+        );
+        button_set_action(quality_check, action_handler, sel!(onQualityDaemonToggled:));
+        add_subview(setup_view, quality_check);
+        y -= 18.0;
+
+        let _quality_desc = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(pad + 22.0, y),
+                &CGSize::new(field_w - 22.0, 16.0),
+            ),
+            text: "Runs quality analysis every 30min in background".to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(setup_view, _quality_desc);
+
+        // ── Footer buttons ───────────────────────────────────────────
         let finish_btn = button(
-            core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(content_width - 110.0, 16.0),
-                &core_graphics::geometry::CGSize::new(90.0, 28.0),
+            CGRect::new(
+                &CGPoint::new(content_width - 110.0, 16.0),
+                &CGSize::new(90.0, 28.0),
             ),
             "Finish",
         );
@@ -490,14 +601,30 @@ unsafe fn build_settings_ui(
         add_subview(setup_view, finish_btn);
 
         let skip_btn = button(
-            core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(20.0, 16.0),
-                &core_graphics::geometry::CGSize::new(90.0, 28.0),
-            ),
+            CGRect::new(&CGPoint::new(pad, 16.0), &CGSize::new(90.0, 28.0)),
             "Skip",
         );
         button_set_action(skip_btn, action_handler, sel!(onFinish:));
         add_subview(setup_view, skip_btn);
+
+        // ── Completion view (hidden, shown on Finish) ────────────────
+        let completion: Id = msg_send![ns_view, alloc];
+        let completion: Id = msg_send![completion, initWithFrame: content_frame];
+        let _: () = msg_send![completion, setHidden: true];
+        let done_label = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(0.0, content_h * 0.5 - 20.0),
+                &CGSize::new(content_width, 40.0),
+            ),
+            text: "All set!".to_string(),
+            font_size: 24.0,
+            bold: true,
+            text_color: permission_color(true), // green
+            ..Default::default()
+        });
+        let _: () = msg_send![done_label, setAlignment: 1_isize]; // NSTextAlignmentCenter
+        add_subview(completion, done_label);
+        add_subview(root_view, completion);
 
         // --- Keys tab (index 1) ---
         let keys_view = build_keys_tab(action_handler, content_frame, config);
@@ -512,11 +639,7 @@ unsafe fn build_settings_ui(
         // ====================================================================
         // Store state
         // ====================================================================
-        state.step_labels = [
-            Some(step1_status as usize),
-            Some(step2_status as usize),
-            Some(step3_status as usize),
-        ];
+        state.step_labels = step_status_labels;
         state.tab_buttons = tab_buttons;
         state.content_views = [
             Some(setup_view as usize),
@@ -524,6 +647,9 @@ unsafe fn build_settings_ui(
             Some(audio_view as usize),
         ];
         state.active_tab = TAB_SETUP;
+        state.permission_labels = perm_labels;
+        state.quality_daemon_checkbox = Some(quality_check as usize);
+        state.completion_view = Some(completion as usize);
     }
 }
 
@@ -646,9 +772,27 @@ pub(super) fn handle_hotkey_done() {
 }
 
 pub(super) fn handle_finish() {
-    mark_bootstrap_done();
-    crate::voice_chat_ui::show_agent_tab();
-    hide_bootstrap_overlay();
+    // Show "All set!" completion view, then close after a brief delay.
+    Queue::main().exec_async(|| unsafe {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(setup_ptr) = state.content_views[0] {
+            let _: () = msg_send![setup_ptr as Id, setHidden: true];
+        }
+        // Hide sidebar tabs too
+        for ptr in state.tab_buttons.iter().flatten() {
+            let _: () = msg_send![*ptr as Id, setHidden: true];
+        }
+        if let Some(completion_ptr) = state.completion_view {
+            let _: () = msg_send![completion_ptr as Id, setHidden: false];
+        }
+    });
+
+    thread::spawn(|| {
+        thread::sleep(Duration::from_millis(1200));
+        mark_bootstrap_done();
+        crate::voice_chat_ui::show_agent_tab();
+        hide_bootstrap_overlay();
+    });
 }
 
 pub fn hide_bootstrap_overlay() {
@@ -664,6 +808,9 @@ pub fn hide_bootstrap_overlay() {
             state.keys_toggle_popup = None;
             state.keys_preset_popup = None;
             state.keys_exclusive_checkbox = None;
+            state.permission_labels = [None, None, None];
+            state.quality_daemon_checkbox = None;
+            state.completion_view = None;
             return;
         }
 
@@ -688,6 +835,9 @@ pub fn reset_embedded_bootstrap_state() {
     state.keys_toggle_popup = None;
     state.keys_preset_popup = None;
     state.keys_exclusive_checkbox = None;
+    state.permission_labels = [None, None, None];
+    state.quality_daemon_checkbox = None;
+    state.completion_view = None;
 }
 
 fn update_step_status(index: usize, text: &str) {
@@ -1353,6 +1503,83 @@ pub(super) extern "C" fn on_buffered_toggled(_this: &Object, _cmd: objc::runtime
             if enabled { "1" } else { "0" },
         );
     }
+}
+
+// ============================================================================
+// Assistive AI + Quality daemon + Permissions handlers
+// ============================================================================
+
+pub(super) extern "C" fn on_assistive_endpoint_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    unsafe {
+        let ns_val: Id = msg_send![sender, stringValue];
+        let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
+        let value = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+        info!("Settings: assistive endpoint -> {}", value);
+        let config = Config::load();
+        let _ = config.save_to_env("LLM_ASSISTIVE_ENDPOINT", &value);
+    }
+}
+
+pub(super) extern "C" fn on_assistive_model_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    unsafe {
+        let ns_val: Id = msg_send![sender, stringValue];
+        let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
+        let value = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+        info!("Settings: assistive model -> {}", value);
+        let config = Config::load();
+        let _ = config.save_to_env("LLM_ASSISTIVE_MODEL", &value);
+    }
+}
+
+pub(super) extern "C" fn on_assistive_key_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    unsafe {
+        let ns_val: Id = msg_send![sender, stringValue];
+        let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
+        let value = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+        if !value.is_empty() {
+            info!("Settings: assistive API key updated (stored in Keychain)");
+            let config = Config::load();
+            let _ = config.save_to_env("LLM_ASSISTIVE_API_KEY", &value);
+        }
+    }
+}
+
+pub(super) extern "C" fn on_quality_daemon_toggled(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    unsafe {
+        let state: isize = msg_send![sender, state];
+        let enabled = state == 1;
+        info!("Settings: quality daemon autostart -> {}", enabled);
+        let config = Config::load();
+        let _ = config.save_to_env(
+            "CODESCRIBE_AUTOSTART_QUALITY_DAEMON",
+            if enabled { "1" } else { "0" },
+        );
+    }
+}
+
+pub(super) extern "C" fn on_refresh_permissions(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    _sender: Id,
+) {
+    info!("Settings: refreshing permission indicators");
+    refresh_permission_indicators();
 }
 
 fn send_ipc(cmd: IpcCommand) -> Result<IpcResponse, String> {

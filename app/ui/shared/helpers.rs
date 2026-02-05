@@ -430,32 +430,57 @@ pub fn create_glass_effect_view(frame: CGRect, material: NSVisualEffectMaterial)
         if let Some(glass_cls) = Class::get("NSGlassEffectView") {
             let view: Id = msg_send![glass_cls, alloc];
             let view: Id = msg_send![view, initWithFrame: frame];
-            let supports_material: bool = msg_send![view, respondsToSelector: sel!(setMaterial:)];
-            if supports_material {
-                let _: () = msg_send![view, setMaterial: material];
-                let supports_blend: bool =
-                    msg_send![view, respondsToSelector: sel!(setBlendingMode:)];
-                if supports_blend {
-                    let _: () =
-                        msg_send![view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
-                }
-                let supports_state: bool = msg_send![view, respondsToSelector: sel!(setState:)];
-                if supports_state {
-                    let _: () = msg_send![view, setState: NSVisualEffectState::Active];
-                }
-                let _: () = msg_send![view, setWantsLayer: true];
-                return view;
-            }
+            set_visual_effect_material(view, material);
+            set_visual_effect_blending(view, NSVisualEffectBlendingMode::BehindWindow);
+            set_visual_effect_state(view, NSVisualEffectState::Active);
+            let _: () = msg_send![view, setWantsLayer: true];
+            return view;
         }
 
         let visual_cls = Class::get("NSVisualEffectView").unwrap();
         let view: Id = msg_send![visual_cls, alloc];
         let view: Id = msg_send![view, initWithFrame: frame];
-        let _: () = msg_send![view, setMaterial: material];
-        let _: () = msg_send![view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
-        let _: () = msg_send![view, setState: NSVisualEffectState::Active];
+        set_visual_effect_material(view, material);
+        set_visual_effect_blending(view, NSVisualEffectBlendingMode::BehindWindow);
+        set_visual_effect_state(view, NSVisualEffectState::Active);
         let _: () = msg_send![view, setWantsLayer: true];
         view
+    }
+}
+
+/// # Safety
+/// `view` must be a valid `NSVisualEffectView`/`NSGlassEffectView` instance.
+pub unsafe fn set_visual_effect_material(view: Id, material: NSVisualEffectMaterial) {
+    if view.is_null() {
+        return;
+    }
+    let supports_material: bool = msg_send![view, respondsToSelector: sel!(setMaterial:)];
+    if supports_material {
+        let _: () = msg_send![view, setMaterial: material];
+    }
+}
+
+/// # Safety
+/// `view` must be a valid `NSVisualEffectView`/`NSGlassEffectView` instance.
+pub unsafe fn set_visual_effect_blending(view: Id, blending: NSVisualEffectBlendingMode) {
+    if view.is_null() {
+        return;
+    }
+    let supports_blend: bool = msg_send![view, respondsToSelector: sel!(setBlendingMode:)];
+    if supports_blend {
+        let _: () = msg_send![view, setBlendingMode: blending];
+    }
+}
+
+/// # Safety
+/// `view` must be a valid `NSVisualEffectView`/`NSGlassEffectView` instance.
+pub unsafe fn set_visual_effect_state(view: Id, state: NSVisualEffectState) {
+    if view.is_null() {
+        return;
+    }
+    let supports_state: bool = msg_send![view, respondsToSelector: sel!(setState:)];
+    if supports_state {
+        let _: () = msg_send![view, setState: state];
     }
 }
 

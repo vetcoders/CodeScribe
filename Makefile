@@ -211,6 +211,7 @@ TEST_LOG := /tmp/codescribe-tests.log
 
 define TEST_SETUP
 LOG=$(TEST_LOG); \
+export CODESCRIBE_DISABLE_KEYCHAIN=1; \
 echo "" >> "$$LOG"; \
 echo "╔══════════════════════════════════════════════════════════╗" | tee -a "$$LOG"; \
 echo "║  CodeScribe Test Suite — $$(date '+%Y-%m-%d %H:%M:%S')           ║" | tee -a "$$LOG"; \

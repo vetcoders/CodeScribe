@@ -151,6 +151,7 @@ fn env_path_override_is_respected() {
     let env_path = tmp.path().join("custom.env");
     fs::write(&env_path, "HOLD_MODS=ctrl_alt\n").expect("write env");
 
+    let _g0 = EnvGuard::set("CODESCRIBE_DATA_DIR", tmp.path().to_string_lossy().as_ref());
     let _g1 = EnvGuard::set("CODESCRIBE_ENV_PATH", env_path.to_string_lossy().as_ref());
     let _g2 = EnvGuard::unset("HOLD_MODS");
 

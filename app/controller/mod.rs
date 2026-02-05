@@ -203,8 +203,10 @@ impl RecordingController {
                 info!("Available local models: {:?}", models);
             }
 
-            // Initialize Whisper engine (singleton)
-            if let Err(e) = crate::whisper::init() {
+            // Initialize Whisper engine if not already done (daemon pre-inits)
+            if !crate::whisper::is_initialized()
+                && let Err(e) = crate::whisper::init()
+            {
                 warn!("Failed to initialize Whisper engine: {}", e);
             }
         }
@@ -264,8 +266,9 @@ impl RecordingController {
             }
         }
 
-        // Initialize Whisper engine (singleton)
+        // Initialize Whisper engine if not already done (daemon pre-inits)
         if !cfg!(test)
+            && !crate::whisper::is_initialized()
             && let Err(e) = crate::whisper::init()
         {
             warn!("Failed to initialize Whisper engine: {}", e);

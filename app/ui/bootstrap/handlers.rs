@@ -4,11 +4,13 @@ use objc::{sel, sel_impl};
 use std::sync::Once;
 
 use super::{
-    handle_finish, handle_hotkey_done, handle_show_overlay, handle_test_mic, on_beep_toggled,
-    on_buffered_toggled, on_delay_changed, on_formatting_toggled, on_hold_exclusive_changed,
-    on_hold_mod_changed, on_language_changed, on_llm_endpoint_changed, on_llm_key_changed,
-    on_llm_model_changed, on_preset_changed, on_toggle_trigger_changed, on_vad_preset_changed,
-    on_volume_changed, switch_tab,
+    handle_finish, handle_hotkey_done, handle_show_overlay, handle_test_mic,
+    on_assistive_endpoint_changed, on_assistive_key_changed, on_assistive_model_changed,
+    on_beep_toggled, on_buffered_toggled, on_delay_changed, on_formatting_toggled,
+    on_hold_exclusive_changed, on_hold_mod_changed, on_language_changed, on_llm_endpoint_changed,
+    on_llm_key_changed, on_llm_model_changed, on_preset_changed, on_quality_daemon_toggled,
+    on_refresh_permissions, on_toggle_trigger_changed, on_vad_preset_changed, on_volume_changed,
+    switch_tab,
 };
 
 pub type Id = *mut Object;
@@ -119,6 +121,32 @@ pub fn action_handler_class() -> *const Class {
             decl.add_method(
                 sel!(onVolumeChanged:),
                 on_volume_changed as extern "C" fn(&Object, Sel, Id),
+            );
+
+            // Assistive AI fields
+            decl.add_method(
+                sel!(onAssistiveEndpointChanged:),
+                on_assistive_endpoint_changed as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onAssistiveModelChanged:),
+                on_assistive_model_changed as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onAssistiveKeyChanged:),
+                on_assistive_key_changed as extern "C" fn(&Object, Sel, Id),
+            );
+
+            // Quality daemon toggle
+            decl.add_method(
+                sel!(onQualityDaemonToggled:),
+                on_quality_daemon_toggled as extern "C" fn(&Object, Sel, Id),
+            );
+
+            // Permission refresh
+            decl.add_method(
+                sel!(onRefreshPermissions:),
+                on_refresh_permissions as extern "C" fn(&Object, Sel, Id),
             );
 
             ACTION_HANDLER_CLASS = decl.register();

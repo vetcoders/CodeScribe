@@ -292,6 +292,17 @@ impl Config {
             // Set env var so downstream code picks it up
             unsafe { std::env::set_var("LLM_MODEL", v) };
         }
+        // Assistive LLM (not in Config struct, read from env at runtime)
+        if std::env::var("LLM_ASSISTIVE_ENDPOINT").is_err()
+            && let Some(ref v) = settings.llm_assistive_endpoint
+        {
+            unsafe { std::env::set_var("LLM_ASSISTIVE_ENDPOINT", v) };
+        }
+        if std::env::var("LLM_ASSISTIVE_MODEL").is_err()
+            && let Some(ref v) = settings.llm_assistive_model
+        {
+            unsafe { std::env::set_var("LLM_ASSISTIVE_MODEL", v) };
+        }
         // Double-tap toggles (read from env at runtime, not in Config struct)
         if std::env::var("HOTKEY_DOUBLE_TAP_LEFT").is_err()
             && let Some(v) = settings.double_tap_left

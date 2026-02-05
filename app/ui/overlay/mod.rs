@@ -32,7 +32,8 @@ use tracing::{debug, info, warn};
 use crate::ui::shared::status::status_from_detail;
 use crate::ui_helpers::{
     add_subview, animate_fade, button_set_action, button_style, clamp_overlay_position,
-    create_button, set_hidden, set_text, ui_colors, window_close, window_set_alpha, window_show,
+    create_button, set_hidden, set_text, set_visual_effect_blending, set_visual_effect_material,
+    set_visual_effect_state, ui_colors, window_close, window_set_alpha, window_show,
 };
 use objc::declare::ClassDecl;
 use objc::runtime::Sel;
@@ -709,15 +710,15 @@ fn show_transcription_overlay_impl() {
 
         // HudWindow material (13) - perfect for floating overlays
         let material = NSVisualEffectMaterial::HUDWindow;
-        let _: () = msg_send![blur_view, setMaterial: material];
+        set_visual_effect_material(blur_view, material);
 
         // BehindWindow blending for true vibrancy
         let blending = NSVisualEffectBlendingMode::BehindWindow;
-        let _: () = msg_send![blur_view, setBlendingMode: blending];
+        set_visual_effect_blending(blur_view, blending);
 
         // Always active (don't dim when window loses focus)
         let effect_state = NSVisualEffectState::Active;
-        let _: () = msg_send![blur_view, setState: effect_state];
+        set_visual_effect_state(blur_view, effect_state);
 
         // Enable layer-backed view for corner radius
         let _: () = msg_send![blur_view, setWantsLayer: true];

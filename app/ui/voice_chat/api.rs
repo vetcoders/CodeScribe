@@ -928,23 +928,27 @@ fn ensure_agent_tab_visible(state: &mut VoiceChatOverlayState) {
 }
 
 pub(super) fn clear_voice_chat_text_impl() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.messages.clear();
-    state.manual_draft.clear();
-    state.is_sending = false;
-    state.attached_files.clear();
-    state.attached_files_last_sent = None;
-    reset_attach_button_ui_locked(&mut state);
+    let btn_ptr = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.messages.clear();
+        state.manual_draft.clear();
+        state.is_sending = false;
+        state.attached_files.clear();
+        state.attached_files_last_sent = None;
+        let btn_ptr = state.agent_attach_button;
 
-    if let Some(input_view) = state.agent_input_text_view {
-        unsafe { set_text_view_string(input_view as Id, "") };
-    } else if let Some(input_field) = state.agent_input_field {
-        unsafe { set_text_field_string(input_field as Id, "") };
-    }
-    resize_agent_input_locked(&mut state);
+        if let Some(input_view) = state.agent_input_text_view {
+            unsafe { set_text_view_string(input_view as Id, "") };
+        } else if let Some(input_field) = state.agent_input_field {
+            unsafe { set_text_field_string(input_field as Id, "") };
+        }
+        resize_agent_input_locked(&mut state);
 
-    update_chat_view_with_state(&mut state, true);
-    update_send_button_with_state(&mut state);
+        update_chat_view_with_state(&mut state, true);
+        update_send_button_with_state(&mut state);
+        btn_ptr
+    };
+    update_attach_button_ui(btn_ptr, 0, Vec::new());
 }
 
 /// Send the draft message (called from handlers)
@@ -1199,16 +1203,37 @@ fn update_send_button_with_state(state: &mut VoiceChatOverlayState) {
     }
 }
 
-fn reset_attach_button_ui_locked(state: &mut VoiceChatOverlayState) {
+pub(super) fn update_attach_button_ui(
+    btn_ptr: Option<usize>,
+    count: usize,
+    mut names: Vec<String>,
+) {
     unsafe {
-        let Some(btn_ptr) = state.agent_attach_button else {
+        let Some(btn_ptr) = btn_ptr else {
             return;
         };
         let btn = btn_ptr as Id;
-        let has_symbol = crate::ui_helpers::set_button_symbol(btn, "paperclip");
-        let title = if has_symbol { "" } else { "Attach" };
-        let _: () = msg_send![btn, setTitle: ns_string(title)];
-        crate::ui_helpers::set_tooltip(btn, "Attach files (assistant context)");
+        let has_symbol = crate::ui_helpers::set_button_symbol(btn, "doc.badge.plus");
+        let title = if count == 0 {
+            if has_symbol {
+                String::new()
+            } else {
+                "Attach".to_string()
+            }
+        } else {
+            count.to_string()
+        };
+        let _: () = msg_send![btn, setTitle: ns_string(&title)];
+
+        if count == 0 {
+            crate::ui_helpers::set_tooltip(btn, "Attach files (assistant context)");
+        } else {
+            names.sort();
+            let shown: Vec<String> = names.into_iter().take(3).collect();
+            let suffix = if count > 3 { "…" } else { "" };
+            let tip = format!("Attached: {}{}", shown.join(", "), suffix);
+            let _: () = msg_send![btn, setToolTip: ns_string(&tip)];
+        }
     }
 }
 

@@ -18,8 +18,22 @@ pub const KEYCHAIN_ACCOUNTS: &[&str] = &[
     "LLM_ASSISTIVE_API_KEY",
 ];
 
-/// Returns true when running inside a test harness (CODESCRIBE_DATA_DIR set).
+/// Returns true when running inside a test harness or when Keychain is explicitly disabled.
+///
+/// NOTE: `cfg!(test)` only works for **unit tests** within this crate.
+/// Integration tests (`tests/`, `core/tests/`) compile the library normally,
+/// so `cfg!(test)` returns false. Those tests MUST set `CODESCRIBE_DISABLE_KEYCHAIN=1`
+/// or `CODESCRIBE_DATA_DIR` to skip Keychain. The Makefile `TEST_SETUP` sets the former.
 fn is_test_env() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    if std::env::var_os("CODESCRIBE_DISABLE_KEYCHAIN").is_some() {
+        return true;
+    }
+    if std::env::var_os("CI").is_some() {
+        return true;
+    }
     std::env::var("CODESCRIBE_DATA_DIR").is_ok()
 }
 
@@ -39,6 +53,10 @@ pub fn save_key(account: &str, secret: &str) -> Result<()> {
 
 /// Loads a secret from the macOS Keychain. Returns `None` if not found.
 pub fn load_key(account: &str) -> Option<String> {
+    if is_test_env() {
+        debug!("Test env: skipping Keychain load for {account}");
+        return None;
+    }
     match get_generic_password(SERVICE, account) {
         Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
             Ok(s) => {
@@ -59,6 +77,10 @@ pub fn load_key(account: &str) -> Option<String> {
 
 /// Deletes a secret from the macOS Keychain. Ignores "not found" errors.
 pub fn delete_key(account: &str) -> Result<()> {
+    if is_test_env() {
+        debug!("Test env: skipping Keychain delete for {account}");
+        return Ok(());
+    }
     match delete_generic_password(SERVICE, account) {
         Ok(()) => {
             info!("Deleted {account} from Keychain");
