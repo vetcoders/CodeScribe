@@ -95,8 +95,13 @@ pub fn show_bootstrap_overlay() {
 }
 
 fn show_bootstrap_overlay_impl() {
+    if crate::voice_chat_ui::is_voice_chat_overlay_visible() {
+        crate::voice_chat_ui::show_settings_tab();
+        return;
+    }
+
+    crate::voice_chat_ui::request_settings_tab_on_open();
     crate::show_voice_chat_overlay();
-    crate::voice_chat_ui::show_settings_tab();
 }
 
 /// Attach the Settings view inside an existing parent view (overlay).

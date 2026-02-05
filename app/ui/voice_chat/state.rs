@@ -158,6 +158,8 @@ pub struct VoiceChatOverlayState {
 
     // Active tab
     pub active_tab: Tab,
+    /// Requested tab to apply after overlay is created (used for routing Settings from tray).
+    pub pending_tab: Option<Tab>,
 
     // Chat state
     pub messages: Vec<ChatMessage>,
@@ -231,6 +233,7 @@ impl Default for VoiceChatOverlayState {
             transcription_edge_effect: None,
             transcription_text: String::new(),
             active_tab: Tab::Drawer,
+            pending_tab: None,
             messages: Vec::new(),
             manual_draft: String::new(),
             is_sending: false,

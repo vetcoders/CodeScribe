@@ -15,11 +15,11 @@ pub use api::{
     append_voice_chat_assistant_delta, append_voice_chat_user_delta, clear_transcription_text,
     clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay, is_auto_send_enabled,
     is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
-    reset_voice_chat_activity, send_voice_chat_draft, set_transcription_text,
-    set_voice_chat_send_callback, set_voice_chat_sending, set_voice_chat_target_app,
-    set_voice_chat_text, set_voice_chat_user_text, show_agent_tab, show_drawer_tab,
-    show_settings_tab, show_transcription_tab, update_conversation_state, update_drawer_after_save,
-    update_voice_chat_context_summary, update_voice_chat_status,
+    request_settings_tab_on_open, reset_voice_chat_activity, send_voice_chat_draft,
+    set_transcription_text, set_voice_chat_send_callback, set_voice_chat_sending,
+    set_voice_chat_target_app, set_voice_chat_text, set_voice_chat_user_text, show_agent_tab,
+    show_drawer_tab, show_settings_tab, show_transcription_tab, update_conversation_state,
+    update_drawer_after_save, update_voice_chat_context_summary, update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 
@@ -48,7 +48,9 @@ use crate::ui_helpers::{
 };
 
 use api::update_active_tab_impl;
-use handlers::{action_handler_class, overlay_window_class, window_delegate_class};
+use handlers::{
+    action_handler_class, drop_target_view_class, overlay_window_class, window_delegate_class,
+};
 use state::{OVERLAY_STATE, Tab};
 
 // Type alias for Objective-C object pointers
@@ -952,7 +954,8 @@ fn show_voice_chat_overlay_impl() {
         set_tooltip(help_panel, &shortcuts_tip);
 
         // Agent input bar
-        let input_bar: Id = msg_send![Class::get("NSView").unwrap(), alloc];
+        let drop_target_cls = drop_target_view_class();
+        let input_bar: Id = msg_send![drop_target_cls, alloc];
         let input_frame = CGRect::new(
             &CGPoint::new(inner_pad, ui_tokens::FOOTER_INSET),
             &CGSize::new(
@@ -964,6 +967,11 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![input_bar, setWantsLayer: true];
         let _: () =
             msg_send![input_bar, setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MAX_Y_MARGIN];
+        let ns_mut_array = Class::get("NSMutableArray").unwrap();
+        let drag_types: Id = msg_send![ns_mut_array, array];
+        let _: () = msg_send![drag_types, addObject: ns_string("NSPasteboardTypeFileURL")];
+        let _: () = msg_send![drag_types, addObject: ns_string("NSFilenamesPboardType")];
+        let _: () = msg_send![input_bar, registerForDraggedTypes: drag_types];
         let input_layer: Id = msg_send![input_bar, layer];
         if !input_layer.is_null() {
             let color = ui_colors::input_bar_bg();
@@ -1081,14 +1089,17 @@ fn show_voice_chat_overlay_impl() {
         state.transcription_placeholder = Some(placeholder_view as usize);
         state.transcription_edge_effect = Some(transcription_edge_effect as usize);
         state.action_handler = Some(action_handler as usize);
-        state.active_tab = Tab::Drawer;
+        let pending_tab = state.pending_tab.take();
+        state.active_tab = pending_tab.unwrap_or(Tab::Drawer);
 
         window_set_alpha(window, 0.0);
         window_show(window);
         crate::ui_helpers::animate_fade(window, 1.0, 0.2);
 
         let has_messages = !state.messages.is_empty();
-        let desired_tab = if has_messages {
+        let desired_tab = if let Some(tab) = pending_tab {
+            tab
+        } else if has_messages {
             Tab::Agent
         } else {
             state.active_tab

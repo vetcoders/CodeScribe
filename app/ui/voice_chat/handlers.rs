@@ -6,6 +6,7 @@ use core_graphics::geometry::{CGPoint, CGRect};
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{msg_send, sel, sel_impl};
+use std::path::PathBuf;
 use std::sync::Once;
 use tracing::{debug, info};
 
@@ -18,7 +19,8 @@ use super::api::{
     clear_overlay_state, clear_voice_chat_text_impl, commit_last_user_message_impl,
     discard_last_message_impl, filter_drawer, handle_card_copy, handle_card_delete,
     handle_card_edit, handle_card_favorite, reflow_agent_after_resize_impl,
-    send_draft_message_impl, toggle_drawer_favorites_only_impl, update_active_tab_impl,
+    reflow_overlay_after_resize_impl, send_draft_message_impl, toggle_drawer_favorites_only_impl,
+    update_active_tab_impl,
 };
 use super::state::{ChatRole, OVERLAY_STATE, Tab};
 
@@ -31,6 +33,10 @@ static WINDOW_DELEGATE_INIT: Once = Once::new();
 static mut WINDOW_DELEGATE_CLASS: *const Class = std::ptr::null();
 static OVERLAY_WINDOW_INIT: Once = Once::new();
 static mut OVERLAY_WINDOW_CLASS: *const Class = std::ptr::null();
+static DROP_TARGET_INIT: Once = Once::new();
+static mut DROP_TARGET_CLASS: *const Class = std::ptr::null();
+
+const NS_DRAG_OP_COPY: u64 = 1;
 
 /// Get or create the action handler class for UI controls
 pub fn action_handler_class() -> *const Class {
@@ -189,6 +195,10 @@ pub fn window_delegate_class() -> *const Class {
                 sel!(windowDidEndLiveResize:),
                 on_window_did_end_live_resize as extern "C" fn(&Object, Sel, Id),
             );
+            decl.add_method(
+                sel!(windowDidResize:),
+                on_window_did_resize as extern "C" fn(&Object, Sel, Id),
+            );
             let cls = decl.register();
             WINDOW_DELEGATE_CLASS = cls;
         });
@@ -220,6 +230,126 @@ pub fn overlay_window_class() -> *const Class {
             OVERLAY_WINDOW_CLASS = cls;
         });
         OVERLAY_WINDOW_CLASS
+    }
+}
+
+/// Drop target view for attachments (supports dragging files into the Agent input bar).
+pub fn drop_target_view_class() -> *const Class {
+    unsafe {
+        DROP_TARGET_INIT.call_once(|| {
+            let superclass = Class::get("NSView").expect("NSView not found");
+            let mut decl = ClassDecl::new("VoiceChatAttachmentDropView", superclass)
+                .expect("Failed to declare drop target class");
+            decl.add_method(
+                sel!(draggingEntered:),
+                on_dragging_entered as extern "C" fn(&Object, Sel, Id) -> u64,
+            );
+            decl.add_method(
+                sel!(performDragOperation:),
+                on_perform_drag_operation as extern "C" fn(&Object, Sel, Id) -> bool,
+            );
+            let cls = decl.register();
+            DROP_TARGET_CLASS = cls;
+        });
+        DROP_TARGET_CLASS
+    }
+}
+
+fn extract_paths_from_pasteboard(pasteboard: Id) -> Vec<PathBuf> {
+    unsafe {
+        let mut out = Vec::new();
+        if pasteboard.is_null() {
+            return out;
+        }
+
+        // Preferred path: read file URLs.
+        let ns_url = Class::get("NSURL").unwrap();
+        let ns_array = Class::get("NSArray").unwrap();
+        let ns_dict = Class::get("NSDictionary").unwrap();
+        let ns_number = Class::get("NSNumber").unwrap();
+
+        let classes: Id = msg_send![ns_array, arrayWithObject: ns_url];
+        let key = ns_string("NSPasteboardURLReadingFileURLsOnlyKey");
+        let yes: Id = msg_send![ns_number, numberWithBool: true];
+        let options: Id = msg_send![ns_dict, dictionaryWithObject: yes forKey: key];
+        let urls: Id = msg_send![pasteboard, readObjectsForClasses: classes options: options];
+        if !urls.is_null() {
+            let count: usize = msg_send![urls, count];
+            for i in 0..count {
+                let url: Id = msg_send![urls, objectAtIndex: i];
+                if url.is_null() {
+                    continue;
+                }
+                let ns_path: Id = msg_send![url, path];
+                if ns_path.is_null() {
+                    continue;
+                }
+                let c_str: *const i8 = msg_send![ns_path, UTF8String];
+                if c_str.is_null() {
+                    continue;
+                }
+                let s = std::ffi::CStr::from_ptr(c_str)
+                    .to_string_lossy()
+                    .to_string();
+                if !s.is_empty() {
+                    out.push(PathBuf::from(s));
+                }
+            }
+        }
+
+        // Fallback: legacy filenames pasteboard type.
+        if out.is_empty() {
+            let filenames_type = ns_string("NSFilenamesPboardType");
+            let files: Id = msg_send![pasteboard, propertyListForType: filenames_type];
+            if !files.is_null() {
+                let count: usize = msg_send![files, count];
+                for i in 0..count {
+                    let ns_path: Id = msg_send![files, objectAtIndex: i];
+                    if ns_path.is_null() {
+                        continue;
+                    }
+                    let c_str: *const i8 = msg_send![ns_path, UTF8String];
+                    if c_str.is_null() {
+                        continue;
+                    }
+                    let s = std::ffi::CStr::from_ptr(c_str)
+                        .to_string_lossy()
+                        .to_string();
+                    if !s.is_empty() {
+                        out.push(PathBuf::from(s));
+                    }
+                }
+            }
+        }
+
+        out
+    }
+}
+
+extern "C" fn on_dragging_entered(_this: &Object, _cmd: Sel, dragging_info: Id) -> u64 {
+    unsafe {
+        let pasteboard: Id = msg_send![dragging_info, draggingPasteboard];
+        let paths = extract_paths_from_pasteboard(pasteboard);
+        if paths.is_empty() { 0 } else { NS_DRAG_OP_COPY }
+    }
+}
+
+extern "C" fn on_perform_drag_operation(_this: &Object, _cmd: Sel, dragging_info: Id) -> bool {
+    unsafe {
+        let pasteboard: Id = msg_send![dragging_info, draggingPasteboard];
+        let paths = extract_paths_from_pasteboard(pasteboard);
+        if paths.is_empty() {
+            return false;
+        }
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        for p in paths {
+            if !state.attached_files.contains(&p) {
+                state.attached_files.push(p);
+            }
+        }
+        state.attached_files_last_sent = None;
+        update_attach_button_ui_locked(&mut state);
+        true
     }
 }
 
@@ -427,6 +557,11 @@ extern "C" fn on_window_did_end_live_resize(_this: &Object, _cmd: Sel, notificat
         // Reflow bubbles to the new width/height.
         reflow_agent_after_resize_impl();
     }
+}
+
+extern "C" fn on_window_did_resize(_this: &Object, _cmd: Sel, _notification: Id) {
+    // Keep footer/input aligned during live resizing.
+    reflow_overlay_after_resize_impl();
 }
 
 extern "C" fn on_tab_drawer(_this: &Object, _cmd: Sel, _sender: Id) {

@@ -18,10 +18,11 @@ use crate::ui::shared::status::status_from_detail;
 use crate::ui_helpers::{
     BubbleConfig, BubbleRole, LabelConfig, add_subview, button_set_action, button_style,
     color_label, color_rgba, color_secondary_label, create_bubble_view, create_button,
-    create_card_view, create_label, get_text_field_string, get_text_view_string, list_draft_files,
-    ns_string, open_file_in_editor, resize_bubble_container_for_text, set_button_symbol,
-    set_hidden, set_text_field_string, set_text_view_string, set_tooltip, stack_view_add,
-    stack_view_clear, ui_colors, ui_tokens, update_bubble_text, window_set_alpha, window_show,
+    create_card_view, create_label, get_text_field_string, get_text_view_string,
+    layout_region_frame_for_view, list_draft_files, ns_string, open_file_in_editor,
+    resize_bubble_container_for_text, set_button_symbol, set_hidden, set_text_field_string,
+    set_text_view_string, set_tooltip, stack_view_add, stack_view_clear, ui_colors, ui_tokens,
+    update_bubble_text, window_set_alpha, window_show,
 };
 
 use super::handlers::{clear_search_field, copy_to_clipboard};
@@ -273,6 +274,13 @@ pub fn show_settings_tab() {
     });
 }
 
+/// Request Settings tab to be shown the next time the overlay is created.
+/// This is used when routing tray "Settings" to the overlay before it exists.
+pub fn request_settings_tab_on_open() {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.pending_tab = Some(Tab::Settings);
+}
+
 /// Append a delta (streaming token) to the transcription preview.
 pub fn append_transcription_delta(delta: &str) {
     let delta_owned = delta.to_string();
@@ -512,6 +520,87 @@ pub(super) fn reflow_agent_after_resize_impl() {
 
     update_chat_view_with_state(&mut state, false);
     resize_agent_input_locked(&mut state);
+}
+
+/// Lightweight layout pass for window resizing (keeps inputs/footers aligned).
+pub(super) fn reflow_overlay_after_resize_impl() {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    reflow_footer_controls_locked(&mut state);
+    resize_agent_input_locked(&mut state);
+}
+
+fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
+    unsafe {
+        let Some(blur_ptr) = state.blur_view else {
+            return;
+        };
+        let blur_view = blur_ptr as Id;
+        let bounds: CGRect = msg_send![blur_view, bounds];
+        let content_bounds = layout_region_frame_for_view(blur_view).unwrap_or(bounds);
+
+        let footer_height = ui_tokens::FOOTER_HEIGHT;
+        let footer_base_y = content_bounds.origin.y;
+        let gap = ui_tokens::CONTENT_GAP;
+        let help_panel_w = ui_tokens::HELP_PANEL_WIDTH;
+        let help_panel_h = footer_height - ui_tokens::FOOTER_INSET;
+        let help_panel_x = content_bounds.origin.x + content_bounds.size.width - help_panel_w;
+        let search_x = content_bounds.origin.x;
+        let search_w = (help_panel_x - gap - search_x).max(160.0);
+
+        if let Some(label_ptr) = state.search_label {
+            let label = label_ptr as Id;
+            let frame = CGRect::new(
+                &CGPoint::new(search_x, footer_base_y + footer_height - 20.0),
+                &CGSize::new(search_w, 16.0),
+            );
+            let _: () = msg_send![label, setFrame: frame];
+        }
+
+        if let Some(field_ptr) = state.search_field {
+            let field = field_ptr as Id;
+            let frame = CGRect::new(
+                &CGPoint::new(search_x, footer_base_y + 12.0),
+                &CGSize::new(search_w, 24.0),
+            );
+            let _: () = msg_send![field, setFrame: frame];
+        }
+
+        if let Some(panel_ptr) = state.help_panel {
+            let panel = panel_ptr as Id;
+            let frame = CGRect::new(
+                &CGPoint::new(help_panel_x, footer_base_y + 6.0),
+                &CGSize::new(help_panel_w, help_panel_h),
+            );
+            let _: () = msg_send![panel, setFrame: frame];
+        }
+
+        let content_pad = ui_tokens::EDGE_PADDING;
+        let header_height = ui_tokens::HEADER_HEIGHT;
+        let content_gap = ui_tokens::CONTENT_GAP;
+        let content_frame = CGRect::new(
+            &CGPoint::new(
+                content_bounds.origin.x + content_pad,
+                content_bounds.origin.y + footer_height + content_gap,
+            ),
+            &CGSize::new(
+                (content_bounds.size.width - content_pad * 2.0).max(0.0),
+                (content_bounds.size.height - header_height - footer_height - content_gap * 2.0)
+                    .max(0.0),
+            ),
+        );
+
+        if let Some(split_controller) = state.split_view_controller {
+            let split_view: Id = msg_send![split_controller as Id, view];
+            if !split_view.is_null() {
+                let _: () = msg_send![split_view, setFrame: content_frame];
+            }
+        }
+
+        if let Some(settings_ptr) = state.settings_view {
+            let settings_view = settings_ptr as Id;
+            let _: () = msg_send![settings_view, setFrame: content_frame];
+        }
+    }
 }
 
 fn update_voice_chat_status_impl(status: &str) {
@@ -1669,19 +1758,32 @@ fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
             };
 
         let text = get_text_view_string(text_view);
-        let hard_lines = (text.matches('\n').count() + 1).max(1);
-        // Heuristic for wrapped lines: assume ~52 chars per visual line at this width.
-        let wrapped_lines = text.chars().count().div_ceil(52).max(1);
-        let visual_lines = hard_lines.max(wrapped_lines);
 
         // Keep the input compact by default (single-line-ish), then grow smoothly up to a cap.
         let min_h = 44.0;
-        let max_h = 140.0;
-        let line_h = 18.0;
+        let max_h = 180.0;
         let desired_h = if text.trim().is_empty() {
             min_h
         } else {
-            (min_h + (visual_lines.saturating_sub(1) as f64) * line_h).clamp(min_h, max_h)
+            // Prefer actual layout height from NSTextView; fall back to a simple heuristic.
+            let mut measured: Option<f64> = None;
+            let layout: Id = msg_send![text_view, layoutManager];
+            let container: Id = msg_send![text_view, textContainer];
+            if !layout.is_null() && !container.is_null() {
+                let _: () = msg_send![layout, ensureLayoutForTextContainer: container];
+                let used: CGRect = msg_send![layout, usedRectForTextContainer: container];
+                let text_h = used.size.height.max(0.0);
+                measured = Some((text_h + 20.0).clamp(min_h, max_h));
+            }
+
+            measured.unwrap_or_else(|| {
+                let hard_lines = (text.matches('\n').count() + 1).max(1);
+                // Heuristic for wrapped lines: assume ~52 chars per visual line at this width.
+                let wrapped_lines = text.chars().count().div_ceil(52).max(1);
+                let visual_lines = hard_lines.max(wrapped_lines);
+                let line_h = 18.0;
+                (min_h + (visual_lines.saturating_sub(1) as f64) * line_h).clamp(min_h, max_h)
+            })
         };
 
         let pad = ui_tokens::EDGE_PADDING_TIGHT;
@@ -1871,6 +1973,7 @@ pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
     state.transcription_placeholder = None;
     state.transcription_edge_effect = None;
     state.active_tab = Tab::Drawer;
+    state.pending_tab = None;
     state.is_sending = false;
     state.manual_draft.clear();
     state.conversation_state = ConversationModeState::Inactive;
