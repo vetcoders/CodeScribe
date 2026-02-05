@@ -3,6 +3,7 @@
 //! Contains Objective-C class registration and action handler functions.
 
 use core_graphics::geometry::{CGPoint, CGRect};
+use dispatch::Queue;
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{msg_send, sel, sel_impl};
@@ -555,13 +556,17 @@ extern "C" fn on_window_did_end_live_resize(_this: &Object, _cmd: Sel, notificat
         }
 
         // Reflow bubbles to the new width/height.
-        reflow_agent_after_resize_impl();
+        Queue::main().exec_async(|| {
+            reflow_agent_after_resize_impl();
+        });
     }
 }
 
 extern "C" fn on_window_did_resize(_this: &Object, _cmd: Sel, _notification: Id) {
     // Keep footer/input aligned during live resizing.
-    reflow_overlay_after_resize_impl();
+    Queue::main().exec_async(|| {
+        reflow_overlay_after_resize_impl();
+    });
 }
 
 extern "C" fn on_tab_drawer(_this: &Object, _cmd: Sel, _sender: Id) {

@@ -513,7 +513,9 @@ fn update_shortcuts_panel_locked(state: &mut VoiceChatOverlayState) {
 ///
 /// Without this, long messages can look clipped until the next message arrives.
 pub(super) fn reflow_agent_after_resize_impl() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(mut state) = OVERLAY_STATE.try_lock() else {
+        return;
+    };
     if state.active_tab != Tab::Agent {
         return;
     }
@@ -524,7 +526,9 @@ pub(super) fn reflow_agent_after_resize_impl() {
 
 /// Lightweight layout pass for window resizing (keeps inputs/footers aligned).
 pub(super) fn reflow_overlay_after_resize_impl() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(mut state) = OVERLAY_STATE.try_lock() else {
+        return;
+    };
     reflow_footer_controls_locked(&mut state);
     resize_agent_input_locked(&mut state);
 }
@@ -1713,7 +1717,9 @@ Tools (optional): `brew install poppler ocrmypdf tesseract-lang`.)\n",
 ///
 /// Keeps it compact by default, and grows it when the user types/pastes longer messages.
 pub fn resize_agent_input_to_draft() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(mut state) = OVERLAY_STATE.try_lock() else {
+        return;
+    };
     resize_agent_input_locked(&mut state);
 }
 

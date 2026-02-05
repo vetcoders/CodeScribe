@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use lazy_static::lazy_static;
 use objc::runtime::{Class, Object};
@@ -19,9 +20,9 @@ use crate::os::hotkeys;
 use crate::tray::{TrayMenuEvent, send_menu_event};
 use crate::ui::bootstrap::handlers::action_handler_class;
 use crate::ui_helpers::{
-    LabelConfig, add_subview, button, button_set_action, create_checkbox, create_label,
-    create_secure_text_input, create_slider, create_text_input, ns_string, set_text_field_string,
-    ui_colors, ui_tokens, window_close,
+    LabelConfig, add_subview, button, button_set_action, create_checkbox, create_floating_window,
+    create_label, create_secure_text_input, create_slider, create_text_input, ns_string,
+    set_text_field_string, ui_colors, ui_tokens, window_close, window_content_view, window_show,
 };
 
 mod handlers;
@@ -97,13 +98,60 @@ pub fn show_bootstrap_overlay() {
 }
 
 fn show_bootstrap_overlay_impl() {
-    if crate::voice_chat_ui::is_voice_chat_overlay_visible() {
-        crate::voice_chat_ui::show_settings_tab();
-        return;
-    }
+    // Keep bootstrap as a standalone onboarding window.
+    // It should not depend on the voice chat overlay being available.
+    // (This also avoids deadlocks when the overlay is mid-layout.)
+    unsafe {
+        let reuse_window = {
+            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(window_ptr) = state.window {
+                let ns_window = Class::get("NSWindow").unwrap();
+                let window = window_ptr as Id;
+                let is_window: bool = msg_send![window, isKindOfClass: ns_window];
+                if is_window {
+                    Some(window)
+                } else {
+                    state.window = None;
+                    None
+                }
+            } else {
+                None
+            }
+        }; // Release lock before AppKit call.
+        if let Some(window) = reuse_window {
+            window_show(window);
+            return;
+        }
 
-    crate::voice_chat_ui::request_settings_tab_on_open();
-    crate::show_voice_chat_overlay();
+        let ns_screen = Class::get("NSScreen").unwrap();
+        let screen: Id = msg_send![ns_screen, mainScreen];
+        if screen.is_null() {
+            warn!("No NSScreen available for bootstrap window");
+            return;
+        }
+        let visible: CGRect = msg_send![screen, visibleFrame];
+        let window_width = 720.0;
+        let window_height = 520.0;
+        let x = visible.origin.x + (visible.size.width - window_width) * 0.5;
+        let y = visible.origin.y + (visible.size.height - window_height) * 0.5;
+        let frame = CGRect::new(
+            &CGPoint::new(x, y),
+            &CGSize::new(window_width, window_height),
+        );
+
+        let window = create_floating_window(frame, "Settings", true);
+        let _: () = msg_send![window, setOpaque: false];
+        let content_view = window_content_view(window);
+        let bounds: CGRect = msg_send![content_view, bounds];
+        let _ = attach_settings_view(content_view, bounds);
+
+        {
+            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.window = Some(window as usize);
+        } // Release lock before AppKit call to avoid nested-runloop deadlock.
+
+        window_show(window);
+    }
 }
 
 /// Attach the Settings view inside an existing parent view (overlay).

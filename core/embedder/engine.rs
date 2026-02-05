@@ -393,6 +393,7 @@ fn pad_to(vec: &mut Vec<u32>, target_len: usize, pad: u32) {
 
 fn mean_pool(hidden: &Tensor, mask: &Tensor) -> Result<Tensor> {
     // hidden: [batch, seq, hidden], mask: [batch, seq]
+    let mask = mask.to_dtype(hidden.dtype())?;
     let mask = mask.unsqueeze(2)?; // [batch, seq, 1]
     let masked = hidden.broadcast_mul(&mask)?;
     let sum = masked.sum(1)?; // [batch, hidden]

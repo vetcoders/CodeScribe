@@ -32,7 +32,9 @@ use objc2_app_kit::{
     NSBackingStoreType, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use tracing::{info, warn};
+use std::thread;
+use std::time::Duration;
+use tracing::{debug, info, warn};
 
 use crate::config::{HoldMods, ToggleTrigger};
 use crate::os::hotkeys::{get_hold_mods, get_toggle_trigger};
@@ -102,40 +104,50 @@ pub fn show_voice_chat_overlay_with_config(_config: VoiceChatOverlayConfig) {
 
 fn show_voice_chat_overlay_impl() {
     unsafe {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        // DEADLOCK PREVENTION: Do NOT hold OVERLAY_STATE across AppKit calls.
+        // AppKit can spin a nested runloop during window_show / animate_fade /
+        // orderFront, and pending Queue::main().exec_async blocks that also lock
+        // OVERLAY_STATE will deadlock on the non-reentrant Mutex.
+        // (Same pattern documented in hide_voice_chat_overlay_impl.)
 
-        let ns_window = Class::get("NSWindow").unwrap();
-        let ns_screen = Class::get("NSScreen").unwrap();
+        // Phase 1 — check / reuse existing window (short lock scope).
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let ns_window = Class::get("NSWindow").unwrap();
+            if let Some(window_ptr) = state.window {
+                let window = window_ptr as Id;
+                let is_window: bool = msg_send![window, isKindOfClass: ns_window];
+                if is_window {
+                    // Reuse path: extract pointers, release lock, THEN do AppKit.
+                    let blur_ptr = state.blur_view;
+                    drop(state);
 
-        if let Some(window_ptr) = state.window {
-            let window = window_ptr as Id;
-            let is_window: bool = msg_send![window, isKindOfClass: ns_window];
-            if is_window {
-                // Ensure previously-created overlays remain visible and sized correctly.
-                let _: () = msg_send![window, orderFrontRegardless];
-                let _: () = msg_send![window, setAlphaValue: 1.0f64];
-                // Ensure the overlay shows up even when the user is in a fullscreen Space.
-                let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
-                    | NSWindowCollectionBehavior::FullScreenAuxiliary;
-                let _: () = msg_send![window, setCollectionBehavior: collection_behavior];
+                    let _: () = msg_send![window, orderFrontRegardless];
+                    let _: () = msg_send![window, setAlphaValue: 1.0f64];
+                    let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
+                        | NSWindowCollectionBehavior::FullScreenAuxiliary;
+                    let _: () = msg_send![window, setCollectionBehavior: collection_behavior];
 
-                if let Some(blur_ptr) = state.blur_view {
-                    let blur_view = blur_ptr as Id;
-                    let w_frame: CGRect = msg_send![window, frame];
-                    let blur_frame = CGRect::new(
-                        &CGPoint::new(0.0, 0.0),
-                        &CGSize::new(w_frame.size.width, w_frame.size.height),
-                    );
-                    let _: () = msg_send![blur_view, setFrame: blur_frame];
+                    if let Some(blur_ptr) = blur_ptr {
+                        let blur_view = blur_ptr as Id;
+                        let w_frame: CGRect = msg_send![window, frame];
+                        let blur_frame = CGRect::new(
+                            &CGPoint::new(0.0, 0.0),
+                            &CGSize::new(w_frame.size.width, w_frame.size.height),
+                        );
+                        let _: () = msg_send![blur_view, setFrame: blur_frame];
+                    }
+
+                    info!("Voice chat overlay reused");
+                    return;
                 }
-
-                info!("Voice chat overlay reused");
-                return;
+                warn!("Voice chat overlay pointer invalid; recreating window");
+                api::clear_overlay_state(&mut state);
             }
-            warn!("Voice chat overlay pointer invalid; recreating window");
-            api::clear_overlay_state(&mut state);
-        }
+        } // OVERLAY_STATE released — UI construction below is lock-free.
 
+        // Phase 2 — build the entire overlay UI without holding OVERLAY_STATE.
+        let ns_screen = Class::get("NSScreen").unwrap();
         let config = VoiceChatOverlayConfig::default();
         let window_width = config.width;
         let window_height = config.height;
@@ -1049,63 +1061,92 @@ fn show_voice_chat_overlay_impl() {
         set_hidden(input_bar, true);
         set_hidden(transcription_scroll, true);
 
-        state.window = Some(window as usize);
-        state.window_delegate = Some(window_delegate as usize);
-        state.blur_view = Some(blur_view as usize);
-        state.split_view_controller = Some(split_controller as usize);
-        state.split_sidebar_item = Some(sidebar_item as usize);
-        state.split_content_item = Some(content_item as usize);
-        state.split_sidebar_container = Some(sidebar_view as usize);
-        state.split_content_container = Some(content_view as usize);
-        state.title_label = Some(title_label as usize);
-        state.status_pill = Some(status_pill as usize);
-        state.status_pill_label = Some(status_label as usize);
-        state.status_pill_dot = Some(dot as usize);
-        state.tab_drawer_button = Some(tab_drawer_button as usize);
-        state.tab_transcription_button = Some(tab_transcription_button as usize);
-        state.tab_agent_button = Some(tab_agent_button as usize);
-        state.tab_settings_button = Some(tab_settings_button as usize);
-        state.favorites_button = Some(favorites_button as usize);
-        state.close_button = Some(close_button as usize);
-        state.settings_view = settings_view.map(|view| view as usize);
-        state.drawer_scroll_view = Some(drawer_scroll as usize);
-        state.drawer_container = Some(drawer_container as usize);
-        state.drawer_edge_effect = Some(drawer_edge_effect as usize);
-        state.search_field = Some(search_field as usize);
-        state.search_label = Some(search_label as usize);
-        state.help_panel = Some(help_panel as usize);
-        state.help_hold_label = Some(hold_label as usize);
-        state.help_toggle_label = Some(toggle_label as usize);
-        state.agent_scroll_view = Some(agent_scroll as usize);
-        state.agent_container = Some(agent_container as usize);
-        state.agent_input_bar = Some(input_bar as usize);
-        state.agent_input_scroll_view = Some(agent_input_scroll as usize);
-        state.agent_input_text_view = Some(agent_input_text_view as usize);
-        state.agent_input_field = None;
-        state.agent_attach_button = Some(agent_attach_button as usize);
-        state.agent_send_button = Some(agent_send_button as usize);
-        state.transcription_scroll_view = Some(transcription_scroll as usize);
-        state.transcription_text_view = Some(transcription_text_view as usize);
-        state.transcription_placeholder = Some(placeholder_view as usize);
-        state.transcription_edge_effect = Some(transcription_edge_effect as usize);
-        state.action_handler = Some(action_handler as usize);
-        let pending_tab = state.pending_tab.take();
-        state.active_tab = pending_tab.unwrap_or(Tab::Drawer);
+        // Phase 3 — store widget pointers into state (short lock scope).
+        let (has_messages, desired_tab, status_text) = {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.window = Some(window as usize);
+            state.window_delegate = Some(window_delegate as usize);
+            state.blur_view = Some(blur_view as usize);
+            state.split_view_controller = Some(split_controller as usize);
+            state.split_sidebar_item = Some(sidebar_item as usize);
+            state.split_content_item = Some(content_item as usize);
+            state.split_sidebar_container = Some(sidebar_view as usize);
+            state.split_content_container = Some(content_view as usize);
+            state.title_label = Some(title_label as usize);
+            state.status_pill = Some(status_pill as usize);
+            state.status_pill_label = Some(status_label as usize);
+            state.status_pill_dot = Some(dot as usize);
+            state.tab_drawer_button = Some(tab_drawer_button as usize);
+            state.tab_transcription_button = Some(tab_transcription_button as usize);
+            state.tab_agent_button = Some(tab_agent_button as usize);
+            state.tab_settings_button = Some(tab_settings_button as usize);
+            state.favorites_button = Some(favorites_button as usize);
+            state.close_button = Some(close_button as usize);
+            state.settings_view = settings_view.map(|view| view as usize);
+            state.drawer_scroll_view = Some(drawer_scroll as usize);
+            state.drawer_container = Some(drawer_container as usize);
+            state.drawer_edge_effect = Some(drawer_edge_effect as usize);
+            state.search_field = Some(search_field as usize);
+            state.search_label = Some(search_label as usize);
+            state.help_panel = Some(help_panel as usize);
+            state.help_hold_label = Some(hold_label as usize);
+            state.help_toggle_label = Some(toggle_label as usize);
+            state.agent_scroll_view = Some(agent_scroll as usize);
+            state.agent_container = Some(agent_container as usize);
+            state.agent_input_bar = Some(input_bar as usize);
+            state.agent_input_scroll_view = Some(agent_input_scroll as usize);
+            state.agent_input_text_view = Some(agent_input_text_view as usize);
+            state.agent_input_field = None;
+            state.agent_attach_button = Some(agent_attach_button as usize);
+            state.agent_send_button = Some(agent_send_button as usize);
+            state.transcription_scroll_view = Some(transcription_scroll as usize);
+            state.transcription_text_view = Some(transcription_text_view as usize);
+            state.transcription_placeholder = Some(placeholder_view as usize);
+            state.transcription_edge_effect = Some(transcription_edge_effect as usize);
+            state.action_handler = Some(action_handler as usize);
+            let pending_tab = state.pending_tab.take();
+            state.active_tab = pending_tab.unwrap_or(Tab::Drawer);
 
+            let has_messages = !state.messages.is_empty();
+            let desired_tab = if let Some(tab) = pending_tab {
+                tab
+            } else if has_messages {
+                Tab::Agent
+            } else {
+                state.active_tab
+            };
+            let status_text = state.status_text.clone();
+            (has_messages, desired_tab, status_text)
+        }; // OVERLAY_STATE released — safe to perform AppKit window operations.
+
+        // Phase 4 — show window (no lock held; avoids nested-runloop deadlock).
         window_set_alpha(window, 0.0);
         window_show(window);
         crate::ui_helpers::animate_fade(window, 1.0, 0.2);
+        let is_visible: bool = msg_send![window, isVisible];
+        let alpha: f64 = msg_send![window, alphaValue];
+        debug!(
+            "Voice chat overlay visible={} alpha={:.2}",
+            is_visible, alpha
+        );
 
-        let has_messages = !state.messages.is_empty();
-        let desired_tab = if let Some(tab) = pending_tab {
-            tab
-        } else if has_messages {
-            Tab::Agent
-        } else {
-            state.active_tab
-        };
-        let status_text = state.status_text.clone();
-        drop(state);
+        // Safety fallback: ensure the overlay becomes visible even if the fade animation stalls.
+        let window_ptr = window as usize;
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            Queue::main().exec_async(move || {
+                let ns_window = Class::get("NSWindow").unwrap();
+                let window = window_ptr as Id;
+                let is_window: bool = msg_send![window, isKindOfClass: ns_window];
+                if !is_window {
+                    return;
+                }
+                let _: () = msg_send![window, setAlphaValue: 1.0f64];
+                let _: () = msg_send![window, orderFrontRegardless];
+            });
+        });
+
+        // Phase 5 — post-show updates.
         api::refresh_drawer();
         api::update_voice_chat_status(&status_text);
         update_active_tab_impl(desired_tab);

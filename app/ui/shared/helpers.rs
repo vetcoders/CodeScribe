@@ -428,20 +428,18 @@ fn insets_from_frame(bounds: CGRect, frame: CGRect) -> NSEdgeInsets {
 pub fn create_glass_effect_view(frame: CGRect, material: NSVisualEffectMaterial) -> Id {
     unsafe {
         if let Some(glass_cls) = Class::get("NSGlassEffectView") {
-            let supports_material: bool =
-                msg_send![glass_cls, instancesRespondToSelector: sel!(setMaterial:)];
+            let view: Id = msg_send![glass_cls, alloc];
+            let view: Id = msg_send![view, initWithFrame: frame];
+            let supports_material: bool = msg_send![view, respondsToSelector: sel!(setMaterial:)];
             if supports_material {
-                let view: Id = msg_send![glass_cls, alloc];
-                let view: Id = msg_send![view, initWithFrame: frame];
                 let _: () = msg_send![view, setMaterial: material];
                 let supports_blend: bool =
-                    msg_send![glass_cls, instancesRespondToSelector: sel!(setBlendingMode:)];
+                    msg_send![view, respondsToSelector: sel!(setBlendingMode:)];
                 if supports_blend {
                     let _: () =
                         msg_send![view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
                 }
-                let supports_state: bool =
-                    msg_send![glass_cls, instancesRespondToSelector: sel!(setState:)];
+                let supports_state: bool = msg_send![view, respondsToSelector: sel!(setState:)];
                 if supports_state {
                     let _: () = msg_send![view, setState: NSVisualEffectState::Active];
                 }
