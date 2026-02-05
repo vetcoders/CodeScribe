@@ -3,6 +3,7 @@
 //! Contains Objective-C class registration and action handler functions.
 
 use core_graphics::geometry::{CGPoint, CGRect};
+use dispatch::Queue;
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{msg_send, sel, sel_impl};
@@ -622,14 +623,27 @@ extern "C" fn on_tab_settings(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_copy_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
-    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(msg) = state
+    // IMPORTANT: do not block the main thread on OVERLAY_STATE. Some UI updates (e.g. setting
+    // NSTextView contents) can synchronously re-enter handlers and would deadlock with a
+    // blocking lock().
+    let state = match OVERLAY_STATE.try_lock() {
+        Ok(state) => state,
+        Err(_) => {
+            warn!("on_copy_last_response: OVERLAY_STATE busy; skipping");
+            return;
+        }
+    };
+
+    let text = state
         .messages
         .iter()
         .rev()
         .find(|m| m.role == ChatRole::Assistant)
-    {
-        copy_to_clipboard(&msg.text);
+        .map(|m| m.text.clone());
+    drop(state);
+
+    if let Some(text) = text {
+        copy_to_clipboard(&text);
         info!("Copied last assistant response to clipboard");
     } else {
         info!("No assistant response to copy");
@@ -637,7 +651,14 @@ extern "C" fn on_copy_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_paste_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
-    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    // See on_copy_last_response: avoid blocking lock() on the main thread.
+    let state = match OVERLAY_STATE.try_lock() {
+        Ok(state) => state,
+        Err(_) => {
+            warn!("on_paste_last_response: OVERLAY_STATE busy; skipping");
+            return;
+        }
+    };
     let text = state
         .messages
         .iter()
@@ -681,9 +702,18 @@ extern "C" fn on_paste_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
 extern "C" fn on_copy_message(_this: &Object, _cmd: Sel, sender: Id) {
     let index: isize = unsafe { msg_send![sender, tag] };
     let index = index.max(0) as usize;
-    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = match OVERLAY_STATE.try_lock() {
+        Ok(state) => state,
+        Err(_) => {
+            warn!("on_copy_message: OVERLAY_STATE busy; skipping");
+            return;
+        }
+    };
+
     if let Some(message) = state.messages.get(index) {
-        copy_to_clipboard(&message.text);
+        let text = message.text.clone();
+        drop(state);
+        copy_to_clipboard(&text);
     }
 }
 
@@ -717,12 +747,17 @@ extern "C" fn on_search_changed(_this: &Object, _cmd: Sel, sender: Id) {
 }
 
 extern "C" fn on_new_thread(_this: &Object, _cmd: Sel, _sender: Id) {
-    clear_voice_chat_text_impl();
+    // Schedule to avoid re-entrancy deadlocks (AppKit may invoke handlers synchronously).
+    Queue::main().exec_async(|| {
+        clear_voice_chat_text_impl();
+    });
     info!("New thread started");
 }
 
 extern "C" fn on_toggle_favorites_only(_this: &Object, _cmd: Sel, _sender: Id) {
-    toggle_drawer_favorites_only_impl();
+    Queue::main().exec_async(|| {
+        toggle_drawer_favorites_only_impl();
+    });
     info!("Toggled Drawer favorites-only filter");
 }
 
@@ -737,12 +772,16 @@ extern "C" fn on_show_overlay(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_commit_message(_this: &Object, _cmd: Sel, _sender: Id) {
-    commit_last_user_message_impl();
+    Queue::main().exec_async(|| {
+        commit_last_user_message_impl();
+    });
     info!("Draft message committed");
 }
 
 extern "C" fn on_discard_message(_this: &Object, _cmd: Sel, _sender: Id) {
-    discard_last_message_impl();
+    Queue::main().exec_async(|| {
+        discard_last_message_impl();
+    });
     info!("Draft message discarded");
 }
 
@@ -834,33 +873,41 @@ extern "C" fn on_export_menu(this: &Object, _cmd: Sel, sender: Id) {
 }
 
 extern "C" fn on_export_all_copy(_this: &Object, _cmd: Sel, _sender: Id) {
-    let md = super::api::export_chat_markdown(false);
-    copy_to_clipboard(&md);
-    info!("Exported chat (all) to clipboard as Markdown");
+    Queue::main().exec_async(|| {
+        let md = super::api::export_chat_markdown(false);
+        copy_to_clipboard(&md);
+        info!("Exported chat (all) to clipboard as Markdown");
+    });
 }
 
 extern "C" fn on_export_all_save(_this: &Object, _cmd: Sel, _sender: Id) {
-    if let Some(path) = super::api::save_chat_markdown_to_history(false) {
-        info!("Saved chat (all) export to {}", path.display());
-        super::api::refresh_drawer();
-    } else {
-        info!("Failed to save chat (all) export");
-    }
+    Queue::main().exec_async(|| {
+        if let Some(path) = super::api::save_chat_markdown_to_history(false) {
+            info!("Saved chat (all) export to {}", path.display());
+            super::api::refresh_drawer();
+        } else {
+            info!("Failed to save chat (all) export");
+        }
+    });
 }
 
 extern "C" fn on_export_assistant_copy(_this: &Object, _cmd: Sel, _sender: Id) {
-    let md = super::api::export_chat_markdown(true);
-    copy_to_clipboard(&md);
-    info!("Exported chat (assistant-only) to clipboard as Markdown");
+    Queue::main().exec_async(|| {
+        let md = super::api::export_chat_markdown(true);
+        copy_to_clipboard(&md);
+        info!("Exported chat (assistant-only) to clipboard as Markdown");
+    });
 }
 
 extern "C" fn on_export_assistant_save(_this: &Object, _cmd: Sel, _sender: Id) {
-    if let Some(path) = super::api::save_chat_markdown_to_history(true) {
-        info!("Saved chat (assistant-only) export to {}", path.display());
-        super::api::refresh_drawer();
-    } else {
-        info!("Failed to save chat (assistant-only) export");
-    }
+    Queue::main().exec_async(|| {
+        if let Some(path) = super::api::save_chat_markdown_to_history(true) {
+            info!("Saved chat (assistant-only) export to {}", path.display());
+            super::api::refresh_drawer();
+        } else {
+            info!("Failed to save chat (assistant-only) export");
+        }
+    });
 }
 
 extern "C" fn on_more_menu(this: &Object, _cmd: Sel, sender: Id) {
@@ -946,7 +993,10 @@ extern "C" fn on_do_command_by_selector(
         if shift_held {
             return false; // Let NSTextView insert a newline.
         }
-        send_draft_message_impl();
+        // Schedule send after the current AppKit event returns to avoid re-entrancy deadlocks.
+        Queue::main().exec_async(|| {
+            send_draft_message_impl();
+        });
         return true; // Handled: don't insert newline.
     }
     false // All other commands: default behaviour.
@@ -974,12 +1024,17 @@ pub fn copy_to_clipboard(text: &str) {
 }
 
 pub fn clear_search_field() {
-    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = match OVERLAY_STATE.try_lock() {
+        Ok(state) => state,
+        Err(_) => {
+            warn!("clear_search_field: OVERLAY_STATE busy; skipping");
+            return;
+        }
+    };
+
     if let Some(search_field) = state.search_field {
         unsafe {
             set_text_field_string(search_field as Id, "");
-        }
-        unsafe {
             set_hidden(search_field as Id, false);
         }
     }
