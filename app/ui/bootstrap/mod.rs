@@ -1381,6 +1381,7 @@ pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime
         }
 
         mark_keys_preset_custom();
+        crate::tray::refresh_hotkeys_menu_from_config();
     }
 }
 
@@ -1406,6 +1407,7 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
                 set_keys_popup_index(state.keys_hold_popup, 0);
                 set_keys_popup_index(state.keys_toggle_popup, 4);
                 set_keys_checkbox_state(state.keys_exclusive_checkbox, true);
+                crate::tray::refresh_hotkeys_menu_from_config();
             }
             // Safe (no toggles)
             1 => {
@@ -1425,9 +1427,11 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
                 set_keys_popup_index(state.keys_hold_popup, 0);
                 set_keys_popup_index(state.keys_toggle_popup, 0);
                 set_keys_checkbox_state(state.keys_exclusive_checkbox, false);
+                crate::tray::refresh_hotkeys_menu_from_config();
             }
             _ => {
                 info!("Settings: hotkey preset -> custom");
+                crate::tray::refresh_hotkeys_menu_from_config();
             }
         }
     }
@@ -1448,6 +1452,7 @@ pub(super) extern "C" fn on_hold_exclusive_changed(
         hotkeys::set_exclusive_mode(hold_exclusive);
         send_menu_event(TrayMenuEvent::SetHoldExclusive(hold_exclusive));
         mark_keys_preset_custom();
+        crate::tray::refresh_hotkeys_menu_from_config();
     }
 }
 
@@ -1487,6 +1492,7 @@ pub(super) extern "C" fn on_toggle_trigger_changed(
         }
 
         mark_keys_preset_custom();
+        crate::tray::refresh_hotkeys_menu_from_config();
     }
 }
 

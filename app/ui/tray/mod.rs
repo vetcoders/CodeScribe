@@ -58,6 +58,7 @@ use tracing::{debug, info};
 use tray_icon::{TrayIconBuilder, menu::MenuEvent};
 
 // Re-export public API
+pub(crate) use handlers::refresh_hotkeys_menu_from_config;
 pub use menu::update_silero_vad_label;
 pub use menu::update_vad_preset_checks;
 pub use menu::{toggle_ai_formatting, update_quality_label};
