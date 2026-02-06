@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 
 use crate::os::hotkeys;
 use anyhow::Result;
+use codescribe_core::vad;
 use crossbeam_channel::TryRecvError;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -57,9 +58,12 @@ use tracing::{debug, info};
 use tray_icon::{TrayIconBuilder, menu::MenuEvent};
 
 // Re-export public API
+pub use menu::update_silero_vad_label;
+pub use menu::update_vad_preset_checks;
 pub use menu::{toggle_ai_formatting, update_quality_label};
+pub use state::send_menu_event;
 pub use state::{menu_event_receiver, update_tray_status};
-pub use types::{MenuIds, TrayMenuEvent, TrayStatus};
+pub use types::{MenuIds, TrayMenuEvent, TrayStatus, VadPreset};
 
 // ============================================================================
 // Shutdown Management
@@ -154,6 +158,7 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
 
     // Poll interval for checking channels
     let poll_interval = Duration::from_millis(100);
+    let mut last_menu_refresh = Instant::now();
 
     // Run the event loop
     event_loop.run(move |event, _, control_flow| {
@@ -170,6 +175,7 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
         // Check for programmatic shutdown request
         if is_shutdown_requested() {
             info!("Shutdown flag detected, performing cleanup...");
+            vad::shutdown();
             *control_flow = ControlFlow::Exit;
             return;
         }
@@ -177,6 +183,14 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
         // Process hotkey events (integrated with main event loop for macOS)
         if let Some(ref hk_manager) = hotkey_manager {
             hk_manager.process_events();
+        }
+
+        // Periodic menu label refresh (must run on main thread)
+        if last_menu_refresh.elapsed() >= Duration::from_secs(2) {
+            menu::update_quality_label();
+            menu::update_silero_vad_label();
+            menu::update_vad_preset_checks();
+            last_menu_refresh = Instant::now();
         }
 
         // Check for status updates (non-blocking)
@@ -217,6 +231,7 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
             // Handle Quit specially to exit event loop
             if event.id == menu_ids.quit {
                 info!("Quit requested via menu, exiting...");
+                vad::shutdown();
                 *control_flow = ControlFlow::Exit;
             }
         }

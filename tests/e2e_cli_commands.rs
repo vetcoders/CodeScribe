@@ -29,6 +29,14 @@ fn cli_binary() -> PathBuf {
     if release.exists() { release } else { debug }
 }
 
+/// Build a CLI command with test-safe env defaults.
+fn cli_command() -> Command {
+    let mut cmd = Command::new(cli_binary());
+    // Never touch the real Keychain in tests.
+    cmd.env("CODESCRIBE_DISABLE_KEYCHAIN", "1");
+    cmd
+}
+
 /// Path to test audio file
 fn test_audio_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets/1.fretka-Ziggy.mp3")
@@ -55,7 +63,7 @@ fn ensure_cli_built() {
 fn test_cli_help() {
     ensure_cli_built();
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .arg("--help")
         .output()
         .expect("Failed to run CLI");
@@ -75,7 +83,7 @@ fn test_cli_help() {
 fn test_cli_version() {
     ensure_cli_built();
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .arg("--version")
         .output()
         .expect("Failed to run CLI");
@@ -101,7 +109,7 @@ fn test_cli_no_args() {
         return;
     }
 
-    let mut child = Command::new(cli_binary())
+    let mut child = cli_command()
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -122,7 +130,7 @@ fn test_cli_no_args() {
 fn test_cli_transcribe_help() {
     ensure_cli_built();
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .args(["transcribe", "--help"])
         .output()
         .expect("Failed to run CLI");
@@ -152,7 +160,7 @@ fn test_cli_config_creates_default() {
     let config_path = config_dir.join(".env");
 
     // Run with custom HOME to isolate
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .arg("--config")
         .env("HOME", tmp.path())
         // Prevent editor from opening (no TTY)
@@ -178,7 +186,7 @@ fn test_cli_config_creates_default() {
 fn test_cli_transcribe_file_not_found() {
     ensure_cli_built();
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .args(["transcribe", "/nonexistent/audio.wav"])
         .output()
         .expect("Failed to run CLI");
@@ -218,7 +226,7 @@ fn test_cli_transcribe_real_audio() {
         return;
     }
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .args(["transcribe", audio_path.to_str().unwrap(), "-l", "pl"])
         .output()
         .expect("Failed to run CLI");
@@ -258,7 +266,7 @@ fn test_cli_transcribe_with_language() {
         return;
     }
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .args([
             "transcribe",
             audio_path.to_str().unwrap(),
@@ -281,7 +289,7 @@ fn test_cli_transcribe_with_language() {
 fn test_cli_invalid_subcommand() {
     ensure_cli_built();
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .args(["invalid-command"])
         .output()
         .expect("Failed to run CLI");
@@ -297,7 +305,7 @@ fn test_cli_invalid_subcommand() {
 fn test_cli_transcribe_missing_file() {
     ensure_cli_built();
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .args(["transcribe"])
         .output()
         .expect("Failed to run CLI");
@@ -333,7 +341,7 @@ fn test_cli_transcribe_streaming_output() {
         return;
     }
 
-    let output = Command::new(cli_binary())
+    let output = cli_command()
         .args([
             "transcribe",
             "--stream",

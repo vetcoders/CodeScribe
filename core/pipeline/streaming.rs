@@ -8,7 +8,7 @@
 
 use crate::audio::chunker::{SpeechEvent, SpeechSession};
 use crate::pipeline::dedup::{dedup_chunk_overlap, strip_suffix_overlap};
-use crate::pipeline::stream_postprocess::{LexiconPostProcessor, StreamPostProcessor};
+use crate::pipeline::stream_postprocess::StreamPostProcessor;
 use crate::stt::whisper;
 use crate::stt::whisper::singleton::engine as get_engine;
 use anyhow::{Result, anyhow};
@@ -84,7 +84,7 @@ pub(crate) fn is_hallucination(text: &str) -> bool {
 
 pub(crate) struct TranscriptionPipeline {
     pub(crate) language: Option<String>,
-    pub(crate) postprocessor: LexiconPostProcessor,
+    pub(crate) postprocessor: StreamPostProcessor,
     pub(crate) last_suffix: String,
     pub(crate) hallucination_drops: u64,
     pub(crate) overlap_strips: u64,
@@ -94,7 +94,7 @@ impl TranscriptionPipeline {
     pub(crate) fn new(language: Option<String>) -> Self {
         Self {
             language,
-            postprocessor: LexiconPostProcessor::new(),
+            postprocessor: StreamPostProcessor::new(),
             last_suffix: String::new(),
             hallucination_drops: 0,
             overlap_strips: 0,
@@ -134,6 +134,7 @@ pub(crate) struct BufferedEmitter {
     initial_delay_ms: u64,
     typing_speed_cps: f32,
     emit_words_max: usize,
+    correction_prefix_ratio: f64,
     first_output_at: Option<Instant>,
     current_segment: Option<String>,
     current_tokens: Vec<String>,
@@ -161,6 +162,7 @@ impl BufferedEmitter {
             typing_speed_cps: env_f32("CODESCRIBE_TYPING_CPS", DEFAULT_TYPING_CPS).max(5.0),
             emit_words_max: env_usize("CODESCRIBE_EMIT_WORDS_MAX", DEFAULT_EMIT_WORDS_MAX)
                 .clamp(1, 10),
+            correction_prefix_ratio: buffered_correction_prefix_ratio(),
             first_output_at: None,
             current_segment: None,
             current_tokens: Vec::new(),
@@ -177,12 +179,18 @@ impl BufferedEmitter {
         }
     }
 
+    pub(crate) fn note_audio_activity(&mut self) {
+        if self.first_output_at.is_none() {
+            self.first_output_at = Some(Instant::now());
+        }
+    }
+
     pub(crate) fn push_correction(&mut self, corrected: String) {
         if self.emitted_text.is_empty() {
             return;
         }
         // Guard: reject corrections that would rewrite most of the text.
-        // Common-prefix must cover >= 70% of the shorter string.
+        // Common-prefix must cover >= ratio (default: 60%) of the shorter string.
         let prefix_len = self
             .emitted_text
             .chars()
@@ -194,12 +202,13 @@ impl BufferedEmitter {
             .chars()
             .count()
             .min(corrected.chars().count());
-        if min_len > 0 && (prefix_len as f64 / min_len as f64) < 0.70 {
+        if min_len > 0 && (prefix_len as f64 / min_len as f64) < self.correction_prefix_ratio {
             debug!(
-                "Correction rejected: common prefix {}/{} ({:.0}%) < 70%",
+                "Correction rejected: common prefix {}/{} ({:.0}%) < {:.0}%",
                 prefix_len,
                 min_len,
                 prefix_len as f64 / min_len as f64 * 100.0,
+                self.correction_prefix_ratio * 100.0,
             );
             return;
         }
@@ -419,11 +428,15 @@ pub(crate) async fn buffered_transcription_worker(
     sample_rate: u32,
     language: Option<String>,
     delta_callback: Option<Arc<dyn DeltaSink>>,
+    vad_stop_callback: Option<Arc<dyn Fn() + Send + Sync>>,
     stream_log_path: Option<std::path::PathBuf>,
 ) {
     info!("Buffered transcription worker started");
 
+    let correction_min_utterances = buffered_correction_min_utterances();
+    let correction_min_sec = buffered_correction_min_sec();
     let mut session = SpeechSession::new_utterance(sample_rate);
+    let mut vad_stop_emitted = false;
     let mut pipeline = TranscriptionPipeline::new(language);
     let emitter = Arc::new(Mutex::new(BufferedEmitter::new(
         transcript_buffer.clone(),
@@ -436,10 +449,22 @@ pub(crate) async fn buffered_transcription_worker(
     let mut correction_audio_buf: Vec<f32> = Vec::new();
     let mut utterance_count: usize = 0;
     let mut suffix_snapshot = String::new();
+    let mut seen_audio = false;
 
     while let Some(data) = chunk_receiver.recv().await {
+        if !seen_audio {
+            seen_audio = true;
+            let mut guard = emitter.lock().await;
+            guard.note_audio_activity();
+        }
         for event in session.feed(&data, sample_rate) {
             if let SpeechEvent::Utterance(utterance) = event {
+                if !vad_stop_emitted {
+                    if let Some(callback) = &vad_stop_callback {
+                        callback();
+                    }
+                    vad_stop_emitted = true;
+                }
                 if utterance_count == 0 && correction_audio_buf.is_empty() {
                     suffix_snapshot = pipeline.last_suffix.clone();
                 }
@@ -462,7 +487,9 @@ pub(crate) async fn buffered_transcription_worker(
                 utterance_count += 1;
 
                 let audio_duration_s = correction_audio_buf.len() as f32 / sample_rate as f32;
-                if utterance_count >= 3 || audio_duration_s >= 10.0 {
+                if utterance_count >= correction_min_utterances
+                    || audio_duration_s >= correction_min_sec
+                {
                     let audio = std::mem::take(&mut correction_audio_buf);
                     let lang = pipeline.language.clone();
 
@@ -509,6 +536,10 @@ pub(crate) async fn buffered_transcription_worker(
         .await
     {
         error!("Final buffered transcription failed: {}", e);
+    }
+
+    if !vad_stop_emitted && let Some(callback) = &vad_stop_callback {
+        callback();
     }
 
     {
@@ -590,7 +621,7 @@ async fn process_chunk(
                 let cleaned = if let Some(processor) = postprocessor.as_mut() {
                     processor.process(&text)
                 } else {
-                    let cleaned = crate::pipeline::stream_postprocess::normalize_whitespace(&text);
+                    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
                     if cleaned.trim().is_empty() {
                         None
                     } else {
@@ -714,7 +745,59 @@ pub fn transcribe_streaming_samples(
         out.split_whitespace().count()
     );
 
+    // Optional: apply lexicon post-processing to streaming output.
+    // Disabled by default to preserve legacy behavior.
+    if env_bool_default("CODESCRIBE_STREAM_LEXICON", false) && !out.trim().is_empty() {
+        let mut lex = StreamPostProcessor::new();
+        if let Some(cleaned) = lex.process(&out) {
+            out = cleaned;
+        }
+    }
+
     Ok(out)
+}
+
+/// Public helper: run the buffered (overlay) pipeline on in-memory samples.
+///
+/// This mirrors the live overlay behavior (VAD → utterance → buffered emitter),
+/// but runs on a finite sample buffer for test/CLI comparisons.
+pub async fn transcribe_buffered_samples(
+    samples: &[f32],
+    sample_rate: u32,
+    language: Option<String>,
+) -> Result<String> {
+    if samples.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Simulate live callback cadence (~100ms) to keep VAD/utterance behavior realistic.
+    let chunk_size = ((sample_rate as f32) * 0.1).round().max(1.0) as usize;
+
+    let (tx, rx) = mpsc::channel::<Vec<f32>>(8);
+    let transcript_buffer = Arc::new(Mutex::new(String::new()));
+
+    let worker = tokio::spawn(buffered_transcription_worker(
+        rx,
+        transcript_buffer.clone(),
+        sample_rate,
+        language,
+        None,
+        None,
+        None,
+    ));
+
+    for chunk in samples.chunks(chunk_size) {
+        if tx.send(chunk.to_vec()).await.is_err() {
+            return Err(anyhow!("Buffered transcription worker dropped channel"));
+        }
+    }
+    drop(tx);
+
+    worker
+        .await
+        .map_err(|e| anyhow!("Buffered transcription worker join error: {}", e))?;
+
+    Ok(transcript_buffer.lock().await.clone())
 }
 
 // ── Delta helpers ────────────────────────────────────────────────────────────
@@ -823,6 +906,18 @@ fn env_usize(key: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(default)
+}
+
+fn buffered_correction_min_utterances() -> usize {
+    env_usize("CODESCRIBE_BUFFERED_CORRECTION_UTTERANCES", 2).clamp(1, 10)
+}
+
+fn buffered_correction_min_sec() -> f32 {
+    env_f32("CODESCRIBE_BUFFERED_CORRECTION_SEC", 6.0).clamp(1.0, 60.0)
+}
+
+fn buffered_correction_prefix_ratio() -> f64 {
+    env_f32("CODESCRIBE_BUFFERED_CORRECTION_PREFIX", 0.60).clamp(0.4, 0.9) as f64
 }
 
 pub(crate) fn stream_chunk_duration_sec() -> f32 {

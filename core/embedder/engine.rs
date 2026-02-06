@@ -393,20 +393,23 @@ fn pad_to(vec: &mut Vec<u32>, target_len: usize, pad: u32) {
 
 fn mean_pool(hidden: &Tensor, mask: &Tensor) -> Result<Tensor> {
     // hidden: [batch, seq, hidden], mask: [batch, seq]
+    let dtype = hidden.dtype();
+    let mask = mask.to_dtype(dtype)?;
     let mask = mask.unsqueeze(2)?; // [batch, seq, 1]
     let masked = hidden.broadcast_mul(&mask)?;
     let sum = masked.sum(1)?; // [batch, hidden]
     let counts = mask.sum(1)?; // [batch, 1]
-    let eps = Tensor::from_vec(vec![1e-9f32], (1,), hidden.device())?;
+    let eps = Tensor::from_vec(vec![1e-9f32], (1,), hidden.device())?.to_dtype(dtype)?;
     let counts = counts.broadcast_add(&eps)?;
     Ok(sum.broadcast_div(&counts)?)
 }
 
 fn l2_normalize(t: &Tensor) -> Result<Tensor> {
+    let dtype = t.dtype();
     let squared = t.sqr()?;
     let sum = squared.sum(1)?.unsqueeze(1)?;
     let norm = sum.sqrt()?;
-    let eps = Tensor::from_vec(vec![1e-9f32], (1,), t.device())?;
+    let eps = Tensor::from_vec(vec![1e-9f32], (1,), t.device())?.to_dtype(dtype)?;
     let norm = norm.broadcast_add(&eps)?;
     Ok(t.broadcast_div(&norm)?)
 }
