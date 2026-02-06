@@ -13,7 +13,8 @@ mod state;
 pub use api::{
     add_voice_chat_error_message, add_voice_chat_user_message, append_transcription_delta,
     append_voice_chat_assistant_delta, append_voice_chat_user_delta, clear_transcription_text,
-    clear_voice_chat_text, filter_drawer, hide_voice_chat_overlay, is_auto_send_enabled,
+    clear_voice_chat_text, filter_drawer, finalize_voice_chat_assistant_message,
+    finalize_voice_chat_user_message, hide_voice_chat_overlay, is_auto_send_enabled,
     is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
     request_settings_tab_on_open, reset_voice_chat_activity, send_voice_chat_draft,
     set_transcription_text, set_voice_chat_send_callback, set_voice_chat_sending,
@@ -308,6 +309,13 @@ fn show_voice_chat_overlay_impl() {
             }
             let _: () = msg_send![header_layer, setMasksToBounds: true];
         }
+        let header_controls: Id = msg_send![Class::get("NSView").unwrap(), alloc];
+        let header_controls: Id = msg_send![header_controls, initWithFrame: header_frame];
+        let _: () = msg_send![header_controls, setWantsLayer: true];
+        let _: () = msg_send![
+            header_controls,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MIN_Y_MARGIN
+        ];
         let title_x = ui_tokens::EDGE_PADDING_TIGHT;
         let title_y = ((header_height - 20.0) / 2.0).max(0.0);
         // Give the tab control more room to avoid truncation ("Dr..." / "A...").
@@ -326,7 +334,7 @@ fn show_voice_chat_overlay_impl() {
             title_label,
             setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        add_subview(header_bg, title_label);
+        add_subview(header_controls, title_label);
 
         // Header right-side controls (right-aligned, consistent spacing).
         let btn_w = ui_tokens::HEADER_BUTTON_SIZE;
@@ -372,7 +380,7 @@ fn show_voice_chat_overlay_impl() {
             setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
         set_focus_ring(tab_drawer_button);
-        add_subview(header_bg, tab_drawer_button);
+        add_subview(header_controls, tab_drawer_button);
 
         let tab_transcription_button = create_button(
             CGRect::new(
@@ -395,7 +403,7 @@ fn show_voice_chat_overlay_impl() {
             setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
         set_focus_ring(tab_transcription_button);
-        add_subview(header_bg, tab_transcription_button);
+        add_subview(header_controls, tab_transcription_button);
 
         let tab_agent_button = create_button(
             CGRect::new(
@@ -414,7 +422,7 @@ fn show_voice_chat_overlay_impl() {
             setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
         set_focus_ring(tab_agent_button);
-        add_subview(header_bg, tab_agent_button);
+        add_subview(header_controls, tab_agent_button);
 
         let tab_settings_button = create_button(
             CGRect::new(
@@ -433,7 +441,7 @@ fn show_voice_chat_overlay_impl() {
             setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
         set_focus_ring(tab_settings_button);
-        add_subview(header_bg, tab_settings_button);
+        add_subview(header_controls, tab_settings_button);
 
         // Status pill (global status: Idle / Listening / Processing / Error).
         let status_pill_h = ui_tokens::STATUS_PILL_HEIGHT;
@@ -492,7 +500,7 @@ fn show_voice_chat_overlay_impl() {
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MIN_Y_MARGIN
         ];
         add_subview(status_pill, status_label);
-        add_subview(header_bg, status_pill);
+        add_subview(header_controls, status_pill);
 
         let export_button = create_button(
             CGRect::new(
@@ -513,7 +521,7 @@ fn show_voice_chat_overlay_impl() {
             export_button,
             setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        add_subview(header_bg, export_button);
+        add_subview(header_controls, export_button);
 
         // Drawer favorites filter (hearts on/off)
         let favorites_button = create_button(
@@ -536,7 +544,7 @@ fn show_voice_chat_overlay_impl() {
             favorites_button,
             setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        add_subview(header_bg, favorites_button);
+        add_subview(header_controls, favorites_button);
 
         let more_button = create_button(
             CGRect::new(
@@ -557,7 +565,7 @@ fn show_voice_chat_overlay_impl() {
             more_button,
             setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        add_subview(header_bg, more_button);
+        add_subview(header_controls, more_button);
 
         let close_button = create_button(
             CGRect::new(
@@ -578,7 +586,7 @@ fn show_voice_chat_overlay_impl() {
             close_button,
             setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        add_subview(header_bg, close_button);
+        add_subview(header_controls, close_button);
 
         // Drawer/Agent split view (system sidebar glass)
         let content_gap = ui_tokens::CONTENT_GAP;
@@ -681,6 +689,7 @@ fn show_voice_chat_overlay_impl() {
         add_subview(blur_view, split_view);
         // Ensure header stays on top of content.
         add_subview(blur_view, header_bg);
+        add_subview(blur_view, header_controls);
 
         let inner_pad = ui_tokens::EDGE_PADDING_TIGHT;
         let drawer_frame = CGRect::new(

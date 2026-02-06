@@ -167,9 +167,9 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
         *control_flow = ControlFlow::WaitUntil(Instant::now() + poll_interval);
 
         // Handle dock icon click (macOS Reopen event)
-        // Note: GUI was removed, dock click now just logs the event
         if let Event::Reopen { .. } = event {
-            debug!("Dock icon clicked (no GUI available)");
+            debug!("Dock icon clicked → opening Settings window");
+            crate::show_bootstrap_overlay();
             return;
         }
 

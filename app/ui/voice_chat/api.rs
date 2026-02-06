@@ -73,6 +73,13 @@ pub fn set_voice_chat_user_text(text: &str) {
     });
 }
 
+/// Finalize the latest user message without changing its text.
+pub fn finalize_voice_chat_user_message() {
+    Queue::main().exec_async(|| {
+        finalize_user_message_state_only_impl();
+    });
+}
+
 /// Append a delta to the assistant response (streaming)
 pub fn append_voice_chat_assistant_delta(delta: &str) {
     let delta_owned = delta.to_string();
@@ -86,6 +93,13 @@ pub fn set_voice_chat_text(text: &str) {
     let text_owned = text.to_string();
     Queue::main().exec_async(move || {
         finalize_assistant_message_impl(&text_owned, false);
+    });
+}
+
+/// Finalize the latest assistant message without changing its text.
+pub fn finalize_voice_chat_assistant_message() {
+    Queue::main().exec_async(|| {
+        finalize_assistant_message_state_only_impl(false);
     });
 }
 
@@ -861,6 +875,22 @@ fn finalize_user_message_impl(text: &str) {
     update_chat_view_with_state(&mut state, true);
 }
 
+fn finalize_user_message_state_only_impl() {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = state
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|msg| msg.role == ChatRole::User)
+    {
+        last.is_streaming = false;
+        last.is_error = false;
+    } else {
+        return;
+    }
+    update_chat_view_with_state(&mut state, true);
+}
+
 fn finalize_assistant_message_impl(text: &str, is_error: bool) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     ensure_agent_tab_visible(&mut state);
@@ -869,6 +899,24 @@ fn finalize_assistant_message_impl(text: &str, is_error: bool) {
         last.text = text.to_string();
         last.is_streaming = false;
         last.is_error = is_error;
+    }
+    state.is_sending = false;
+    update_chat_view_with_state(&mut state, true);
+    update_send_button_with_state(&mut state);
+}
+
+fn finalize_assistant_message_state_only_impl(is_error: bool) {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = state
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|msg| msg.role == ChatRole::Assistant)
+    {
+        last.is_streaming = false;
+        last.is_error = is_error;
+    } else {
+        return;
     }
     state.is_sending = false;
     update_chat_view_with_state(&mut state, true);

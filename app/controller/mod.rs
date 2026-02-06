@@ -145,6 +145,10 @@ pub struct RecordingController {
     /// Assistive hands-off loop active (Right Option toggle)
     assistive_loop_active: Arc<AtomicBool>,
 
+    /// Toggle session: track whether we've already appended user/assistant text
+    toggle_user_has_text: Arc<AtomicBool>,
+    toggle_assistant_has_text: Arc<AtomicBool>,
+
     /// Best-effort selected-text/app context captured for assistive sessions.
     ///
     /// Must be captured BEFORE showing any overlay window, because overlays
@@ -228,6 +232,8 @@ impl RecordingController {
             serial_lock: Arc::new(Mutex::new(())),
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
+            toggle_user_has_text: Arc::new(AtomicBool::new(false)),
+            toggle_assistant_has_text: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
             opened_voice_chat_overlay_for_transcription: Arc::new(AtomicBool::new(false)),
             // Conversation mode (lazy init)
@@ -290,6 +296,8 @@ impl RecordingController {
             serial_lock: Arc::new(Mutex::new(())),
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
+            toggle_user_has_text: Arc::new(AtomicBool::new(false)),
+            toggle_assistant_has_text: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
             opened_voice_chat_overlay_for_transcription: Arc::new(AtomicBool::new(false)),
             // Conversation mode (lazy init)
@@ -1161,6 +1169,9 @@ impl RecordingController {
         }
         self.assistive_loop_active
             .store(is_assistive, Ordering::SeqCst);
+        self.toggle_user_has_text.store(false, Ordering::SeqCst);
+        self.toggle_assistant_has_text
+            .store(false, Ordering::SeqCst);
 
         info!("Starting toggle recording (session={})", new_session_id);
 
@@ -1330,6 +1341,8 @@ impl RecordingController {
 
         let config = self.config.read().await.clone();
         let language_opt = Some(config.whisper_language.as_str().to_string());
+        let user_needs_separator = self.toggle_user_has_text.load(Ordering::SeqCst);
+        let assistant_needs_separator = self.toggle_assistant_has_text.load(Ordering::SeqCst);
 
         let result = self
             .process_transcript_text_pipeline(
@@ -1345,6 +1358,9 @@ impl RecordingController {
                 None,
                 None,
                 None,
+                true,
+                user_needs_separator,
+                assistant_needs_separator,
             )
             .await;
 
@@ -1384,6 +1400,15 @@ impl RecordingController {
         *self.force_ai_mode.write().await = false;
         *self.session_id.write().await = None;
         self.assistive_loop_active.store(false, Ordering::SeqCst);
+        if self.toggle_user_has_text.load(Ordering::SeqCst) {
+            crate::voice_chat_ui::finalize_voice_chat_user_message();
+        }
+        if self.toggle_assistant_has_text.load(Ordering::SeqCst) {
+            crate::voice_chat_ui::finalize_voice_chat_assistant_message();
+        }
+        self.toggle_user_has_text.store(false, Ordering::SeqCst);
+        self.toggle_assistant_has_text
+            .store(false, Ordering::SeqCst);
         set_assistive_session(false);
 
         hide_hold_badge();
@@ -1715,6 +1740,9 @@ impl RecordingController {
             audio_path,
             cloud_text_opt,
             cloud_handle,
+            false,
+            false,
+            false,
         )
         .await
     }
@@ -1734,6 +1762,9 @@ impl RecordingController {
         audio_path: Option<ValidatedAudioPath>,
         cloud_text_opt: Option<String>,
         cloud_handle: Option<JoinHandle<Result<String>>>,
+        append_mode: bool,
+        user_needs_separator: bool,
+        assistant_needs_separator: bool,
     ) -> Result<()> {
         let language_opt = language_opt.as_deref();
 
@@ -1801,7 +1832,15 @@ impl RecordingController {
             if chat_active {
                 // Finalize the streaming user draft into a bubble
                 crate::show_voice_chat_overlay();
-                crate::voice_chat_ui::set_voice_chat_user_text(&clean_text);
+                if append_mode {
+                    if user_needs_separator {
+                        crate::voice_chat_ui::append_voice_chat_user_delta("\n\n");
+                    }
+                    crate::voice_chat_ui::append_voice_chat_user_delta(&clean_text);
+                    self.toggle_user_has_text.store(true, Ordering::SeqCst);
+                } else {
+                    crate::voice_chat_ui::set_voice_chat_user_text(&clean_text);
+                }
                 crate::voice_chat_ui::show_agent_tab();
                 crate::voice_chat_ui::set_voice_chat_sending(true);
                 crate::voice_chat_ui::update_voice_chat_status("Thinking...");
@@ -1868,8 +1907,15 @@ impl RecordingController {
 
                 // Callback for streaming AI response to overlay
                 let delta_callback = if use_streaming && chat_active {
-                    Some(Arc::new(|text: &str| {
+                    let needs_prefix = append_mode && assistant_needs_separator;
+                    let prefix_sent = Arc::new(AtomicBool::new(false));
+                    let assistant_has_text = self.toggle_assistant_has_text.clone();
+                    Some(Arc::new(move |text: &str| {
+                        if needs_prefix && !prefix_sent.swap(true, Ordering::SeqCst) {
+                            crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
+                        }
                         crate::voice_chat_ui::append_voice_chat_assistant_delta(text);
+                        assistant_has_text.store(true, Ordering::SeqCst);
                     }) as Arc<dyn Fn(&str) + Send + Sync>)
                 } else {
                     None
@@ -1888,7 +1934,17 @@ impl RecordingController {
                             // Display AI response in overlay
                             crate::show_voice_chat_overlay();
                             crate::voice_chat_ui::update_voice_chat_status("AI Response:");
-                            crate::voice_chat_ui::set_voice_chat_text(&result.text);
+                            if append_mode {
+                                if assistant_needs_separator {
+                                    crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
+                                }
+                                crate::voice_chat_ui::append_voice_chat_assistant_delta(
+                                    &result.text,
+                                );
+                                self.toggle_assistant_has_text.store(true, Ordering::SeqCst);
+                            } else {
+                                crate::voice_chat_ui::set_voice_chat_text(&result.text);
+                            }
                             info!(
                                 "Assistive response displayed in overlay ({} chars)",
                                 result.text.len()
@@ -1940,7 +1996,15 @@ impl RecordingController {
                 crate::hide_transcription_overlay();
                 crate::show_voice_chat_overlay();
                 crate::show_agent_tab();
-                crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
+                if append_mode {
+                    if user_needs_separator {
+                        crate::voice_chat_ui::append_voice_chat_user_delta("\n\n");
+                    }
+                    crate::voice_chat_ui::append_voice_chat_user_delta(&clean_text);
+                    self.toggle_user_has_text.store(true, Ordering::SeqCst);
+                } else {
+                    crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
+                }
                 crate::voice_chat_ui::set_voice_chat_sending(true);
                 crate::voice_chat_ui::update_voice_chat_status("Formatting...");
 
@@ -1955,8 +2019,15 @@ impl RecordingController {
 
                 // Callback for streaming AI response to overlay
                 let delta_callback = if use_streaming {
-                    Some(Arc::new(|text: &str| {
+                    let needs_prefix = append_mode && assistant_needs_separator;
+                    let prefix_sent = Arc::new(AtomicBool::new(false));
+                    let assistant_has_text = self.toggle_assistant_has_text.clone();
+                    Some(Arc::new(move |text: &str| {
+                        if needs_prefix && !prefix_sent.swap(true, Ordering::SeqCst) {
+                            crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
+                        }
                         crate::voice_chat_ui::append_voice_chat_assistant_delta(text);
+                        assistant_has_text.store(true, Ordering::SeqCst);
                     }) as Arc<dyn Fn(&str) + Send + Sync>)
                 } else {
                     None
@@ -1974,7 +2045,15 @@ impl RecordingController {
                         // Display formatted text in overlay
                         crate::show_voice_chat_overlay();
                         crate::voice_chat_ui::update_voice_chat_status("Formatted:");
-                        crate::voice_chat_ui::set_voice_chat_text(&result.text);
+                        if append_mode {
+                            if assistant_needs_separator {
+                                crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
+                            }
+                            crate::voice_chat_ui::append_voice_chat_assistant_delta(&result.text);
+                            self.toggle_assistant_has_text.store(true, Ordering::SeqCst);
+                        } else {
+                            crate::voice_chat_ui::set_voice_chat_text(&result.text);
+                        }
                         info!(
                             "Formatted response displayed in overlay ({} chars)",
                             result.text.len()
@@ -2021,7 +2100,15 @@ impl RecordingController {
                 crate::hide_transcription_overlay();
                 crate::show_voice_chat_overlay();
                 crate::show_agent_tab();
-                crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
+                if append_mode {
+                    if user_needs_separator {
+                        crate::voice_chat_ui::append_voice_chat_user_delta("\n\n");
+                    }
+                    crate::voice_chat_ui::append_voice_chat_user_delta(&clean_text);
+                    self.toggle_user_has_text.store(true, Ordering::SeqCst);
+                } else {
+                    crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
+                }
                 crate::voice_chat_ui::set_voice_chat_sending(true);
                 crate::voice_chat_ui::update_voice_chat_status("Formatting...");
 
@@ -2036,8 +2123,15 @@ impl RecordingController {
 
                 // Callback for streaming AI response to overlay
                 let delta_callback = if use_streaming {
-                    Some(Arc::new(|text: &str| {
+                    let needs_prefix = append_mode && assistant_needs_separator;
+                    let prefix_sent = Arc::new(AtomicBool::new(false));
+                    let assistant_has_text = self.toggle_assistant_has_text.clone();
+                    Some(Arc::new(move |text: &str| {
+                        if needs_prefix && !prefix_sent.swap(true, Ordering::SeqCst) {
+                            crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
+                        }
                         crate::voice_chat_ui::append_voice_chat_assistant_delta(text);
+                        assistant_has_text.store(true, Ordering::SeqCst);
                     }) as Arc<dyn Fn(&str) + Send + Sync>)
                 } else {
                     None
@@ -2054,7 +2148,15 @@ impl RecordingController {
                     crate::ai_formatting::AiFormatStatus::Applied => {
                         // Display formatted text in overlay
                         crate::voice_chat_ui::update_voice_chat_status("Formatted:");
-                        crate::voice_chat_ui::set_voice_chat_text(&result.text);
+                        if append_mode {
+                            if assistant_needs_separator {
+                                crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
+                            }
+                            crate::voice_chat_ui::append_voice_chat_assistant_delta(&result.text);
+                            self.toggle_assistant_has_text.store(true, Ordering::SeqCst);
+                        } else {
+                            crate::voice_chat_ui::set_voice_chat_text(&result.text);
+                        }
                         info!(
                             "Formatted response displayed in overlay ({} chars)",
                             result.text.len()

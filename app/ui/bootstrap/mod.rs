@@ -526,7 +526,7 @@ unsafe fn build_settings_ui(
         let llm_endpoint_val = config.llm_endpoint.as_deref().unwrap_or("");
         let llm_endpoint_field = create_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
-            "Endpoint (e.g. https://api.openai.com/v1/responses)",
+            "Endpoint (e.g. https://api.libraxis.cloud/v1/responses)",
             llm_endpoint_val,
         );
         let _: () = msg_send![llm_endpoint_field, setFont: mono_font_input];
@@ -542,7 +542,7 @@ unsafe fn build_settings_ui(
         let llm_model_val = std::env::var("LLM_MODEL").unwrap_or_default();
         let llm_model_field = create_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
-            "Model (e.g. gpt-4.1-mini)",
+            "Model (e.g. programmer)",
             &llm_model_val,
         );
         let _: () = msg_send![llm_model_field, setFont: mono_font_input];
@@ -576,7 +576,7 @@ unsafe fn build_settings_ui(
         let assist_endpoint_val = std::env::var("LLM_ASSISTIVE_ENDPOINT").unwrap_or_default();
         let assist_endpoint_field = create_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
-            "Endpoint (e.g. https://api.openai.com/v1/responses)",
+            "Endpoint (e.g. https://api.libraxis.cloud/v1/responses)",
             &assist_endpoint_val,
         );
         let _: () = msg_send![assist_endpoint_field, setFont: mono_font_input];
@@ -592,7 +592,7 @@ unsafe fn build_settings_ui(
         let assist_model_val = std::env::var("LLM_ASSISTIVE_MODEL").unwrap_or_default();
         let assist_model_field = create_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
-            "Model (e.g. gpt-5.2)",
+            "Model (e.g. programmer)",
             &assist_model_val,
         );
         let _: () = msg_send![assist_model_field, setFont: mono_font_input];
