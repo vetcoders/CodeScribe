@@ -315,10 +315,14 @@ impl Config {
             unsafe { std::env::set_var("HOTKEY_DOUBLE_TAP_RIGHT", if v { "1" } else { "0" }) };
         }
         // Buffered stream (read from env at runtime)
-        if std::env::var("CODESCRIBE_BUFFERED_STREAM").is_err()
-            && let Some(v) = settings.buffered_stream
-        {
-            unsafe { std::env::set_var("CODESCRIBE_BUFFERED_STREAM", if v { "1" } else { "0" }) };
+        if std::env::var("CODESCRIBE_BUFFERED_STREAM").is_err() {
+            let enabled = settings.buffered_stream.unwrap_or(true);
+            unsafe {
+                std::env::set_var(
+                    "CODESCRIBE_BUFFERED_STREAM",
+                    if enabled { "1" } else { "0" },
+                )
+            };
         }
     }
 

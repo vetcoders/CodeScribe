@@ -4,19 +4,21 @@ use objc::{sel, sel_impl};
 use std::sync::Once;
 
 use super::{
-    handle_finish, handle_hotkey_done, handle_show_overlay, handle_test_mic,
-    on_assistive_endpoint_changed, on_assistive_key_changed, on_assistive_model_changed,
-    on_beep_toggled, on_buffered_toggled, on_delay_changed, on_formatting_toggled,
-    on_hold_exclusive_changed, on_hold_mod_changed, on_language_changed, on_llm_endpoint_changed,
-    on_llm_key_changed, on_llm_model_changed, on_preset_changed, on_quality_daemon_toggled,
-    on_refresh_permissions, on_toggle_trigger_changed, on_vad_preset_changed, on_volume_changed,
-    switch_tab,
+    handle_bootstrap_window_closed, handle_finish, handle_hotkey_done, handle_show_overlay,
+    handle_test_mic, on_assistive_endpoint_changed, on_assistive_key_changed,
+    on_assistive_model_changed, on_beep_toggled, on_buffered_toggled, on_delay_changed,
+    on_formatting_toggled, on_hold_exclusive_changed, on_hold_mod_changed, on_language_changed,
+    on_llm_endpoint_changed, on_llm_key_changed, on_llm_model_changed, on_preset_changed,
+    on_quality_daemon_toggled, on_refresh_permissions, on_save_api_settings,
+    on_toggle_trigger_changed, on_vad_preset_changed, on_volume_changed, switch_tab,
 };
 
 pub type Id = *mut Object;
 
 static ACTION_HANDLER_INIT: Once = Once::new();
 static mut ACTION_HANDLER_CLASS: *const Class = std::ptr::null();
+static WINDOW_DELEGATE_INIT: Once = Once::new();
+static mut WINDOW_DELEGATE_CLASS: *const Class = std::ptr::null();
 
 pub fn action_handler_class() -> *const Class {
     unsafe {
@@ -106,6 +108,10 @@ pub fn action_handler_class() -> *const Class {
                 sel!(onLlmKeyChanged:),
                 on_llm_key_changed as extern "C" fn(&Object, Sel, Id),
             );
+            decl.add_method(
+                sel!(onSaveApiSettings:),
+                on_save_api_settings as extern "C" fn(&Object, Sel, Id),
+            );
 
             // Keys tab: delay slider
             decl.add_method(
@@ -156,6 +162,23 @@ pub fn action_handler_class() -> *const Class {
     }
 }
 
+pub fn window_delegate_class() -> *const Class {
+    unsafe {
+        WINDOW_DELEGATE_INIT.call_once(|| {
+            let superclass = Class::get("NSObject").expect("NSObject not found");
+            let mut decl = ClassDecl::new("BootstrapWindowDelegate", superclass)
+                .expect("Failed to declare window delegate class");
+            decl.add_method(
+                sel!(windowWillClose:),
+                on_window_will_close as extern "C" fn(&Object, Sel, Id),
+            );
+            WINDOW_DELEGATE_CLASS = decl.register();
+        });
+
+        WINDOW_DELEGATE_CLASS
+    }
+}
+
 extern "C" fn on_test_mic(_this: &Object, _sel: Sel, _sender: Id) {
     handle_test_mic();
 }
@@ -182,4 +205,8 @@ extern "C" fn on_tab_keys(_this: &Object, _sel: Sel, _sender: Id) {
 
 extern "C" fn on_tab_audio(_this: &Object, _sel: Sel, _sender: Id) {
     switch_tab(2);
+}
+
+extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, _notification: Id) {
+    handle_bootstrap_window_closed();
 }

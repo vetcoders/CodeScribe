@@ -28,6 +28,7 @@ pub type Id = *mut Object;
 /// Window level constants
 pub const NS_FLOATING_WINDOW_LEVEL: i64 = 3;
 pub const NS_STATUS_WINDOW_LEVEL: i64 = 25;
+pub const NS_NORMAL_WINDOW_LEVEL: i64 = 0;
 
 // ============================================================================
 // UI Tokens (shared sizes/spacing; aligned to Settings)
@@ -73,6 +74,7 @@ pub mod ui_tokens {
 }
 
 pub const NS_FOCUS_RING_TYPE_EXTERIOR: i64 = 1;
+pub const NS_FOCUS_RING_TYPE_NONE: i64 = 2;
 
 // ============================================================================
 // Color Helpers
@@ -1063,6 +1065,8 @@ pub fn create_floating_window(frame: CGRect, title: &str, transparent_titlebar: 
 
         let _: () = msg_send![window, setMovableByWindowBackground: true];
         let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
+        // Keep the window instance alive even after close; we manage lifecycle explicitly.
+        let _: () = msg_send![window, setReleasedWhenClosed: false];
 
         // Can join all spaces
         let collection = NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -1372,6 +1376,30 @@ pub unsafe fn set_enabled(view: Id, enabled: bool) {
 pub unsafe fn set_focus_ring(view: Id) {
     unsafe {
         let _: () = msg_send![view, setFocusRingType: NS_FOCUS_RING_TYPE_EXTERIOR];
+    }
+}
+
+/// Return a monospaced system font (best-effort).
+/// # Safety
+/// Uses AppKit selectors; caller must be on main thread when applied to views.
+pub unsafe fn monospace_font(size: f64) -> Id {
+    unsafe {
+        let ns_font = Class::get("NSFont").unwrap();
+        let supports: bool =
+            msg_send![ns_font, respondsToSelector: sel!(monospacedSystemFontOfSize:weight:)];
+        if supports {
+            let font: Id = msg_send![ns_font, monospacedSystemFontOfSize: size weight: 0.0];
+            if !font.is_null() {
+                return font;
+            }
+        }
+
+        let font: Id = msg_send![ns_font, userFixedPitchFontOfSize: size];
+        if !font.is_null() {
+            font
+        } else {
+            msg_send![ns_font, systemFontOfSize: size]
+        }
     }
 }
 

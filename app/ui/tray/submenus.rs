@@ -11,6 +11,7 @@ use crate::tray::types::HotkeysMenuItems;
 // Type aliases
 pub struct HotkeysMenuIds {
     pub copy_cheatsheet: MenuId,
+    pub hold_fn: MenuId,
     pub hold_ctrl: MenuId,
     pub hold_ctrl_alt: MenuId,
     pub hold_ctrl_shift: MenuId,
@@ -47,11 +48,7 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HotkeysMenuIds)> {
     let copy_cheatsheet_id = copy_cheatsheet_item.id().clone();
     hold_menu.append(&copy_cheatsheet_item)?;
 
-    let reset_item = MenuItem::new(
-        "Apply recommended preset (Ctrl+Option + Double Ctrl)",
-        true,
-        None,
-    );
+    let reset_item = MenuItem::new("Apply recommended preset (Fn + Option toggle)", true, None);
     let reset_id = reset_item.id().clone();
     hold_menu.append(&reset_item)?;
     hold_menu.append(&PredefinedMenuItem::separator())?;
@@ -59,8 +56,17 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HotkeysMenuIds)> {
     let hold_key_label = MenuItem::new("Hold key:", false, None);
     hold_menu.append(&hold_key_label)?;
 
+    let hold_fn = CheckMenuItem::new(
+        "Use Fn (recommended)",
+        true,
+        config.hold_mods == crate::config::HoldMods::Fn,
+        None,
+    );
+    let hold_fn_id = hold_fn.id().clone();
+    hold_menu.append(&hold_fn)?;
+
     let hold_ctrl = CheckMenuItem::new(
-        "Use Ctrl (not recommended with Double Ctrl toggle)",
+        "Use Ctrl (legacy)",
         true,
         config.hold_mods == crate::config::HoldMods::Ctrl,
         None,
@@ -69,7 +75,7 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HotkeysMenuIds)> {
     hold_menu.append(&hold_ctrl)?;
 
     let hold_ctrl_alt = CheckMenuItem::new(
-        "Use Ctrl+Option (recommended)",
+        "Use Ctrl+Option (legacy)",
         true,
         config.hold_mods == crate::config::HoldMods::CtrlAlt,
         None,
@@ -135,6 +141,7 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HotkeysMenuIds)> {
     HOTKEYS_MENU_ITEMS.with(|items_cell| {
         *items_cell.borrow_mut() = Some(HotkeysMenuItems {
             hold_summary,
+            hold_fn,
             hold_ctrl,
             hold_ctrl_alt,
             hold_ctrl_shift,
@@ -149,6 +156,7 @@ pub fn build_hold_hotkeys_submenu() -> Result<(Submenu, HotkeysMenuIds)> {
         hold_menu,
         HotkeysMenuIds {
             copy_cheatsheet: copy_cheatsheet_id,
+            hold_fn: hold_fn_id,
             hold_ctrl: hold_ctrl_id,
             hold_ctrl_alt: hold_ctrl_alt_id,
             hold_ctrl_shift: hold_ctrl_shift_id,

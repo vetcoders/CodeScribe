@@ -12,6 +12,7 @@ use super::defaults::*;
 #[serde(rename_all = "snake_case")]
 pub enum HoldMods {
     #[default]
+    Fn,
     Ctrl,
     CtrlAlt,
     CtrlShift,
@@ -21,6 +22,7 @@ pub enum HoldMods {
 impl HoldMods {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Fn => "fn",
             Self::Ctrl => "ctrl",
             Self::CtrlAlt => "ctrl_alt",
             Self::CtrlShift => "ctrl_shift",
@@ -31,6 +33,7 @@ impl HoldMods {
     /// Human-readable label for menu display
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Fn => "Fn",
             Self::Ctrl => "Ctrl",
             Self::CtrlAlt => "Ctrl+Option",
             Self::CtrlShift => "Ctrl+Shift",
@@ -44,6 +47,7 @@ impl FromStr for HoldMods {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "fn" | "globe" => Ok(Self::Fn),
             "ctrl" => Ok(Self::Ctrl),
             "ctrl_alt" | "ctrl+alt" => Ok(Self::CtrlAlt),
             "ctrl_shift" | "ctrl+shift" => Ok(Self::CtrlShift),

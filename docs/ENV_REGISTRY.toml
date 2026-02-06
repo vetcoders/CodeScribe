@@ -551,11 +551,11 @@ description = "Override path to TTS model directory"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 [vars.HOLD_MODS]
-default = "ctrl"
+default = "fn"
 type = "string"
 reload = "restart"
 category = "hotkeys"
-description = "Hold modifier keys (ctrl|ctrl_alt|ctrl_shift|ctrl_cmd)"
+description = "Hold modifier keys (fn|ctrl|ctrl_alt|ctrl_shift|ctrl_cmd)"
 
 [vars.HOLD_EXCLUSIVE]
 default = "1"
@@ -658,6 +658,13 @@ type = "i64"
 reload = "restart"
 category = "ui"
 description = "Custom overlay Y position (when mode=custom)"
+
+[vars.CODESCRIBE_DISABLE_GLASS]
+default = "0"
+type = "bool"
+reload = "restart"
+category = "ui"
+description = "Disable glass effects (force NSVisualEffectView fallback)"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Clipboard

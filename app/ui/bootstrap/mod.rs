@@ -11,14 +11,17 @@ use dispatch::Queue;
 use lazy_static::lazy_static;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use objc2_app_kit::{NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState};
+use objc2_app_kit::{
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSWindowCollectionBehavior,
+};
 use tracing::{info, warn};
 
 use crate::config::{Config, HoldMods, ToggleTrigger};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::hotkeys;
 use crate::tray::{TrayMenuEvent, send_menu_event};
-use crate::ui::bootstrap::handlers::action_handler_class;
+use crate::ui::bootstrap::handlers::{action_handler_class, window_delegate_class};
 use crate::ui_helpers::{
     LabelConfig, add_subview, button, button_set_action, create_checkbox, create_floating_window,
     create_label, create_secure_text_input, create_slider, create_text_input, ns_string,
@@ -43,6 +46,7 @@ const STEP_PRESS_HOTKEY: usize = 2;
 #[derive(Default)]
 struct BootstrapState {
     window: Option<usize>,
+    window_delegate: Option<usize>,
     root_view: Option<usize>,
     step_labels: [Option<usize>; 3],
     tab_buttons: [Option<usize>; 3],
@@ -57,6 +61,12 @@ struct BootstrapState {
     permission_labels: [Option<usize>; 3], // Mic, Accessibility, Input Monitoring
     quality_daemon_checkbox: Option<usize>,
     completion_view: Option<usize>,
+    llm_endpoint_field: Option<usize>,
+    llm_model_field: Option<usize>,
+    llm_key_field: Option<usize>,
+    assistive_endpoint_field: Option<usize>,
+    assistive_model_field: Option<usize>,
+    assistive_key_field: Option<usize>,
 }
 
 lazy_static! {
@@ -144,8 +154,13 @@ fn show_bootstrap_overlay_impl() {
             &CGSize::new(window_width, window_height),
         );
 
-        let window = create_floating_window(frame, "Settings", true);
+        let window = create_floating_window(frame, "Settings", false);
         let _: () = msg_send![window, setOpaque: false];
+        let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
+        let _: () = msg_send![window, setCollectionBehavior: NSWindowCollectionBehavior::empty()];
+        let delegate_class = window_delegate_class();
+        let window_delegate: Id = msg_send![delegate_class, new];
+        let _: () = msg_send![window, setDelegate: window_delegate];
         let content_view = window_content_view(window);
         let bounds: CGRect = msg_send![content_view, bounds];
         let _ = attach_settings_view(content_view, bounds);
@@ -153,20 +168,18 @@ fn show_bootstrap_overlay_impl() {
         {
             let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.window = Some(window as usize);
+            state.window_delegate = Some(window_delegate as usize);
         } // Release lock before AppKit call to avoid nested-runloop deadlock.
 
         window_show(window);
     }
 }
 
-/// Attach the Settings view inside an existing parent view (overlay).
+/// Attach the Settings view inside an existing parent view.
 ///
 /// # Safety
 /// `parent` must be a valid `NSView` instance owned by AppKit.
-pub unsafe fn attach_settings_view(
-    parent: Id,
-    frame: core_graphics::geometry::CGRect,
-) -> Option<Id> {
+unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRect) -> Option<Id> {
     unsafe {
         let (config, existing_root) = {
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -232,6 +245,12 @@ pub unsafe fn attach_settings_view(
         state.permission_labels = built_state.permission_labels;
         state.quality_daemon_checkbox = built_state.quality_daemon_checkbox;
         state.completion_view = built_state.completion_view;
+        state.llm_endpoint_field = built_state.llm_endpoint_field;
+        state.llm_model_field = built_state.llm_model_field;
+        state.llm_key_field = built_state.llm_key_field;
+        state.assistive_endpoint_field = built_state.assistive_endpoint_field;
+        state.assistive_model_field = built_state.assistive_model_field;
+        state.assistive_key_field = built_state.assistive_key_field;
 
         Some(root)
     }
@@ -320,16 +339,17 @@ unsafe fn build_settings_ui(
 
         let settings_width = settings_width.max(SIDEBAR_WIDTH + 240.0);
         let settings_height = settings_height.max(280.0);
+        let header_h = 88.0;
         let content_x = SIDEBAR_WIDTH;
         let content_width = (settings_width - SIDEBAR_WIDTH).max(240.0);
-        let content_h = settings_height - 52.0;
+        let content_h = (settings_height - header_h).max(240.0);
 
         // ====================================================================
         // Title: "Welcome to CodeScribe"
         // ====================================================================
         let title_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(20.0, settings_height - 36.0),
+                &CGPoint::new(20.0, settings_height - 34.0),
                 &CGSize::new(settings_width - 40.0, 28.0),
             ),
             text: "Welcome to CodeScribe".to_string(),
@@ -406,7 +426,8 @@ unsafe fn build_settings_ui(
         let field_w = content_width - pad * 2.0;
         let primary = crate::ui_helpers::color_label();
         let secondary = crate::ui_helpers::color_secondary_label();
-        let mut y = content_h - 10.0;
+        let mut y = content_h - 20.0;
+        let mono_font = crate::ui_helpers::monospace_font(ui_tokens::SMALL_FONT_SIZE);
 
         // ── Permission indicators ────────────────────────────────────
         let perms = check_permissions();
@@ -428,6 +449,7 @@ unsafe fn build_settings_ui(
                 text_color: permission_color(*granted),
                 ..Default::default()
             });
+            let _: () = msg_send![lbl, setFont: mono_font];
             add_subview(setup_view, lbl);
             perm_labels[i] = Some(lbl as usize);
         }
@@ -469,6 +491,7 @@ unsafe fn build_settings_ui(
                 text_color: secondary,
                 ..Default::default()
             });
+            let _: () = msg_send![status_lbl, setFont: mono_font];
             add_subview(setup_view, status_lbl);
             step_status_labels[i] = Some(status_lbl as usize);
 
@@ -503,12 +526,14 @@ unsafe fn build_settings_ui(
             "Endpoint (e.g. https://api.openai.com/v1/responses)",
             llm_endpoint_val,
         );
+        let _: () = msg_send![llm_endpoint_field, setFont: mono_font];
         button_set_action(
             llm_endpoint_field,
             action_handler,
             sel!(onLlmEndpointChanged:),
         );
         add_subview(setup_view, llm_endpoint_field);
+        state.llm_endpoint_field = Some(llm_endpoint_field as usize);
         y -= 28.0;
 
         let llm_model_val = std::env::var("LLM_MODEL").unwrap_or_default();
@@ -517,16 +542,20 @@ unsafe fn build_settings_ui(
             "Model (e.g. gpt-4.1-mini)",
             &llm_model_val,
         );
+        let _: () = msg_send![llm_model_field, setFont: mono_font];
         button_set_action(llm_model_field, action_handler, sel!(onLlmModelChanged:));
         add_subview(setup_view, llm_model_field);
+        state.llm_model_field = Some(llm_model_field as usize);
         y -= 28.0;
 
         let llm_key_field = create_secure_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
             "API Key (stored in Keychain)",
         );
+        let _: () = msg_send![llm_key_field, setFont: mono_font];
         button_set_action(llm_key_field, action_handler, sel!(onLlmKeyChanged:));
         add_subview(setup_view, llm_key_field);
+        state.llm_key_field = Some(llm_key_field as usize);
         y -= 34.0;
 
         // ── Assistive AI (optional) ──────────────────────────────────
@@ -547,12 +576,14 @@ unsafe fn build_settings_ui(
             "Endpoint (e.g. https://api.openai.com/v1/responses)",
             &assist_endpoint_val,
         );
+        let _: () = msg_send![assist_endpoint_field, setFont: mono_font];
         button_set_action(
             assist_endpoint_field,
             action_handler,
             sel!(onAssistiveEndpointChanged:),
         );
         add_subview(setup_view, assist_endpoint_field);
+        state.assistive_endpoint_field = Some(assist_endpoint_field as usize);
         y -= 28.0;
 
         let assist_model_val = std::env::var("LLM_ASSISTIVE_MODEL").unwrap_or_default();
@@ -561,24 +592,39 @@ unsafe fn build_settings_ui(
             "Model (e.g. gpt-5.2)",
             &assist_model_val,
         );
+        let _: () = msg_send![assist_model_field, setFont: mono_font];
         button_set_action(
             assist_model_field,
             action_handler,
             sel!(onAssistiveModelChanged:),
         );
         add_subview(setup_view, assist_model_field);
+        state.assistive_model_field = Some(assist_model_field as usize);
         y -= 28.0;
 
         let assist_key_field = create_secure_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
             "API Key (stored in Keychain)",
         );
+        let _: () = msg_send![assist_key_field, setFont: mono_font];
         button_set_action(
             assist_key_field,
             action_handler,
             sel!(onAssistiveKeyChanged:),
         );
         add_subview(setup_view, assist_key_field);
+        state.assistive_key_field = Some(assist_key_field as usize);
+        y -= 34.0;
+
+        let save_btn = button(
+            CGRect::new(
+                &CGPoint::new(content_width - 110.0, y + 4.0),
+                &CGSize::new(90.0, 24.0),
+            ),
+            "Save",
+        );
+        button_set_action(save_btn, action_handler, sel!(onSaveApiSettings:));
+        add_subview(setup_view, save_btn);
         y -= 34.0;
 
         // ── Quality daemon toggle ────────────────────────────────────
@@ -689,6 +735,10 @@ unsafe fn create_sidebar_tab_button(
         let title_str = crate::ui_helpers::ns_string(title);
         let _: () = msg_send![btn, setTitle: title_str];
         let _: () = msg_send![btn, setBordered: false];
+        let _: () = msg_send![
+            btn,
+            setFocusRingType: crate::ui_helpers::NS_FOCUS_RING_TYPE_NONE
+        ];
 
         let font: Id = msg_send![ns_font, systemFontOfSize: ui_tokens::SMALL_FONT_SIZE];
         let _: () = msg_send![btn, setFont: font];
@@ -721,14 +771,17 @@ unsafe fn create_sidebar_tab_button(
 /// and updates sidebar button highlights.
 pub(super) fn switch_tab(index: usize) {
     Queue::main().exec_async(move || unsafe {
-        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if index >= 3 || state.active_tab == index {
-            return;
-        }
-        state.active_tab = index;
+        let (content_views, tab_buttons) = {
+            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if index >= 3 || state.active_tab == index {
+                return;
+            }
+            state.active_tab = index;
+            (state.content_views, state.tab_buttons)
+        };
 
         // Hide all content views, show selected
-        for (i, cv) in state.content_views.iter().enumerate() {
+        for (i, cv) in content_views.iter().enumerate() {
             if let Some(ptr) = cv {
                 let view = *ptr as Id;
                 let _: () = msg_send![view, setHidden: (i != index)];
@@ -736,7 +789,7 @@ pub(super) fn switch_tab(index: usize) {
         }
 
         // Update tab button highlights
-        for (i, tb) in state.tab_buttons.iter().enumerate() {
+        for (i, tb) in tab_buttons.iter().enumerate() {
             if let Some(ptr) = tb {
                 let btn = *ptr as Id;
                 let active = i == index;
@@ -751,6 +804,7 @@ pub(super) fn switch_tab(index: usize) {
                     };
                     let cg_color: Id = msg_send![bg, CGColor];
                     let _: () = msg_send![layer, setBackgroundColor: cg_color];
+                    let _: () = msg_send![layer, setCornerRadius: ui_tokens::CORNER_RADIUS_SM];
                 }
 
                 let tint = if active {
@@ -822,12 +876,31 @@ pub(super) fn handle_finish() {
     });
 }
 
+pub(super) fn handle_bootstrap_window_closed() {
+    let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.window = None;
+    state.window_delegate = None;
+    state.root_view = None;
+    state.step_labels = [None, None, None];
+    state.tab_buttons = [None, None, None];
+    state.content_views = [None, None, None];
+    state.keys_hold_popup = None;
+    state.keys_toggle_popup = None;
+    state.keys_preset_popup = None;
+    state.keys_exclusive_checkbox = None;
+    state.permission_labels = [None, None, None];
+    state.quality_daemon_checkbox = None;
+    state.completion_view = None;
+    state.config_cache = None;
+}
+
 pub fn hide_bootstrap_overlay() {
     Queue::main().exec_async(|| unsafe {
         let (window_ptr, root_ptr) = {
             let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             let window_ptr = state.window.take();
             if window_ptr.is_some() {
+                state.window_delegate = None;
                 state.root_view = None;
                 state.step_labels = [None, None, None];
                 state.tab_buttons = [None, None, None];
@@ -863,6 +936,7 @@ pub fn reset_embedded_bootstrap_state() {
         return;
     }
     state.root_view = None;
+    state.window_delegate = None;
     state.config_cache = None;
     state.step_labels = [None, None, None];
     state.tab_buttons = [None, None, None];
@@ -961,18 +1035,18 @@ unsafe fn build_keys_tab(
             CGRect::new(&CGPoint::new(pad + 124.0, y - 2.0), &CGSize::new(content_w - 124.0, 24.0))
             pullsDown: false
         ];
-        let preset_titles = ["Monika Power (recommended)", "Safe (no toggles)", "Custom"];
+        let preset_titles = ["Fn (recommended)", "Safe (no toggles)", "Custom"];
         for title in &preset_titles {
             let ns_title = ns_string(title);
             let _: () = msg_send![preset_popup, addItemWithTitle: ns_title];
         }
-        let preset_idx: isize = if config.hold_mods == crate::config::HoldMods::CtrlAlt
+        let preset_idx: isize = if config.hold_mods == crate::config::HoldMods::Fn
             && config.toggle_trigger == crate::config::ToggleTrigger::DoubleOption
             && !config.hold_exclusive
         {
             0
         } else if config.toggle_trigger == crate::config::ToggleTrigger::None
-            && config.hold_mods == crate::config::HoldMods::Ctrl
+            && config.hold_mods == crate::config::HoldMods::Fn
             && config.hold_exclusive
         {
             1
@@ -999,15 +1073,22 @@ unsafe fn build_keys_tab(
             CGRect::new(&CGPoint::new(pad + 124.0, y - 2.0), &CGSize::new(content_w - 124.0, 24.0))
             pullsDown: false
         ];
-        for title in &["Ctrl", "Ctrl+Option", "Ctrl+Shift", "Ctrl+Command"] {
+        for title in &[
+            "Fn (Globe)",
+            "Ctrl",
+            "Ctrl+Option",
+            "Ctrl+Shift",
+            "Ctrl+Command",
+        ] {
             let ns_title = ns_string(title);
             let _: () = msg_send![hold_popup, addItemWithTitle: ns_title];
         }
         let hold_idx: isize = match config.hold_mods.as_str() {
-            "ctrl" => 0,
-            "ctrl_alt" => 1,
-            "ctrl_shift" => 2,
-            "ctrl_cmd" => 3,
+            "fn" => 0,
+            "ctrl" => 1,
+            "ctrl_alt" => 2,
+            "ctrl_shift" => 3,
+            "ctrl_cmd" => 4,
             _ => 0,
         };
         let _: () = msg_send![hold_popup, selectItemAtIndex: hold_idx];
@@ -1275,11 +1356,12 @@ pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
         let (value, mods) = match idx {
-            0 => ("ctrl", HoldMods::Ctrl),
-            1 => ("ctrl_alt", HoldMods::CtrlAlt),
-            2 => ("ctrl_shift", HoldMods::CtrlShift),
-            3 => ("ctrl_cmd", HoldMods::CtrlCmd),
-            _ => ("ctrl", HoldMods::Ctrl),
+            0 => ("fn", HoldMods::Fn),
+            1 => ("ctrl", HoldMods::Ctrl),
+            2 => ("ctrl_alt", HoldMods::CtrlAlt),
+            3 => ("ctrl_shift", HoldMods::CtrlShift),
+            4 => ("ctrl_cmd", HoldMods::CtrlCmd),
+            _ => ("fn", HoldMods::Fn),
         };
         info!("Settings: hold modifier -> {}", value);
         let config = Config::load();
@@ -1305,22 +1387,22 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
         match idx {
-            // Monika Power (recommended)
+            // Fn (recommended)
             0 => {
-                info!("Settings: hotkey preset -> monika_power");
+                info!("Settings: hotkey preset -> fn_recommended");
                 let config = Config::load();
-                let _ = config.save_to_env("HOLD_MODS", HoldMods::CtrlAlt.as_str());
+                let _ = config.save_to_env("HOLD_MODS", HoldMods::Fn.as_str());
                 let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::DoubleOption.as_str());
                 let _ = config.save_to_env("HOLD_EXCLUSIVE", "0");
-                hotkeys::set_hold_mods(HoldMods::CtrlAlt);
+                hotkeys::set_hold_mods(HoldMods::Fn);
                 hotkeys::set_toggle_trigger(ToggleTrigger::DoubleOption);
                 hotkeys::set_exclusive_mode(false);
-                send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::CtrlAlt));
+                send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Fn));
                 send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::DoubleOption));
                 send_menu_event(TrayMenuEvent::SetHoldExclusive(false));
 
                 let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                set_keys_popup_index(state.keys_hold_popup, 1);
+                set_keys_popup_index(state.keys_hold_popup, 0);
                 set_keys_popup_index(state.keys_toggle_popup, 4);
                 set_keys_checkbox_state(state.keys_exclusive_checkbox, true);
             }
@@ -1328,13 +1410,13 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
             1 => {
                 info!("Settings: hotkey preset -> safe");
                 let config = Config::load();
-                let _ = config.save_to_env("HOLD_MODS", HoldMods::Ctrl.as_str());
+                let _ = config.save_to_env("HOLD_MODS", HoldMods::Fn.as_str());
                 let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::None.as_str());
                 let _ = config.save_to_env("HOLD_EXCLUSIVE", "1");
-                hotkeys::set_hold_mods(HoldMods::Ctrl);
+                hotkeys::set_hold_mods(HoldMods::Fn);
                 hotkeys::set_toggle_trigger(ToggleTrigger::None);
                 hotkeys::set_exclusive_mode(true);
-                send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Ctrl));
+                send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Fn));
                 send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::None));
                 send_menu_event(TrayMenuEvent::SetHoldExclusive(true));
 
@@ -1495,6 +1577,57 @@ pub(super) extern "C" fn on_llm_key_changed(_this: &Object, _cmd: objc::runtime:
             let _ = config.save_to_env("LLM_API_KEY", &value);
         }
     }
+}
+
+pub(super) extern "C" fn on_save_api_settings(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    _sender: Id,
+) {
+    let (llm_endpoint, llm_model, llm_key, assist_endpoint, assist_model, assist_key) = unsafe {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            state.llm_endpoint_field,
+            state.llm_model_field,
+            state.llm_key_field,
+            state.assistive_endpoint_field,
+            state.assistive_model_field,
+            state.assistive_key_field,
+        )
+    };
+
+    let mut config = Config::load();
+    unsafe {
+        if let Some(ptr) = llm_endpoint {
+            let value = crate::ui_helpers::get_text_field_string(ptr as Id);
+            let _ = config.save_to_env("LLM_ENDPOINT", value.trim());
+        }
+        if let Some(ptr) = llm_model {
+            let value = crate::ui_helpers::get_text_field_string(ptr as Id);
+            let _ = config.save_to_env("LLM_MODEL", value.trim());
+        }
+        if let Some(ptr) = llm_key {
+            let value = crate::ui_helpers::get_text_field_string(ptr as Id);
+            if !value.trim().is_empty() {
+                let _ = config.save_to_env("LLM_API_KEY", value.trim());
+            }
+        }
+        if let Some(ptr) = assist_endpoint {
+            let value = crate::ui_helpers::get_text_field_string(ptr as Id);
+            let _ = config.save_to_env("LLM_ASSISTIVE_ENDPOINT", value.trim());
+        }
+        if let Some(ptr) = assist_model {
+            let value = crate::ui_helpers::get_text_field_string(ptr as Id);
+            let _ = config.save_to_env("LLM_ASSISTIVE_MODEL", value.trim());
+        }
+        if let Some(ptr) = assist_key {
+            let value = crate::ui_helpers::get_text_field_string(ptr as Id);
+            if !value.trim().is_empty() {
+                let _ = config.save_to_env("LLM_ASSISTIVE_API_KEY", value.trim());
+            }
+        }
+    }
+    info!("Settings: API settings saved");
 }
 
 pub(super) extern "C" fn on_delay_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {

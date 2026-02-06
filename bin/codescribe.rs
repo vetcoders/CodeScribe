@@ -887,7 +887,11 @@ async fn dispatch_hotkey_event(
     use codescribe::os::hotkeys::{HoldAction, HoldMode, HotkeyEvent};
 
     match event {
-        HotkeyEvent::Hold { action, mode } => {
+        HotkeyEvent::Hold {
+            action,
+            mode,
+            force_ai,
+        } => {
             let mapped_action = match action {
                 HoldAction::Down => HotkeyAction::Down,
                 HoldAction::Up => HotkeyAction::Up,
@@ -897,19 +901,19 @@ async fn dispatch_hotkey_event(
                 action: mapped_action,
                 assistive: !matches!(mode, HoldMode::Raw),
                 hold_mode: mode,
-                force_raw: matches!(mode, HoldMode::Raw),
-                force_ai: false,
+                force_raw: matches!(mode, HoldMode::Raw) && !force_ai,
+                force_ai,
             };
             controller.handle_hotkey_event(input).await?;
         }
-        HotkeyEvent::HoldUpdate { mode } => {
+        HotkeyEvent::HoldUpdate { mode, force_ai } => {
             let input = HotkeyInput {
                 key_type: HotkeyType::Hold,
                 action: HotkeyAction::Press,
                 assistive: !matches!(mode, HoldMode::Raw),
                 hold_mode: mode,
-                force_raw: matches!(mode, HoldMode::Raw),
-                force_ai: false,
+                force_raw: matches!(mode, HoldMode::Raw) && !force_ai,
+                force_ai,
             };
             controller.handle_hotkey_event(input).await?;
         }

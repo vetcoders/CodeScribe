@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.hold_mods, HoldMods::Ctrl);
+        assert_eq!(config.hold_mods, HoldMods::Fn);
         assert_eq!(config.whisper_language, Language::Polish); // Polish is default
         assert_eq!(config.ai_max_tokens, 0); // 0 = no limit (API decides)
         assert!(!config.ai_formatting_enabled);

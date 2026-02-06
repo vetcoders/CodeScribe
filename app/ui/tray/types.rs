@@ -121,6 +121,7 @@ pub enum VadPreset {
 /// Hotkeys menu items that need runtime updates.
 pub struct HotkeysMenuItems {
     pub hold_summary: MenuItem,
+    pub hold_fn: CheckMenuItem,
     pub hold_ctrl: CheckMenuItem,
     pub hold_ctrl_alt: CheckMenuItem,
     pub hold_ctrl_shift: CheckMenuItem,
@@ -164,6 +165,7 @@ pub struct MenuIds {
     pub hotkeys_toggle_dictation: MenuId,
     pub hotkeys_reset: MenuId,
     pub hotkeys_copy_cheatsheet: MenuId,
+    pub hotkeys_hold_fn: MenuId,
     pub hotkeys_hold_ctrl: MenuId,
     pub hotkeys_hold_ctrl_alt: MenuId,
     pub hotkeys_hold_ctrl_shift: MenuId,

@@ -270,15 +270,14 @@ pub fn show_transcription_tab() {
 /// Switch to Settings tab programmatically
 pub fn show_settings_tab() {
     Queue::main().exec_async(|| {
-        update_active_tab_impl(Tab::Settings);
+        crate::show_bootstrap_overlay();
     });
 }
 
 /// Request Settings tab to be shown the next time the overlay is created.
 /// This is used when routing tray "Settings" to the overlay before it exists.
 pub fn request_settings_tab_on_open() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.pending_tab = Some(Tab::Settings);
+    crate::show_bootstrap_overlay();
 }
 
 /// Append a delta (streaming token) to the transcription preview.
@@ -385,12 +384,19 @@ pub fn is_conversation_active() -> bool {
 // ═══════════════════════════════════════════════════════════
 
 pub fn update_active_tab_impl(tab: Tab) {
+    if tab == Tab::Settings {
+        crate::show_bootstrap_overlay();
+        return;
+    }
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     update_active_tab_locked(&mut state, tab);
 }
 
 fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
     unsafe {
+        if tab == Tab::Settings {
+            return;
+        }
         state.active_tab = tab;
 
         if let Some(button) = state.tab_drawer_button {
@@ -403,32 +409,31 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
             crate::ui_helpers::set_tab_button_active(button as Id, tab == Tab::Agent);
         }
         if let Some(button) = state.tab_settings_button {
-            crate::ui_helpers::set_tab_button_active(button as Id, tab == Tab::Settings);
+            crate::ui_helpers::set_tab_button_active(button as Id, false);
         }
 
         let show_drawer = tab == Tab::Drawer;
         let show_transcription = tab == Tab::Transcription;
         let show_agent = tab == Tab::Agent;
-        let show_settings = tab == Tab::Settings;
 
         if let Some(sidebar_item) = state.split_sidebar_item {
             let item = sidebar_item as Id;
             let responds: bool = msg_send![item, respondsToSelector: sel!(setCollapsed:)];
             if responds {
-                let _: () = msg_send![item, setCollapsed: show_agent || show_settings];
+                let _: () = msg_send![item, setCollapsed: show_agent];
             }
         }
         if let Some(content_item) = state.split_content_item {
             let item = content_item as Id;
             let responds: bool = msg_send![item, respondsToSelector: sel!(setCollapsed:)];
             if responds {
-                let _: () = msg_send![item, setCollapsed: !show_agent || show_settings];
+                let _: () = msg_send![item, setCollapsed: !show_agent];
             }
         }
         if let Some(split_controller) = state.split_view_controller {
             let split_view: Id = msg_send![split_controller as Id, view];
             if !split_view.is_null() {
-                crate::ui_helpers::set_hidden(split_view, show_settings);
+                crate::ui_helpers::set_hidden(split_view, false);
             }
         }
         if let Some(drawer_view) = state.drawer_scroll_view {
@@ -442,12 +447,6 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
         }
         if let Some(favorites_button) = state.favorites_button {
             crate::ui_helpers::set_hidden(favorites_button as Id, !show_drawer);
-        }
-        if let Some(help_panel) = state.help_panel {
-            crate::ui_helpers::set_hidden(help_panel as Id, !show_agent);
-        }
-        if let Some(settings_view) = state.settings_view {
-            crate::ui_helpers::set_hidden(settings_view as Id, !show_settings);
         }
         if let Some(edge) = state.drawer_edge_effect {
             crate::ui_helpers::set_hidden(edge as Id, !show_drawer);
@@ -473,7 +472,6 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
 
         if show_agent {
             resize_agent_input_locked(state);
-            update_shortcuts_panel_locked(state);
         }
 
         // When switching to Agent, make sure the input field can actually receive text.
@@ -490,22 +488,6 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
         }
 
         update_transcription_placeholder(state);
-    }
-}
-
-fn update_shortcuts_panel_locked(state: &mut VoiceChatOverlayState) {
-    let (hold_line, toggle_line) = shortcuts_lines(get_hold_mods(), get_toggle_trigger());
-    unsafe {
-        if let Some(label) = state.help_hold_label {
-            set_text_field_string(label as Id, &hold_line);
-        }
-        if let Some(label) = state.help_toggle_label {
-            set_text_field_string(label as Id, &toggle_line);
-        }
-        if let Some(panel) = state.help_panel {
-            let tip = format!("{hold_line}\n{toggle_line}");
-            set_tooltip(panel as Id, &tip);
-        }
     }
 }
 
@@ -544,12 +526,8 @@ fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
 
         let footer_height = ui_tokens::FOOTER_HEIGHT;
         let footer_base_y = content_bounds.origin.y;
-        let gap = ui_tokens::CONTENT_GAP;
-        let help_panel_w = ui_tokens::HELP_PANEL_WIDTH;
-        let help_panel_h = footer_height - ui_tokens::FOOTER_INSET;
-        let help_panel_x = content_bounds.origin.x + content_bounds.size.width - help_panel_w;
         let search_x = content_bounds.origin.x;
-        let search_w = (help_panel_x - gap - search_x).max(160.0);
+        let search_w = content_bounds.size.width.max(160.0);
 
         if let Some(label_ptr) = state.search_label {
             let label = label_ptr as Id;
@@ -567,15 +545,6 @@ fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
                 &CGSize::new(search_w, 24.0),
             );
             let _: () = msg_send![field, setFrame: frame];
-        }
-
-        if let Some(panel_ptr) = state.help_panel {
-            let panel = panel_ptr as Id;
-            let frame = CGRect::new(
-                &CGPoint::new(help_panel_x, footer_base_y + 6.0),
-                &CGSize::new(help_panel_w, help_panel_h),
-            );
-            let _: () = msg_send![panel, setFrame: frame];
         }
 
         let content_pad = ui_tokens::EDGE_PADDING;
@@ -598,11 +567,6 @@ fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
             if !split_view.is_null() {
                 let _: () = msg_send![split_view, setFrame: content_frame];
             }
-        }
-
-        if let Some(settings_ptr) = state.settings_view {
-            let settings_view = settings_ptr as Id;
-            let _: () = msg_send![settings_view, setFrame: content_frame];
         }
     }
 }
@@ -1979,15 +1943,11 @@ pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
     state.tab_settings_button = None;
     state.favorites_button = None;
     state.close_button = None;
-    state.settings_view = None;
     state.drawer_scroll_view = None;
     state.drawer_container = None;
     state.drawer_edge_effect = None;
     state.search_field = None;
     state.search_label = None;
-    state.help_panel = None;
-    state.help_hold_label = None;
-    state.help_toggle_label = None;
     state.agent_scroll_view = None;
     state.agent_container = None;
     state.agent_bubble_views.clear();
@@ -2008,7 +1968,6 @@ pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
     state.is_sending = false;
     state.manual_draft.clear();
     state.conversation_state = ConversationModeState::Inactive;
-    crate::ui::bootstrap::reset_embedded_bootstrap_state();
 }
 
 fn refresh_drawer_impl() {
@@ -2441,7 +2400,7 @@ mod tests {
     fn update_active_tab_handles_settings_without_views() {
         let mut state = VoiceChatOverlayState::default();
         update_active_tab_locked(&mut state, Tab::Settings);
-        assert_eq!(state.active_tab, Tab::Settings);
+        assert_eq!(state.active_tab, Tab::Drawer);
 
         update_active_tab_locked(&mut state, Tab::Drawer);
         assert_eq!(state.active_tab, Tab::Drawer);

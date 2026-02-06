@@ -387,8 +387,8 @@ impl RecordingController {
 
                             *self.assistive_mode.write().await = false;
                             *self.assistive_context.write().await = None;
-                            *self.force_raw_mode.write().await = true;
-                            *self.force_ai_mode.write().await = false;
+                            *self.force_raw_mode.write().await = !event.force_ai;
+                            *self.force_ai_mode.write().await = event.force_ai;
 
                             if matches!(current_state, State::RecHold | State::RecToggle) {
                                 set_assistive_session(false);
@@ -1212,9 +1212,9 @@ impl RecordingController {
         if is_assistive {
             self.opened_voice_chat_overlay_for_transcription
                 .store(false, Ordering::SeqCst);
-            // Toggle-assistive is a hands-off chat loop (no selection).
-            // Capture only target app (no clipboard).
-            let ctx = tokio::task::spawn_blocking(capture_frontmost_app_only)
+            // Toggle-assistive is a hands-off chat loop with optional selection context.
+            // Capture selection when available (best-effort), otherwise just app name.
+            let ctx = tokio::task::spawn_blocking(capture_assistive_context)
                 .await
                 .unwrap_or_default();
             *self.assistive_context.write().await = Some(ctx);
@@ -1534,7 +1534,7 @@ impl RecordingController {
         let local_final_pass_enabled = std::env::var("CODESCRIBE_LOCAL_STT_FINAL_PASS")
             .ok()
             .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"))
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         if use_local_stt && local_final_pass_enabled {
             if let Some(path) = &audio_path {
@@ -1651,7 +1651,8 @@ impl RecordingController {
         // chat_active already captured above
 
         let effective_hold_mode = if assistive && matches!(hold_mode, HoldMode::Raw) {
-            // Toggle-assistive path doesn't have a meaningful hold-mode; treat as Chat (no selection).
+            // Toggle-assistive path doesn't have a meaningful hold-mode; treat as Chat
+            // but allow optional selection context if it was captured.
             HoldMode::Chat
         } else {
             hold_mode

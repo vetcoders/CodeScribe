@@ -77,6 +77,8 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         handle_reset_hotkeys();
     } else if event_id == &menu_ids.hotkeys_copy_cheatsheet {
         handle_copy_hotkeys_cheatsheet();
+    } else if event_id == &menu_ids.hotkeys_hold_fn {
+        handle_set_hold_mods(HoldMods::Fn);
     } else if event_id == &menu_ids.hotkeys_hold_ctrl {
         handle_set_hold_mods(HoldMods::Ctrl);
     } else if event_id == &menu_ids.hotkeys_hold_ctrl_alt {
@@ -104,6 +106,7 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
 
 fn base_hold_cheatsheet_label(hold_mods: HoldMods) -> &'static str {
     match hold_mods {
+        HoldMods::Fn => "Fn",
         HoldMods::Ctrl => "Ctrl",
         HoldMods::CtrlAlt => "Ctrl+Option",
         HoldMods::CtrlShift => "Ctrl+Shift",
@@ -127,25 +130,52 @@ fn handle_copy_hotkeys_cheatsheet() {
     let base = base_hold_cheatsheet_label(cfg.hold_mods);
     let hands_off = hands_off_cheatsheet_label(cfg.toggle_trigger);
 
-    let talk_ai = if cfg.hold_exclusive {
-        format!("{base} (Shift/Cmd modes disabled)")
-    } else {
-        format!("{base}+Shift")
-    };
-    let sel_ai = if cfg.hold_exclusive {
-        format!("{base} (Shift/Cmd modes disabled)")
-    } else {
-        format!("{base}+Command")
+    let (base_raw, format_ai, talk_ai, sel_ai) = match cfg.hold_mods {
+        HoldMods::CtrlAlt => {
+            let raw = "Ctrl".to_string();
+            let format_ai = Some("Ctrl+Option".to_string());
+            let talk_ai = if cfg.hold_exclusive {
+                "Ctrl (Shift/Cmd modes disabled)".to_string()
+            } else {
+                "Ctrl+Shift".to_string()
+            };
+            let sel_ai = if cfg.hold_exclusive {
+                "Ctrl (Shift/Cmd modes disabled)".to_string()
+            } else {
+                "Ctrl+Command".to_string()
+            };
+            (raw, format_ai, talk_ai, sel_ai)
+        }
+        _ => {
+            let talk_ai = if cfg.hold_exclusive {
+                format!("{base} (Shift/Cmd modes disabled)")
+            } else {
+                format!("{base}+Shift")
+            };
+            let sel_ai = if cfg.hold_exclusive {
+                format!("{base} (Shift/Cmd modes disabled)")
+            } else {
+                format!("{base}+Command")
+            };
+            (base.to_string(), None, talk_ai, sel_ai)
+        }
     };
 
-    let text = format!(
+    let mut text = format!(
         "CodeScribe hotkeys\n\
 \n\
 - Hands-off (RAW): {hands_off}\n\
-- Hold-to-talk (RAW): {base} (hold)\n\
-- Talk to AI: {talk_ai} (hold)\n\
-- Selected text → AI: {sel_ai} (hold)\n"
+- Hold-to-talk (RAW): {base_raw} (hold)\n"
     );
+
+    if let Some(format_ai) = format_ai {
+        text.push_str(&format!("- Format with AI: {format_ai} (hold)\n"));
+    }
+
+    text.push_str(&format!(
+        "- Talk to AI: {talk_ai} (hold)\n\
+- Selected text → AI: {sel_ai} (hold)\n"
+    ));
 
     if let Err(e) = clipboard::set_clipboard(&text) {
         info!("Failed to copy hotkeys cheatsheet: {}", e);
@@ -346,6 +376,7 @@ fn update_hold_menu(items: &crate::tray::types::HotkeysMenuItems, mods: HoldMods
     items.hold_summary.set_text(format!(
         "Hold {label}: RAW | {label}+Shift: Chat | {label}+Cmd: Selection"
     ));
+    items.hold_fn.set_checked(mods == HoldMods::Fn);
     items.hold_ctrl.set_checked(mods == HoldMods::Ctrl);
     items.hold_ctrl_alt.set_checked(mods == HoldMods::CtrlAlt);
     items
@@ -532,39 +563,38 @@ fn handle_reset_hotkeys() {
         notify("CodeScribe", &format!("Failed to save HOLD_EXCLUSIVE: {e}"));
         return;
     }
-    // Recommended: Hold Ctrl+Option for RAW (doesn't break Ctrl+shortcuts).
-    if let Err(e) = config.save_to_env("HOLD_MODS", HoldMods::CtrlAlt.as_str()) {
+    // Recommended: Hold Fn for RAW (doesn't break terminal shortcuts).
+    if let Err(e) = config.save_to_env("HOLD_MODS", HoldMods::Fn.as_str()) {
         #[cfg(target_os = "macos")]
         notify("CodeScribe", &format!("Failed to save HOLD_MODS: {e}"));
         return;
     }
-    // Recommended: enable hands-off RAW toggle on double Ctrl.
-    if let Err(e) = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::DoubleCtrl.as_str()) {
+    // Recommended: enable hands-off toggle on double Option.
+    if let Err(e) = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::DoubleOption.as_str()) {
         #[cfg(target_os = "macos")]
         notify("CodeScribe", &format!("Failed to save TOGGLE_TRIGGER: {e}"));
         return;
     }
 
     hotkeys::set_exclusive_mode(false);
-    hotkeys::set_hold_mods(HoldMods::CtrlAlt);
-    hotkeys::set_toggle_trigger(ToggleTrigger::DoubleCtrl);
+    hotkeys::set_hold_mods(HoldMods::Fn);
+    hotkeys::set_toggle_trigger(ToggleTrigger::DoubleOption);
 
-    send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::CtrlAlt));
-    send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::DoubleCtrl));
+    send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Fn));
+    send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::DoubleOption));
     send_menu_event(TrayMenuEvent::ResetShortcuts);
 
     HOTKEYS_MENU_ITEMS.with(|items_cell| {
         if let Some(ref items) = *items_cell.borrow() {
-            update_hold_menu(items, HoldMods::CtrlAlt);
-            update_toggle_menu(items, ToggleTrigger::DoubleCtrl);
-            items.toggle_assistive.set_checked(false);
+            update_hold_menu(items, HoldMods::Fn);
+            update_toggle_menu(items, ToggleTrigger::DoubleOption);
         }
     });
 
     #[cfg(target_os = "macos")]
     notify(
         "CodeScribe",
-        "Applied recommended hotkeys: Hold Ctrl+Option, Double Ctrl hands-off",
+        "Applied recommended hotkeys: Hold Fn, Double Option hands-off",
     );
 }
 
