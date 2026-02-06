@@ -330,6 +330,11 @@ fn persist_config(config: &Config) -> Result<()> {
         config.hold_start_delay_ms.to_string(),
         &mut env_vars,
     );
+    put(
+        "TOGGLE_SILENCE_SEC",
+        config.toggle_silence_sec.to_string(),
+        &mut env_vars,
+    );
 
     put(
         "WHISPER_LANGUAGE",

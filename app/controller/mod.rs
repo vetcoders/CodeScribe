@@ -8,9 +8,10 @@
 //!
 //! ```text
 //! IDLE + hold_down → (wait 800ms) → REC_HOLD
-//! IDLE + toggle_press → REC_TOGGLE
+//! IDLE + toggle_press → REC_TOGGLE (continuous)
 //! REC_HOLD + hold_up → BUSY (process)
-//! REC_TOGGLE + toggle_press → BUSY (process)
+//! REC_TOGGLE + silence → send (no stop)
+//! REC_TOGGLE + toggle_press → IDLE (stop)
 //! BUSY → (transcribe + format + paste) → IDLE
 //! ```
 //!
@@ -529,9 +530,9 @@ impl RecordingController {
                 self.start_toggle_recording(event.assistive).await?;
             }
             State::RecToggle => {
-                info!("Toggle pressed again; finishing recording");
+                info!("Toggle pressed again; stopping recording");
                 self.assistive_loop_active.store(false, Ordering::SeqCst);
-                self.finish_recording().await?;
+                self.stop_toggle_recording().await?;
             }
             State::RecHold => {
                 // Safety/UX: if a hands-off toggle is triggered while in hold recording
@@ -1024,6 +1025,8 @@ impl RecordingController {
             let mut rec = recorder.lock().await;
             // Hold-to-talk: the key-down is the source of truth. Don't auto-stop mid-hold.
             rec.recorder.config.auto_silence = false;
+            rec.set_utterance_callback(None);
+            rec.set_utterance_silence_sec(None);
             rec.recorder.set_on_vad_stop(move || {
                 info!("VAD callback: setting vad_triggered flag");
                 vad_flag.store(true, Ordering::SeqCst);
@@ -1161,24 +1164,35 @@ impl RecordingController {
 
         info!("Starting toggle recording (session={})", new_session_id);
 
-        let config = self.config.read().await;
+        let config = self.config.read().await.clone();
         let language = config.whisper_language;
-        drop(config);
+        let toggle_silence_sec = config.toggle_silence_sec;
+        let beep_enabled = config.beep_on_start;
 
-        // Reset VAD flag and set callback
-        self.vad_triggered.store(false, Ordering::SeqCst);
-        let vad_flag = Arc::clone(&self.vad_triggered);
-
-        // Start the recorder with VAD callback
-        // hang_sec is configured via CODESCRIBE_VAD_MAX_SILENCE_SEC env var (single source of truth)
+        // Start the recorder
         let mut recorder = self.recorder.lock().await;
 
-        // Toggle mode: VAD-based auto-stop is the intended UX.
-        recorder.recorder.config.auto_silence = true;
-        recorder.recorder.set_on_vad_stop(move || {
-            info!("VAD callback: setting vad_triggered flag");
-            vad_flag.store(true, Ordering::SeqCst);
-        });
+        // Toggle mode: continuous recording; silence only triggers per-utterance send.
+        recorder.recorder.config.auto_silence = false;
+        recorder.recorder.set_on_vad_stop(|| {});
+        recorder.set_utterance_silence_sec(Some(toggle_silence_sec));
+
+        let controller = OVERLAY_CONTROLLER.get().cloned();
+        let expected_session = new_session_id.clone();
+        let is_assistive_session = is_assistive;
+        recorder.set_utterance_callback(Some(Arc::new(move |text: String| {
+            let controller = controller.clone();
+            let expected_session = expected_session.clone();
+            tokio::spawn(async move {
+                if let Some(controller) = controller
+                    && let Err(e) = controller
+                        .handle_toggle_utterance(text, expected_session, is_assistive_session)
+                        .await
+                {
+                    warn!("Toggle utterance processing failed: {}", e);
+                }
+            });
+        })));
 
         // Set streaming callback for overlay updates (routed by session mode)
         recorder.set_delta_callback(Some(Arc::new(
@@ -1189,11 +1203,12 @@ impl RecordingController {
 
         // Skip actual audio stream in tests (no CoreAudio device needed)
         if !cfg!(test) {
-            recorder.start(Some(language.as_str().to_string())).await?;
+            recorder
+                .start_with_buffered(Some(language.as_str().to_string()), true)
+                .await?;
         }
 
         // Play start beep if enabled
-        let beep_enabled = self.config.read().await.beep_on_start;
         if beep_enabled {
             crate::audio::play_sound("Tink");
         }
@@ -1260,50 +1275,121 @@ impl RecordingController {
         *self.state.write().await = State::RecToggle;
         info!("STATE TRANSITION: IDLE → REC_TOGGLE (pulsing badge)");
 
-        if is_assistive {
-            self.spawn_assistive_vad_watch(new_session_id);
-        }
-
         Ok(())
     }
 
-    fn spawn_assistive_vad_watch(&self, expected_session: String) {
-        let vad_flag = Arc::clone(&self.vad_triggered);
-        let state = Arc::clone(&self.state);
-        let session_id = Arc::clone(&self.session_id);
-        let loop_active = Arc::clone(&self.assistive_loop_active);
-
-        tokio::spawn(async move {
-            loop {
-                if !loop_active.load(Ordering::SeqCst) {
-                    break;
-                }
-                if *state.read().await != State::RecToggle {
-                    break;
-                }
-                if vad_flag.load(Ordering::SeqCst) {
-                    let current = session_id.read().await.clone();
-                    if current.as_deref() != Some(expected_session.as_str()) {
-                        break;
-                    }
-                    vad_flag.store(false, Ordering::SeqCst);
-                    if let Some(controller) = OVERLAY_CONTROLLER.get().cloned() {
-                        if let Err(e) = controller.finish_recording().await {
-                            warn!("Assistive VAD auto-stop failed: {}", e);
-                            break;
-                        }
-                        if controller.assistive_loop_active.load(Ordering::SeqCst) {
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                            if let Err(e) = controller.start_toggle_recording(true).await {
-                                warn!("Assistive loop restart failed: {}", e);
-                            }
-                        }
-                    }
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+    async fn handle_toggle_utterance(
+        &self,
+        raw_text: String,
+        expected_session: String,
+        is_assistive: bool,
+    ) -> Result<()> {
+        if raw_text.trim().is_empty() {
+            if is_assistive {
+                crate::voice_chat_ui::set_voice_chat_sending(false);
+                crate::voice_chat_ui::update_voice_chat_status("Listening...");
             }
-        });
+            return Ok(());
+        }
+
+        // Skip if another session is active. If session_id is None, allow final flush.
+        if let Some(current) = self.session_id.read().await.clone()
+            && current != expected_session
+        {
+            debug!("Ignoring stale toggle utterance (session changed)");
+            return Ok(());
+        }
+
+        let _guard = self.serial_lock.lock().await;
+
+        // Snapshot mode flags
+        let hold_mode = *self.hold_mode.read().await;
+        let force_raw = *self.force_raw_mode.read().await;
+        let force_ai = *self.force_ai_mode.read().await;
+
+        if is_assistive {
+            let ctx = tokio::task::spawn_blocking(capture_assistive_context)
+                .await
+                .unwrap_or_default();
+            *self.assistive_context.write().await = Some(ctx);
+        } else {
+            let ctx = tokio::task::spawn_blocking(capture_frontmost_app_only)
+                .await
+                .unwrap_or_default();
+            *self.assistive_context.write().await = Some(ctx);
+        }
+
+        crate::voice_chat_ui::set_voice_chat_target_app(
+            self.assistive_context
+                .read()
+                .await
+                .clone()
+                .unwrap_or_default()
+                .frontmost_app,
+        );
+
+        let config = self.config.read().await.clone();
+        let language_opt = Some(config.whisper_language.as_str().to_string());
+
+        let result = self
+            .process_transcript_text_pipeline(
+                raw_text,
+                chrono::Local::now(),
+                is_assistive,
+                hold_mode,
+                force_raw,
+                force_ai,
+                config,
+                language_opt,
+                raw_save_enabled(),
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        if *self.state.read().await == State::RecToggle {
+            crate::voice_chat_ui::set_voice_chat_sending(false);
+            crate::voice_chat_ui::update_voice_chat_status("Listening...");
+        }
+
+        result
+    }
+
+    async fn stop_toggle_recording(&self) -> Result<()> {
+        // Ignore if not recording
+        if *self.state.read().await != State::RecToggle {
+            return Ok(());
+        }
+
+        info!("Stopping toggle recording");
+
+        // Stop recording and flush buffered worker
+        let mut recorder = self.recorder.lock().await;
+        if !cfg!(test) {
+            let _ = recorder
+                .stop_without_saving()
+                .await
+                .context("Failed to stop recorder")?;
+        }
+        recorder.set_utterance_callback(None);
+        recorder.set_utterance_silence_sec(None);
+        drop(recorder);
+
+        // Reset state
+        *self.state.write().await = State::Idle;
+        *self.assistive_mode.write().await = false;
+        *self.hold_mode.write().await = HoldMode::Raw;
+        *self.force_raw_mode.write().await = false;
+        *self.force_ai_mode.write().await = false;
+        *self.session_id.write().await = None;
+        self.assistive_loop_active.store(false, Ordering::SeqCst);
+        set_assistive_session(false);
+
+        hide_hold_badge();
+        crate::voice_chat_ui::update_voice_chat_status("Ready");
+
+        Ok(())
     }
 
     /// Stop recording, transcribe, format, and paste the result
@@ -1615,6 +1701,42 @@ impl RecordingController {
 
         info!("Raw transcript captured ({} chars)", raw_text.len());
 
+        let language_opt = Some(language.as_str().to_string());
+        self.process_transcript_text_pipeline(
+            raw_text,
+            recording_timestamp,
+            assistive,
+            hold_mode,
+            force_raw,
+            force_ai,
+            config,
+            language_opt,
+            raw_save_enabled,
+            audio_path,
+            cloud_text_opt,
+            cloud_handle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_transcript_text_pipeline(
+        &self,
+        raw_text: String,
+        recording_timestamp: chrono::DateTime<chrono::Local>,
+        assistive: bool,
+        hold_mode: HoldMode,
+        force_raw: bool,
+        force_ai: bool,
+        config: Config,
+        language_opt: Option<String>,
+        raw_save_enabled: bool,
+        audio_path: Option<ValidatedAudioPath>,
+        cloud_text_opt: Option<String>,
+        cloud_handle: Option<JoinHandle<Result<String>>>,
+    ) -> Result<()> {
+        let language_opt = language_opt.as_deref();
+
         // ALWAYS-ON: Final post-processing pass (lexicon + cleanup + semantic gate)
         // This ensures ALL output paths receive clean text regardless of mode.
         // Contract: every chunk/transcript passes through StreamPostProcessor before
@@ -1648,7 +1770,7 @@ impl RecordingController {
             warn!("Detected repetition loop in transcription - will clean up");
         }
 
-        // chat_active already captured above
+        let chat_active = assistive || crate::voice_chat_ui::is_voice_chat_overlay_visible();
 
         let effective_hold_mode = if assistive && matches!(hold_mode, HoldMode::Raw) {
             // Toggle-assistive path doesn't have a meaningful hold-mode; treat as Chat

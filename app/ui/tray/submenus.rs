@@ -25,7 +25,7 @@ pub(crate) fn hotkeys_summary_lines(config: &Config) -> (String, String) {
         )
     } else {
         match config.hold_mods {
-            HoldMods::Fn => "Hold Fn — RAW • Fn+Shift — Selection • Fn+Cmd — Chat".to_string(),
+            HoldMods::Fn => "Hold Fn — RAW • Fn+Shift — Chat • Fn+Cmd — Selection".to_string(),
             HoldMods::Ctrl => "Hold Ctrl — RAW".to_string(),
             HoldMods::CtrlAlt => {
                 "Hold Ctrl — RAW • Ctrl+Option — Format • Ctrl+Shift — Chat • Ctrl+Cmd — Selection"
@@ -41,9 +41,9 @@ pub(crate) fn hotkeys_summary_lines(config: &Config) -> (String, String) {
         match config.toggle_trigger {
             ToggleTrigger::None => "OFF",
             ToggleTrigger::DoubleCtrl => "Double Ctrl (RAW)",
-            ToggleTrigger::DoubleLeftOption => "Left Option (normal)",
+            ToggleTrigger::DoubleLeftOption => "Left Option (format)",
             ToggleTrigger::DoubleRightOption => "Right Option (assistive)",
-            ToggleTrigger::DoubleOption => "Option keys (left=RAW, right=assistive)",
+            ToggleTrigger::DoubleOption => "Option keys (left=format, right=assistive)",
         }
     );
 

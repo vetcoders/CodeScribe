@@ -429,9 +429,9 @@ mod macos {
             HoldMods::Fn => {
                 // Fn is base; Shift/Cmd modify mode.
                 if shift {
-                    HoldMode::Selection
-                } else if cmd {
                     HoldMode::Chat
+                } else if cmd {
+                    HoldMode::Selection
                 } else {
                     HoldMode::Raw
                 }
@@ -934,11 +934,11 @@ mod macos {
 
             // Fn base with Shift/Cmd modifiers
             assert_eq!(compute_hold_mode(false, false, HoldMods::Fn), HoldMode::Raw);
+            assert_eq!(compute_hold_mode(true, false, HoldMods::Fn), HoldMode::Chat);
             assert_eq!(
-                compute_hold_mode(true, false, HoldMods::Fn),
+                compute_hold_mode(false, true, HoldMods::Fn),
                 HoldMode::Selection
             );
-            assert_eq!(compute_hold_mode(false, true, HoldMods::Fn), HoldMode::Chat);
 
             // Ctrl-only ignores Shift/Cmd modifiers
             assert_eq!(

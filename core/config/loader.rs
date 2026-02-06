@@ -75,6 +75,11 @@ impl Config {
         {
             self.hold_start_delay_ms = ms;
         }
+        if let Ok(val) = std::env::var("TOGGLE_SILENCE_SEC")
+            && let Ok(sec) = val.parse()
+        {
+            self.toggle_silence_sec = sec;
+        }
 
         // Language
         if let Ok(val) = std::env::var("WHISPER_LANGUAGE")
@@ -257,6 +262,11 @@ impl Config {
         {
             self.hold_start_delay_ms = v;
         }
+        if std::env::var("TOGGLE_SILENCE_SEC").is_err()
+            && let Some(v) = settings.toggle_silence_sec
+        {
+            self.toggle_silence_sec = v;
+        }
         if std::env::var("HOLD_EXCLUSIVE").is_err()
             && let Some(v) = settings.hold_exclusive
         {
@@ -373,6 +383,7 @@ impl Config {
             "WHISPER_LANGUAGE"
                 | "HOLD_MODS"
                 | "HOLD_START_DELAY_MS"
+                | "TOGGLE_SILENCE_SEC"
                 | "HOLD_EXCLUSIVE"
                 | "AI_FORMATTING_ENABLED"
                 | "CODESCRIBE_BUFFERED_STREAM"
@@ -398,6 +409,11 @@ impl Config {
                     }
                 }
                 "SOUND_VOLUME" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        settings.set_f32(key, v);
+                    }
+                }
+                "TOGGLE_SILENCE_SEC" => {
                     if let Ok(v) = value.parse::<f32>() {
                         settings.set_f32(key, v);
                     }

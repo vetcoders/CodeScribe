@@ -256,6 +256,7 @@ pub fn diagnostics_report() -> String {
         "WHISPER_LANGUAGE",
         "HOLD_MODS",
         "HOLD_START_DELAY_MS",
+        "TOGGLE_SILENCE_SEC",
         "TOGGLE_TRIGGER",
         "CODESCRIBE_BUFFERED_STREAM",
         "CODESCRIBE_STREAM_CHUNK_SEC",

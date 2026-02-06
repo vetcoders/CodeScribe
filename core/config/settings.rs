@@ -24,6 +24,8 @@ pub struct UserSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_start_delay_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub toggle_silence_sec: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_formatting_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffered_stream: Option<bool>,
@@ -170,6 +172,7 @@ impl UserSettings {
     pub fn set_f32(&mut self, key: &str, value: f32) {
         match key {
             "SOUND_VOLUME" => self.sound_volume = Some(value),
+            "TOGGLE_SILENCE_SEC" => self.toggle_silence_sec = Some(value),
             other => {
                 warn!("Unknown f32 setting key: {other}");
                 return;

@@ -592,6 +592,13 @@ reload = "restart"
 category = "hotkeys"
 description = "Delay before hold recording starts (ms)"
 
+[vars.TOGGLE_SILENCE_SEC]
+default = "5.0"
+type = "f32"
+reload = "restart"
+category = "hotkeys"
+description = "Silence duration before sending a toggle utterance (seconds)"
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # UI / Overlay
 # ═══════════════════════════════════════════════════════════════════════════════
