@@ -14,7 +14,7 @@ use objc::{msg_send, sel, sel_impl};
 use objc2_app_kit::{NSVisualEffectMaterial, NSWindowCollectionBehavior};
 use tracing::{info, warn};
 
-use crate::config::{Config, HoldMods, ToggleTrigger};
+use crate::config::{Config, HoldMods, ToggleTrigger, keychain};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::hotkeys;
 use crate::tray::{TrayMenuEvent, send_menu_event};
@@ -63,9 +63,11 @@ struct BootstrapState {
     llm_endpoint_field: Option<usize>,
     llm_model_field: Option<usize>,
     llm_key_field: Option<usize>,
+    llm_key_status_label: Option<usize>,
     assistive_endpoint_field: Option<usize>,
     assistive_model_field: Option<usize>,
     assistive_key_field: Option<usize>,
+    assistive_key_status_label: Option<usize>,
 }
 
 lazy_static! {
@@ -111,8 +113,13 @@ pub fn show_bootstrap_overlay() {
     });
 }
 
+/// Alias: Settings window (bootstrap is now a standalone Settings window).
+pub fn show_settings_window() {
+    show_bootstrap_overlay();
+}
+
 fn show_bootstrap_overlay_impl() {
-    // Keep bootstrap as a standalone onboarding window.
+    // Keep Settings as a standalone window.
     // It should not depend on the voice chat overlay being available.
     // (This also avoids deadlocks when the overlay is mid-layout.)
     unsafe {
@@ -140,7 +147,7 @@ fn show_bootstrap_overlay_impl() {
         let ns_screen = Class::get("NSScreen").unwrap();
         let screen: Id = msg_send![ns_screen, mainScreen];
         if screen.is_null() {
-            warn!("No NSScreen available for bootstrap window");
+            warn!("No NSScreen available for settings window");
             return;
         }
         let visible: CGRect = msg_send![screen, visibleFrame];
@@ -294,6 +301,66 @@ fn permission_color(granted: bool) -> Id {
             msg_send![ns_color, systemRedColor]
         }
     }
+}
+
+fn keychain_key_is_set(account: &str) -> bool {
+    std::env::var(account)
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn key_status_text(is_set: bool) -> &'static str {
+    if is_set {
+        "Stored in Keychain"
+    } else {
+        "Not set"
+    }
+}
+
+fn key_status_color(is_set: bool) -> Id {
+    unsafe {
+        let ns_color = Class::get("NSColor").unwrap();
+        if is_set {
+            msg_send![ns_color, systemGreenColor]
+        } else {
+            msg_send![ns_color, secondaryLabelColor]
+        }
+    }
+}
+
+fn update_keychain_status_labels() {
+    let (llm_label, assist_label) = {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        (state.llm_key_status_label, state.assistive_key_status_label)
+    };
+    unsafe {
+        if let Some(ptr) = llm_label {
+            let is_set = keychain_key_is_set("LLM_API_KEY");
+            let label = ptr as Id;
+            set_text_field_string(label, key_status_text(is_set));
+            let _: () = msg_send![label, setTextColor: key_status_color(is_set)];
+        }
+        if let Some(ptr) = assist_label {
+            let is_set = keychain_key_is_set("LLM_ASSISTIVE_API_KEY");
+            let label = ptr as Id;
+            set_text_field_string(label, key_status_text(is_set));
+            let _: () = msg_send![label, setTextColor: key_status_color(is_set)];
+        }
+    }
+}
+
+fn clear_keychain_entry(account: &str, field_ptr: Option<usize>) {
+    if let Err(e) = keychain::delete_key(account) {
+        warn!("Failed to delete {account} from Keychain: {e}");
+    } else {
+        info!("Deleted {account} from Keychain");
+    }
+    unsafe { std::env::remove_var(account) };
+    if let Some(ptr) = field_ptr {
+        unsafe { set_text_field_string(ptr as Id, "") };
+    }
+    update_keychain_status_labels();
 }
 
 pub(super) fn refresh_permission_indicators() {
@@ -514,11 +581,14 @@ unsafe fn build_settings_ui(
         add_subview(setup_view, _fmt_header);
         y -= 26.0;
 
-        let llm_endpoint_val = config.llm_endpoint.as_deref().unwrap_or("");
+        let llm_endpoint_val = config
+            .llm_endpoint
+            .clone()
+            .unwrap_or_else(|| std::env::var("LLM_ENDPOINT").unwrap_or_default());
         let llm_endpoint_field = create_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
             "Endpoint (e.g. https://api.libraxis.cloud/v1/responses)",
-            llm_endpoint_val,
+            &llm_endpoint_val,
         );
         let _: () = msg_send![llm_endpoint_field, setFont: mono_font_input];
         button_set_action(
@@ -550,7 +620,27 @@ unsafe fn build_settings_ui(
         button_set_action(llm_key_field, action_handler, sel!(onLlmKeyChanged:));
         add_subview(setup_view, llm_key_field);
         state.llm_key_field = Some(llm_key_field as usize);
-        y -= 34.0;
+        y -= 22.0;
+        let llm_key_status = keychain_key_is_set("LLM_API_KEY");
+        let llm_status_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w - 70.0, 16.0)),
+            text: key_status_text(llm_key_status).to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: key_status_color(llm_key_status),
+            ..Default::default()
+        });
+        add_subview(setup_view, llm_status_label);
+        state.llm_key_status_label = Some(llm_status_label as usize);
+        let clear_llm_btn = button(
+            CGRect::new(
+                &CGPoint::new(pad + field_w - 60.0, y - 2.0),
+                &CGSize::new(60.0, 20.0),
+            ),
+            "Clear",
+        );
+        button_set_action(clear_llm_btn, action_handler, sel!(onClearLlmKey:));
+        add_subview(setup_view, clear_llm_btn);
+        y -= 20.0;
 
         // ── Assistive AI (optional) ──────────────────────────────────
         let _assist_header = create_label(LabelConfig {
@@ -608,7 +698,27 @@ unsafe fn build_settings_ui(
         );
         add_subview(setup_view, assist_key_field);
         state.assistive_key_field = Some(assist_key_field as usize);
-        y -= 34.0;
+        y -= 22.0;
+        let assist_key_status = keychain_key_is_set("LLM_ASSISTIVE_API_KEY");
+        let assist_status_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w - 70.0, 16.0)),
+            text: key_status_text(assist_key_status).to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: key_status_color(assist_key_status),
+            ..Default::default()
+        });
+        add_subview(setup_view, assist_status_label);
+        state.assistive_key_status_label = Some(assist_status_label as usize);
+        let clear_assist_btn = button(
+            CGRect::new(
+                &CGPoint::new(pad + field_w - 60.0, y - 2.0),
+                &CGSize::new(60.0, 20.0),
+            ),
+            "Clear",
+        );
+        button_set_action(clear_assist_btn, action_handler, sel!(onClearAssistiveKey:));
+        add_subview(setup_view, clear_assist_btn);
+        y -= 20.0;
 
         let save_btn = button(
             CGRect::new(
@@ -890,9 +1000,11 @@ pub(super) fn handle_bootstrap_window_closed() {
     state.llm_endpoint_field = None;
     state.llm_model_field = None;
     state.llm_key_field = None;
+    state.llm_key_status_label = None;
     state.assistive_endpoint_field = None;
     state.assistive_model_field = None;
     state.assistive_key_field = None;
+    state.assistive_key_status_label = None;
     state.config_cache = None;
 }
 
@@ -919,9 +1031,11 @@ pub fn hide_bootstrap_overlay() {
                 state.llm_endpoint_field = None;
                 state.llm_model_field = None;
                 state.llm_key_field = None;
+                state.llm_key_status_label = None;
                 state.assistive_endpoint_field = None;
                 state.assistive_model_field = None;
                 state.assistive_key_field = None;
+                state.assistive_key_status_label = None;
                 (window_ptr, None)
             } else {
                 (None, state.root_view)
@@ -937,6 +1051,21 @@ pub fn hide_bootstrap_overlay() {
             let _: () = msg_send![root_ptr as Id, setHidden: true];
         }
     });
+}
+
+/// Alias: Settings window close.
+pub fn hide_settings_window() {
+    hide_bootstrap_overlay();
+}
+
+/// Alias: schedule Settings onboarding window.
+pub fn schedule_settings_window() {
+    schedule_bootstrap();
+}
+
+/// Alias: should show Settings onboarding window.
+pub fn should_show_settings_onboarding() -> bool {
+    should_show_bootstrap()
 }
 
 /// Reset embedded Settings view state when the overlay is destroyed.
@@ -963,9 +1092,11 @@ pub fn reset_embedded_bootstrap_state() {
     state.llm_endpoint_field = None;
     state.llm_model_field = None;
     state.llm_key_field = None;
+    state.llm_key_status_label = None;
     state.assistive_endpoint_field = None;
     state.assistive_model_field = None;
     state.assistive_key_field = None;
+    state.assistive_key_status_label = None;
 }
 
 fn update_step_status(index: usize, text: &str) {
@@ -1654,8 +1785,17 @@ pub(super) extern "C" fn on_llm_key_changed(_this: &Object, _cmd: objc::runtime:
             info!("Settings: LLM API key updated (stored in Keychain)");
             let config = Config::load();
             let _ = config.save_to_env("LLM_API_KEY", &value);
+            update_keychain_status_labels();
         }
     }
+}
+
+pub(super) extern "C" fn on_clear_llm_key(_this: &Object, _cmd: objc::runtime::Sel, _sender: Id) {
+    let field_ptr = {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.llm_key_field
+    };
+    clear_keychain_entry("LLM_API_KEY", field_ptr);
 }
 
 pub(super) extern "C" fn on_save_api_settings(
@@ -1711,6 +1851,15 @@ pub(super) extern "C" fn on_save_api_settings(
         let borrowed: Vec<(&str, &str)> = entries.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let _ = config.save_to_env_many(&borrowed);
     }
+    unsafe {
+        if let Some(ptr) = llm_key {
+            set_text_field_string(ptr as Id, "");
+        }
+        if let Some(ptr) = assist_key {
+            set_text_field_string(ptr as Id, "");
+        }
+    }
+    update_keychain_status_labels();
     info!("Settings: API settings saved");
 }
 
@@ -1832,8 +1981,21 @@ pub(super) extern "C" fn on_assistive_key_changed(
             info!("Settings: assistive API key updated (stored in Keychain)");
             let config = Config::load();
             let _ = config.save_to_env("LLM_ASSISTIVE_API_KEY", &value);
+            update_keychain_status_labels();
         }
     }
+}
+
+pub(super) extern "C" fn on_clear_assistive_key(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    _sender: Id,
+) {
+    let field_ptr = {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.assistive_key_field
+    };
+    clear_keychain_entry("LLM_ASSISTIVE_API_KEY", field_ptr);
 }
 
 pub(super) extern "C" fn on_quality_daemon_toggled(

@@ -75,7 +75,7 @@ pub enum TrayMenuEvent {
     /// User clicked Quit - clean shutdown
     Quit,
 
-    /// Run onboarding (bootstrap) flow
+    /// Open Settings window (onboarding flow)
     RunOnboarding,
 
     // Hold Hotkeys submenu
