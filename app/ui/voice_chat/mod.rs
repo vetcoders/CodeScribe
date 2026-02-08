@@ -42,8 +42,8 @@ use crate::config::{HoldMods, ToggleTrigger};
 use crate::ui_helpers::{
     LabelConfig, NS_FLOATING_WINDOW_LEVEL, add_subview, button_set_action, button_style,
     color_clear, color_label, color_secondary_label, create_button,
-    create_flipped_vertical_stack_view, create_glass_effect_view, create_label,
-    create_scrollable_text_view, create_vertical_stack_view, glass_effect_supported,
+    create_flipped_vertical_stack_view, create_glass_effect_view, create_glass_effect_view_with,
+    create_label, create_scrollable_text_view, create_vertical_stack_view, glass_effect_supported,
     layout_region_frame_for_view, ns_string, set_button_symbol, set_focus_ring, set_hidden,
     set_tooltip, set_visual_effect_blending, set_visual_effect_material, set_visual_effect_state,
     style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha, window_show,
@@ -250,8 +250,12 @@ fn show_voice_chat_overlay_impl() {
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(window_width, window_height),
         );
-        let blur_view: Id =
-            create_glass_effect_view(blur_frame, NSVisualEffectMaterial::WindowBackground);
+        let blur_view: Id = create_glass_effect_view_with(
+            blur_frame,
+            NSVisualEffectMaterial::WindowBackground,
+            NSVisualEffectBlendingMode::BehindWindow,
+            NSVisualEffectState::Active,
+        );
         let _: () = msg_send![
             blur_view,
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
@@ -306,11 +310,17 @@ fn show_voice_chat_overlay_impl() {
             let _: () = msg_send![header_layer, setMasksToBounds: true];
         }
         let header_controls: Id = msg_send![Class::get("NSView").unwrap(), alloc];
-        let header_controls: Id = msg_send![header_controls, initWithFrame: header_frame];
+        let header_controls: Id = msg_send![
+            header_controls,
+            initWithFrame: CGRect::new(
+                &CGPoint::new(0.0, 0.0),
+                &CGSize::new(header_frame.size.width, header_frame.size.height),
+            )
+        ];
         let _: () = msg_send![header_controls, setWantsLayer: true];
         let _: () = msg_send![
             header_controls,
-            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MIN_Y_MARGIN
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
         ];
         let title_x = ui_tokens::EDGE_PADDING_TIGHT;
         let title_y = ((header_height - 20.0) / 2.0).max(0.0);
@@ -685,7 +695,7 @@ fn show_voice_chat_overlay_impl() {
         add_subview(blur_view, split_view);
         // Ensure header glass + controls stay above the split view content.
         add_subview(blur_view, header_bg);
-        add_subview(blur_view, header_controls);
+        add_subview(header_bg, header_controls);
 
         let inner_pad = ui_tokens::EDGE_PADDING_TIGHT;
         let drawer_frame = CGRect::new(

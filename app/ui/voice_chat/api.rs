@@ -1867,6 +1867,7 @@ fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
 
         let pad = ui_tokens::EDGE_PADDING_TIGHT;
         let gap = ui_tokens::CONTENT_GAP;
+        let input_gap = (gap * 0.5).max(4.0);
         let footer_inset = ui_tokens::FOOTER_INSET;
         let bar_width = (content_width - pad * 2.0).max(120.0);
         let current_bar: CGRect = msg_send![input_bar, frame];
@@ -1906,7 +1907,7 @@ fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
         // Resize Agent scroll view so it doesn't overlap with input.
         if let Some(agent_scroll_ptr) = state.agent_scroll_view {
             let agent_scroll = agent_scroll_ptr as Id;
-            let bottom = footer_inset + desired_h + gap;
+            let bottom = footer_inset + desired_h + input_gap;
             let top = content_height - gap;
             let new_agent_frame = CGRect::new(
                 &CGPoint::new(pad, bottom),

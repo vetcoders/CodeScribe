@@ -130,7 +130,7 @@ impl TranscriptionPipeline {
                 break;
             }
         }
-        self.last_suffix = processed[start..].to_string();
+        self.last_suffix = processed.get(start..).unwrap_or("").to_string();
 
         Some(processed)
     }
@@ -842,26 +842,38 @@ pub(crate) fn build_redacted_delta(before: &str, after: &str) -> Option<String> 
         return None;
     }
 
-    let mut prefix_len = 0usize;
+    let mut prefix_chars = 0usize;
     for (a, b) in before.chars().zip(after.chars()) {
         if a == b {
-            prefix_len += a.len_utf8();
+            prefix_chars += 1;
         } else {
             break;
         }
     }
 
-    let removed = before[prefix_len..].chars().count();
+    let prefix_before = byte_index_at_char(before, prefix_chars);
+    let prefix_after = byte_index_at_char(after, prefix_chars);
+    let removed = before.get(prefix_before..).unwrap_or("").chars().count();
     let mut delta = String::new();
     for _ in 0..removed {
         delta.push('\u{0008}');
     }
-    delta.push_str(&after[prefix_len..]);
+    delta.push_str(after.get(prefix_after..).unwrap_or(""));
     Some(delta)
 }
 
 pub(crate) fn apply_delta_to_string(target: &mut String, delta: &str) {
     crate::pipeline::contracts::TranscriptDelta::from_raw(delta).apply(target);
+}
+
+fn byte_index_at_char(text: &str, char_index: usize) -> usize {
+    if char_index == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(char_index)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| text.len())
 }
 
 fn tokenize_for_emit(text: &str) -> Vec<String> {
@@ -1048,6 +1060,17 @@ mod tests {
 
         assert!(delta.contains("\u{0008}\u{0008}\u{0008}"));
         assert!(delta.ends_with("ft."));
+
+        let mut target = before.to_string();
+        apply_delta_to_string(&mut target, &delta);
+        assert_eq!(target, after);
+    }
+
+    #[test]
+    fn test_correction_delta_polish_diacritics() {
+        let before = "chciałbym zostać weterynarzem.";
+        let after = "chciałbym zostać weterynarzem!";
+        let delta = build_redacted_delta(before, after).expect("should produce delta");
 
         let mut target = before.to_string();
         apply_delta_to_string(&mut target, &delta);

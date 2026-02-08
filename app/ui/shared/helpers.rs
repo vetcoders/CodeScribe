@@ -427,7 +427,12 @@ fn insets_from_frame(bounds: CGRect, frame: CGRect) -> NSEdgeInsets {
 }
 
 /// Create a glass effect view if available, otherwise fallback to NSVisualEffectView.
-pub fn create_glass_effect_view(frame: CGRect, material: NSVisualEffectMaterial) -> Id {
+pub fn create_glass_effect_view_with(
+    frame: CGRect,
+    material: NSVisualEffectMaterial,
+    blending: NSVisualEffectBlendingMode,
+    state: NSVisualEffectState,
+) -> Id {
     unsafe {
         let glass_allowed =
             std::env::var("CODESCRIBE_DISABLE_GLASS").is_err() && glass_effect_supported();
@@ -451,8 +456,8 @@ pub fn create_glass_effect_view(frame: CGRect, material: NSVisualEffectMaterial)
                 );
                 let glass: Id = msg_send![glass, initWithFrame: glass_frame];
                 set_visual_effect_material(glass, material);
-                set_visual_effect_blending(glass, NSVisualEffectBlendingMode::WithinWindow);
-                set_visual_effect_state(glass, NSVisualEffectState::Active);
+                set_visual_effect_blending(glass, blending);
+                set_visual_effect_state(glass, state);
                 let _: () = msg_send![glass, setWantsLayer: true];
                 let _: () = msg_send![
                     glass,
@@ -466,8 +471,8 @@ pub fn create_glass_effect_view(frame: CGRect, material: NSVisualEffectMaterial)
             let view: Id = msg_send![glass_cls, alloc];
             let view: Id = msg_send![view, initWithFrame: frame];
             set_visual_effect_material(view, material);
-            set_visual_effect_blending(view, NSVisualEffectBlendingMode::WithinWindow);
-            set_visual_effect_state(view, NSVisualEffectState::Active);
+            set_visual_effect_blending(view, blending);
+            set_visual_effect_state(view, state);
             let _: () = msg_send![view, setWantsLayer: true];
             return view;
         }
@@ -476,11 +481,21 @@ pub fn create_glass_effect_view(frame: CGRect, material: NSVisualEffectMaterial)
         let view: Id = msg_send![visual_cls, alloc];
         let view: Id = msg_send![view, initWithFrame: frame];
         set_visual_effect_material(view, material);
-        set_visual_effect_blending(view, NSVisualEffectBlendingMode::WithinWindow);
-        set_visual_effect_state(view, NSVisualEffectState::Active);
+        set_visual_effect_blending(view, blending);
+        set_visual_effect_state(view, state);
         let _: () = msg_send![view, setWantsLayer: true];
         view
     }
+}
+
+/// Create a glass effect view if available, otherwise fallback to NSVisualEffectView.
+pub fn create_glass_effect_view(frame: CGRect, material: NSVisualEffectMaterial) -> Id {
+    create_glass_effect_view_with(
+        frame,
+        material,
+        NSVisualEffectBlendingMode::WithinWindow,
+        NSVisualEffectState::Active,
+    )
 }
 
 pub fn glass_effect_supported() -> bool {
@@ -1511,6 +1526,56 @@ unsafe fn markdown_attributed_string(text: &str, font: Id) -> Option<Id> {
     None
 }
 
+fn markdown_preserve_single_newlines(text: &str) -> String {
+    if !text.contains('\n') {
+        return text.to_string();
+    }
+
+    // NSAttributedString Markdown parsing collapses single newlines into spaces.
+    // Convert single newlines into Markdown hard breaks ("  \\n") outside fenced code blocks.
+    let mut out = String::with_capacity(text.len() + text.len() / 10);
+    let mut in_fence = false;
+    let parts: Vec<&str> = text.split('\n').collect();
+
+    for (idx, line) in parts.iter().enumerate() {
+        let is_last = idx + 1 == parts.len();
+        let trimmed = line.trim_start();
+        let is_fence = trimmed.starts_with("```");
+
+        if is_fence {
+            out.push_str(line);
+            if !is_last {
+                out.push('\n');
+            }
+            in_fence = !in_fence;
+            continue;
+        }
+
+        if in_fence {
+            out.push_str(line);
+            if !is_last {
+                out.push('\n');
+            } else if line.is_empty() {
+                out.push('\n');
+            }
+            continue;
+        }
+
+        out.push_str(line);
+        if !is_last {
+            if line.is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str("  \n");
+            }
+        } else if line.is_empty() {
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
 unsafe fn apply_markdown_to_text_field(text_label: Id, text: &str, font: Id) -> bool {
     let responds_attr: bool =
         msg_send![text_label, respondsToSelector: sel!(setAttributedStringValue:)];
@@ -1523,7 +1588,8 @@ unsafe fn apply_markdown_to_text_field(text_label: Id, text: &str, font: Id) -> 
     } else {
         font
     };
-    if let Some(attr) = unsafe { markdown_attributed_string(text, font) } {
+    let processed = markdown_preserve_single_newlines(text);
+    if let Some(attr) = unsafe { markdown_attributed_string(&processed, font) } {
         let _: () = msg_send![text_label, setAttributedStringValue: attr];
         return true;
     }
@@ -1663,6 +1729,7 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         let cell: Id = msg_send![text_label, cell];
         if !cell.is_null() {
             let _: () = msg_send![cell, setWraps: true];
+            let _: () = msg_send![cell, setLineBreakMode: 0_isize]; // NSLineBreakByWordWrapping
             let _: () = msg_send![cell, setScrollable: false];
         }
 
