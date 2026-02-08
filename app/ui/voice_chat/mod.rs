@@ -687,7 +687,8 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![split_controller, addSplitViewItem: sidebar_item];
         let _: () = msg_send![split_controller, addSplitViewItem: content_item];
 
-        let split_view: Id = msg_send![split_controller, view];
+        // Use splitView property to ensure we get the NSSplitView (view property might be a wrapper).
+        let split_view: Id = msg_send![split_controller, splitView];
         let _: () = msg_send![split_view, setFrame: content_frame];
         let _: () = msg_send![
             split_view,
@@ -698,7 +699,11 @@ fn show_voice_chat_overlay_impl() {
             let _: () = msg_send![split_view, setVertical: true];
         }
         // Use thin divider style with adequate contrast for glass-effect windows.
-        let _: () = msg_send![split_view, setDividerStyle: 1_isize]; // NSSplitViewDividerStyleThin
+        let responds_divider: bool =
+            msg_send![split_view, respondsToSelector: sel!(setDividerStyle:)];
+        if responds_divider {
+            let _: () = msg_send![split_view, setDividerStyle: 1_isize]; // NSSplitViewDividerStyleThin
+        }
         add_subview(blur_view, split_view);
         // Ensure header glass + controls stay above the split view content.
         add_subview(blur_view, header_bg);

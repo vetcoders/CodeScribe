@@ -1483,7 +1483,9 @@ fn markdown_options_with_base_font(font: Id) -> Option<Id> {
 
 unsafe fn markdown_attributed_string(text: &str, font: Id) -> Option<Id> {
     let ns_attr = Class::get("NSAttributedString")?;
-    let text_ns = ns_string(text);
+    // Pre-process text to ensure single newlines become hard breaks in Markdown (except in code blocks).
+    let processed_text = markdown_preserve_single_newlines(text);
+    let text_ns = ns_string(&processed_text);
     let options = markdown_options_with_base_font(font).unwrap_or(std::ptr::null_mut::<Object>());
 
     // initWithMarkdown: expects NSData, not NSString

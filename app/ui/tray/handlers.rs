@@ -1,5 +1,4 @@
 //! Menu action handlers for tray menu events
-//!
 //! Handles menu item clicks and dispatches appropriate events.
 
 use muda::MenuId;
@@ -8,24 +7,13 @@ use tracing::{debug, info};
 
 use crate::config::{Config, HoldMods, ToggleTrigger};
 use crate::os::clipboard;
-use crate::os::hotkeys;
-use crate::os::notifications;
 use crate::os::permissions;
-use crate::tray::state::{HOTKEYS_MENU_ITEMS, NOTES_MENU_ITEMS, send_menu_event};
-use crate::tray::types::{MenuIds, TrayMenuEvent, VadPreset};
+use crate::tray::state::{NOTES_MENU_ITEMS, send_menu_event};
+use crate::tray::types::{MenuIds, TrayMenuEvent};
 
 #[cfg(target_os = "macos")]
 fn notify(title: &str, message: &str) {
-    notifications::notify(title, message);
-}
-
-fn hotkeys_state_summary() -> String {
-    let cfg = Config::load();
-    format!(
-        "HOLD_MODS={}, TOGGLE_TRIGGER={}",
-        cfg.hold_mods.as_str(),
-        cfg.toggle_trigger.as_str()
-    )
+    crate::os::notifications::notify(title, message);
 }
 
 /// Handle menu item click and send appropriate event
@@ -72,13 +60,7 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         handle_open_today_note();
     }
     // Hotkeys submenu
-    else if event_id == &menu_ids.hotkeys_toggle_assistive {
-        handle_toggle_assistive_toggle();
-    } else if event_id == &menu_ids.hotkeys_toggle_dictation {
-        handle_toggle_dictation_toggle();
-    } else if event_id == &menu_ids.hotkeys_reset {
-        handle_reset_hotkeys();
-    } else if event_id == &menu_ids.hotkeys_copy_cheatsheet {
+    else if event_id == &menu_ids.hotkeys_copy_cheatsheet {
         handle_copy_hotkeys_cheatsheet();
     }
     // Quality - Open Report
@@ -86,12 +68,6 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         handle_open_quality_report();
     } else if event_id == &menu_ids.silero_vad_install {
         handle_install_silero_vad();
-    } else if event_id == &menu_ids.vad_preset_sensitive {
-        send_menu_event(TrayMenuEvent::SetVadPreset(VadPreset::Sensitive));
-    } else if event_id == &menu_ids.vad_preset_balanced {
-        send_menu_event(TrayMenuEvent::SetVadPreset(VadPreset::Balanced));
-    } else if event_id == &menu_ids.vad_preset_conservative {
-        send_menu_event(TrayMenuEvent::SetVadPreset(VadPreset::Conservative));
     } else {
         debug!("Unknown menu event id: {:?}", event_id);
     }
@@ -156,7 +132,7 @@ fn handle_copy_hotkeys_cheatsheet() {
 
     let mut text = format!(
         "CodeScribe hotkeys\n\
-\n\
+
 - Hands-off (RAW): {hands_off}\n\
 - Hold-to-talk (RAW): {base_raw} (hold)\n"
     );
@@ -364,145 +340,6 @@ fn handle_open_today_note() {
     crate::state::notes::open_today_note();
 }
 
-pub(crate) fn refresh_hotkeys_menu_from_config() {
-    let config = Config::load();
-    let (hold_line, toggle_line) = crate::tray::submenus::hotkeys_summary_lines(&config);
-
-    HOTKEYS_MENU_ITEMS.with(|items_cell| {
-        if let Some(ref items) = *items_cell.borrow() {
-            items.hold_summary.set_text(hold_line);
-            items.toggle_summary.set_text(toggle_line);
-            items
-                .toggle_dictation
-                .set_checked(config.toggle_trigger == ToggleTrigger::DoubleCtrl);
-            items.toggle_assistive.set_checked(matches!(
-                config.toggle_trigger,
-                ToggleTrigger::DoubleOption | ToggleTrigger::DoubleRightOption
-            ));
-        }
-    });
-}
-
-// ============================================================================
-// Hotkeys Handlers
-// ============================================================================
-
-/// Toggle the assistive "right Option" trigger on/off.
-fn handle_toggle_assistive_toggle() {
-    let config = Config::load();
-    let currently_enabled = matches!(
-        config.toggle_trigger,
-        ToggleTrigger::DoubleOption | ToggleTrigger::DoubleRightOption
-    );
-    let new_trigger = if currently_enabled {
-        ToggleTrigger::None
-    } else {
-        ToggleTrigger::DoubleRightOption
-    };
-
-    info!(
-        "Toggling assistive right-Option trigger: {} -> {:?}",
-        if currently_enabled { "ON" } else { "OFF" },
-        new_trigger
-    );
-
-    // Persist to config + notify daemon to re-sync hotkeys deterministically.
-    let _ = config.save_to_env("TOGGLE_TRIGGER", new_trigger.as_str());
-    send_menu_event(TrayMenuEvent::SetToggleTrigger(new_trigger));
-
-    refresh_hotkeys_menu_from_config();
-}
-
-/// Toggle the RAW hands-off "double Ctrl" trigger on/off.
-fn handle_toggle_dictation_toggle() {
-    let config = Config::load();
-    let currently_enabled = matches!(config.toggle_trigger, ToggleTrigger::DoubleCtrl);
-    let new_trigger = if currently_enabled {
-        ToggleTrigger::None
-    } else {
-        ToggleTrigger::DoubleCtrl
-    };
-
-    info!(
-        "Toggling RAW double-Ctrl trigger: {} -> {:?}",
-        if currently_enabled { "ON" } else { "OFF" },
-        new_trigger
-    );
-
-    if let Err(e) = config.save_to_env("TOGGLE_TRIGGER", new_trigger.as_str()) {
-        #[cfg(target_os = "macos")]
-        notify("CodeScribe", &format!("Failed to save TOGGLE_TRIGGER: {e}"));
-        return;
-    }
-    hotkeys::set_toggle_trigger(new_trigger);
-    send_menu_event(TrayMenuEvent::SetToggleTrigger(new_trigger));
-
-    // If enabling DoubleCtrl and hold is Ctrl-only, switch hold to Ctrl+Option automatically
-    // (otherwise hold-to-talk is disabled to avoid Ctrl+shortcut conflicts).
-    if new_trigger == ToggleTrigger::DoubleCtrl && config.hold_mods == HoldMods::Ctrl {
-        let hold_mods_for_ui = HoldMods::CtrlAlt;
-        if let Err(e) = config.save_to_env("HOLD_MODS", hold_mods_for_ui.as_str()) {
-            #[cfg(target_os = "macos")]
-            notify("CodeScribe", &format!("Failed to save HOLD_MODS: {e}"));
-            return;
-        }
-        let _ = config.save_to_env("HOLD_EXCLUSIVE", "0");
-        hotkeys::set_hold_mods(hold_mods_for_ui);
-        hotkeys::set_exclusive_mode(false);
-        send_menu_event(TrayMenuEvent::SetHoldMods(hold_mods_for_ui));
-    }
-
-    refresh_hotkeys_menu_from_config();
-
-    #[cfg(target_os = "macos")]
-    notify(
-        "CodeScribe",
-        &format!("Hotkeys updated ({})", hotkeys_state_summary()),
-    );
-}
-
-/// Reset hotkeys to a safe, recommended default.
-fn handle_reset_hotkeys() {
-    info!("Resetting hotkeys to recommended defaults");
-
-    let config = Config::load();
-
-    // Ensure Shift/Cmd mode layer is enabled.
-    if let Err(e) = config.save_to_env("HOLD_EXCLUSIVE", "0") {
-        #[cfg(target_os = "macos")]
-        notify("CodeScribe", &format!("Failed to save HOLD_EXCLUSIVE: {e}"));
-        return;
-    }
-    // Recommended: Hold Fn for RAW (doesn't break terminal shortcuts).
-    if let Err(e) = config.save_to_env("HOLD_MODS", HoldMods::Fn.as_str()) {
-        #[cfg(target_os = "macos")]
-        notify("CodeScribe", &format!("Failed to save HOLD_MODS: {e}"));
-        return;
-    }
-    // Recommended: enable hands-off toggle on double Option.
-    if let Err(e) = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::DoubleOption.as_str()) {
-        #[cfg(target_os = "macos")]
-        notify("CodeScribe", &format!("Failed to save TOGGLE_TRIGGER: {e}"));
-        return;
-    }
-
-    hotkeys::set_exclusive_mode(false);
-    hotkeys::set_hold_mods(HoldMods::Fn);
-    hotkeys::set_toggle_trigger(ToggleTrigger::DoubleOption);
-
-    send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Fn));
-    send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::DoubleOption));
-    send_menu_event(TrayMenuEvent::ResetShortcuts);
-
-    refresh_hotkeys_menu_from_config();
-
-    #[cfg(target_os = "macos")]
-    notify(
-        "CodeScribe",
-        "Applied recommended hotkeys: Hold Fn, Double Option hands-off",
-    );
-}
-
 /// Open history folder in Finder
 fn handle_open_history_folder() {
     send_menu_event(TrayMenuEvent::OpenHistoryFolder);
@@ -539,7 +376,7 @@ fn handle_show_about() {
     {
         let version = env!("CARGO_PKG_VERSION");
         let message = format!(
-            "CodeScribe v{}\\n\\nSpeech-to-text for macOS\\n\\nCreated by M&K (c)2026 VetCoders",
+            "CodeScribe v{}\n\nSpeech-to-text for macOS\n\nCreated by M&K (c)2026 VetCoders",
             version
         );
 

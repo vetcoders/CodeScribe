@@ -58,9 +58,7 @@ use tracing::{debug, info};
 use tray_icon::{TrayIconBuilder, menu::MenuEvent};
 
 // Re-export public API
-pub(crate) use handlers::refresh_hotkeys_menu_from_config;
 pub use menu::update_silero_vad_label;
-pub use menu::update_vad_preset_checks;
 pub use menu::{toggle_ai_formatting, update_quality_label};
 pub use state::send_menu_event;
 pub use state::{menu_event_receiver, update_tray_status};
@@ -190,7 +188,6 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
         if last_menu_refresh.elapsed() >= Duration::from_secs(2) {
             menu::update_quality_label();
             menu::update_silero_vad_label();
-            menu::update_vad_preset_checks();
             last_menu_refresh = Instant::now();
         }
 

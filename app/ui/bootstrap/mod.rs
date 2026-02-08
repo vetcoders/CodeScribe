@@ -17,11 +17,10 @@ use tracing::{info, warn};
 use crate::config::{Config, HoldMods, ToggleTrigger, keychain};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::hotkeys;
-use crate::tray::{TrayMenuEvent, send_menu_event};
 use crate::ui::bootstrap::handlers::{action_handler_class, window_delegate_class};
 use crate::ui_helpers::{
     LabelConfig, add_subview, button, button_set_action, create_checkbox, create_floating_window,
-    create_glass_effect_view, create_label, create_secure_text_input, create_slider,
+    create_glass_effect_view_with, create_label, create_secure_text_input, create_slider,
     create_text_input, ns_string, set_text_field_string, ui_colors, ui_tokens, window_close,
     window_content_view, window_show,
 };
@@ -208,16 +207,18 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
             return Some(root);
         }
 
-        let root: Id = create_glass_effect_view(frame, NSVisualEffectMaterial::WindowBackground);
+        // Create a container view (transparent) to hold the split visual effects.
+        let ns_view = Class::get("NSView").unwrap();
+        let root: Id = msg_send![ns_view, alloc];
+        let root: Id = msg_send![root, initWithFrame: frame];
         let _: () = msg_send![
             root,
             setAutoresizingMask: 2_isize | 16_isize // NSViewWidthSizable | NSViewHeightSizable
         ];
-        let layer: Id = msg_send![root, layer];
-        if !layer.is_null() {
-            let _: () = msg_send![layer, setCornerRadius: 14.0f64];
-            let _: () = msg_send![layer, setMasksToBounds: true];
-        }
+        // No corner radius on the root container; individual panes will handle their own if needed,
+        // or the window itself handles clipping. Since it's a full-size content window, we rely on window mask.
+        // Actually, for a floating window, we might want rounded corners on the content if it's detached,
+        // but here we are building a standard window structure.
         add_subview(parent, root);
 
         let action_handler_class = action_handler_class();
@@ -399,18 +400,51 @@ unsafe fn build_settings_ui(
 
         let settings_width = settings_width.max(SIDEBAR_WIDTH + 240.0);
         let settings_height = settings_height.max(280.0);
-        let header_h = 88.0;
-        let content_x = SIDEBAR_WIDTH;
-        let content_width = (settings_width - SIDEBAR_WIDTH).max(240.0);
-        let content_h = (settings_height - header_h).max(240.0);
 
-        // ====================================================================
-        // Title: "Welcome to CodeScribe"
-        // ====================================================================
+        // ── Glass Split Structure ────────────────────────────────────
+        // Left: Sidebar (Material: Sidebar)
+        let sidebar_frame = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(SIDEBAR_WIDTH, settings_height),
+        );
+        let sidebar_bg = create_glass_effect_view_with(
+            sidebar_frame,
+            NSVisualEffectMaterial::Sidebar,
+            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
+            objc2_app_kit::NSVisualEffectState::Active,
+        );
+        let _: () = msg_send![
+            sidebar_bg,
+            setAutoresizingMask: 16_isize | 2_isize // Height | MinXMargin (fixed left)
+        ];
+        add_subview(root_view, sidebar_bg);
+
+        // Right: Content (Material: WindowBackground)
+        let content_bg_frame = CGRect::new(
+            &CGPoint::new(SIDEBAR_WIDTH, 0.0),
+            &CGSize::new(settings_width - SIDEBAR_WIDTH, settings_height),
+        );
+        let content_bg = create_glass_effect_view_with(
+            content_bg_frame,
+            NSVisualEffectMaterial::WindowBackground,
+            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
+            objc2_app_kit::NSVisualEffectState::Active,
+        );
+        let _: () = msg_send![
+            content_bg,
+            setAutoresizingMask: 16_isize | 2_isize // Height | Width
+        ];
+        add_subview(root_view, content_bg);
+
+        // ── Header (inside Content BG) ───────────────────────────────
+        let header_h = 80.0; // Slightly shorter header for modern feel
+        let content_area_w = content_bg_frame.size.width;
+        let content_area_h = settings_height; // Full height available in bg, but we'll inset content below header
+
         let title_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(20.0, settings_height - 34.0),
-                &CGSize::new(settings_width - 40.0, 28.0),
+                &CGPoint::new(30.0, content_area_h - 40.0),
+                &CGSize::new(content_area_w - 60.0, 24.0),
             ),
             text: "Welcome to CodeScribe".to_string(),
             font_size: 18.0,
@@ -420,12 +454,12 @@ unsafe fn build_settings_ui(
             selectable: false,
             editable: false,
         });
-        add_subview(root_view, title_label);
+        add_subview(content_bg, title_label);
 
         let subtitle_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(20.0, settings_height - 54.0),
-                &CGSize::new(settings_width - 40.0, 16.0),
+                &CGPoint::new(30.0, content_area_h - 60.0),
+                &CGSize::new(content_area_w - 60.0, 16.0),
             ),
             text: "Native macOS speech-to-text with AI formatting".to_string(),
             font_size: ui_tokens::SMALL_FONT_SIZE,
@@ -433,54 +467,48 @@ unsafe fn build_settings_ui(
             text_color: crate::ui_helpers::color_secondary_label(),
             ..Default::default()
         });
-        add_subview(root_view, subtitle_label);
+        add_subview(content_bg, subtitle_label);
 
-        // ====================================================================
-        // Sidebar (left, 120px wide, darker background)
-        // ====================================================================
-        let sidebar_frame = CGRect::new(
-            &CGPoint::new(0.0, 0.0),
-            &CGSize::new(SIDEBAR_WIDTH, content_h),
-        );
-        let sidebar: Id = msg_send![ns_view, alloc];
-        let sidebar: Id = msg_send![sidebar, initWithFrame: sidebar_frame];
-        let _: () = msg_send![sidebar, setWantsLayer: true];
-        let sidebar_layer: Id = msg_send![sidebar, layer];
-        if !sidebar_layer.is_null() {
-            let sidebar_bg = ui_colors::sidebar_bg();
-            let cg_color: Id = msg_send![sidebar_bg, CGColor];
-            let _: () = msg_send![sidebar_layer, setBackgroundColor: cg_color];
-        }
-        add_subview(root_view, sidebar);
-
-        // Sidebar tab buttons
+        // Sidebar tab buttons (inside sidebar_bg)
+        // Vertically centered or top-aligned? Standard is top, below window traffic lights if visible.
+        // Since it's a frameless window with titlebar, traffic lights are at top-left.
+        // We start buttons a bit lower.
+        let tab_start_y = settings_height - 60.0;
         let tab_names = ["Setup", "Keys", "Audio"];
         let tab_sels = [sel!(onTabSetup:), sel!(onTabKeys:), sel!(onTabAudio:)];
         let mut tab_buttons: [Option<usize>; 3] = [None; 3];
 
         for (i, (name, sel)) in tab_names.iter().zip(tab_sels.iter()).enumerate() {
-            let btn_y = content_h - 44.0 * (i as f64 + 1.0);
-            let btn_frame =
-                CGRect::new(&CGPoint::new(0.0, btn_y), &CGSize::new(SIDEBAR_WIDTH, 36.0));
+            let btn_height = 36.0;
+            let gap = 4.0;
+            let btn_y = tab_start_y - (btn_height + gap) * (i as f64);
+            let btn_frame = CGRect::new(
+                &CGPoint::new(8.0, btn_y),
+                &CGSize::new(SIDEBAR_WIDTH - 16.0, btn_height),
+            );
 
             let tab_btn = create_sidebar_tab_button(btn_frame, name, i == TAB_SETUP);
             button_set_action(tab_btn, action_handler, *sel);
-            add_subview(sidebar, tab_btn);
+            add_subview(sidebar_bg, tab_btn);
             tab_buttons[i] = Some(tab_btn as usize);
         }
 
         // ====================================================================
-        // Content area views (one per tab)
+        // Content area views (one per tab, inside content_bg)
         // ====================================================================
-        let content_frame = CGRect::new(
-            &CGPoint::new(content_x, 0.0),
-            &CGSize::new(content_width, content_h),
+        // Relative to content_bg: origin is (0,0)
+        let tab_content_frame = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(content_area_w, content_area_h - header_h),
         );
 
         // --- Setup tab (index 0) ---
+        let content_width = content_area_w;
+        let content_h = tab_content_frame.size.height;
+
         let setup_view: Id = msg_send![ns_view, alloc];
-        let setup_view: Id = msg_send![setup_view, initWithFrame: content_frame];
-        add_subview(root_view, setup_view);
+        let setup_view: Id = msg_send![setup_view, initWithFrame: tab_content_frame];
+        add_subview(content_bg, setup_view);
 
         let pad = ui_tokens::EDGE_PADDING;
         let field_w = content_width - pad * 2.0;
@@ -776,7 +804,7 @@ unsafe fn build_settings_ui(
 
         // ── Completion view (hidden, shown on Finish) ────────────────
         let completion: Id = msg_send![ns_view, alloc];
-        let completion: Id = msg_send![completion, initWithFrame: content_frame];
+        let completion: Id = msg_send![completion, initWithFrame: tab_content_frame];
         let _: () = msg_send![completion, setHidden: true];
         let done_label = create_label(LabelConfig {
             frame: CGRect::new(
@@ -791,17 +819,17 @@ unsafe fn build_settings_ui(
         });
         let _: () = msg_send![done_label, setAlignment: 1_isize]; // NSTextAlignmentCenter
         add_subview(completion, done_label);
-        add_subview(root_view, completion);
+        add_subview(content_bg, completion);
 
         // --- Keys tab (index 1) ---
-        let keys_view = build_keys_tab(action_handler, content_frame, config, &mut state);
+        let keys_view = build_keys_tab(action_handler, tab_content_frame, config, &mut state);
         let _: () = msg_send![keys_view, setHidden: true];
-        add_subview(root_view, keys_view);
+        add_subview(content_bg, keys_view);
 
         // --- Audio tab (index 2) ---
-        let audio_view = build_audio_tab(action_handler, content_frame, config);
+        let audio_view = build_audio_tab(action_handler, tab_content_frame, config);
         let _: () = msg_send![audio_view, setHidden: true];
-        add_subview(root_view, audio_view);
+        add_subview(content_bg, audio_view);
 
         // ====================================================================
         // Store state
@@ -843,21 +871,38 @@ unsafe fn create_sidebar_tab_button(
             btn,
             setFocusRingType: crate::ui_helpers::NS_FOCUS_RING_TYPE_NONE
         ];
+        // Left alignment for sidebar items
+        let _: () = msg_send![btn, setAlignment: 0_isize]; // NSLeftTextAlignment
 
-        let font: Id = msg_send![ns_font, systemFontOfSize: ui_tokens::SMALL_FONT_SIZE];
+        // Add SF Symbol icon based on title
+        let symbol_name = match title {
+            "Setup" => "gearshape",
+            "Keys" => "keyboard",
+            "Audio" => "waveform",
+            _ => "circle",
+        };
+        crate::ui_helpers::set_button_symbol(btn, symbol_name);
+        // NSImageLeft = 2
+        let _: () = msg_send![btn, setImagePosition: 2_isize];
+
+        let font: Id = msg_send![ns_font, systemFontOfSize: 13.0f64];
         let _: () = msg_send![btn, setFont: font];
 
         let _: () = msg_send![btn, setWantsLayer: true];
         let layer: Id = msg_send![btn, layer];
         if !layer.is_null() {
             let bg = if active {
-                ui_colors::panel_bg()
+                // Active selection color (accent color with some transparency)
+                let ns_color = Class::get("NSColor").unwrap();
+                let accent: Id = msg_send![ns_color, controlAccentColor];
+                let semi: Id = msg_send![accent, colorWithAlphaComponent: 0.2f64];
+                semi
             } else {
                 crate::ui_helpers::color_clear()
             };
             let cg_color: Id = msg_send![bg, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg_color];
-            let _: () = msg_send![layer, setCornerRadius: ui_tokens::CORNER_RADIUS_SM];
+            let _: () = msg_send![layer, setCornerRadius: 6.0f64]; // Rounded rect selection
         }
 
         let tint = if active {
@@ -1579,20 +1624,16 @@ pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime
         let config = Config::load();
         let _ = config.save_to_env("HOLD_MODS", value);
         hotkeys::set_hold_mods(mods);
-        send_menu_event(TrayMenuEvent::SetHoldMods(mods));
 
         // If DoubleCtrl toggle is enabled, Ctrl-only hold is unsafe → disable toggle.
         if mods == HoldMods::Ctrl && config.toggle_trigger == ToggleTrigger::DoubleCtrl {
             let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::None.as_str());
             hotkeys::set_toggle_trigger(ToggleTrigger::None);
-            send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::None));
 
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             set_keys_popup_index(state.keys_toggle_popup, 0);
         }
-
         mark_keys_preset_custom();
-        crate::tray::refresh_hotkeys_menu_from_config();
     }
 }
 
@@ -1610,15 +1651,11 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
                 hotkeys::set_hold_mods(HoldMods::Fn);
                 hotkeys::set_toggle_trigger(ToggleTrigger::DoubleOption);
                 hotkeys::set_exclusive_mode(false);
-                send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Fn));
-                send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::DoubleOption));
-                send_menu_event(TrayMenuEvent::SetHoldExclusive(false));
 
                 let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 set_keys_popup_index(state.keys_hold_popup, 0);
                 set_keys_popup_index(state.keys_toggle_popup, 4);
                 set_keys_checkbox_state(state.keys_exclusive_checkbox, true);
-                crate::tray::refresh_hotkeys_menu_from_config();
             }
             // Safe (no toggles)
             1 => {
@@ -1630,19 +1667,14 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
                 hotkeys::set_hold_mods(HoldMods::Fn);
                 hotkeys::set_toggle_trigger(ToggleTrigger::None);
                 hotkeys::set_exclusive_mode(true);
-                send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::Fn));
-                send_menu_event(TrayMenuEvent::SetToggleTrigger(ToggleTrigger::None));
-                send_menu_event(TrayMenuEvent::SetHoldExclusive(true));
 
                 let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 set_keys_popup_index(state.keys_hold_popup, 0);
                 set_keys_popup_index(state.keys_toggle_popup, 0);
                 set_keys_checkbox_state(state.keys_exclusive_checkbox, false);
-                crate::tray::refresh_hotkeys_menu_from_config();
             }
             _ => {
                 info!("Settings: hotkey preset -> custom");
-                crate::tray::refresh_hotkeys_menu_from_config();
             }
         }
     }
@@ -1661,9 +1693,7 @@ pub(super) extern "C" fn on_hold_exclusive_changed(
         let config = Config::load();
         let _ = config.save_to_env("HOLD_EXCLUSIVE", if hold_exclusive { "1" } else { "0" });
         hotkeys::set_exclusive_mode(hold_exclusive);
-        send_menu_event(TrayMenuEvent::SetHoldExclusive(hold_exclusive));
         mark_keys_preset_custom();
-        crate::tray::refresh_hotkeys_menu_from_config();
     }
 }
 
@@ -1686,7 +1716,6 @@ pub(super) extern "C" fn on_toggle_trigger_changed(
         let config = Config::load();
         let _ = config.save_to_env("TOGGLE_TRIGGER", value);
         hotkeys::set_toggle_trigger(trigger);
-        send_menu_event(TrayMenuEvent::SetToggleTrigger(trigger));
 
         // If enabling DoubleCtrl and hold is Ctrl-only, switch to Ctrl+Option and enable modes.
         if trigger == ToggleTrigger::DoubleCtrl && config.hold_mods == HoldMods::Ctrl {
@@ -1694,8 +1723,6 @@ pub(super) extern "C" fn on_toggle_trigger_changed(
             let _ = config.save_to_env("HOLD_EXCLUSIVE", "0");
             hotkeys::set_hold_mods(HoldMods::CtrlAlt);
             hotkeys::set_exclusive_mode(false);
-            send_menu_event(TrayMenuEvent::SetHoldMods(HoldMods::CtrlAlt));
-            send_menu_event(TrayMenuEvent::SetHoldExclusive(false));
 
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             set_keys_popup_index(state.keys_hold_popup, 1);
@@ -1703,10 +1730,8 @@ pub(super) extern "C" fn on_toggle_trigger_changed(
         }
 
         mark_keys_preset_custom();
-        crate::tray::refresh_hotkeys_menu_from_config();
     }
 }
-
 pub(super) extern "C" fn on_language_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
