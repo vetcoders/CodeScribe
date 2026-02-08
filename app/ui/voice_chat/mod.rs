@@ -42,8 +42,8 @@ use crate::config::{HoldMods, ToggleTrigger};
 use crate::ui_helpers::{
     LabelConfig, NS_FLOATING_WINDOW_LEVEL, add_subview, button_set_action, button_style,
     color_clear, color_label, color_secondary_label, create_button,
-    create_flipped_vertical_stack_view, create_glass_effect_view, create_glass_effect_view_with,
-    create_label, create_scrollable_text_view, create_vertical_stack_view, glass_effect_supported,
+    create_flipped_vertical_stack_view, create_glass_effect_view, create_label,
+    create_scrollable_text_view, create_vertical_stack_view, glass_effect_supported,
     layout_region_frame_for_view, ns_string, set_button_symbol, set_focus_ring, set_hidden,
     set_tooltip, set_visual_effect_blending, set_visual_effect_material, set_visual_effect_state,
     style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha, window_show,
@@ -208,10 +208,7 @@ fn show_voice_chat_overlay_impl() {
         let window: Id = msg_send![overlay_window_class, alloc];
         let style_mask = NSWindowStyleMask::Borderless
             | NSWindowStyleMask::FullSizeContentView
-            | NSWindowStyleMask::Resizable
-            | NSWindowStyleMask::Titled
-            | NSWindowStyleMask::Miniaturizable
-            | NSWindowStyleMask::Closable;
+            | NSWindowStyleMask::Resizable;
         let backing = NSBackingStoreType::Buffered;
         let window: Id = msg_send![
             window,
@@ -253,12 +250,8 @@ fn show_voice_chat_overlay_impl() {
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(window_width, window_height),
         );
-        let blur_view: Id = create_glass_effect_view_with(
-            blur_frame,
-            NSVisualEffectMaterial::WindowBackground,
-            NSVisualEffectBlendingMode::BehindWindow,
-            NSVisualEffectState::Active,
-        );
+        let blur_view: Id =
+            create_glass_effect_view(blur_frame, NSVisualEffectMaterial::WindowBackground);
         let _: () = msg_send![
             blur_view,
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
@@ -326,8 +319,7 @@ fn show_voice_chat_overlay_impl() {
             header_controls,
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
         ];
-        // Reserve space for standard macOS traffic-light buttons (~60px).
-        let title_x = ui_tokens::EDGE_PADDING_TIGHT + 60.0;
+        let title_x = ui_tokens::EDGE_PADDING_TIGHT;
         let title_y = ((header_height - 20.0) / 2.0).max(0.0);
         // Give the tab control more room to avoid truncation ("Dr..." / "A...").
         let title_w = ui_tokens::TITLE_LABEL_WIDTH;
@@ -369,8 +361,8 @@ fn show_voice_chat_overlay_impl() {
         let right_cluster_start_x = export_button_x;
         let tab_x = title_x + title_w + 10.0;
         let status_pill_w = ui_tokens::STATUS_PILL_WIDTH;
-        let tab_btn_w = 60.0;
-        let tab_gap = 4.0;
+        let tab_btn_w = (btn_w - 2.0).max(24.0);
+        let tab_gap = (gap - 2.0).max(6.0);
         let tab_cluster_w = tab_btn_w * 4.0 + tab_gap * 3.0;
         let status_pill_x =
             (right_cluster_start_x - gap - status_pill_w).max(tab_x + tab_cluster_w + tab_gap);
@@ -710,8 +702,7 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![split_controller, addSplitViewItem: sidebar_item];
         let _: () = msg_send![split_controller, addSplitViewItem: content_item];
 
-        // Use splitView property to ensure we get the NSSplitView (view property might be a wrapper).
-        let split_view: Id = msg_send![split_controller, splitView];
+        let split_view: Id = msg_send![split_controller, view];
         let _: () = msg_send![split_view, setFrame: content_frame];
         let _: () = msg_send![
             split_view,

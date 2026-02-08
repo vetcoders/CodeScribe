@@ -95,7 +95,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, windowBackgroundColor];
-            with_alpha(base, 0.5)
+            with_alpha(base, 0.6)
         }
     }
 
@@ -103,7 +103,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.5)
+            with_alpha(base, 0.65)
         }
     }
 
@@ -111,7 +111,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.5)
+            with_alpha(base, 0.86)
         }
     }
 
@@ -119,7 +119,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, separatorColor];
-            with_alpha(base, 0.5)
+            with_alpha(base, 0.92)
         }
     }
 
@@ -150,7 +150,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.5)
+            with_alpha(base, 0.78)
         }
     }
 
@@ -158,7 +158,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.5)
+            with_alpha(base, 0.7)
         }
     }
 
@@ -182,7 +182,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.5)
+            with_alpha(base, 0.8)
         }
     }
 
@@ -190,7 +190,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, windowBackgroundColor];
-            with_alpha(base, 0.5)
+            with_alpha(base, 0.8)
         }
     }
 
@@ -1486,15 +1486,23 @@ fn markdown_options_with_base_font(font: Id) -> Option<Id> {
         if responds_base && !font.is_null() {
             let _: () = msg_send![options, setBaseFont: font];
         }
+        // Use inlineOnlyPreservingWhitespace so that newline characters are kept
+        // as literal line breaks instead of being collapsed into spaces by the
+        // full CommonMark parser.  Inline formatting (**bold**, `code`, etc.) is
+        // still applied.
+        let responds_syntax: bool =
+            msg_send![options, respondsToSelector: sel!(setInterpretedSyntax:)];
+        if responds_syntax {
+            // 0 = .full, 1 = .inlineOnly, 2 = .inlineOnlyPreservingWhitespace
+            let _: () = msg_send![options, setInterpretedSyntax: 2_isize];
+        }
         Some(options)
     }
 }
 
 unsafe fn markdown_attributed_string(text: &str, font: Id) -> Option<Id> {
     let ns_attr = Class::get("NSAttributedString")?;
-    // Pre-process text to ensure single newlines become hard breaks in Markdown (except in code blocks).
-    let processed_text = markdown_preserve_single_newlines(text);
-    let text_ns = ns_string(&processed_text);
+    let text_ns = ns_string(text);
     let options = markdown_options_with_base_font(font).unwrap_or(std::ptr::null_mut::<Object>());
 
     // initWithMarkdown: expects NSData, not NSString
@@ -1537,54 +1545,6 @@ unsafe fn markdown_attributed_string(text: &str, font: Id) -> Option<Id> {
     None
 }
 
-fn markdown_preserve_single_newlines(text: &str) -> String {
-    if !text.contains('\n') {
-        return text.to_string();
-    }
-
-    // NSAttributedString Markdown parsing collapses single newlines into spaces.
-    // Convert single newlines into Markdown hard breaks ("  \\n") outside fenced code blocks.
-    let mut out = String::with_capacity(text.len() + text.len() / 10);
-    let mut in_fence = false;
-    let parts: Vec<&str> = text.split('\n').collect();
-
-    for (idx, line) in parts.iter().enumerate() {
-        let is_last = idx + 1 == parts.len();
-        let trimmed = line.trim_start();
-        let is_fence = trimmed.starts_with("```");
-
-        if is_fence {
-            out.push_str(line);
-            if !is_last {
-                out.push('\n');
-            }
-            in_fence = !in_fence;
-            continue;
-        }
-
-        if in_fence {
-            out.push_str(line);
-            if !is_last || line.is_empty() {
-                out.push('\n');
-            }
-            continue;
-        }
-
-        out.push_str(line);
-        if !is_last {
-            if line.is_empty() {
-                out.push('\n');
-            } else {
-                out.push_str("  \n");
-            }
-        } else if line.is_empty() {
-            out.push('\n');
-        }
-    }
-
-    out
-}
-
 unsafe fn apply_markdown_to_text_field(text_label: Id, text: &str, font: Id) -> bool {
     let responds_attr: bool =
         msg_send![text_label, respondsToSelector: sel!(setAttributedStringValue:)];
@@ -1597,8 +1557,7 @@ unsafe fn apply_markdown_to_text_field(text_label: Id, text: &str, font: Id) -> 
     } else {
         font
     };
-    let processed = markdown_preserve_single_newlines(text);
-    if let Some(attr) = unsafe { markdown_attributed_string(&processed, font) } {
+    if let Some(attr) = unsafe { markdown_attributed_string(text, font) } {
         let _: () = msg_send![text_label, setAttributedStringValue: attr];
         return true;
     }
@@ -1785,16 +1744,7 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
             msg_send![cell, cellSizeForBounds: measure_bounds]
         };
         let text_height = measured.height.ceil().max(line_height);
-        // Cap bubble height at 400px to prevent extremely tall bubbles for long code blocks.
-        // When capped, we wrap the text label in a scroll view below.
-        let max_bubble_content_height = 400.0;
-        let capped = text_height > max_bubble_content_height;
-        let effective_text_height = if capped {
-            max_bubble_content_height
-        } else {
-            text_height
-        };
-        let bubble_height = effective_text_height + padding_top + padding_bottom;
+        let bubble_height = text_height + padding_top + padding_bottom;
         let container_height = bubble_height + meta_height + meta_spacing;
 
         // Container view (for alignment)
@@ -1856,36 +1806,13 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
             }
         }
 
-        // Update label frame to the final measured height (full, uncapped).
+        // Update label frame to the final measured height.
         let text_frame = CGRect::new(
             &CGPoint::new(padding_x, padding_top),
             &CGSize::new(text_layout_width.max(1.0), text_height),
         );
         let _: () = msg_send![text_label, setFrame: text_frame];
-        // When content overflows the cap, wrap in a scroll view for vertical scrolling.
-        if capped {
-            let ns_scroll_view = Class::get("NSScrollView").unwrap();
-            let scroll_frame = CGRect::new(
-                &CGPoint::new(padding_x, padding_top),
-                &CGSize::new(text_layout_width.max(1.0), effective_text_height),
-            );
-            let scroll: Id = msg_send![ns_scroll_view, alloc];
-            let scroll: Id = msg_send![scroll, initWithFrame: scroll_frame];
-            let _: () = msg_send![scroll, setHasVerticalScroller: true];
-            let _: () = msg_send![scroll, setHasHorizontalScroller: false];
-            let _: () = msg_send![scroll, setDrawsBackground: false];
-            let _: () = msg_send![scroll, setBorderType: 0_isize]; // NSNoBorder
-            // Re-position label at origin for scroll document view.
-            let doc_frame = CGRect::new(
-                &CGPoint::new(0.0, 0.0),
-                &CGSize::new(text_layout_width.max(1.0), text_height),
-            );
-            let _: () = msg_send![text_label, setFrame: doc_frame];
-            let _: () = msg_send![scroll, setDocumentView: text_label];
-            add_subview(bubble, scroll);
-        } else {
-            add_subview(bubble, text_label);
-        }
+        add_subview(bubble, text_label);
 
         // Metadata (role/time/mode) above the bubble.
         if let Some(meta) = config.metadata.as_ref() {

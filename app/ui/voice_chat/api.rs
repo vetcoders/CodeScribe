@@ -2587,9 +2587,9 @@ fn create_drawer_card(
             // Walk subviews in reverse to find it (last NSTextField before action buttons).
             for i in (0..count).rev() {
                 let subview: Id = msg_send![subviews, objectAtIndex: i];
-                let responds: bool =
-                    msg_send![subview, respondsToSelector: sel!(attributedStringValue)];
-                if responds {
+                let ns_text_field = Class::get("NSTextField").unwrap();
+                let is_text_field: bool = msg_send![subview, isKindOfClass: ns_text_field];
+                if is_text_field {
                     apply_search_highlight(subview, &preview, query);
                     break;
                 }
@@ -2649,6 +2649,9 @@ struct NSRange {
 }
 
 /// Apply search-term highlighting to a text field by bolding matching ranges.
+///
+/// Uses `char_indices()` to safely iterate over Unicode characters, then maps
+/// character offsets to UTF-16 code unit counts for `NSRange` (Cocoa convention).
 unsafe fn apply_search_highlight(field: Id, text: &str, query: &str) {
     let ns_mut_attr = Class::get("NSMutableAttributedString").unwrap();
     let ns_font_cls = Class::get("NSFont").unwrap();
@@ -2657,25 +2660,46 @@ unsafe fn apply_search_highlight(field: Id, text: &str, query: &str) {
     let attr_str: Id = msg_send![attr_str, initWithString: text_ns];
     let bold_font: Id = msg_send![ns_font_cls, boldSystemFontOfSize: ui_tokens::BODY_FONT_SIZE];
     let font_key = ns_string("NSFont");
-    let query_lower = query.to_lowercase();
-    let text_lower = text.to_lowercase();
-    let mut start = 0;
-    while let Some(pos) = text_lower[start..].find(&query_lower) {
-        let abs_pos = start + pos;
-        let match_len = query_lower.len();
-        if abs_pos + match_len > text.len() {
-            break;
+    // Build char-level lowercase for safe matching (no byte-index slicing).
+    let text_chars: Vec<char> = text.chars().collect();
+    let text_lower: Vec<char> = text_chars
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+    let query_lower: Vec<char> = query
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
+    if query_lower.is_empty() {
+        // Always set the plain attributed string to clear stale highlights.
+        let _: () = msg_send![field, setAttributedStringValue: attr_str];
+        return;
+    }
+    // Build byte→utf16 offset map at char boundaries for NSRange conversion.
+    let mut char_to_utf16: Vec<usize> = Vec::with_capacity(text_chars.len() + 1);
+    let mut utf16_pos: usize = 0;
+    for ch in &text_chars {
+        char_to_utf16.push(utf16_pos);
+        utf16_pos += ch.len_utf16();
+    }
+    char_to_utf16.push(utf16_pos); // sentinel for end
+    // Slide through char-level arrays to find matches.
+    let mut i = 0;
+    while i + query_lower.len() <= text_lower.len() {
+        if text_lower[i..i + query_lower.len()] == query_lower[..] {
+            let range = NSRange {
+                location: char_to_utf16[i],
+                length: char_to_utf16[i + query_lower.len()] - char_to_utf16[i],
+            };
+            let _: () = msg_send![attr_str, addAttribute: font_key value: bold_font range: range];
+            // NSColor expects 0.0–1.0 for RGBA components.
+            let highlight = color_rgba(1.0, 0.82, 0.0, 0.3);
+            let bg_key = ns_string("NSBackgroundColor");
+            let _: () = msg_send![attr_str, addAttribute: bg_key value: highlight range: range];
+            i += query_lower.len();
+        } else {
+            i += 1;
         }
-        let range = NSRange {
-            location: text[..abs_pos].encode_utf16().count(),
-            length: text[abs_pos..abs_pos + match_len].encode_utf16().count(),
-        };
-        let _: () = msg_send![attr_str, addAttribute: font_key value: bold_font range: range];
-        // Also set highlight color for visibility.
-        let highlight = color_rgba(255.0, 210.0, 0.0, 0.3);
-        let bg_key = ns_string("NSBackgroundColor");
-        let _: () = msg_send![attr_str, addAttribute: bg_key value: highlight range: range];
-        start = abs_pos + match_len;
     }
     let _: () = msg_send![field, setAttributedStringValue: attr_str];
 }
