@@ -261,6 +261,14 @@ pub fn filter_drawer(query: &str) {
 /// Switch to Agent tab programmatically
 pub fn show_agent_tab() {
     Queue::main().exec_async(|| {
+        // If the overlay isn't created yet, defer tab selection until build completes.
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if state.window.is_none() {
+            state.pending_tab = Some(Tab::Agent);
+            state.active_tab = Tab::Agent;
+            return;
+        }
+        drop(state);
         update_active_tab_impl(Tab::Agent);
     });
 }
@@ -268,6 +276,13 @@ pub fn show_agent_tab() {
 /// Switch to Drawer tab programmatically
 pub fn show_drawer_tab() {
     Queue::main().exec_async(|| {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if state.window.is_none() {
+            state.pending_tab = Some(Tab::Drawer);
+            state.active_tab = Tab::Drawer;
+            return;
+        }
+        drop(state);
         update_active_tab_impl(Tab::Drawer);
     });
 }
@@ -275,6 +290,13 @@ pub fn show_drawer_tab() {
 /// Switch to Transcription tab programmatically
 pub fn show_transcription_tab() {
     Queue::main().exec_async(|| {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if state.window.is_none() {
+            state.pending_tab = Some(Tab::Transcription);
+            state.active_tab = Tab::Transcription;
+            return;
+        }
+        drop(state);
         update_active_tab_impl(Tab::Transcription);
     });
 }
@@ -409,6 +431,7 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
         if tab == Tab::Settings {
             return;
         }
+        let prev_tab = state.active_tab;
         state.active_tab = tab;
 
         if let Some(button) = state.tab_drawer_button {
@@ -483,6 +506,12 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
         }
 
         if show_agent {
+            // Populate the Agent view on tab switch so the empty-state CTA is visible.
+            // Important: do this only on transition to Agent; `ensure_agent_tab_visible` can
+            // call `update_active_tab_locked(Tab::Agent)` frequently during streaming.
+            if prev_tab != Tab::Agent {
+                update_chat_view_with_state(state, true);
+            }
             resize_agent_input_locked(state);
         }
 
@@ -1001,7 +1030,9 @@ fn ensure_agent_tab_visible(state: &mut VoiceChatOverlayState) {
         }
 
         // Force Agent tab for any live/assistive messaging.
-        update_active_tab_locked(state, Tab::Agent);
+        if state.active_tab != Tab::Agent {
+            update_active_tab_locked(state, Tab::Agent);
+        }
     }
 }
 
@@ -2631,16 +2662,20 @@ unsafe fn apply_search_highlight(field: Id, text: &str, query: &str) {
     let mut start = 0;
     while let Some(pos) = text_lower[start..].find(&query_lower) {
         let abs_pos = start + pos;
+        let match_len = query_lower.len();
+        if abs_pos + match_len > text.len() {
+            break;
+        }
         let range = NSRange {
-            location: abs_pos,
-            length: query_lower.len(),
+            location: text[..abs_pos].encode_utf16().count(),
+            length: text[abs_pos..abs_pos + match_len].encode_utf16().count(),
         };
         let _: () = msg_send![attr_str, addAttribute: font_key value: bold_font range: range];
         // Also set highlight color for visibility.
         let highlight = color_rgba(255.0, 210.0, 0.0, 0.3);
         let bg_key = ns_string("NSBackgroundColor");
         let _: () = msg_send![attr_str, addAttribute: bg_key value: highlight range: range];
-        start = abs_pos + query_lower.len();
+        start = abs_pos + match_len;
     }
     let _: () = msg_send![field, setAttributedStringValue: attr_str];
 }

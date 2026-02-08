@@ -118,6 +118,7 @@ pub struct VoiceChatOverlayState {
     pub tab_agent_button: Option<usize>,
     pub tab_settings_button: Option<usize>,
     pub favorites_button: Option<usize>,
+    pub help_button: Option<usize>,
     pub close_button: Option<usize>,
 
     // Drawer tab
@@ -200,6 +201,7 @@ impl Default for VoiceChatOverlayState {
             tab_agent_button: None,
             tab_settings_button: None,
             favorites_button: None,
+            help_button: None,
             close_button: None,
             drawer_scroll_view: None,
             drawer_container: None,

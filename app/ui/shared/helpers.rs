@@ -95,7 +95,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, windowBackgroundColor];
-            with_alpha(base, 0.6)
+            with_alpha(base, 0.5)
         }
     }
 
@@ -103,7 +103,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.65)
+            with_alpha(base, 0.5)
         }
     }
 
@@ -111,7 +111,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.86)
+            with_alpha(base, 0.5)
         }
     }
 
@@ -119,7 +119,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, separatorColor];
-            with_alpha(base, 0.92)
+            with_alpha(base, 0.5)
         }
     }
 
@@ -150,7 +150,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.78)
+            with_alpha(base, 0.5)
         }
     }
 
@@ -158,7 +158,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.7)
+            with_alpha(base, 0.5)
         }
     }
 
@@ -182,7 +182,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, 0.8)
+            with_alpha(base, 0.5)
         }
     }
 
@@ -190,7 +190,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, windowBackgroundColor];
-            with_alpha(base, 0.8)
+            with_alpha(base, 0.5)
         }
     }
 
@@ -1088,14 +1088,21 @@ pub fn create_scrollable_text_view(frame: CGRect, editable: bool) -> (Id, Id) {
 // ============================================================================
 
 /// Create a floating overlay window
-pub fn create_floating_window(frame: CGRect, title: &str, transparent_titlebar: bool) -> Id {
+pub fn create_floating_window(
+    frame: CGRect,
+    title: &str,
+    transparent_titlebar: bool,
+    resizable: bool,
+) -> Id {
     unsafe {
         let ns_window = Class::get("NSWindow").unwrap();
 
-        let style = NSWindowStyleMask::Titled
+        let mut style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
-            | NSWindowStyleMask::Miniaturizable
-            | NSWindowStyleMask::Resizable;
+            | NSWindowStyleMask::Miniaturizable;
+        if resizable {
+            style |= NSWindowStyleMask::Resizable;
+        }
 
         let window: Id = msg_send![ns_window, alloc];
         let window: Id = msg_send![

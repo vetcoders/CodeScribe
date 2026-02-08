@@ -11,7 +11,7 @@ use dispatch::Queue;
 use lazy_static::lazy_static;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use objc2_app_kit::{NSVisualEffectMaterial, NSWindowCollectionBehavior};
+use objc2_app_kit::{NSVisualEffectMaterial, NSWindowButton, NSWindowCollectionBehavior};
 use tracing::{info, warn};
 
 use crate::config::{Config, HoldMods, ToggleTrigger, keychain};
@@ -159,10 +159,22 @@ fn show_bootstrap_overlay_impl() {
             &CGSize::new(window_width, window_height),
         );
 
-        let window = create_floating_window(frame, "Settings", false);
+        // Settings window should be fixed-size (no resize / fullscreen), to avoid AppKit
+        // fullscreen transition crashes with our custom content setup.
+        let window = create_floating_window(frame, "Settings", false, false);
         let _: () = msg_send![window, setOpaque: false];
         let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
-        let _: () = msg_send![window, setCollectionBehavior: NSWindowCollectionBehavior::empty()];
+        // Disallow fullscreen/zoom to avoid triggering AppKit fullscreen snapshots that can crash.
+        let _: () =
+            msg_send![window, setCollectionBehavior: NSWindowCollectionBehavior::FullScreenNone];
+        // Hard lock the size (no resize handles, no zoom).
+        let fixed_size = CGSize::new(window_width, window_height);
+        let _: () = msg_send![window, setContentMinSize: fixed_size];
+        let _: () = msg_send![window, setContentMaxSize: fixed_size];
+        let zoom_btn: Id = msg_send![window, standardWindowButton: NSWindowButton::ZoomButton];
+        if !zoom_btn.is_null() {
+            let _: () = msg_send![zoom_btn, setEnabled: false];
+        }
         let delegate_class = window_delegate_class();
         let window_delegate: Id = msg_send![delegate_class, new];
         let _: () = msg_send![window, setDelegate: window_delegate];
@@ -651,7 +663,7 @@ unsafe fn build_settings_ui(
         y -= 22.0;
         let llm_key_status = keychain_key_is_set("LLM_API_KEY");
         let llm_status_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w - 70.0, 16.0)),
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 16.0)),
             text: key_status_text(llm_key_status).to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: key_status_color(llm_key_status),
@@ -659,15 +671,6 @@ unsafe fn build_settings_ui(
         });
         add_subview(setup_view, llm_status_label);
         state.llm_key_status_label = Some(llm_status_label as usize);
-        let clear_llm_btn = button(
-            CGRect::new(
-                &CGPoint::new(pad + field_w - 60.0, y - 2.0),
-                &CGSize::new(60.0, 20.0),
-            ),
-            "Clear",
-        );
-        button_set_action(clear_llm_btn, action_handler, sel!(onClearLlmKey:));
-        add_subview(setup_view, clear_llm_btn);
         y -= 20.0;
 
         // ── Assistive AI (optional) ──────────────────────────────────
@@ -729,7 +732,7 @@ unsafe fn build_settings_ui(
         y -= 22.0;
         let assist_key_status = keychain_key_is_set("LLM_ASSISTIVE_API_KEY");
         let assist_status_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w - 70.0, 16.0)),
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 16.0)),
             text: key_status_text(assist_key_status).to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: key_status_color(assist_key_status),
@@ -737,15 +740,6 @@ unsafe fn build_settings_ui(
         });
         add_subview(setup_view, assist_status_label);
         state.assistive_key_status_label = Some(assist_status_label as usize);
-        let clear_assist_btn = button(
-            CGRect::new(
-                &CGPoint::new(pad + field_w - 60.0, y - 2.0),
-                &CGSize::new(60.0, 20.0),
-            ),
-            "Clear",
-        );
-        button_set_action(clear_assist_btn, action_handler, sel!(onClearAssistiveKey:));
-        add_subview(setup_view, clear_assist_btn);
         y -= 40.0;
 
         let save_btn = button(

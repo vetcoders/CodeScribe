@@ -359,6 +359,8 @@ fn show_voice_chat_overlay_impl() {
         x -= gap + btn_w;
         let more_button_x = x;
         x -= gap + btn_w;
+        let help_button_x = x;
+        x -= gap + btn_w;
         let favorites_button_x = x;
         x -= gap + btn_w;
         let export_button_x = x;
@@ -557,6 +559,27 @@ fn show_voice_chat_overlay_impl() {
         ];
         add_subview(header_controls, favorites_button);
 
+        let help_button = create_button(
+            CGRect::new(
+                &CGPoint::new(help_button_x, header_btn_y),
+                &CGSize::new(btn_w, btn_h),
+            ),
+            "",
+            button_style::INLINE,
+        );
+        let has_symbol = set_button_symbol(help_button, "questionmark.circle");
+        if !has_symbol {
+            let _: () = msg_send![help_button, setTitle: ns_string("?")];
+        }
+        style_toolbar_icon_button(help_button);
+        button_set_action(help_button, action_handler, sel!(onShowShortcuts:));
+        set_tooltip(help_button, "Keyboard shortcuts");
+        let _: () = msg_send![
+            help_button,
+            setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
+        ];
+        add_subview(header_controls, help_button);
+
         let more_button = create_button(
             CGRect::new(
                 &CGPoint::new(more_button_x, header_btn_y),
@@ -703,6 +726,14 @@ fn show_voice_chat_overlay_impl() {
             msg_send![split_view, respondsToSelector: sel!(setDividerStyle:)];
         if responds_divider {
             let _: () = msg_send![split_view, setDividerStyle: 1_isize]; // NSSplitViewDividerStyleThin
+        }
+        let responds_divider_color: bool =
+            msg_send![split_view, respondsToSelector: sel!(setDividerColor:)];
+        if responds_divider_color {
+            let ns_color = Class::get("NSColor").unwrap();
+            let base: Id = msg_send![ns_color, separatorColor];
+            let color: Id = msg_send![base, colorWithAlphaComponent: 0.45f64];
+            let _: () = msg_send![split_view, setDividerColor: color];
         }
         add_subview(blur_view, split_view);
         // Ensure header glass + controls stay above the split view content.
@@ -1020,6 +1051,7 @@ fn show_voice_chat_overlay_impl() {
             state.tab_agent_button = Some(tab_agent_button as usize);
             state.tab_settings_button = Some(tab_settings_button as usize);
             state.favorites_button = Some(favorites_button as usize);
+            state.help_button = Some(help_button as usize);
             state.close_button = Some(close_button as usize);
             state.drawer_scroll_view = Some(drawer_scroll as usize);
             state.drawer_container = Some(drawer_container as usize);
