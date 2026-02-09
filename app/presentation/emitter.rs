@@ -116,11 +116,14 @@ impl EventSink for PresentationEmitter {
                 }
             }
             EngineEvent::Correction { text, .. } => {
-                // Reset last_preview to corrected text so next Preview diffs correctly.
-                {
-                    let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                    *last = text.clone();
+                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+                // Ignore stale corrections after UtteranceFinal reset last_preview.
+                if last.is_empty() {
+                    debug!("Ignoring Correction with empty last_preview (post-final)");
+                    return;
                 }
+                *last = text.clone();
+                drop(last);
                 let emitter = self.emitter.clone();
                 let text = text.clone();
                 tokio::spawn(async move {

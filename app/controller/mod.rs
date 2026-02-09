@@ -1037,7 +1037,27 @@ impl RecordingController {
                 info!("VAD callback: setting vad_triggered flag");
                 vad_flag.store(true, Ordering::SeqCst);
             });
-            if !cfg!(test)
+
+            let use_event_pipeline = std::env::var("CODESCRIBE_EVENT_PIPELINE")
+                .ok()
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+            if use_event_pipeline {
+                // Event-based pipeline: Preview streams directly into overlay.
+                // Hold mode has no utterance callback — text is collected on key-up.
+                let router = Arc::new(helpers::ControllerEventRouter::new());
+                rec.set_event_sink(Some(router));
+
+                if !cfg!(test)
+                    && let Err(e) = rec
+                        .start_event_session(Some(language.as_str().to_string()))
+                        .await
+                {
+                    error!("Failed to start event session: {}", e);
+                    return;
+                }
+            } else if !cfg!(test)
                 && let Err(e) = rec.start(Some(language.as_str().to_string())).await
             {
                 error!("Failed to start recorder: {}", e);

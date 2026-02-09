@@ -12,15 +12,15 @@ flowchart TD
     CPAL[cpal audio callback\ncore/audio/recorder.rs]
     SR[StreamingRecorder\ncore/audio/streaming_recorder.rs]
     RESAMPLE[Resample 48kHz → 16kHz\nvad::Resampler]
-    VAD[Silero VAD v5\ncore/vad/silero_ort.rs\nONNX Runtime · GRU neural net]
+    VAD[Silero VAD v6\ncore/vad/silero_ort.rs\nONNX Runtime · GRU neural net]
     GATE{VAD Gate\nspeech_prob ≥ threshold?}
     DROP[🗑️ Silence discarded]
-    PREROLL[Pre-roll buffer\n~64 samples · catches consonant attacks]
+    PREROLL[Pre-roll buffer\n~64ms · catches consonant attacks]
     SPEECH[SpeechSession\ncore/audio/chunker.rs\nSupervisor mode]
     CHUNK[SpeechEvent::Utterance / UtteranceFinal\nclean speech audio segments]
     WORKER[transcription_session\ncore/pipeline/streaming.rs\nunified pipeline]
     WHISPER[Whisper Engine\ncore/stt/whisper/engine.rs\nMetal GPU · large-v3-turbo-q8]
-    POSTPROC[StreamPostProcessor\ncore/stream_postprocess.rs\nlexicon + semantic gate]
+    POSTPROC[StreamPostProcessor\ncore/pipeline/stream_postprocess.rs\nlexicon + semantic gate]
     EVENT[EngineEvent\ncore/pipeline/contracts.rs]
     SINK{EventSink / DeltaSink}
     ROUTER[ControllerEventRouter\napp/controller/helpers.rs]
@@ -83,7 +83,7 @@ The microphone delivers raw PCM f32 samples at the device's native sample rate (
 ### How it works
 
 1. Raw audio is resampled to **16kHz** (Silero's native rate).
-2. Resampled audio is fed in **512-sample frames** (32ms) to Silero VAD v5.
+2. Resampled audio is fed in **512-sample frames** (32ms) to Silero VAD v6.
 3. Each frame produces a **speech probability** (0.0–1.0).
 4. The VAD gate makes a decision per frame:
 
@@ -106,7 +106,7 @@ silence_counter < min_silence      → keep buffering (might be mid-sentence pau
 
 ### Pre-roll buffer
 
-A 64-sample circular buffer captures audio **before** speech onset. This catches the attack transients of plosive consonants (k, t, p, b) that would otherwise be clipped. When speech begins, the pre-roll is prepended to the speech segment.
+A 64ms circular buffer (~1024 samples at 16kHz) captures audio **before** speech onset. This catches the attack transients of plosive consonants (k, t, p, b) that would otherwise be clipped. When speech begins, the pre-roll is prepended to the speech segment.
 
 ### Three gate modes
 
@@ -136,7 +136,7 @@ When recording stops but VAD never fired `Start` (e.g. speech was too quiet or s
 | -------------------------- | ------------------------------ | --------------------------------- |
 | **WhisperEngine**          | `core/stt/whisper/engine.rs`   | Candle + Metal GPU, singleton     |
 | **transcription_session**  | `core/pipeline/streaming.rs`   | Unified pipeline (event-based)    |
-| **StreamPostProcessor**    | `core/stream_postprocess.rs`   | Lexicon + semantic gate + cleanup |
+| **StreamPostProcessor**    | `core/pipeline/stream_postprocess.rs`   | Lexicon + semantic gate + cleanup |
 
 ### Streaming transcription
 
@@ -315,12 +315,12 @@ Displayed text (String, visible in overlay/bubble)
 | `core/audio/recorder.rs`          | cpal audio capture, device management                       |
 | `core/audio/streaming_recorder.rs`| Pipeline orchestrator, connects recorder to engine          |
 | `core/audio/chunker.rs`           | SpeechSession, VAD gate, Supervisor mode, flush fallback    |
-| `core/vad/silero_ort.rs`          | Silero VAD v5 (ONNX), worker thread, resampler              |
+| `core/vad/silero_ort.rs`          | Silero VAD v6 (ONNX), worker thread, resampler              |
 | `core/stt/whisper/engine.rs`      | Whisper singleton, Metal GPU inference                      |
 | `core/pipeline/contracts.rs`      | EngineEvent, EventSink, DeltaSink, TranscriptDelta          |
 | `core/pipeline/streaming.rs`      | transcription_session (unified), BufferedEmitter             |
 | `core/pipeline/sinks.rs`          | DeltaSinkAdapter, CallbackSink, CollectorEventSink          |
-| `core/stream_postprocess.rs`      | Lexicon correction, semantic gate, hallucination filter      |
+| `core/pipeline/stream_postprocess.rs`      | Lexicon correction, semantic gate, hallucination filter      |
 | `app/controller/mod.rs`           | Recording state machine, Hold/Toggle orchestration          |
 | `app/controller/helpers.rs`       | ControllerEventRouter, session mode routing                 |
 | `app/presentation/emitter.rs`     | PresentationEmitter (typing animation via BufferedEmitter)  |

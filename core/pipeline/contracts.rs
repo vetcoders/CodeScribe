@@ -286,10 +286,13 @@ pub enum EngineEvent {
 pub enum DropKind {
     /// Whisper hallucination pattern detected (e.g. "thank you", "subscribe").
     Hallucination,
-    /// Semantic gate: chunk too similar to previous output.
+    /// Semantic gate: chunk too similar to previous output (streaming path only).
     SemanticGate,
     /// Overlap dedup produced empty result.
     OverlapEmpty,
+    /// Text was empty after lexicon + cleanup processing (utterance path).
+    /// Distinct from `SemanticGate` — no embedding comparison was involved.
+    FilteredEmpty,
 }
 
 impl std::fmt::Display for DropKind {
@@ -298,6 +301,7 @@ impl std::fmt::Display for DropKind {
             DropKind::Hallucination => write!(f, "Hallucination"),
             DropKind::SemanticGate => write!(f, "SemanticGate"),
             DropKind::OverlapEmpty => write!(f, "OverlapEmpty"),
+            DropKind::FilteredEmpty => write!(f, "FilteredEmpty"),
         }
     }
 }
@@ -474,6 +478,7 @@ mod tests {
         assert_eq!(DropKind::Hallucination.to_string(), "Hallucination");
         assert_eq!(DropKind::SemanticGate.to_string(), "SemanticGate");
         assert_eq!(DropKind::OverlapEmpty.to_string(), "OverlapEmpty");
+        assert_eq!(DropKind::FilteredEmpty.to_string(), "FilteredEmpty");
     }
 
     #[test]

@@ -121,7 +121,9 @@ pub(crate) struct TranscriptionPipeline {
 pub(crate) enum PostprocessDrop {
     Hallucination,
     OverlapEmpty,
-    SemanticGate,
+    /// Text was empty after lexicon + cleanup (NOT semantic gate — utterance path
+    /// never applies the embedding-based gate).
+    FilteredEmpty,
 }
 
 impl TranscriptionPipeline {
@@ -180,7 +182,7 @@ impl TranscriptionPipeline {
                 self.update_suffix(&processed);
                 Ok(processed)
             }
-            None => Err(PostprocessDrop::SemanticGate),
+            None => Err(PostprocessDrop::FilteredEmpty),
         }
     }
 
@@ -489,6 +491,10 @@ pub(crate) async fn transcription_session(
     // Accumulate text for the current "run" of utterances (between corrections).
     let mut accumulated_text = String::new();
 
+    // Track audio position for UtteranceFinal timestamps (seconds).
+    let mut utterance_start_s: f32 = 0.0;
+    let mut utterance_audio_samples: usize = 0;
+
     // Phase 2 correction state
     let mut correction_audio_buf: Vec<f32> = Vec::new();
     let mut utterance_count: usize = 0;
@@ -606,7 +612,16 @@ pub(crate) async fn transcription_session(
                 let current_suffix = correction_current_suffix.take().unwrap_or_default();
                 match result {
                     Ok(Ok(raw)) => {
-                        if let Some(cleaned) = pipeline.postprocess(&raw) {
+                        // Suppress stale corrections that arrive after UtteranceFinal
+                        // already cleared accumulated_text. Without this guard, the
+                        // corrected text would appear as phantom content in the next
+                        // utterance window.
+                        if accumulated_text.is_empty() {
+                            debug!("Suppressing stale correction (utterance already finalized)");
+                            if !current_suffix.is_empty() {
+                                pipeline.last_suffix = current_suffix;
+                            }
+                        } else if let Some(cleaned) = pipeline.postprocess(&raw) {
                             let previous_text = accumulated_text.clone();
                             preview_rev += 1;
                             corrections_applied += 1;
@@ -636,6 +651,9 @@ pub(crate) async fn transcription_session(
                 utterance_in_flight.as_mut().unwrap().await
             }, if utterance_in_flight.is_some() => {
                 let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem { audio: Vec::new(), is_final: false });
+                // Track audio duration for timestamp computation.
+                utterance_audio_samples += item.audio.len();
+
                 match result {
                     Ok(Ok(raw_text)) => {
                         if utterance_count == 0 && correction_audio_buf.is_empty() {
@@ -673,12 +691,12 @@ pub(crate) async fn transcription_session(
                                     reason: "Overlap dedup produced empty result".to_string(),
                                 });
                             }
-                            Err(PostprocessDrop::SemanticGate) => {
+                            Err(PostprocessDrop::FilteredEmpty) => {
                                 semantic_gate_drops += 1;
                                 event_sink.on_event(&EngineEvent::Drop {
-                                    kind: DropKind::SemanticGate,
+                                    kind: DropKind::FilteredEmpty,
                                     text: raw_text.clone(),
-                                    reason: "Dropped by semantic gate".to_string(),
+                                    reason: "Empty after lexicon/cleanup (not semantic gate)".to_string(),
                                 });
                             }
                         }
@@ -687,16 +705,21 @@ pub(crate) async fn transcription_session(
                             utterance_id += 1;
                             total_utterances += 1;
                             let final_text = accumulated_text.trim().to_string();
+                            let end_ts = utterance_start_s
+                                + utterance_audio_samples as f32 / output_sample_rate as f32;
                             if !final_text.is_empty() {
                                 event_sink.on_event(&EngineEvent::UtteranceFinal {
                                     utterance_id,
                                     text: final_text,
                                     raw_text: raw_text.clone(),
-                                    start_ts: 0.0,
-                                    end_ts: 0.0,
+                                    start_ts: utterance_start_s,
+                                    end_ts,
                                 });
                             }
                             accumulated_text.clear();
+                            // Advance start_ts for next utterance.
+                            utterance_start_s = end_ts;
+                            utterance_audio_samples = 0;
 
                             if vad_started {
                                 event_sink.on_event(&EngineEvent::VadEnd {
@@ -705,27 +728,35 @@ pub(crate) async fn transcription_session(
                                 });
                                 vad_started = false;
                             }
-                        }
 
-                        // Phase 2 correction accumulation
-                        correction_audio_buf.extend_from_slice(&item.audio);
-                        utterance_count += 1;
+                            // Reset Phase 2 correction state on utterance boundary.
+                            // Any in-flight correction will be suppressed by the
+                            // accumulated_text.is_empty() guard in the correction handler.
+                            correction_audio_buf.clear();
+                            utterance_count = 0;
+                        } else {
+                            // Phase 2 correction accumulation — only for non-final items.
+                            // Spawning correction on a final item would produce a stale
+                            // Correction event after UtteranceFinal has already fired.
+                            correction_audio_buf.extend_from_slice(&item.audio);
+                            utterance_count += 1;
 
-                        let audio_duration_s =
-                            correction_audio_buf.len() as f32 / output_sample_rate as f32;
-                        if utterance_count >= correction_min_utterances || audio_duration_s >= correction_min_sec {
-                            let audio = std::mem::take(&mut correction_audio_buf);
-                            let lang = pipeline.language.clone();
+                            let audio_duration_s =
+                                correction_audio_buf.len() as f32 / output_sample_rate as f32;
+                            if utterance_count >= correction_min_utterances || audio_duration_s >= correction_min_sec {
+                                let audio = std::mem::take(&mut correction_audio_buf);
+                                let lang = pipeline.language.clone();
 
-                            let current_suffix = pipeline.last_suffix.clone();
-                            pipeline.last_suffix = suffix_snapshot.clone();
-                            correction_current_suffix = Some(current_suffix);
+                                let current_suffix = pipeline.last_suffix.clone();
+                                pipeline.last_suffix = suffix_snapshot.clone();
+                                correction_current_suffix = Some(current_suffix);
 
-                            correction_in_flight = Some(spawn_utterance_transcription(
-                                audio,
-                                output_sample_rate,
-                                lang,
-                            ));
+                                correction_in_flight = Some(spawn_utterance_transcription(
+                                    audio,
+                                    output_sample_rate,
+                                    lang,
+                                ));
+                            }
                         }
                     }
                     Ok(Err(e)) => {
@@ -754,12 +785,13 @@ pub(crate) async fn transcription_session(
     if !remaining.is_empty() {
         utterance_id += 1;
         total_utterances += 1;
+        let end_ts = utterance_start_s + utterance_audio_samples as f32 / output_sample_rate as f32;
         event_sink.on_event(&EngineEvent::UtteranceFinal {
             utterance_id,
             text: remaining,
             raw_text: String::new(),
-            start_ts: 0.0,
-            end_ts: 0.0,
+            start_ts: utterance_start_s,
+            end_ts,
         });
     }
 
@@ -1103,27 +1135,31 @@ pub(crate) async fn buffered_transcription_worker(
                                 }
                             }
                             pending_utterance_text.clear();
-                        }
 
-                        // Phase 2 correction accumulation uses the same sample rate as utterance audio.
-                        correction_audio_buf.extend_from_slice(&item.audio);
-                        utterance_count += 1;
+                            // Reset Phase 2 correction state on utterance boundary.
+                            correction_audio_buf.clear();
+                            utterance_count = 0;
+                        } else {
+                            // Phase 2 correction accumulation — only for non-final items.
+                            correction_audio_buf.extend_from_slice(&item.audio);
+                            utterance_count += 1;
 
-                        let audio_duration_s =
-                            correction_audio_buf.len() as f32 / output_sample_rate as f32;
-                        if utterance_count >= correction_min_utterances || audio_duration_s >= correction_min_sec {
-                            let audio = std::mem::take(&mut correction_audio_buf);
-                            let lang = pipeline.language.clone();
+                            let audio_duration_s =
+                                correction_audio_buf.len() as f32 / output_sample_rate as f32;
+                            if utterance_count >= correction_min_utterances || audio_duration_s >= correction_min_sec {
+                                let audio = std::mem::take(&mut correction_audio_buf);
+                                let lang = pipeline.language.clone();
 
-                            let current_suffix = pipeline.last_suffix.clone();
-                            pipeline.last_suffix = suffix_snapshot.clone();
-                            correction_current_suffix = Some(current_suffix);
+                                let current_suffix = pipeline.last_suffix.clone();
+                                pipeline.last_suffix = suffix_snapshot.clone();
+                                correction_current_suffix = Some(current_suffix);
 
-                            correction_in_flight = Some(spawn_utterance_transcription(
-                                audio,
-                                output_sample_rate,
-                                lang,
-                            ));
+                                correction_in_flight = Some(spawn_utterance_transcription(
+                                    audio,
+                                    output_sample_rate,
+                                    lang,
+                                ));
+                            }
                         }
                     }
                     Ok(Err(e)) => {

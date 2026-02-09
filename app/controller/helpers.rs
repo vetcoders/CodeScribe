@@ -173,6 +173,13 @@ impl EventSink for ControllerEventRouter {
                 // Compute delta from last_preview and apply — keeps is_streaming=true
                 // in assistive mode (set_voice_chat_user_text would finalize the bubble).
                 let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+                // Ignore stale corrections that arrive after UtteranceFinal
+                // already reset last_preview. Without this, delta from "" → text
+                // would inject phantom content into the next utterance.
+                if last.is_empty() {
+                    debug!("Ignoring Correction with empty last_preview (post-final)");
+                    return;
+                }
                 if is_assistive_session() {
                     if let Some(td) = TranscriptDelta::from_diff(&last, text) {
                         crate::voice_chat_ui::append_voice_chat_user_delta(&td.delta);

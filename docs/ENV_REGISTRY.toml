@@ -71,11 +71,11 @@ description = "Maximum utterance length before force flush"
 range = "1.0-300.0"
 
 [vars.CODESCRIBE_VAD_PRE_ROLL_SEC]
-default = "0.5"
+default = "0.064"
 type = "f32"
 reload = "restart"
 category = "vad"
-description = "Pre-roll buffer (seconds) before speech onset"
+description = "Pre-roll buffer (seconds) before speech onset (~64ms for consonant attacks)"
 range = "0.0-2.0"
 
 [vars.CODESCRIBE_VAD_SPEECH_PAD_SEC]
@@ -87,11 +87,11 @@ description = "Speech padding (seconds) appended after speech offset. Defaults t
 range = "0.0-2.0"
 
 [vars.CODESCRIBE_VAD_GATE_MODE]
-default = "simple"
+default = "supervisor"
 type = "string"
 reload = "restart"
 category = "vad"
-description = "Silero gate mode: simple (default) or iter (vad_iter with temp_end/prev_end)"
+description = "Silero gate mode: supervisor (default, preserves raw sample rate), iter, or simple"
 
 [vars.CODESCRIBE_VAD_ITER]
 default = "0"
@@ -187,11 +187,11 @@ category = "streaming"
 description = "Maximum words emitted per tick (buffered mode)"
 
 [vars.CODESCRIBE_STREAM_CHUNK_SEC]
-default = "15.0"
+default = "3.0"
 type = "f32"
 reload = "hot"
 category = "streaming"
-description = "Streaming chunk duration in seconds"
+description = "Streaming chunk duration in seconds (utterance cadence)"
 range = "0.5-30.0"
 
 [vars.CODESCRIBE_STREAM_OVERLAP_RATIO]
