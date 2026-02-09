@@ -6,9 +6,10 @@ use crate::pipeline::streaming::{
 };
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // Re-export public API that was moved to pipeline::streaming
 pub use crate::pipeline::streaming::transcribe_streaming_samples;
@@ -21,6 +22,8 @@ pub struct StreamingRecorder {
     delta_callback: Option<Arc<dyn DeltaSink>>,
     utterance_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
     utterance_silence_sec: Option<f32>,
+    /// Counter for audio chunks dropped due to channel backpressure.
+    dropped_chunks: Arc<AtomicU64>,
 }
 
 impl StreamingRecorder {
@@ -36,6 +39,7 @@ impl StreamingRecorder {
             delta_callback: None,
             utterance_callback: None,
             utterance_silence_sec: None,
+            dropped_chunks: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -51,6 +55,7 @@ impl StreamingRecorder {
             delta_callback: None,
             utterance_callback: None,
             utterance_silence_sec: None,
+            dropped_chunks: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -77,16 +82,21 @@ impl StreamingRecorder {
         language: Option<String>,
         use_buffered_stream: bool,
     ) -> Result<()> {
-        // Clear previous transcript
+        // Clear previous transcript and reset drop counter
         *self.transcript_buffer.lock().await = String::new();
+        self.dropped_chunks.store(0, Ordering::Relaxed);
 
         // Create channel for audio chunks
         let (tx, rx) = mpsc::channel::<Vec<f32>>(500);
 
-        // Setup callback to send audio data
+        // Setup callback to send audio data (with drop counter for observability)
+        let dropped = Arc::clone(&self.dropped_chunks);
         self.recorder.set_callback(Box::new(move |data| {
             if let Err(_e) = tx.try_send(data.to_vec()) {
-                // If channel is full, we drop audio (better than blocking)
+                let n = dropped.fetch_add(1, Ordering::Relaxed);
+                if n == 0 || (n + 1).is_multiple_of(50) {
+                    tracing::warn!("Audio callback: channel full, dropped {} chunk(s)", n + 1);
+                }
             }
         }));
 
@@ -148,6 +158,15 @@ impl StreamingRecorder {
     pub async fn stop(&mut self) -> Result<(String, Option<std::path::PathBuf>)> {
         info!("Stopping streaming recorder...");
 
+        // Report any dropped audio chunks
+        let drops = self.dropped_chunks.load(Ordering::Relaxed);
+        if drops > 0 {
+            warn!(
+                "Recording session: dropped {} audio chunk(s) due to backpressure",
+                drops
+            );
+        }
+
         // 1. Stop recording (drops callback and sender)
         let audio_path = self.recorder.stop().await?;
 
@@ -164,6 +183,15 @@ impl StreamingRecorder {
 
     pub async fn stop_without_saving(&mut self) -> Result<String> {
         info!("Stopping streaming recorder (no WAV)...");
+
+        // Report any dropped audio chunks
+        let drops = self.dropped_chunks.load(Ordering::Relaxed);
+        if drops > 0 {
+            warn!(
+                "Recording session: dropped {} audio chunk(s) due to backpressure",
+                drops
+            );
+        }
 
         // 1. Stop recording (discard WAV path)
         let _ = self.recorder.stop().await?;

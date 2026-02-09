@@ -241,7 +241,9 @@ impl BufferedEmitter {
             return true;
         }
 
-        if self.is_buffering() {
+        // Skip initial delay for the very first emission — gives instant visual
+        // feedback that recording is working. Subsequent emissions use normal buffering.
+        if self.is_buffering() && self.has_output {
             return false;
         }
 

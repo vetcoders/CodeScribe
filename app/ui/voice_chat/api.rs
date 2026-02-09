@@ -995,6 +995,15 @@ pub fn send_draft_message_impl() {
             return;
         }
 
+        // Check handler BEFORE mutating state to avoid phantom messages
+        // when no connector is registered.
+        let handler_guard = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(handler) = handler_guard.clone() else {
+            // No send handler — leave state untouched so draft remains in input.
+            return;
+        };
+        drop(handler_guard);
+
         let attachments_to_send = attachment_should_include_locked(&state);
         if let Some((_fingerprint, _paths, summary)) = attachments_to_send.as_ref() {
             let mode = message_mode_label(&state);
@@ -1006,7 +1015,6 @@ pub fn send_draft_message_impl() {
                 timestamp: SystemTime::now(),
                 mode: Some(mode),
             });
-            // Fingerprint committed below, only after confirming send callback exists.
         }
 
         let mode = message_mode_label(&state);
@@ -1028,35 +1036,28 @@ pub fn send_draft_message_impl() {
         resize_agent_input_locked(&mut state);
         update_chat_view_with_state(&mut state, true);
         update_send_button_with_state(&mut state);
-        let handler = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
-        (handler.clone(), draft, attachments_to_send)
+        (handler, draft, attachments_to_send)
     };
 
-    if let (Some(handler), draft, attachments_to_send) = callback {
-        if let Some((fingerprint, paths, _summary)) = attachments_to_send {
-            // Commit fingerprint now that we know the handler exists.
-            {
-                let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.attachments_last_sent = Some(fingerprint);
-            }
-            std::thread::spawn(move || {
-                let block = build_attachments_block(&paths);
-                let payload = if block.is_empty() {
-                    draft
-                } else {
-                    format!("{draft}\n\n{block}")
-                };
-                // The send callback uses `tokio::spawn`, which requires a runtime handle.
-                // Calling it from an arbitrary background thread can panic (release builds abort).
-                Queue::main().exec_async(move || handler(payload));
-            });
-        } else {
-            handler(draft);
+    let (handler, draft, attachments_to_send) = callback;
+    if let Some((fingerprint, paths, _summary)) = attachments_to_send {
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.attachments_last_sent = Some(fingerprint);
         }
+        std::thread::spawn(move || {
+            let block = build_attachments_block(&paths);
+            let payload = if block.is_empty() {
+                draft
+            } else {
+                format!("{draft}\n\n{block}")
+            };
+            // The send callback uses `tokio::spawn`, which requires a runtime handle.
+            // Calling it from an arbitrary background thread can panic (release builds abort).
+            Queue::main().exec_async(move || handler(payload));
+        });
     } else {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.is_sending = false;
-        update_send_button_with_state(&mut state);
+        handler(draft);
     }
 }
 
@@ -1070,6 +1071,14 @@ pub(super) fn commit_last_user_message_impl() {
             return;
         }
         let text = last_message.text.clone();
+
+        // Check handler BEFORE mutating state to avoid phantom messages.
+        let handler_guard = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(handler) = handler_guard.clone() else {
+            return;
+        };
+        drop(handler_guard);
+
         let attachments_to_send = attachment_should_include_locked(&state);
         if let Some((_fingerprint, _paths, summary)) = attachments_to_send.as_ref() {
             let mode = message_mode_label(&state);
@@ -1081,38 +1090,30 @@ pub(super) fn commit_last_user_message_impl() {
                 timestamp: SystemTime::now(),
                 mode: Some(mode),
             });
-            // Fingerprint committed below, only after confirming send callback exists.
         }
         state.is_sending = true;
         update_chat_view_with_state(&mut state, true);
         update_send_button_with_state(&mut state);
-        let handler = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
-        (handler.clone(), text, attachments_to_send)
+        (handler, text, attachments_to_send)
     };
 
-    if let (Some(handler), text, attachments_to_send) = callback {
-        if let Some((fingerprint, paths, _summary)) = attachments_to_send {
-            // Commit fingerprint now that we know the handler exists.
-            {
-                let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                state.attachments_last_sent = Some(fingerprint);
-            }
-            std::thread::spawn(move || {
-                let block = build_attachments_block(&paths);
-                let payload = if block.is_empty() {
-                    text
-                } else {
-                    format!("{text}\n\n{block}")
-                };
-                Queue::main().exec_async(move || handler(payload));
-            });
-        } else {
-            handler(text);
+    let (handler, text, attachments_to_send) = callback;
+    if let Some((fingerprint, paths, _summary)) = attachments_to_send {
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.attachments_last_sent = Some(fingerprint);
         }
+        std::thread::spawn(move || {
+            let block = build_attachments_block(&paths);
+            let payload = if block.is_empty() {
+                text
+            } else {
+                format!("{text}\n\n{block}")
+            };
+            Queue::main().exec_async(move || handler(payload));
+        });
     } else {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.is_sending = false;
-        update_send_button_with_state(&mut state);
+        handler(text);
     }
 }
 
@@ -1984,16 +1985,32 @@ fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
         let current_bar: CGRect = msg_send![input_bar, frame];
         let height_same = (current_bar.size.height - desired_h).abs() < 0.5;
         let width_same = (current_bar.size.width - bar_width).abs() < 0.5;
-        // Do not early-return when chip strip visibility may have changed.
-        let chip_strip_stable = if let Some(strip_ptr) = state.attachment_chip_strip {
-            let strip = strip_ptr as Id;
-            let is_hidden: bool = msg_send![strip, isHidden];
-            let should_hide = state.attachments.is_empty();
-            is_hidden == should_hide
+        // Check if agent scroll frame needs updating (e.g. chip strip toggled).
+        // We compare the actual frame origin against the expected bottom rather
+        // than checking visibility flags, because setHidden may have already been
+        // called (by render_attachment_chips_locked) before we get here — making
+        // the visibility flag look "stable" even though the scroll frame hasn't
+        // been adjusted yet.
+        let scroll_needs_reflow = if let Some(agent_scroll_ptr) = state.agent_scroll_view {
+            let agent_scroll = agent_scroll_ptr as Id;
+            let current_frame: CGRect = msg_send![agent_scroll, frame];
+            let strip_extra = if let Some(strip_ptr) = state.attachment_chip_strip {
+                let strip = strip_ptr as Id;
+                let strip_visible: bool = !msg_send![strip, isHidden];
+                if strip_visible {
+                    CHIP_STRIP_HEIGHT + input_gap
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let expected_bottom = footer_inset + desired_h + input_gap + strip_extra;
+            (current_frame.origin.y - expected_bottom).abs() > 0.5
         } else {
-            true
+            false
         };
-        if height_same && width_same && chip_strip_stable {
+        if height_same && width_same && !scroll_needs_reflow {
             return;
         }
 

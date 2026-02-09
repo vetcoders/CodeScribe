@@ -163,7 +163,7 @@ default = "3000"
 type = "u64"
 reload = "hot"
 category = "streaming"
-description = "Initial buffer delay in milliseconds"
+description = "Buffer delay in milliseconds (skipped for first emission to give instant feedback)"
 
 [vars.CODESCRIBE_TYPING_CPS]
 default = "30"
@@ -262,7 +262,7 @@ description = "Prefix ratio required to accept buffered correction"
 range = "0.4-0.9"
 
 [vars.CODESCRIBE_BUFFERED_INTERIM_SEC]
-default = "5.0"
+default = "3.0"
 type = "f32"
 reload = "hot"
 category = "streaming"
@@ -270,7 +270,7 @@ description = "Interim emission cadence for buffered mode (sec)"
 range = "1.0-30.0"
 
 [vars.CODESCRIBE_UTTERANCE_INTERIM_SEC]
-default = "5.0"
+default = "3.0"
 type = "f32"
 reload = "hot"
 category = "streaming"

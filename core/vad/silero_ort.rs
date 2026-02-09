@@ -186,15 +186,21 @@ impl SileroVad {
             (&sr_value).into(),
         ])?;
 
-        // Read probability from "output"
+        // Read probability from "output" (safe access — no panic on missing key)
         let prob = {
-            let (_shape, data) = outputs["output"].try_extract_tensor::<f32>()?;
+            let output = outputs
+                .get("output")
+                .context("Silero model missing 'output' tensor")?;
+            let (_shape, data) = output.try_extract_tensor::<f32>()?;
             data.first().copied().unwrap_or(0.0)
         };
 
-        // Read updated state from "stateN"
+        // Read updated state from "stateN" (safe access — no panic on missing key)
         {
-            let (shape, data) = outputs["stateN"].try_extract_tensor::<f32>()?;
+            let state_output = outputs
+                .get("stateN")
+                .context("Silero model missing 'stateN' tensor")?;
+            let (shape, data) = state_output.try_extract_tensor::<f32>()?;
             let shape_usize: Vec<usize> = shape.as_ref().iter().map(|&d| d as usize).collect();
             if let Ok(arr) = ArrayD::from_shape_vec(shape_usize.as_slice(), data.to_vec()) {
                 self.state = arr;
@@ -286,7 +292,13 @@ impl VadWorker {
                         sample_rate,
                     } => {
                         vad.set_input_sample_rate(sample_rate);
-                        let prob = vad.predict(&samples).unwrap_or(0.0);
+                        let prob = match vad.predict(&samples) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!("VAD predict error (assuming speech): {e}");
+                                1.0
+                            }
+                        };
                         // Update atomic (Relaxed - just caching value, no sync needed)
                         last_prob_writer.store(prob.to_bits(), Ordering::Relaxed);
                     }
