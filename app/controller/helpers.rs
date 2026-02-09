@@ -104,3 +104,109 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
 pub fn raw_save_enabled() -> bool {
     true
 }
+
+// ═══════════════════════════════════════════════════════════
+// Event-based routing (new pipeline)
+// ═══════════════════════════════════════════════════════════
+
+use codescribe_core::pipeline::contracts::{EngineEvent, EventSink};
+use tracing::{debug, info, warn};
+
+/// Routes `EngineEvent`s to the appropriate UI based on session state.
+///
+/// This is the app-layer `EventSink` that replaces `route_transcription_delta`
+/// and the scattered `utterance_callback` / `delta_callback` setup.
+///
+/// Hold mode: buffers previews, emits final on stop.
+/// Toggle mode: routes utterances immediately.
+pub struct ControllerEventRouter {
+    /// Optional callback for completed utterances (Toggle mode sends immediately).
+    utterance_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
+    /// Optional callback when VAD first detects speech.
+    vad_stop_callback: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl ControllerEventRouter {
+    pub fn new() -> Self {
+        Self {
+            utterance_callback: None,
+            vad_stop_callback: None,
+        }
+    }
+
+    pub fn with_utterance_callback(mut self, cb: Arc<dyn Fn(String) + Send + Sync>) -> Self {
+        self.utterance_callback = Some(cb);
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_vad_stop_callback(mut self, cb: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.vad_stop_callback = Some(cb);
+        self
+    }
+}
+
+impl EventSink for ControllerEventRouter {
+    fn on_event(&self, event: &EngineEvent) {
+        match event {
+            EngineEvent::VadStart { .. } => {
+                if let Some(cb) = &self.vad_stop_callback {
+                    cb();
+                }
+            }
+            EngineEvent::Preview { text, .. } => {
+                // Route preview to the active overlay (assistive or transcription).
+                // Use TranscriptDelta::from_diff to compute minimal delta from full text.
+                if is_assistive_session() {
+                    crate::voice_chat_ui::append_voice_chat_user_delta(text);
+                } else {
+                    crate::transcription_overlay::append_transcription_delta(text);
+                }
+            }
+            EngineEvent::Correction { text, .. } => {
+                // Corrections update the overlay with the corrected full text.
+                if is_assistive_session() {
+                    crate::voice_chat_ui::set_voice_chat_user_text(text);
+                } else {
+                    crate::set_transcription_text(text);
+                }
+            }
+            EngineEvent::UtteranceFinal { text, .. } => {
+                if let Some(cb) = &self.utterance_callback {
+                    let payload = text.trim();
+                    if !payload.is_empty() {
+                        cb(payload.to_string());
+                    }
+                }
+            }
+            EngineEvent::Drop { kind, text, reason } => {
+                debug!(
+                    "Engine dropped [{:?}]: {} (text: '{}')",
+                    kind,
+                    reason,
+                    text.chars().take(50).collect::<String>()
+                );
+            }
+            EngineEvent::Stats {
+                hallucination_drops,
+                semantic_gate_drops,
+                corrections_applied,
+                total_utterances,
+                dropped_audio_chunks,
+            } => {
+                info!(
+                    "Session stats: utterances={}, hallucinations={}, semantic_gate={}, corrections={}, dropped_chunks={}",
+                    total_utterances,
+                    hallucination_drops,
+                    semantic_gate_drops,
+                    corrections_applied,
+                    dropped_audio_chunks,
+                );
+            }
+            EngineEvent::Warning { code, message } => {
+                warn!("Engine warning [{}]: {}", code, message);
+            }
+            _ => {}
+        }
+    }
+}

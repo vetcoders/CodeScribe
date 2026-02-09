@@ -191,6 +191,93 @@ pub trait DeltaSink: Send + Sync {
 }
 
 // ═══════════════════════════════════════════════════════════
+// Engine events (intent layer)
+// ═══════════════════════════════════════════════════════════
+
+/// Events emitted by the transcription engine.
+///
+/// These are semantic events — the engine communicates what happened
+/// and why, not how to display it. UI decides presentation.
+///
+/// Data flow: AudioChunk → VAD → Whisper → PostProcess → EngineEvent
+#[derive(Debug, Clone)]
+pub enum EngineEvent {
+    /// VAD detected speech start.
+    VadStart { speech_prob: f32, ts_ms: u64 },
+    /// VAD detected speech end.
+    VadEnd { speech_prob: f32, ts_ms: u64 },
+    /// VAD flush fallback — speech detected but iter_state never fired Start.
+    VadFallback { max_prob: f32, samples: usize },
+
+    /// Interim preview — latest transcription of current segment.
+    /// `rev` increments on each update; UI can diff if it wants.
+    Preview { rev: u64, text: String },
+    /// Correction — re-transcription improved previous output.
+    Correction {
+        rev: u64,
+        text: String,
+        previous_text: String,
+    },
+
+    /// Complete utterance (VAD-bounded or flush).
+    UtteranceFinal {
+        utterance_id: u64,
+        text: String,
+        raw_text: String,
+        start_ts: f32,
+        end_ts: f32,
+    },
+
+    /// Content dropped by engine intelligence.
+    Drop {
+        kind: DropKind,
+        text: String,
+        reason: String,
+    },
+
+    /// Session-level statistics (emitted on stop/flush).
+    Stats {
+        dropped_audio_chunks: u64,
+        hallucination_drops: u64,
+        semantic_gate_drops: u64,
+        corrections_applied: u64,
+        total_utterances: u64,
+    },
+
+    /// Recoverable error — engine continues.
+    Warning { code: String, message: String },
+}
+
+/// Why the engine dropped content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropKind {
+    /// Whisper hallucination pattern detected (e.g. "thank you", "subscribe").
+    Hallucination,
+    /// Semantic gate: chunk too similar to previous output.
+    SemanticGate,
+    /// Overlap dedup produced empty result.
+    OverlapEmpty,
+}
+
+impl std::fmt::Display for DropKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DropKind::Hallucination => write!(f, "Hallucination"),
+            DropKind::SemanticGate => write!(f, "SemanticGate"),
+            DropKind::OverlapEmpty => write!(f, "OverlapEmpty"),
+        }
+    }
+}
+
+/// Sink for engine events. Replaces DeltaSink for the unified pipeline.
+///
+/// Implementations decide how to present events — typing animation,
+/// overlay updates, clipboard paste, IPC streaming, etc.
+pub trait EventSink: Send + Sync {
+    fn on_event(&self, event: &EngineEvent);
+}
+
+// ═══════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════
 
@@ -330,5 +417,78 @@ mod tests {
         };
         assert!(r.dropped);
         assert!(r.text.is_empty());
+    }
+
+    // ── EngineEvent ──
+
+    #[test]
+    fn engine_event_preview_clone() {
+        let event = EngineEvent::Preview {
+            rev: 1,
+            text: "Hello world".to_string(),
+        };
+        let cloned = event.clone();
+        if let EngineEvent::Preview { rev, text } = cloned {
+            assert_eq!(rev, 1);
+            assert_eq!(text, "Hello world");
+        } else {
+            panic!("Expected Preview variant");
+        }
+    }
+
+    #[test]
+    fn engine_event_drop_kind_display() {
+        assert_eq!(DropKind::Hallucination.to_string(), "Hallucination");
+        assert_eq!(DropKind::SemanticGate.to_string(), "SemanticGate");
+        assert_eq!(DropKind::OverlapEmpty.to_string(), "OverlapEmpty");
+    }
+
+    #[test]
+    fn engine_event_stats_fields() {
+        let event = EngineEvent::Stats {
+            dropped_audio_chunks: 2,
+            hallucination_drops: 3,
+            semantic_gate_drops: 1,
+            corrections_applied: 4,
+            total_utterances: 10,
+        };
+        if let EngineEvent::Stats {
+            total_utterances,
+            hallucination_drops,
+            ..
+        } = event
+        {
+            assert_eq!(total_utterances, 10);
+            assert_eq!(hallucination_drops, 3);
+        } else {
+            panic!("Expected Stats variant");
+        }
+    }
+
+    #[test]
+    fn engine_event_utterance_final_roundtrip() {
+        let event = EngineEvent::UtteranceFinal {
+            utterance_id: 42,
+            text: "cleaned text".to_string(),
+            raw_text: "raw text from whisper".to_string(),
+            start_ts: 1.5,
+            end_ts: 3.2,
+        };
+        if let EngineEvent::UtteranceFinal {
+            utterance_id,
+            text,
+            raw_text,
+            start_ts,
+            end_ts,
+        } = event
+        {
+            assert_eq!(utterance_id, 42);
+            assert_eq!(text, "cleaned text");
+            assert_eq!(raw_text, "raw text from whisper");
+            assert!((start_ts - 1.5).abs() < f32::EPSILON);
+            assert!((end_ts - 3.2).abs() < f32::EPSILON);
+        } else {
+            panic!("Expected UtteranceFinal variant");
+        }
     }
 }

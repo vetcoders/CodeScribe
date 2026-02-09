@@ -1182,35 +1182,78 @@ impl RecordingController {
         recorder.recorder.set_on_vad_stop(|| {});
         recorder.set_utterance_silence_sec(Some(toggle_silence_sec));
 
-        let controller = OVERLAY_CONTROLLER.get().cloned();
-        let expected_session = new_session_id.clone();
-        let is_assistive_session = is_assistive;
-        recorder.set_utterance_callback(Some(Arc::new(move |text: String| {
-            let controller = controller.clone();
-            let expected_session = expected_session.clone();
-            tokio::spawn(async move {
-                if let Some(controller) = controller
-                    && let Err(e) = controller
-                        .handle_toggle_utterance(text, expected_session, is_assistive_session)
-                        .await
-                {
-                    warn!("Toggle utterance processing failed: {}", e);
-                }
-            });
-        })));
+        let use_event_pipeline = std::env::var("CODESCRIBE_EVENT_PIPELINE")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        // Set streaming callback for overlay updates (routed by session mode)
-        recorder.set_delta_callback(Some(Arc::new(
-            codescribe_core::pipeline::sinks::CallbackSink::new(Arc::new(|text: &str| {
-                route_transcription_delta(text);
-            })),
-        )));
+        if use_event_pipeline {
+            // New event-based pipeline: ControllerEventRouter handles all routing.
+            let controller = OVERLAY_CONTROLLER.get().cloned();
+            let expected_session = new_session_id.clone();
+            let is_assistive_session = is_assistive;
 
-        // Skip actual audio stream in tests (no CoreAudio device needed)
-        if !cfg!(test) {
-            recorder
-                .start_with_buffered(Some(language.as_str().to_string()), true)
-                .await?;
+            let router = Arc::new(
+                helpers::ControllerEventRouter::new().with_utterance_callback(Arc::new(
+                    move |text: String| {
+                        let controller = controller.clone();
+                        let expected_session = expected_session.clone();
+                        tokio::spawn(async move {
+                            if let Some(controller) = controller
+                                && let Err(e) = controller
+                                    .handle_toggle_utterance(
+                                        text,
+                                        expected_session,
+                                        is_assistive_session,
+                                    )
+                                    .await
+                            {
+                                warn!("Toggle utterance processing failed: {}", e);
+                            }
+                        });
+                    },
+                )),
+            );
+
+            recorder.set_event_sink(Some(router));
+
+            if !cfg!(test) {
+                recorder
+                    .start_event_session(Some(language.as_str().to_string()))
+                    .await?;
+            }
+        } else {
+            // Legacy pipeline: separate delta_callback + utterance_callback
+            let controller = OVERLAY_CONTROLLER.get().cloned();
+            let expected_session = new_session_id.clone();
+            let is_assistive_session = is_assistive;
+            recorder.set_utterance_callback(Some(Arc::new(move |text: String| {
+                let controller = controller.clone();
+                let expected_session = expected_session.clone();
+                tokio::spawn(async move {
+                    if let Some(controller) = controller
+                        && let Err(e) = controller
+                            .handle_toggle_utterance(text, expected_session, is_assistive_session)
+                            .await
+                    {
+                        warn!("Toggle utterance processing failed: {}", e);
+                    }
+                });
+            })));
+
+            // Set streaming callback for overlay updates (routed by session mode)
+            recorder.set_delta_callback(Some(Arc::new(
+                codescribe_core::pipeline::sinks::CallbackSink::new(Arc::new(|text: &str| {
+                    route_transcription_delta(text);
+                })),
+            )));
+
+            // Skip actual audio stream in tests (no CoreAudio device needed)
+            if !cfg!(test) {
+                recorder
+                    .start_with_buffered(Some(language.as_str().to_string()), true)
+                    .await?;
+            }
         }
 
         // Play start beep if enabled

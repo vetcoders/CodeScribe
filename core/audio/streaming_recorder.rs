@@ -1,9 +1,10 @@
 use crate::audio::recorder::{Recorder, RecorderConfig};
-use crate::pipeline::contracts::DeltaSink;
+use crate::pipeline::contracts::{DeltaSink, EventSink};
 use crate::pipeline::stream_postprocess::StreamPostProcessor;
+#[allow(deprecated)]
 use crate::pipeline::streaming::{
-    BufferedWorkerConfig, buffered_transcription_worker, env_bool_default, stream_log_path,
-    transcription_worker,
+    BufferedWorkerConfig, SessionConfig, buffered_transcription_worker, env_bool_default,
+    stream_log_path, transcription_session, transcription_worker,
 };
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -25,6 +26,8 @@ pub struct StreamingRecorder {
     utterance_silence_sec: Option<f32>,
     /// Counter for audio chunks dropped due to channel backpressure.
     dropped_chunks: Arc<AtomicU64>,
+    /// New event-based pipeline sink (when set, `start_event_session` uses this).
+    event_sink: Option<Arc<dyn EventSink>>,
 }
 
 impl StreamingRecorder {
@@ -41,6 +44,7 @@ impl StreamingRecorder {
             utterance_callback: None,
             utterance_silence_sec: None,
             dropped_chunks: Arc::new(AtomicU64::new(0)),
+            event_sink: None,
         })
     }
 
@@ -57,6 +61,7 @@ impl StreamingRecorder {
             utterance_callback: None,
             utterance_silence_sec: None,
             dropped_chunks: Arc::new(AtomicU64::new(0)),
+            event_sink: None,
         })
     }
 
@@ -72,12 +77,87 @@ impl StreamingRecorder {
         self.utterance_silence_sec = silence_sec;
     }
 
+    /// Set the event sink for the new unified pipeline.
+    ///
+    /// When set, `start_event_session()` uses `transcription_session` instead
+    /// of the legacy workers.
+    pub fn set_event_sink(&mut self, sink: Option<Arc<dyn EventSink>>) {
+        self.event_sink = sink;
+    }
+
+    /// Start recording with the new event-based pipeline.
+    ///
+    /// Uses `transcription_session` which emits `EngineEvent`s to the configured
+    /// `event_sink`. Falls back to `start()` if no event_sink is set.
+    pub async fn start_event_session(&mut self, language: Option<String>) -> Result<()> {
+        let event_sink = match self.event_sink.clone() {
+            Some(sink) => sink,
+            None => {
+                warn!(
+                    "start_event_session called without event_sink; falling back to legacy start()"
+                );
+                return self.start(language).await;
+            }
+        };
+
+        // Clear previous transcript and reset drop counter
+        *self.transcript_buffer.lock().await = String::new();
+        self.dropped_chunks.store(0, Ordering::Relaxed);
+
+        // Create channel for audio chunks
+        let (tx, rx) = mpsc::channel::<Vec<f32>>(500);
+
+        // Setup callback to send audio data
+        let dropped = Arc::clone(&self.dropped_chunks);
+        self.recorder.set_callback(Box::new(move |data| {
+            if let Err(_e) = tx.try_send(data.to_vec()) {
+                let n = dropped.fetch_add(1, Ordering::Relaxed);
+                if n == 0 || (n + 1).is_multiple_of(50) {
+                    tracing::warn!("Audio callback: channel full, dropped {} chunk(s)", n + 1);
+                }
+            }
+        }));
+
+        // Start actual audio stream
+        self.recorder.start().await?;
+
+        // Update sample rate to match real input stream
+        let actual_sample_rate = self.recorder.actual_sample_rate();
+        if actual_sample_rate != self.sample_rate {
+            info!(
+                "StreamingRecorder sample_rate updated: config={}Hz -> actual={}Hz",
+                self.sample_rate, actual_sample_rate
+            );
+            self.sample_rate = actual_sample_rate;
+        }
+
+        let log_path = stream_log_path();
+        let utterance_silence_sec = self.utterance_silence_sec;
+
+        self.transcription_handle = Some(tokio::spawn(async move {
+            transcription_session(
+                rx,
+                event_sink,
+                SessionConfig {
+                    sample_rate: actual_sample_rate,
+                    language,
+                    stream_log_path: log_path,
+                    utterance_silence_sec,
+                },
+            )
+            .await;
+        }));
+
+        Ok(())
+    }
+
     pub async fn start(&mut self, language: Option<String>) -> Result<()> {
         let use_buffered_stream = env_bool_default("CODESCRIBE_BUFFERED_STREAM", true);
         self.start_with_buffered(language, use_buffered_stream)
             .await
     }
 
+    #[allow(deprecated)]
     pub async fn start_with_buffered(
         &mut self,
         language: Option<String>,

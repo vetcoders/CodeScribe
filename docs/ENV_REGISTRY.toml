@@ -158,6 +158,13 @@ reload = "hot"
 category = "streaming"
 description = "Use buffered streaming mode (smoother output)"
 
+[vars.CODESCRIBE_EVENT_PIPELINE]
+default = "0"
+type = "bool"
+reload = "hot"
+category = "streaming"
+description = "Use the new event-based transcription pipeline (experimental)"
+
 [vars.CODESCRIBE_BUFFER_DELAY_MS]
 default = "3000"
 type = "u64"
