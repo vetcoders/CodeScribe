@@ -209,10 +209,33 @@ pub enum EngineEvent {
     /// VAD flush fallback — speech detected but iter_state never fired Start.
     VadFallback { max_prob: f32, samples: usize },
 
-    /// Interim preview — latest transcription of current segment.
-    /// `rev` increments on each update; UI can diff if it wants.
+    /// Interim preview — latest transcription of the current utterance.
+    ///
+    /// # Semantics (contract)
+    ///
+    /// - `text` is **utterance-local**: it contains the full post-processed text for
+    ///   the current utterance only, NOT the accumulated session text.
+    /// - On each new Whisper decode, `text` replaces the previous Preview for this
+    ///   utterance (not appended). `rev` increments monotonically.
+    /// - After `UtteranceFinal`, `text` resets to empty for the next utterance.
+    ///
+    /// # Sink responsibilities
+    ///
+    /// - Sinks that need incremental deltas (e.g. overlay append) must track
+    ///   `last_preview` and compute diffs themselves (see `TranscriptDelta::from_diff`).
+    /// - Sinks that need session-accumulated text must concatenate across utterances.
+    /// - On `UtteranceFinal`, sinks must reset their `last_preview` state.
     Preview { rev: u64, text: String },
-    /// Correction — re-transcription improved previous output.
+
+    /// Correction — re-transcription of accumulated audio improved previous output.
+    ///
+    /// # Semantics (contract)
+    ///
+    /// - `text` is the full corrected utterance-local text (replaces, not appends).
+    /// - `previous_text` is what was shown before correction.
+    /// - Sinks should apply this as a replacement (delta diff or full overwrite)
+    ///   and update their `last_preview` to `text`.
+    /// - Must NOT finalize streaming state (keep `is_streaming = true` in UI).
     Correction {
         rev: u64,
         text: String,
@@ -220,6 +243,16 @@ pub enum EngineEvent {
     },
 
     /// Complete utterance (VAD-bounded or flush).
+    ///
+    /// # Semantics (contract)
+    ///
+    /// - Emitted once per VAD-bounded speech segment (or on session flush).
+    /// - `text` is the final post-processed utterance text.
+    /// - After this event, the engine clears its internal accumulated_text.
+    /// - Sinks must reset `last_preview` to empty (next Preview starts fresh).
+    /// - In toggle mode, the utterance callback processes this text (AI/clipboard).
+    ///   The commit path should NOT re-write to the user bubble if Preview already
+    ///   streamed into it (see `skip_user_bubble`).
     UtteranceFinal {
         utterance_id: u64,
         text: String,

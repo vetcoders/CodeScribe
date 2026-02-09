@@ -543,8 +543,8 @@ pub(crate) async fn transcription_session(
 
                             if !vad_started {
                                 event_sink.on_event(&EngineEvent::VadStart {
-                                    speech_prob: 0.0,
-                                    ts_ms: 0,
+                                    speech_prob: session.boundary_prob(),
+                                    ts_ms: session.session_elapsed_ms(),
                                 });
                                 vad_started = true;
                             }
@@ -563,6 +563,18 @@ pub(crate) async fn transcription_session(
                     None => {
                         audio_closed = true;
                         if let Some(event) = session.flush() {
+                            // Emit VadFallback if flush used degraded path (VAD never fired Start).
+                            if session.was_flush_fallback() {
+                                event_sink.on_event(&EngineEvent::VadFallback {
+                                    max_prob: session.peak_speech_prob(),
+                                    samples: match &event {
+                                        SpeechEvent::UtteranceFinal(u)
+                                        | SpeechEvent::Utterance(u) => u.len(),
+                                        _ => 0,
+                                    },
+                                });
+                            }
+
                             let (utterance, is_final) = match event {
                                 SpeechEvent::Utterance(u) => (u, false),
                                 SpeechEvent::UtteranceFinal(u) => (u, true),
@@ -570,6 +582,14 @@ pub(crate) async fn transcription_session(
                             };
 
                             if !utterance.is_empty() {
+                                // Emit VadStart if this is the first speech (e.g. from flush).
+                                if !vad_started {
+                                    event_sink.on_event(&EngineEvent::VadStart {
+                                        speech_prob: session.boundary_prob(),
+                                        ts_ms: session.session_elapsed_ms(),
+                                    });
+                                    vad_started = true;
+                                }
                                 if pending_utterances.len() < MAX_PENDING_UTTERANCES {
                                     pending_utterances.push_back(UtteranceWorkItem { audio: utterance, is_final });
                                 } else {
@@ -680,8 +700,8 @@ pub(crate) async fn transcription_session(
 
                             if vad_started {
                                 event_sink.on_event(&EngineEvent::VadEnd {
-                                    speech_prob: 0.0,
-                                    ts_ms: 0,
+                                    speech_prob: session.boundary_prob(),
+                                    ts_ms: session.session_elapsed_ms(),
                                 });
                                 vad_started = false;
                             }

@@ -121,6 +121,12 @@ pub(crate) struct SpeechSession {
     last_vad_heartbeat: Instant,
     /// Peak speech probability seen across this session (for flush fallback).
     max_speech_prob: f32,
+    /// Speech probability at the last VAD boundary (Start or End).
+    last_boundary_prob: f32,
+    /// Wall-clock instant when this session was created.
+    session_start: Instant,
+    /// Set to true if `flush()` used the fallback path (VAD never fired Start).
+    last_flush_fallback: bool,
 }
 
 impl SpeechSession {
@@ -204,6 +210,9 @@ impl SpeechSession {
             vad_frames_speech: 0,
             last_vad_heartbeat: Instant::now(),
             max_speech_prob: 0.0,
+            last_boundary_prob: 0.0,
+            session_start: Instant::now(),
+            last_flush_fallback: false,
         }
     }
 
@@ -311,6 +320,9 @@ impl SpeechSession {
             vad_frames_speech: 0,
             last_vad_heartbeat: Instant::now(),
             max_speech_prob: 0.0,
+            last_boundary_prob: 0.0,
+            session_start: Instant::now(),
+            last_flush_fallback: false,
         }
     }
 
@@ -458,6 +470,7 @@ impl SpeechSession {
                     .saturating_sub(self.pre_roll_raw);
                 self.segment_start = Some(raw_start);
                 self.last_emit_raw = raw_start;
+                self.last_boundary_prob = speech_prob;
             }
 
             if let Some(end_sample) = end_event {
@@ -465,6 +478,7 @@ impl SpeechSession {
                     .vad_to_raw_index(end_sample)
                     .saturating_add(self.speech_pad_raw);
                 self.pending_end = Some(raw_end);
+                self.last_boundary_prob = speech_prob;
             }
 
             if let Some(iter_state) = self.iter_state.as_ref() {
@@ -584,6 +598,7 @@ impl SpeechSession {
                         self.max_speech_prob,
                         chunk.len()
                     );
+                    self.last_flush_fallback = true;
                     return Some(match self.mode {
                         SpeechMode::Stream { .. } => SpeechEvent::Chunk(chunk),
                         SpeechMode::Utterance { .. } => SpeechEvent::UtteranceFinal(chunk),
@@ -807,6 +822,26 @@ impl SpeechSession {
 
     pub fn output_sample_rate(&self) -> u32 {
         self.output_sample_rate
+    }
+
+    /// Speech probability at the last VAD Start/End boundary.
+    pub(crate) fn boundary_prob(&self) -> f32 {
+        self.last_boundary_prob
+    }
+
+    /// Milliseconds elapsed since session creation (wall-clock).
+    pub(crate) fn session_elapsed_ms(&self) -> u64 {
+        self.session_start.elapsed().as_millis() as u64
+    }
+
+    /// Whether the last `flush()` used the fallback path (VAD never fired Start).
+    pub(crate) fn was_flush_fallback(&self) -> bool {
+        self.last_flush_fallback
+    }
+
+    /// Peak speech probability observed across the entire session.
+    pub(crate) fn peak_speech_prob(&self) -> f32 {
+        self.max_speech_prob
     }
 
     /// Override VAD threshold (test-only). Set impossibly high to prevent
