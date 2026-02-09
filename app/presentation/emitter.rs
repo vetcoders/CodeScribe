@@ -129,6 +129,11 @@ impl EventSink for PresentationEmitter {
                 });
             }
             EngineEvent::UtteranceFinal { text, .. } => {
+                // Reset last_preview — engine clears accumulated_text on utterance boundary.
+                {
+                    let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+                    last.clear();
+                }
                 if let Some(cb) = &self.utterance_callback {
                     let payload = text.trim();
                     if !payload.is_empty() {

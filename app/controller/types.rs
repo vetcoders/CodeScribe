@@ -152,4 +152,7 @@ pub struct TranscriptPipelineParams {
     pub append_mode: bool,
     pub user_needs_separator: bool,
     pub assistant_needs_separator: bool,
+    /// When true, skip writing to the user bubble in the commit path.
+    /// Used by event pipeline where Preview already streams into the bubble.
+    pub skip_user_bubble: bool,
 }

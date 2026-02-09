@@ -1205,6 +1205,7 @@ impl RecordingController {
                                         text,
                                         expected_session,
                                         is_assistive_session,
+                                        true, // skip_user_bubble: Preview already streams into bubble
                                     )
                                     .await
                             {
@@ -1233,7 +1234,12 @@ impl RecordingController {
                 tokio::spawn(async move {
                     if let Some(controller) = controller
                         && let Err(e) = controller
-                            .handle_toggle_utterance(text, expected_session, is_assistive_session)
+                            .handle_toggle_utterance(
+                                text,
+                                expected_session,
+                                is_assistive_session,
+                                false,
+                            )
                             .await
                     {
                         warn!("Toggle utterance processing failed: {}", e);
@@ -1327,6 +1333,7 @@ impl RecordingController {
         raw_text: String,
         expected_session: String,
         is_assistive: bool,
+        skip_user_bubble: bool,
     ) -> Result<()> {
         if raw_text.trim().is_empty() {
             if is_assistive {
@@ -1394,6 +1401,7 @@ impl RecordingController {
                 append_mode: true,
                 user_needs_separator,
                 assistant_needs_separator,
+                skip_user_bubble,
             })
             .await;
 
@@ -1784,6 +1792,7 @@ impl RecordingController {
             append_mode: false,
             user_needs_separator: false,
             assistant_needs_separator: false,
+            skip_user_bubble: false,
         })
         .await
     }
@@ -1808,6 +1817,7 @@ impl RecordingController {
             append_mode,
             user_needs_separator,
             assistant_needs_separator,
+            skip_user_bubble,
         } = p;
         let language_opt = language_opt.as_deref();
 
@@ -1873,9 +1883,14 @@ impl RecordingController {
             );
 
             if chat_active {
-                // Finalize the streaming user draft into a bubble
                 crate::show_voice_chat_overlay();
-                if append_mode {
+                if skip_user_bubble {
+                    // Event pipeline: Preview already streamed text into the bubble.
+                    // Just finalize the user message (stop streaming indicator)
+                    // without re-writing the text.
+                    crate::voice_chat_ui::finalize_voice_chat_user_message();
+                    self.toggle_user_has_text.store(true, Ordering::SeqCst);
+                } else if append_mode {
                     if user_needs_separator {
                         crate::voice_chat_ui::append_voice_chat_user_delta("\n\n");
                     }

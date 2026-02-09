@@ -170,19 +170,26 @@ impl EventSink for ControllerEventRouter {
                 }
             }
             EngineEvent::Correction { text, .. } => {
-                // Reset last_preview so next Preview diffs from the corrected text.
-                {
-                    let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                    *last = text.clone();
-                }
-                // Corrections update the overlay with the corrected full text.
+                // Compute delta from last_preview and apply — keeps is_streaming=true
+                // in assistive mode (set_voice_chat_user_text would finalize the bubble).
+                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
                 if is_assistive_session() {
-                    crate::voice_chat_ui::set_voice_chat_user_text(text);
+                    if let Some(td) = TranscriptDelta::from_diff(&last, text) {
+                        crate::voice_chat_ui::append_voice_chat_user_delta(&td.delta);
+                    }
                 } else {
+                    // Non-assistive overlay: simple full replace is fine.
                     crate::set_transcription_text(text);
                 }
+                *last = text.clone();
             }
             EngineEvent::UtteranceFinal { text, .. } => {
+                // Reset last_preview — engine clears accumulated_text on utterance boundary,
+                // so next Preview starts fresh.
+                {
+                    let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+                    last.clear();
+                }
                 if let Some(cb) = &self.utterance_callback {
                     let payload = text.trim();
                     if !payload.is_empty() {
