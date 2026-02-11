@@ -1429,8 +1429,10 @@ unsafe fn create_chip_view(index: usize, label: &str, handler: Id) -> Id {
     let font: Id = msg_send![ns_font, systemFontOfSize: 11.0f64];
     let _: () = msg_send![btn, setFont: font];
     let _: () = msg_send![btn, setTag: index as isize];
-    let _: () = msg_send![btn, setTarget: handler];
-    let _: () = msg_send![btn, setAction: sel!(onChipClick:)];
+    if !handler.is_null() {
+        let _: () = msg_send![btn, setTarget: handler];
+        let _: () = msg_send![btn, setAction: sel!(onChipClick:)];
+    }
     let _: () = msg_send![btn, setTranslatesAutoresizingMaskIntoConstraints: false];
 
     // Height constraint.

@@ -412,6 +412,8 @@ pub fn ensure_layout_region_guides_exists() {
             // ObjC runtime internally casts Imp to the correct signature via selector dispatch.
             // class_addMethod on an existing class is safe when called before any instances
             // have been laid out (we call this at tray init, before any windows exist).
+            // Encoding "@@:" means: return `id`, args `(id self, SEL _cmd)`, which
+            // matches `extern "C" fn(&Object, Sel) -> Id`.
             #[allow(clippy::transmute_ptr_to_ptr)]
             unsafe {
                 let imp: objc::runtime::Imp =

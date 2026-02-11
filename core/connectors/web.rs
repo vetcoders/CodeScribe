@@ -4,6 +4,7 @@
 //! No heavy dependencies (no headless browser, no full HTML parser).
 
 use anyhow::{Context, Result, bail};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use tracing::{debug, info};
 
 // ═══════════════════════════════════════════════════════════
@@ -11,6 +12,7 @@ use tracing::{debug, info};
 // ═══════════════════════════════════════════════════════════
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // 1MB
+const MAX_REDIRECTS: usize = 3;
 
 // ═══════════════════════════════════════════════════════════
 // SSRF protection
@@ -18,15 +20,13 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // 1MB
 
 /// Check if a URL points to a private/internal host.
 fn is_private_host(url: &reqwest::Url) -> bool {
-    let Some(host) = url.host_str() else {
+    let Some(host_raw) = url.host_str() else {
         return true; // no host → block
     };
+    let host = host_raw.trim_matches(['[', ']']);
 
     // Exact matches
-    if matches!(
-        host,
-        "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
-    ) {
+    if matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") {
         return true;
     }
 
@@ -40,23 +40,25 @@ fn is_private_host(url: &reqwest::Url) -> bool {
         return is_private;
     }
 
+    // Parse as IPv6 and check loopback/link-local/ULA ranges.
+    if let Some(is_private) = check_ipv6_private(host) {
+        return is_private;
+    }
+
     false
 }
 
-/// Check IPv4 address against private/reserved ranges.
-/// Returns `Some(true)` if private, `Some(false)` if public IPv4,
-/// `None` if not an IPv4 address.
-fn check_ipv4_private(host: &str) -> Option<bool> {
-    let octets: Vec<u8> = host
-        .split('.')
-        .filter_map(|s| s.parse::<u8>().ok())
-        .collect();
-
-    if octets.len() != 4 {
-        return None; // not IPv4
+/// Check if a resolved IP is private/internal.
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_ipv4(v4),
+        IpAddr::V6(v6) => is_private_ipv6(v6),
     }
+}
 
-    let private = match octets[0] {
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    match octets[0] {
         10 => true,                            // 10.0.0.0/8
         172 => (16..=31).contains(&octets[1]), // 172.16.0.0/12
         192 if octets[1] == 168 => true,       // 192.168.0.0/16
@@ -64,8 +66,62 @@ fn check_ipv4_private(host: &str) -> Option<bool> {
         127 => true,                           // 127.0.0.0/8 loopback
         0 => true,                             // 0.0.0.0/8
         _ => false,
+    }
+}
+
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() || ip.is_unique_local()
+}
+
+/// Resolve a non-literal host and block if any resolved IP is private/internal.
+fn resolves_to_private_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
     };
-    Some(private)
+    let host = host.trim_matches(['[', ']']);
+
+    // Literal IPs are handled by `is_private_host`; DNS rebinding protection
+    // targets domain names that resolve to private/internal addresses.
+    if host.parse::<IpAddr>().is_ok() {
+        return false;
+    }
+
+    let port = url
+        .port_or_known_default()
+        .unwrap_or(if url.scheme() == "http" { 80 } else { 443 });
+
+    let addrs = (host, port).to_socket_addrs();
+    let Ok(iter) = addrs else {
+        // Fail closed on DNS errors.
+        return true;
+    };
+
+    let mut resolved_any = false;
+    for addr in iter {
+        resolved_any = true;
+        if is_private_ip(addr.ip()) {
+            return true;
+        }
+    }
+
+    // Fail closed if resolver returns no addresses.
+    !resolved_any
+}
+
+/// Check IPv4 address against private/reserved ranges.
+/// Returns `Some(true)` if private, `Some(false)` if public IPv4,
+/// `None` if not an IPv4 address.
+fn check_ipv4_private(host: &str) -> Option<bool> {
+    let ip = host.parse::<Ipv4Addr>().ok()?;
+    Some(is_private_ipv4(ip))
+}
+
+/// Check IPv6 address against private/reserved ranges.
+/// Returns `Some(true)` if private, `Some(false)` if public IPv6,
+/// `None` if not an IPv6 address.
+fn check_ipv6_private(host: &str) -> Option<bool> {
+    let ip = host.parse::<std::net::Ipv6Addr>().ok()?;
+    Some(is_private_ipv6(ip))
 }
 
 /// Build an SSRF-safe HTTP client with redirect policy that revalidates
@@ -79,9 +135,11 @@ fn ssrf_safe_client() -> reqwest::Client {
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                    if attempt.previous().len() >= 3 {
+                    if attempt.previous().len() >= MAX_REDIRECTS {
                         attempt.error(anyhow::anyhow!("Too many redirects"))
-                    } else if is_private_host(attempt.url()) {
+                    } else if is_private_host(attempt.url())
+                        || resolves_to_private_host(attempt.url())
+                    {
                         attempt.error(anyhow::anyhow!(
                             "Redirect to private/internal address blocked"
                         ))
@@ -107,16 +165,17 @@ fn ssrf_safe_client() -> reqwest::Client {
 /// HTML is stripped to plain text. Non-HTML responses are returned as-is
 /// (if they're valid UTF-8).
 pub async fn fetch_url_as_text(url: &str) -> Result<(String, String)> {
-    // SSRF protection: only allow https (and http for localhost dev).
+    // SSRF protection: only allow http/https schemes.
     let url_trimmed = url.trim();
-    if !url_trimmed.starts_with("https://") && !url_trimmed.starts_with("http://") {
+    let parsed = reqwest::Url::parse(url_trimmed).context("Invalid URL")?;
+
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
         bail!("Unsupported URL scheme (only http/https allowed): {url_trimmed}");
     }
 
     // Block private/internal IP ranges and metadata services.
-    if let Ok(parsed) = reqwest::Url::parse(url_trimmed)
-        && is_private_host(&parsed)
-    {
+    if is_private_host(&parsed) || resolves_to_private_host(&parsed) {
         bail!("URL blocked: private/internal addresses not allowed");
     }
 
@@ -125,7 +184,11 @@ pub async fn fetch_url_as_text(url: &str) -> Result<(String, String)> {
     // Use a client with custom redirect policy that revalidates each hop.
     let client = ssrf_safe_client();
 
-    let mut resp = client.get(url).send().await.context("URL fetch failed")?;
+    let mut resp = client
+        .get(parsed)
+        .send()
+        .await
+        .context("URL fetch failed")?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -598,6 +661,24 @@ mod tests {
     fn test_ssrf_link_local_blocked() {
         let url = reqwest::Url::parse("https://169.254.1.1/meta").unwrap();
         assert!(is_private_host(&url));
+    }
+
+    #[test]
+    fn test_ssrf_ipv6_loopback_blocked() {
+        let url = reqwest::Url::parse("https://[::1]/admin").unwrap();
+        assert!(is_private_host(&url));
+    }
+
+    #[test]
+    fn test_ssrf_ipv6_unique_local_blocked() {
+        let url = reqwest::Url::parse("https://[fd00::1]/admin").unwrap();
+        assert!(is_private_host(&url));
+    }
+
+    #[test]
+    fn test_ssrf_ipv6_public_allowed() {
+        let url = reqwest::Url::parse("https://[2606:4700:4700::1111]/dns").unwrap();
+        assert!(!is_private_host(&url));
     }
 
     // ── HTML edge cases ──

@@ -1248,12 +1248,24 @@ fn spawn_utterance_transcription(
     language: Option<String>,
 ) -> tokio::task::JoinHandle<Result<String>> {
     tokio::task::spawn_blocking(move || {
+        let correction_started_at = std::time::Instant::now();
         // Use try_lock to avoid blocking-pool saturation when corrections
         // pile up faster than the engine can process them.  If the engine
         // is already busy (main transcription or a previous correction),
         // we bail immediately — the next correction cycle will pick up
         // the accumulated audio.
-        crate::stt::try_transcribe_long(&samples, sample_rate, language.as_deref())
+        let result = crate::stt::try_transcribe_long(&samples, sample_rate, language.as_deref());
+        if let Err(err) = &result
+            && err.to_string().contains("engine busy")
+        {
+            debug!(
+                sample_count = samples.len(),
+                sample_rate,
+                correction_elapsed_ms = correction_started_at.elapsed().as_millis(),
+                "Skipping correction pass because STT engine is busy"
+            );
+        }
+        result
     })
 }
 

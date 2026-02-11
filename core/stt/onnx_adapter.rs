@@ -240,9 +240,11 @@ impl OnnxEngine {
         let encoder = create_session(&encoder_path).context("Failed to load ONNX encoder")?;
         let decoder = create_session(&decoder_path).context("Failed to load ONNX decoder")?;
 
-        // Load tokenizer (safe path — model_path is from env or HF cache, not user input)
+        // Load tokenizer via safe_path (path traversal protection).
         let tokenizer_path = model_path.join("tokenizer.json");
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+        let tokenizer_json = crate::safe_path::safe_read_to_string(&tokenizer_path)
+            .context("Failed to read tokenizer.json")?;
+        let tokenizer = Tokenizer::from_bytes(tokenizer_json.as_bytes())
             .map_err(|e| anyhow!("Failed to load tokenizer: {}", e))?;
 
         // Resolve special token IDs from tokenizer

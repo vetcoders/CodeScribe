@@ -683,7 +683,9 @@ fn show_voice_chat_overlay_impl() {
             let _: () = msg_send![split_view, setDividerStyle: 1_isize]; // NSSplitViewDividerStyleThin
             let ns_color = Class::get("NSColor").unwrap();
             let divider_color: Id = msg_send![ns_color, separatorColor];
-            if !divider_color.is_null() {
+            let responds_divider_color: bool =
+                msg_send![split_view, respondsToSelector: sel!(setDividerColor:)];
+            if responds_divider_color && !divider_color.is_null() {
                 let _: () = msg_send![split_view, setDividerColor: divider_color];
             }
         }

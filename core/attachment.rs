@@ -17,7 +17,9 @@ use tracing::{debug, warn};
 // Constants
 // ═══════════════════════════════════════════════════════════
 
-/// Maximum attachment size (50 MB). Files larger than this are rejected with a warning.
+/// Maximum attachment size (50 MB). Files larger than this are allowed but
+/// treated as oversized: they are logged with a warning and can be detected
+/// via `Attachment::is_oversized()`.
 const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
 // ═══════════════════════════════════════════════════════════
@@ -308,16 +310,28 @@ impl AttachmentStore {
                 // Move to trash instead of permanent delete.
                 // Fallback: rename to .trash suffix if trash crate not available.
                 let path = entry.path();
-                let trash_path = path.with_extension(format!(
-                    "{}.trash",
-                    path.extension()
-                        .map(|e| e.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                ));
-                if std::fs::rename(&path, &trash_path).is_ok() {
-                    removed += 1;
+                let already_trashed = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().eq_ignore_ascii_case("trash"))
+                    .unwrap_or(false);
+                if already_trashed {
+                    if std::fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                    } else {
+                        tracing::warn!("Attachment cleanup: failed to delete {}", path.display());
+                    }
                 } else {
-                    tracing::warn!("Attachment cleanup: failed to trash {}", path.display());
+                    let trash_path = match path.extension() {
+                        Some(ext) => {
+                            path.with_extension(format!("{}.trash", ext.to_string_lossy()))
+                        }
+                        None => path.with_extension("trash"),
+                    };
+                    if std::fs::rename(&path, &trash_path).is_ok() {
+                        removed += 1;
+                    } else {
+                        tracing::warn!("Attachment cleanup: failed to trash {}", path.display());
+                    }
                 }
             }
         }
@@ -347,7 +361,12 @@ fn sanitize_filename(name: &str) -> String {
         .take(100) // cap length
         .collect();
     // Strip leading dots to prevent hidden files / path traversal.
-    sanitized.trim_start_matches('.').to_string()
+    let trimmed = sanitized.trim_start_matches('.');
+    if trimmed.is_empty() {
+        "attachment".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -438,7 +457,7 @@ mod tests {
             AttachmentSource::DragDrop,
         );
         let label = a.chip_label(1);
-        assert!(label.len() <= 4); // possibly just "…"
+        assert_eq!(label, "…");
     }
 
     #[test]
@@ -446,6 +465,8 @@ mod tests {
         assert_eq!(sanitize_filename("hello world.txt"), "hello_world.txt");
         assert_eq!(sanitize_filename("a/b/c.rs"), "a_b_c.rs");
         assert_eq!(sanitize_filename("résumé.pdf"), "résumé.pdf");
+        assert_eq!(sanitize_filename(".hidden"), "hidden");
+        assert_eq!(sanitize_filename("...."), "attachment");
     }
 
     #[test]

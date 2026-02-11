@@ -192,11 +192,11 @@ pub async fn fetch_github_blob(gh: &GitHubRef, token: Option<&str>) -> Result<(V
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        // Log full body for diagnostics but don't expose in user-facing error
+        // Log a truncated body for diagnostics but don't expose in user-facing error
         // (body may contain tokens or attacker-controlled content).
         debug!(
             "GitHub API error body: {}",
-            body.chars().take(500).collect::<String>()
+            body.chars().take(200).collect::<String>()
         );
         bail!("GitHub API error {status} for {}", gh);
     }

@@ -725,6 +725,41 @@ extern "C" fn on_copy_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn activate_target_app(app_name: &str) {
+    // Activate via NSWorkspace — no shell, no injection surface.
+    unsafe {
+        let ns_workspace = Class::get("NSWorkspace").unwrap();
+        let workspace: Id = msg_send![ns_workspace, sharedWorkspace];
+        let running: Id = msg_send![workspace, runningApplications];
+        let count: usize = msg_send![running, count];
+        for i in 0..count {
+            let app: Id = msg_send![running, objectAtIndex: i];
+            let name: Id = msg_send![app, localizedName];
+            if !name.is_null() {
+                let name_cstr: *const std::ffi::c_char = msg_send![name, UTF8String];
+                if !name_cstr.is_null() {
+                    let name_str = std::ffi::CStr::from_ptr(name_cstr).to_string_lossy();
+                    if name_str == app_name {
+                        let _: bool = msg_send![app, activateWithOptions: 1u64]; // NSApplicationActivateIgnoringOtherApps
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn paste_last_response_text(text: &str) {
+    // Best-effort: if activation fails, paste will likely go nowhere useful;
+    // clipboard still contains the response.
+    if let Err(e) = crate::os::clipboard::paste_text(text) {
+        info!("Paste failed: {}", e);
+        copy_to_clipboard(text);
+    }
+}
+
 extern "C" fn on_paste_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
     let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let text = state
@@ -741,51 +776,30 @@ extern "C" fn on_paste_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
         return;
     };
 
-    // Dispatch to main thread: NSWorkspace and clipboard APIs require main thread.
-    // Using Queue::main ensures proper autorelease pool and thread safety.
-    Queue::main().exec_async(move || {
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(app_name) = target_app.as_deref() {
-                // Activate via NSWorkspace — no shell, no injection surface.
-                unsafe {
-                    let ns_workspace = Class::get("NSWorkspace").unwrap();
-                    let workspace: Id = msg_send![ns_workspace, sharedWorkspace];
-                    let running: Id = msg_send![workspace, runningApplications];
-                    let count: usize = msg_send![running, count];
-                    for i in 0..count {
-                        let app: Id = msg_send![running, objectAtIndex: i];
-                        let name: Id = msg_send![app, localizedName];
-                        if !name.is_null() {
-                            let name_cstr: *const std::ffi::c_char = msg_send![name, UTF8String];
-                            if !name_cstr.is_null() {
-                                let name_str =
-                                    std::ffi::CStr::from_ptr(name_cstr).to_string_lossy();
-                                if name_str == app_name {
-                                    let _: bool = msg_send![app, activateWithOptions: 1u64]; // NSApplicationActivateIgnoringOtherApps
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                // Brief delay for app activation to complete before pasting.
-                std::thread::sleep(std::time::Duration::from_millis(80));
-            }
+    #[cfg(target_os = "macos")]
+    {
+        let paste_delay_ms = if let Some(app_name) = target_app.as_deref() {
+            let app_name = app_name.to_string();
+            Queue::main().exec_async(move || activate_target_app(&app_name));
+            Some(80_u64)
+        } else {
+            None
+        };
 
-            // Best-effort: if activation fails, paste will likely go nowhere useful;
-            // clipboard still contains the response.
-            if let Err(e) = crate::os::clipboard::paste_text(&text) {
-                info!("Paste failed: {}", e);
-                copy_to_clipboard(&text);
-            }
+        if let Some(delay_ms) = paste_delay_ms {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                Queue::main().exec_async(move || paste_last_response_text(&text));
+            });
+        } else {
+            Queue::main().exec_async(move || paste_last_response_text(&text));
         }
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            copy_to_clipboard(&text);
-        }
-    });
+    #[cfg(not(target_os = "macos"))]
+    {
+        copy_to_clipboard(&text);
+    }
 }
 
 extern "C" fn on_copy_message(_this: &Object, _cmd: Sel, sender: Id) {
