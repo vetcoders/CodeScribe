@@ -62,10 +62,66 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Stream, StreamConfig};
 use hound::{WavSpec, WavWriter};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+
+// ═══════════════════════════════════════════════════════════
+// RecorderVad — local VAD for auto-silence detection
+// ═══════════════════════════════════════════════════════════
+
+/// Recorder-local VAD: dedicated thread with AccumulatingVad.
+///
+/// Replaces the broken global VadWorker. Fixes:
+/// - Initial probability 0.0 (not 1.0) → seen_speech gate works
+/// - Proper sample accumulation → Silero actually processes audio
+/// - Locally owned → dies with the Recorder
+struct RecorderVad {
+    tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+    last_prob: Arc<AtomicU32>,
+}
+
+impl RecorderVad {
+    fn new(sample_rate: u32) -> Option<Self> {
+        let model_path = vad::default_model_path();
+        if !model_path.exists() {
+            warn!(
+                "Silero VAD model not found at {} — auto-silence disabled",
+                model_path.display()
+            );
+            return None;
+        }
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(8);
+        // 0.0 = no speech seen yet (the critical fix)
+        let last_prob = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+        let writer = Arc::clone(&last_prob);
+
+        let config = vad::VadConfig::default();
+        std::thread::Builder::new()
+            .name("recorder-vad".into())
+            .spawn(move || {
+                let mut acc_vad =
+                    match vad::AccumulatingVad::with_config(&model_path, config, sample_rate) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("RecorderVad: Silero load failed: {e}");
+                            return;
+                        }
+                    };
+                info!("RecorderVad ready (sample_rate={sample_rate}Hz)");
+                for samples in rx {
+                    let prob = acc_vad.feed(&samples);
+                    writer.store(prob.to_bits(), Ordering::Relaxed);
+                }
+                debug!("RecorderVad thread exiting (channel closed)");
+            })
+            .ok()?;
+
+        Some(Self { tx, last_prob })
+    }
+}
 
 // --- constants ---
 
@@ -153,6 +209,8 @@ pub struct Recorder {
     on_data: Option<AudioCallback>,
     /// Callback invoked when VAD (silence detection) stops recording
     on_vad_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Local VAD for auto-silence (replaces global VadWorker)
+    recorder_vad: Option<RecorderVad>,
 }
 
 // Safety: Recorder can be sent between threads because:
@@ -193,6 +251,7 @@ impl Recorder {
             actual_sample_rate: config.sample_rate, // Will be updated in start()
             on_data: None,
             on_vad_stop: None,
+            recorder_vad: None,
         })
     }
 
@@ -227,18 +286,6 @@ impl Recorder {
         }
 
         info!("Starting recording...");
-
-        // Initialize VAD (lazy init - only loads model on first use)
-        if !vad::is_initialized() {
-            let model_path = vad::default_model_path();
-            if let Err(e) = vad::init(&model_path) {
-                warn!(
-                    "VAD init failed ({}): {} - auto-stop disabled, speech_probability will return 1.0",
-                    model_path.display(),
-                    e
-                );
-            }
-        }
 
         // Clear buffer and reset diagnostics
         self.buffer
@@ -313,6 +360,13 @@ impl Recorder {
         // Use actual sample rate for silence detection calculations
         let sample_rate = native_sample_rate;
 
+        // Create local VAD for auto-silence (replaces global VadWorker)
+        self.recorder_vad = if self.config.auto_silence {
+            RecorderVad::new(native_sample_rate)
+        } else {
+            None
+        };
+
         // Create channel for stopping
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
         self.stop_tx = Some(stop_tx);
@@ -324,13 +378,20 @@ impl Recorder {
         let speech_threshold = self.config.speech_threshold;
         let hang_sec = self.config.hang_sec;
         let auto_silence = self.config.auto_silence;
-        // sample_rate is already set above to native_sample_rate
 
         let silent_frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let silent_frames_clone = Arc::clone(&silent_frames);
         let seen_speech = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen_speech_clone = Arc::clone(&seen_speech);
         let on_data = self.on_data.take();
+
+        // Share local VAD with audio callback (RecorderVad is Send via channel+atomic)
+        let vad_prob = self
+            .recorder_vad
+            .as_ref()
+            .map(|rv| Arc::clone(&rv.last_prob));
+        let vad_tx: Option<std::sync::mpsc::SyncSender<Vec<f32>>> =
+            self.recorder_vad.as_ref().map(|rv| rv.tx.clone());
 
         let stream = device
             .build_input_stream(
@@ -351,8 +412,16 @@ impl Recorder {
                         }
                     }
 
-                    // Use Silero VAD for speech detection (with automatic resampling to 16kHz)
-                    let speech_prob = vad::speech_probability(data, sample_rate);
+                    // Feed audio to local VAD (non-blocking)
+                    if let Some(ref tx) = vad_tx {
+                        let _ = tx.try_send(data.to_vec());
+                    }
+
+                    // Read latest speech probability from local VAD
+                    let speech_prob = vad_prob
+                        .as_ref()
+                        .map(|p| f32::from_bits(p.load(Ordering::Relaxed)))
+                        .unwrap_or(0.0);
                     let is_silence = speech_prob < speech_threshold;
 
                     // Only check silence if still recording (avoid spam after stop)

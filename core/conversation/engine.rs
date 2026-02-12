@@ -136,6 +136,9 @@ pub struct ConversationEngine {
 
     /// Resampler for input audio (any rate → 24kHz)
     resampler: Option<Resampler24k>,
+
+    /// Local VAD for turn detection (replaces global VadWorker)
+    local_vad: Option<crate::vad::AccumulatingVad>,
 }
 
 impl ConversationEngine {
@@ -177,6 +180,7 @@ impl ConversationEngine {
             prev_text_token: 0,
             generated_audio_codebooks: NUM_CODEBOOKS,
             resampler: None,
+            local_vad: crate::vad::AccumulatingVad::new(SAMPLE_RATE).ok(),
         })
     }
 
@@ -355,8 +359,12 @@ impl ConversationEngine {
         // Extract frame
         let frame: Vec<f32> = self.input_buffer.drain(..FRAME_SAMPLES).collect();
 
-        // Update turn state based on VAD (resample from 24kHz to 16kHz internally)
-        let speech_prob = crate::vad::speech_probability(&frame, SAMPLE_RATE);
+        // Update turn state based on local VAD
+        let speech_prob = self
+            .local_vad
+            .as_mut()
+            .map(|v| v.feed(&frame))
+            .unwrap_or(0.0);
         let is_speech = speech_prob > 0.5;
 
         let (state, changed) = self.turn_manager.update(is_speech);

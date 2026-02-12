@@ -494,30 +494,13 @@ async fn run_daemon() -> Result<()> {
                         eprintln!("Installing Silero VAD model…");
                         match codescribe_core::vad::ensure_downloaded_to_user_dir().await {
                             Ok(path) => {
-                                eprintln!("Silero VAD downloaded: {}", path.display());
-                                let init_path = path.clone();
-                                let init_result = tokio::task::spawn_blocking(move || {
-                                    codescribe_core::vad::init(&init_path)
-                                })
-                                .await;
-
-                                match init_result {
-                                    Ok(Ok(())) => {
-                                        eprintln!("Silero VAD initialized");
-                                        #[cfg(target_os = "macos")]
-                                        {
-                                            codescribe::os::notifications::notify(
-                                                "CodeScribe",
-                                                "Silero VAD is ready",
-                                            );
-                                        }
-                                    }
-                                    Ok(Err(e)) => {
-                                        eprintln!("Silero VAD init failed: {}", e);
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Silero VAD init task failed: {}", e);
-                                    }
+                                eprintln!("Silero VAD downloaded and ready: {}", path.display());
+                                #[cfg(target_os = "macos")]
+                                {
+                                    codescribe::os::notifications::notify(
+                                        "CodeScribe",
+                                        "Silero VAD is ready",
+                                    );
                                 }
                             }
                             Err(e) => {
