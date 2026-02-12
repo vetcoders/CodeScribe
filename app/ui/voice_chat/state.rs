@@ -155,6 +155,10 @@ pub struct VoiceChatOverlayState {
 
     // Chat state
     pub messages: Vec<ChatMessage>,
+    /// Active streaming user message index (if any).
+    pub active_user_stream_index: Option<usize>,
+    /// Active streaming assistant message index (if any).
+    pub active_assistant_stream_index: Option<usize>,
     pub manual_draft: String,
     pub is_sending: bool,
     pub auto_send_enabled: bool,
@@ -223,6 +227,8 @@ impl Default for VoiceChatOverlayState {
             active_tab: Tab::Drawer,
             pending_tab: None,
             messages: Vec::new(),
+            active_user_stream_index: None,
+            active_assistant_stream_index: None,
             manual_draft: String::new(),
             is_sending: false,
             auto_send_enabled: true,

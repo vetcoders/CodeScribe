@@ -35,10 +35,12 @@ impl Default for DecodingParams {
             temperature: 0.0,        // greedy (mlx_whisper default)
             no_repeat_ngram_size: 5, // block 5-gram repetitions (catches more Whisper hallucination variants)
             suppress_blank: true,
-            no_speech_threshold: 0.6,         // mlx_whisper default
-            compression_ratio_threshold: 2.4, // mlx_whisper default
-            logprob_threshold: -1.0,          // mlx_whisper default
-            initial_prompt: None,             // no prompt by default
+            // More conservative silence rejection (fewer false-empty transcripts on short utterances)
+            no_speech_threshold: 0.72,
+            // Trigger anti-repetition cleanup a bit earlier than stock defaults
+            compression_ratio_threshold: 2.2,
+            logprob_threshold: -1.0, // mlx_whisper default
+            initial_prompt: None,    // no prompt by default
         }
     }
 }

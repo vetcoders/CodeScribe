@@ -27,7 +27,7 @@ use super::api::{
     reflow_overlay_after_resize_impl, render_attachment_chips, send_draft_message_impl,
     toggle_drawer_favorites_only_impl, update_active_tab_impl, update_attach_button_ui,
 };
-use super::state::{ChatRole, OVERLAY_STATE, Tab};
+use super::state::{ChatRole, OVERLAY_STATE, Tab, VoiceChatOverlayState};
 
 // Type alias for Objective-C object pointers
 pub type Id = *mut Object;
@@ -42,6 +42,7 @@ static DROP_TARGET_INIT: Once = Once::new();
 static mut DROP_TARGET_CLASS: *const Class = std::ptr::null();
 
 const NS_DRAG_OP_COPY: u64 = 1;
+const MAX_ATTACHMENT_BYTES_UI: u64 = 50 * 1024 * 1024;
 
 /// Get or create the action handler class for UI controls
 pub fn action_handler_class() -> *const Class {
@@ -365,6 +366,56 @@ fn extract_paths_from_pasteboard(pasteboard: Id) -> Vec<PathBuf> {
     }
 }
 
+fn format_attachment_size_mb(size_bytes: u64) -> String {
+    format!("{:.1} MB", size_bytes as f64 / (1024.0 * 1024.0))
+}
+
+fn show_oversized_attachments_alert(skipped: &[String]) {
+    if skipped.is_empty() {
+        return;
+    }
+    let shown = skipped
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let extra = skipped.len().saturating_sub(3);
+    let suffix = if extra > 0 {
+        format!(" (+{} more)", extra)
+    } else {
+        String::new()
+    };
+    let msg = format!(
+        "Max attachment size is 50 MB.\nSkipped: {}{}",
+        shown, suffix
+    );
+    show_error_alert("Attachment Too Large", &msg);
+}
+
+fn push_attachment_if_allowed(
+    state: &mut VoiceChatOverlayState,
+    attachment: Attachment,
+    skipped: &mut Vec<String>,
+) {
+    if attachment.is_oversized() {
+        skipped.push(format!(
+            "{} ({}, max {} MB)",
+            attachment.display_name,
+            format_attachment_size_mb(attachment.size_bytes),
+            MAX_ATTACHMENT_BYTES_UI / (1024 * 1024)
+        ));
+        return;
+    }
+    if !state
+        .attachments
+        .iter()
+        .any(|a| a.same_path(&attachment.path))
+    {
+        state.attachments.push(attachment);
+    }
+}
+
 extern "C" fn on_dragging_entered(_this: &Object, _cmd: Sel, dragging_info: Id) -> u64 {
     unsafe {
         let pasteboard: Id = msg_send![dragging_info, draggingPasteboard];
@@ -380,14 +431,12 @@ extern "C" fn on_perform_drag_operation(_this: &Object, _cmd: Sel, dragging_info
         if paths.is_empty() {
             return false;
         }
-        let (btn_ptr, count, names) = {
+        let (btn_ptr, count, names, skipped) = {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut skipped = Vec::new();
             for p in paths {
-                if !state.attachments.iter().any(|a| a.same_path(&p)) {
-                    state
-                        .attachments
-                        .push(Attachment::from_path(p, AttachmentSource::DragDrop));
-                }
+                let attachment = Attachment::from_path(p, AttachmentSource::DragDrop);
+                push_attachment_if_allowed(&mut state, attachment, &mut skipped);
             }
             state.attachments_last_sent = None;
             render_attachment_chips(&mut state);
@@ -396,9 +445,15 @@ extern "C" fn on_perform_drag_operation(_this: &Object, _cmd: Sel, dragging_info
                 .iter()
                 .map(|a| a.display_name.clone())
                 .collect();
-            (state.agent_attach_button, state.attachments.len(), names)
+            (
+                state.agent_attach_button,
+                state.attachments.len(),
+                names,
+                skipped,
+            )
         };
         update_attach_button_ui(btn_ptr, count, names);
+        show_oversized_attachments_alert(&skipped);
         true
     }
 }
@@ -572,14 +627,12 @@ extern "C" fn on_attach_pick(_this: &Object, _cmd: Sel, _sender: Id) {
         return;
     }
 
-    let (btn_ptr, count, names) = {
+    let (btn_ptr, count, names, skipped) = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut skipped = Vec::new();
         for p in picked {
-            if !state.attachments.iter().any(|a| a.same_path(&p)) {
-                state
-                    .attachments
-                    .push(Attachment::from_path(p, AttachmentSource::FilePicker));
-            }
+            let attachment = Attachment::from_path(p, AttachmentSource::FilePicker);
+            push_attachment_if_allowed(&mut state, attachment, &mut skipped);
         }
         state.attachments_last_sent = None;
         render_attachment_chips(&mut state);
@@ -588,9 +641,15 @@ extern "C" fn on_attach_pick(_this: &Object, _cmd: Sel, _sender: Id) {
             .iter()
             .map(|a| a.display_name.clone())
             .collect();
-        (state.agent_attach_button, state.attachments.len(), names)
+        (
+            state.agent_attach_button,
+            state.attachments.len(),
+            names,
+            skipped,
+        )
     };
     update_attach_button_ui(btn_ptr, count, names);
+    show_oversized_attachments_alert(&skipped);
 }
 
 extern "C" fn on_attach_clear(_this: &Object, _cmd: Sel, _sender: Id) {
@@ -725,6 +784,41 @@ extern "C" fn on_copy_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn activate_target_app(app_name: &str) {
+    // Activate via NSWorkspace — no shell, no injection surface.
+    unsafe {
+        let ns_workspace = Class::get("NSWorkspace").unwrap();
+        let workspace: Id = msg_send![ns_workspace, sharedWorkspace];
+        let running: Id = msg_send![workspace, runningApplications];
+        let count: usize = msg_send![running, count];
+        for i in 0..count {
+            let app: Id = msg_send![running, objectAtIndex: i];
+            let name: Id = msg_send![app, localizedName];
+            if !name.is_null() {
+                let name_cstr: *const std::ffi::c_char = msg_send![name, UTF8String];
+                if !name_cstr.is_null() {
+                    let name_str = std::ffi::CStr::from_ptr(name_cstr).to_string_lossy();
+                    if name_str == app_name {
+                        let _: bool = msg_send![app, activateWithOptions: 1u64]; // NSApplicationActivateIgnoringOtherApps
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn paste_last_response_text(text: &str) {
+    // Best-effort: if activation fails, paste will likely go nowhere useful;
+    // clipboard still contains the response.
+    if let Err(e) = crate::os::clipboard::paste_text(text) {
+        info!("Paste failed: {}", e);
+        copy_to_clipboard(text);
+    }
+}
+
 extern "C" fn on_paste_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
     let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let text = state
@@ -741,30 +835,30 @@ extern "C" fn on_paste_last_response(_this: &Object, _cmd: Sel, _sender: Id) {
         return;
     };
 
-    std::thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(app) = target_app.as_deref() {
-                let app = app.replace('"', "\\\"");
-                let _ = std::process::Command::new("osascript")
-                    .args(["-e", &format!(r#"tell application "{}" to activate"#, app)])
-                    .status();
-                std::thread::sleep(std::time::Duration::from_millis(80));
-            }
+    #[cfg(target_os = "macos")]
+    {
+        let paste_delay_ms = if let Some(app_name) = target_app.as_deref() {
+            let app_name = app_name.to_string();
+            Queue::main().exec_async(move || activate_target_app(&app_name));
+            Some(80_u64)
+        } else {
+            None
+        };
 
-            // Best-effort: if activation fails, paste will likely go nowhere useful;
-            // clipboard still contains the response.
-            if let Err(e) = crate::os::clipboard::paste_text(&text) {
-                info!("Paste failed: {}", e);
-                copy_to_clipboard(&text);
-            }
+        if let Some(delay_ms) = paste_delay_ms {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                Queue::main().exec_async(move || paste_last_response_text(&text));
+            });
+        } else {
+            Queue::main().exec_async(move || paste_last_response_text(&text));
         }
+    }
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            copy_to_clipboard(&text);
-        }
-    });
+    #[cfg(not(target_os = "macos"))]
+    {
+        copy_to_clipboard(&text);
+    }
 }
 
 extern "C" fn on_copy_message(_this: &Object, _cmd: Sel, sender: Id) {
@@ -1085,13 +1179,15 @@ extern "C" fn on_attach_github(_this: &Object, _cmd: Sel, _sender: Id) {
                 ) {
                     Ok(path) => {
                         Queue::main().exec_async(move || {
-                            let (btn_ptr, count, names) = {
+                            let (btn_ptr, count, names, skipped) = {
                                 let mut state =
                                     OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                                state.attachments.push(Attachment::from_path(
+                                let mut skipped = Vec::new();
+                                let attachment = Attachment::from_path(
                                     path,
                                     AttachmentSource::Connector("github".into()),
-                                ));
+                                );
+                                push_attachment_if_allowed(&mut state, attachment, &mut skipped);
                                 state.attachments_last_sent = None;
                                 render_attachment_chips(&mut state);
                                 let names: Vec<String> = state
@@ -1099,9 +1195,15 @@ extern "C" fn on_attach_github(_this: &Object, _cmd: Sel, _sender: Id) {
                                     .iter()
                                     .map(|a| a.display_name.clone())
                                     .collect();
-                                (state.agent_attach_button, state.attachments.len(), names)
+                                (
+                                    state.agent_attach_button,
+                                    state.attachments.len(),
+                                    names,
+                                    skipped,
+                                )
                             };
                             update_attach_button_ui(btn_ptr, count, names);
+                            show_oversized_attachments_alert(&skipped);
                         });
                     }
                     Err(e) => {
@@ -1164,15 +1266,16 @@ extern "C" fn on_attach_url(_this: &Object, _cmd: Sel, _sender: Id) {
                 ) {
                     Ok(path) => {
                         Queue::main().exec_async(move || {
-                            let (btn_ptr, count, names) = {
+                            let (btn_ptr, count, names, skipped) = {
                                 let mut state =
                                     OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut skipped = Vec::new();
                                 let att = Attachment::with_kind(
                                     path,
                                     codescribe_core::attachment::AttachmentKind::UrlSnapshot,
                                     AttachmentSource::Connector("web".into()),
                                 );
-                                state.attachments.push(att);
+                                push_attachment_if_allowed(&mut state, att, &mut skipped);
                                 state.attachments_last_sent = None;
                                 render_attachment_chips(&mut state);
                                 let names: Vec<String> = state
@@ -1180,9 +1283,15 @@ extern "C" fn on_attach_url(_this: &Object, _cmd: Sel, _sender: Id) {
                                     .iter()
                                     .map(|a| a.display_name.clone())
                                     .collect();
-                                (state.agent_attach_button, state.attachments.len(), names)
+                                (
+                                    state.agent_attach_button,
+                                    state.attachments.len(),
+                                    names,
+                                    skipped,
+                                )
                             };
                             update_attach_button_ui(btn_ptr, count, names);
+                            show_oversized_attachments_alert(&skipped);
                         });
                     }
                     Err(e) => {
@@ -1467,14 +1576,12 @@ unsafe fn try_paste_as_attachment() -> bool {
     // 1. File URLs → always treat as attachments
     let file_paths = extract_paths_from_pasteboard(pasteboard);
     if !file_paths.is_empty() {
-        let (btn_ptr, count, names) = {
+        let (btn_ptr, count, names, skipped) = {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut skipped = Vec::new();
             for p in file_paths {
-                if !state.attachments.iter().any(|a| a.same_path(&p)) {
-                    state
-                        .attachments
-                        .push(Attachment::from_path(p, AttachmentSource::Clipboard));
-                }
+                let attachment = Attachment::from_path(p, AttachmentSource::Clipboard);
+                push_attachment_if_allowed(&mut state, attachment, &mut skipped);
             }
             state.attachments_last_sent = None;
             render_attachment_chips(&mut state);
@@ -1483,9 +1590,15 @@ unsafe fn try_paste_as_attachment() -> bool {
                 .iter()
                 .map(|a| a.display_name.clone())
                 .collect();
-            (state.agent_attach_button, state.attachments.len(), names)
+            (
+                state.agent_attach_button,
+                state.attachments.len(),
+                names,
+                skipped,
+            )
         };
         update_attach_button_ui(btn_ptr, count, names);
+        show_oversized_attachments_alert(&skipped);
         debug!("Paste intercepted: {} file(s) attached", count);
         return true;
     }
@@ -1500,11 +1613,11 @@ unsafe fn try_paste_as_attachment() -> bool {
         if let Some(image_data) = unsafe { read_image_from_pasteboard(pasteboard) } {
             match AttachmentStore::save_clipboard_image(&image_data, "png") {
                 Ok(path) => {
-                    let (btn_ptr, count, names) = {
+                    let (btn_ptr, count, names, skipped) = {
                         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                        state
-                            .attachments
-                            .push(Attachment::from_path(path, AttachmentSource::Clipboard));
+                        let mut skipped = Vec::new();
+                        let attachment = Attachment::from_path(path, AttachmentSource::Clipboard);
+                        push_attachment_if_allowed(&mut state, attachment, &mut skipped);
                         state.attachments_last_sent = None;
                         render_attachment_chips(&mut state);
                         let names: Vec<String> = state
@@ -1512,9 +1625,15 @@ unsafe fn try_paste_as_attachment() -> bool {
                             .iter()
                             .map(|a| a.display_name.clone())
                             .collect();
-                        (state.agent_attach_button, state.attachments.len(), names)
+                        (
+                            state.agent_attach_button,
+                            state.attachments.len(),
+                            names,
+                            skipped,
+                        )
                     };
                     update_attach_button_ui(btn_ptr, count, names);
+                    show_oversized_attachments_alert(&skipped);
                     debug!("Paste intercepted: clipboard image saved as attachment");
                     return true;
                 }
@@ -1616,13 +1735,16 @@ pub fn copy_to_clipboard(text: &str) {
 }
 
 pub fn clear_search_field() {
-    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(search_field) = state.search_field {
+    // Extract pointer under lock, then drop lock BEFORE AppKit calls
+    // to avoid deadlock (AppKit callbacks may re-lock OVERLAY_STATE).
+    let search_field = {
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.search_field
+    };
+    if let Some(sf) = search_field {
         unsafe {
-            set_text_field_string(search_field as Id, "");
-        }
-        unsafe {
-            set_hidden(search_field as Id, false);
+            set_text_field_string(sf as Id, "");
+            set_hidden(sf as Id, false);
         }
     }
 }

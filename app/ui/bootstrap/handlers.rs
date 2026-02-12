@@ -6,12 +6,13 @@ use std::sync::Once;
 use super::{
     handle_bootstrap_window_closed, handle_finish, handle_hotkey_done, handle_show_overlay,
     handle_test_mic, on_assistive_endpoint_changed, on_assistive_key_changed,
-    on_assistive_model_changed, on_beep_toggled, on_buffered_toggled, on_clear_assistive_key,
-    on_clear_llm_key, on_delay_changed, on_double_tap_interval_changed, on_enter_send_toggled,
+    on_assistive_model_changed, on_beep_toggled, on_clear_assistive_key, on_clear_llm_key,
+    on_delay_changed, on_double_tap_interval_changed, on_enter_send_toggled,
     on_formatting_level_changed, on_formatting_toggled, on_hold_exclusive_changed,
     on_hold_mod_changed, on_language_changed, on_llm_endpoint_changed, on_llm_key_changed,
     on_llm_model_changed, on_preset_changed, on_quality_daemon_toggled, on_refresh_permissions,
-    on_save_api_settings, on_toggle_trigger_changed, on_volume_changed, switch_tab,
+    on_save_api_settings, on_toggle_trigger_changed, on_voice_lab_field_changed,
+    on_voice_lab_toggle_changed, on_volume_changed, switch_tab,
 };
 
 pub type Id = *mut Object;
@@ -59,6 +60,10 @@ pub fn action_handler_class() -> *const Class {
                 sel!(onTabAudio:),
                 on_tab_audio as extern "C" fn(&Object, Sel, Id),
             );
+            decl.add_method(
+                sel!(onTabVoiceLab:),
+                on_tab_voice_lab as extern "C" fn(&Object, Sel, Id),
+            );
 
             // Keys tab actions
             decl.add_method(
@@ -92,8 +97,12 @@ pub fn action_handler_class() -> *const Class {
                 on_formatting_level_changed as extern "C" fn(&Object, Sel, Id),
             );
             decl.add_method(
-                sel!(onBufferedToggled:),
-                on_buffered_toggled as extern "C" fn(&Object, Sel, Id),
+                sel!(onVoiceLabToggleChanged:),
+                on_voice_lab_toggle_changed as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onVoiceLabFieldChanged:),
+                on_voice_lab_field_changed as extern "C" fn(&Object, Sel, Id),
             );
 
             // Setup tab: LLM configuration
@@ -222,6 +231,10 @@ extern "C" fn on_tab_keys(_this: &Object, _sel: Sel, _sender: Id) {
 
 extern "C" fn on_tab_audio(_this: &Object, _sel: Sel, _sender: Id) {
     switch_tab(2);
+}
+
+extern "C" fn on_tab_voice_lab(_this: &Object, _sel: Sel, _sender: Id) {
+    switch_tab(3);
 }
 
 extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, _notification: Id) {

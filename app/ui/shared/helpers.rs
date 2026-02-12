@@ -385,34 +385,54 @@ pub fn glass_effect_supported() -> bool {
 // ObjC nil-messaging silently eats any further calls.
 
 static CS_VEV_INIT: Once = Once::new();
-static mut CS_VEV_CLASS: *const Class = std::ptr::null();
+
+/// Ensure `NSVisualEffectView` has a `layoutRegionGuides` method.
+///
+/// macOS 26 Tahoe beta: AppKit internally calls `layoutRegionGuides` on
+/// NSVisualEffectView during layout, but the method is missing on current betas.
+/// A subclass-based fix only protects our instances — AppKit also creates its own
+/// NSVisualEffectView internally (e.g. titlebar blur on FullSizeContentView windows).
+///
+/// This injects the stub method directly into `NSVisualEffectView` itself,
+/// protecting ALL instances including AppKit-internal ones.
+pub fn ensure_layout_region_guides_exists() {
+    CS_VEV_INIT.call_once(|| {
+        let cls = Class::get("NSVisualEffectView").unwrap();
+        let has_method =
+            unsafe { !class_getInstanceMethod(cls, sel!(layoutRegionGuides)).is_null() };
+
+        if !has_method {
+            tracing::info!(
+                "Injecting layoutRegionGuides stub into NSVisualEffectView (Tahoe beta workaround)"
+            );
+            extern "C" fn layout_region_guides(_this: &Object, _cmd: Sel) -> Id {
+                std::ptr::null_mut()
+            }
+            // SAFETY: transmute fn(&Object, Sel) -> Id to Imp (extern "C" fn()).
+            // ObjC runtime internally casts Imp to the correct signature via selector dispatch.
+            // class_addMethod on an existing class is safe when called before any instances
+            // have been laid out (we call this at tray init, before any windows exist).
+            // Encoding "@@:" means: return `id`, args `(id self, SEL _cmd)`, which
+            // matches `extern "C" fn(&Object, Sel) -> Id`.
+            #[allow(clippy::transmute_ptr_to_ptr)]
+            unsafe {
+                let imp: objc::runtime::Imp =
+                    std::mem::transmute(layout_region_guides as extern "C" fn(&Object, Sel) -> Id);
+                let encoding = CString::new("@@:").unwrap();
+                objc::runtime::class_addMethod(
+                    cls as *const Class as *mut Class,
+                    sel!(layoutRegionGuides),
+                    imp,
+                    encoding.as_ptr(),
+                );
+            }
+        }
+    });
+}
 
 fn safe_visual_effect_view_class() -> *const Class {
-    unsafe {
-        CS_VEV_INIT.call_once(|| {
-            let superclass = Class::get("NSVisualEffectView").unwrap();
-            let has_layout_guides: bool =
-                !class_getInstanceMethod(superclass, sel!(layoutRegionGuides)).is_null();
-
-            if has_layout_guides {
-                CS_VEV_CLASS = superclass;
-            } else {
-                let mut decl = ClassDecl::new("CSVisualEffectView", superclass)
-                    .expect("Failed to declare CSVisualEffectView");
-
-                extern "C" fn layout_region_guides(_this: &Object, _cmd: Sel) -> Id {
-                    std::ptr::null_mut()
-                }
-
-                decl.add_method(
-                    sel!(layoutRegionGuides),
-                    layout_region_guides as extern "C" fn(&Object, Sel) -> Id,
-                );
-                CS_VEV_CLASS = decl.register();
-            }
-        });
-        CS_VEV_CLASS
-    }
+    ensure_layout_region_guides_exists();
+    Class::get("NSVisualEffectView").unwrap()
 }
 
 /// Create a vibrancy effect view.
@@ -1463,6 +1483,8 @@ unsafe fn normalize_attributed_string_fonts(attr: Id, base_font: Id) -> Id {
     if mutable.is_null() {
         return attr;
     }
+    // Release original — we now own the mutable copy exclusively.
+    let _: () = msg_send![attr, release];
 
     let len: usize = msg_send![mutable, length];
     if len == 0 {
@@ -1585,6 +1607,9 @@ unsafe fn apply_markdown_to_text_field(text_label: Id, text: &str, font: Id) -> 
     };
     if let Some(attr) = unsafe { markdown_attributed_string(text, font) } {
         let _: () = msg_send![text_label, setAttributedStringValue: attr];
+        // Balance the +1 from mutableCopy inside normalize_attributed_string_fonts.
+        // setAttributedStringValue: retains its own copy.
+        let _: () = msg_send![attr, release];
         return true;
     }
     false
@@ -1973,7 +1998,23 @@ pub unsafe fn update_bubble_text(
 
         let allow_markdown =
             !is_streaming && matches!(role, BubbleRole::Assistant | BubbleRole::System);
-        let font: Id = msg_send![text_label, font];
+        // Always create a fresh monospace font instead of reading from the label.
+        // After markdown parsing, text_label.font may return a system font from
+        // the first attributed range, causing cascading degradation on subsequent updates.
+        let label_font: Id = msg_send![text_label, font];
+        let font_size: f64 = if label_font.is_null() {
+            13.0
+        } else {
+            msg_send![label_font, pointSize]
+        };
+        let ns_font_cls = Class::get("NSFont").unwrap();
+        let jb_name = ns_string("JetBrainsMono-Regular");
+        let jb_font: Id = msg_send![ns_font_cls, fontWithName: jb_name size: font_size];
+        let font: Id = if jb_font.is_null() {
+            msg_send![ns_font_cls, monospacedSystemFontOfSize: font_size weight: 0.0f64]
+        } else {
+            jb_font
+        };
         if !(allow_markdown && apply_markdown_to_text_field(text_label, &display_text, font)) {
             let text_str = ns_string(&display_text);
             let _: () = msg_send![text_label, setStringValue: text_str];

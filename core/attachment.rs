@@ -14,6 +14,15 @@ use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
 // ═══════════════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════════════
+
+/// Maximum attachment size (50 MB). Files larger than this are allowed but
+/// treated as oversized: they are logged with a warning and can be detected
+/// via `Attachment::is_oversized()`.
+const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
+
+// ═══════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════
 
@@ -68,6 +77,8 @@ pub struct Attachment {
 
 impl Attachment {
     /// Create an attachment from a file path, inferring kind from extension.
+    ///
+    /// Logs a warning if the file exceeds `MAX_ATTACHMENT_BYTES` (50 MB).
     pub fn from_path(path: PathBuf, source: AttachmentSource) -> Self {
         let display_name = path
             .file_name()
@@ -75,6 +86,12 @@ impl Attachment {
             .unwrap_or_else(|| path.to_string_lossy().to_string());
 
         let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if size_bytes > MAX_ATTACHMENT_BYTES {
+            warn!(
+                "Attachment too large: {} ({} bytes, max {})",
+                display_name, size_bytes, MAX_ATTACHMENT_BYTES
+            );
+        }
 
         let kind = kind_from_extension(&path);
 
@@ -124,10 +141,17 @@ impl Attachment {
 
     /// Truncated display name for chip labels (max `limit` chars).
     pub fn chip_label(&self, limit: usize) -> String {
-        if self.display_name.len() <= limit {
+        if limit == 0 {
+            return String::new();
+        }
+        if self.display_name.chars().count() <= limit {
             self.display_name.clone()
         } else {
-            let truncated: String = self.display_name.chars().take(limit - 1).collect();
+            let truncated: String = self
+                .display_name
+                .chars()
+                .take(limit.saturating_sub(1))
+                .collect();
             format!("{truncated}…")
         }
     }
@@ -135,6 +159,11 @@ impl Attachment {
     /// Check if this attachment has the same path as another.
     pub fn same_path(&self, other: &Path) -> bool {
         self.path == other
+    }
+
+    /// Returns `true` if the file exceeds the maximum attachment size.
+    pub fn is_oversized(&self) -> bool {
+        self.size_bytes > MAX_ATTACHMENT_BYTES
     }
 }
 
@@ -199,7 +228,18 @@ impl AttachmentStore {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let name = format!("clipboard_{ts}.{ext}");
+        // Sanitize ext: only allow alphanumeric chars (no path separators).
+        let safe_ext: String = ext
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(10)
+            .collect();
+        let safe_ext = if safe_ext.is_empty() {
+            "bin"
+        } else {
+            &safe_ext
+        };
+        let name = format!("clipboard_{ts}.{safe_ext}");
         let path = dir.join(&name);
         std::fs::write(&path, data)
             .with_context(|| format!("Failed to save clipboard image: {}", path.display()))?;
@@ -266,9 +306,13 @@ impl AttachmentStore {
             };
             if let Ok(age) = now.duration_since(modified)
                 && age > cutoff
-                && std::fs::remove_file(entry.path()).is_ok()
             {
-                removed += 1;
+                let path = entry.path();
+                if std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                } else {
+                    tracing::warn!("Attachment cleanup: failed to delete {}", path.display());
+                }
             }
         }
 
@@ -283,7 +327,8 @@ impl AttachmentStore {
 
 /// Sanitize a filename by replacing unsafe characters.
 fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    let sanitized = name
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
                 c
@@ -291,10 +336,15 @@ fn sanitize_filename(name: &str) -> String {
                 '_'
             }
         })
-        .collect::<String>()
-        .chars()
-        .take(100) // cap length
-        .collect()
+        .collect::<String>();
+    // Strip leading dots to prevent hidden files / path traversal.
+    let trimmed = sanitized.trim_start_matches('.');
+    let trimmed: String = trimmed.chars().take(100).collect(); // cap length
+    if trimmed.is_empty() {
+        "attachment".to_string()
+    } else {
+        trimmed
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -372,10 +422,31 @@ mod tests {
     }
 
     #[test]
+    fn test_chip_label_zero_limit() {
+        let a = Attachment::from_path(PathBuf::from("/tmp/a.txt"), AttachmentSource::DragDrop);
+        let label = a.chip_label(0);
+        assert_eq!(label, "");
+    }
+
+    #[test]
+    fn test_chip_label_limit_one() {
+        let a = Attachment::from_path(
+            PathBuf::from("/tmp/longname.txt"),
+            AttachmentSource::DragDrop,
+        );
+        let label = a.chip_label(1);
+        assert_eq!(label, "…");
+    }
+
+    #[test]
     fn test_sanitize_filename() {
         assert_eq!(sanitize_filename("hello world.txt"), "hello_world.txt");
         assert_eq!(sanitize_filename("a/b/c.rs"), "a_b_c.rs");
         assert_eq!(sanitize_filename("résumé.pdf"), "résumé.pdf");
+        assert_eq!(sanitize_filename(".hidden"), "hidden");
+        assert_eq!(sanitize_filename("...."), "attachment");
+        let many_dots = format!("{}abc.txt", ".".repeat(120));
+        assert_eq!(sanitize_filename(&many_dots), "abc.txt");
     }
 
     #[test]
