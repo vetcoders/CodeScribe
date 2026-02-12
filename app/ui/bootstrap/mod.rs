@@ -30,14 +30,205 @@ mod handlers;
 // Type alias for Objective-C object pointers
 type Id = *mut Object;
 
-const SIDEBAR_WIDTH: f64 = 120.0;
+const SIDEBAR_WIDTH: f64 = 132.0;
 const TAB_SETUP: usize = 0;
 const _TAB_KEYS: usize = 1;
 const _TAB_AUDIO: usize = 2;
+const _TAB_VOICE_LAB: usize = 3;
 
 const STEP_TEST_MIC: usize = 0;
 const STEP_SHOW_OVERLAY: usize = 1;
 const STEP_PRESS_HOTKEY: usize = 2;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoiceLabFieldKind {
+    Bool,
+    Value,
+}
+
+#[derive(Clone, Copy)]
+struct VoiceLabFieldSpec {
+    key: &'static str,
+    label: &'static str,
+    default_value: &'static str,
+    description: &'static str,
+    kind: VoiceLabFieldKind,
+}
+
+const VOICE_LAB_FIELDS: [VoiceLabFieldSpec; 22] = [
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_BUFFERED_STREAM",
+        label: "Buffered streaming",
+        default_value: "1",
+        description: "Smoother, correction-capable streaming mode.",
+        kind: VoiceLabFieldKind::Bool,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_EVENT_PIPELINE",
+        label: "Event pipeline",
+        default_value: "0",
+        description: "Experimental event-based streaming pipeline.",
+        kind: VoiceLabFieldKind::Bool,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_BUFFER_DELAY_MS",
+        label: "Buffer delay (ms)",
+        default_value: "1800",
+        description: "Delay before buffered emission starts.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_TYPING_CPS",
+        label: "Typing speed (CPS)",
+        default_value: "36",
+        description: "Characters-per-second animation speed.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_EMIT_WORDS_MAX",
+        label: "Emit words max",
+        default_value: "3",
+        description: "Max words emitted per tick in buffered mode.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_CHUNK_SEC",
+        label: "Chunk sec",
+        default_value: "4.0",
+        description: "Streaming chunk duration in seconds.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_OVERLAP_RATIO",
+        label: "Overlap ratio",
+        default_value: "0.25",
+        description: "Overlap ratio between adjacent chunks.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_SIMILARITY",
+        label: "Dedup similarity",
+        default_value: "0.93",
+        description: "Similarity threshold for streaming dedup.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_NOVELTY",
+        label: "Dedup novelty",
+        default_value: "0.12",
+        description: "Novelty threshold for streaming dedup.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_DISABLE_EMBEDDINGS",
+        label: "Disable embedding dedup",
+        default_value: "0",
+        description: "Turn off embedding-based deduplication.",
+        kind: VoiceLabFieldKind::Bool,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_FORCE_EMBEDDINGS",
+        label: "Force embeddings",
+        default_value: "0",
+        description: "Force embeddings in test-like scenarios.",
+        kind: VoiceLabFieldKind::Bool,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_LEXICON",
+        label: "Lexicon pass",
+        default_value: "0",
+        description: "Apply lexicon cleanup in streaming pass.",
+        kind: VoiceLabFieldKind::Bool,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STRIP_TRAILING_SMILEY_D",
+        label: "Strip trailing ':D'",
+        default_value: "1",
+        description: "Filter known trailing hallucination.",
+        kind: VoiceLabFieldKind::Bool,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_BUFFERED_CORRECTION_UTTERANCES",
+        label: "Correction min utterances",
+        default_value: "2",
+        description: "Minimum utterances before correction pass.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_BUFFERED_CORRECTION_SEC",
+        label: "Correction min sec",
+        default_value: "6.0",
+        description: "Minimum elapsed seconds before correction.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_BUFFERED_CORRECTION_PREFIX",
+        label: "Correction prefix ratio",
+        default_value: "0.60",
+        description: "Required common prefix ratio to accept correction.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_BUFFERED_INTERIM_SEC",
+        label: "Buffered interim sec",
+        default_value: "3.0",
+        description: "Interim emission cadence for buffered mode.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_UTTERANCE_INTERIM_SEC",
+        label: "Utterance interim sec",
+        default_value: "3.0",
+        description: "Legacy interim cadence for utterance mode.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "WHISPER_MODEL",
+        label: "Whisper cloud model",
+        default_value: "mlx-community/whisper-large-v3-mlx",
+        description: "Cloud/multipart STT model id.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "BACKEND_MAX_UPLOAD_MB",
+        label: "Cloud upload cap (MB)",
+        default_value: "20",
+        description: "Max upload size for cloud STT multipart.",
+        kind: VoiceLabFieldKind::Value,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_LOG",
+        label: "Stream debug log",
+        default_value: "0",
+        description: "Enable streaming debug delta log.",
+        kind: VoiceLabFieldKind::Bool,
+    },
+    VoiceLabFieldSpec {
+        key: "CODESCRIBE_STREAM_LOG_PATH",
+        label: "Stream log path",
+        default_value: "",
+        description: "Optional custom path for stream debug log.",
+        kind: VoiceLabFieldKind::Value,
+    },
+];
+
+fn parse_env_bool(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn voice_lab_value(spec: &VoiceLabFieldSpec) -> String {
+    std::env::var(spec.key).unwrap_or_else(|_| spec.default_value.to_string())
+}
+
+fn voice_lab_spec_from_tag(tag: isize) -> Option<&'static VoiceLabFieldSpec> {
+    if tag < 0 {
+        return None;
+    }
+    VOICE_LAB_FIELDS.get(tag as usize)
+}
 
 #[derive(Default)]
 struct BootstrapState {
@@ -45,8 +236,8 @@ struct BootstrapState {
     window_delegate: Option<usize>,
     root_view: Option<usize>,
     step_labels: [Option<usize>; 3],
-    tab_buttons: [Option<usize>; 3],
-    content_views: [Option<usize>; 3],
+    tab_buttons: [Option<usize>; 4],
+    content_views: [Option<usize>; 4],
     active_tab: usize,
     keys_hold_popup: Option<usize>,
     keys_toggle_popup: Option<usize>,
@@ -486,9 +677,14 @@ unsafe fn build_settings_ui(
         // Since it's a frameless window with titlebar, traffic lights are at top-left.
         // We start buttons a bit lower.
         let tab_start_y = settings_height - 60.0;
-        let tab_names = ["Setup", "Keys", "Audio"];
-        let tab_sels = [sel!(onTabSetup:), sel!(onTabKeys:), sel!(onTabAudio:)];
-        let mut tab_buttons: [Option<usize>; 3] = [None; 3];
+        let tab_names = ["Setup", "Keys", "Audio", "Voice Lab"];
+        let tab_sels = [
+            sel!(onTabSetup:),
+            sel!(onTabKeys:),
+            sel!(onTabAudio:),
+            sel!(onTabVoiceLab:),
+        ];
+        let mut tab_buttons: [Option<usize>; 4] = [None; 4];
 
         for (i, (name, sel)) in tab_names.iter().zip(tab_sels.iter()).enumerate() {
             let btn_height = 36.0;
@@ -825,6 +1021,11 @@ unsafe fn build_settings_ui(
         let _: () = msg_send![audio_view, setHidden: true];
         add_subview(content_bg, audio_view);
 
+        // --- Voice Lab tab (index 3) ---
+        let voice_lab_view = build_voice_lab_tab(action_handler, tab_content_frame);
+        let _: () = msg_send![voice_lab_view, setHidden: true];
+        add_subview(content_bg, voice_lab_view);
+
         // ====================================================================
         // Store state
         // ====================================================================
@@ -834,6 +1035,7 @@ unsafe fn build_settings_ui(
             Some(setup_view as usize),
             Some(keys_view as usize),
             Some(audio_view as usize),
+            Some(voice_lab_view as usize),
         ];
         state.active_tab = TAB_SETUP;
         state.permission_labels = perm_labels;
@@ -873,6 +1075,7 @@ unsafe fn create_sidebar_tab_button(
             "Setup" => "gearshape",
             "Keys" => "keyboard",
             "Audio" => "waveform",
+            "Voice Lab" => "waveform.path.ecg",
             _ => "circle",
         };
         crate::ui_helpers::set_button_symbol(btn, symbol_name);
@@ -916,7 +1119,7 @@ pub(super) fn switch_tab(index: usize) {
     Queue::main().exec_async(move || unsafe {
         let (content_views, tab_buttons) = {
             let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            if index >= 3 || state.active_tab == index {
+            if index >= 4 || state.active_tab == index {
                 return;
             }
             state.active_tab = index;
@@ -1025,8 +1228,8 @@ pub(super) fn handle_bootstrap_window_closed() {
     state.window_delegate = None;
     state.root_view = None;
     state.step_labels = [None, None, None];
-    state.tab_buttons = [None, None, None];
-    state.content_views = [None, None, None];
+    state.tab_buttons = [None, None, None, None];
+    state.content_views = [None, None, None, None];
     state.keys_hold_popup = None;
     state.keys_toggle_popup = None;
     state.keys_preset_popup = None;
@@ -1056,8 +1259,8 @@ pub fn hide_bootstrap_overlay() {
                 state.window_delegate = None;
                 state.root_view = None;
                 state.step_labels = [None, None, None];
-                state.tab_buttons = [None, None, None];
-                state.content_views = [None, None, None];
+                state.tab_buttons = [None, None, None, None];
+                state.content_views = [None, None, None, None];
                 state.keys_hold_popup = None;
                 state.keys_toggle_popup = None;
                 state.keys_preset_popup = None;
@@ -1117,8 +1320,8 @@ pub fn reset_embedded_bootstrap_state() {
     state.window_delegate = None;
     state.config_cache = None;
     state.step_labels = [None, None, None];
-    state.tab_buttons = [None, None, None];
-    state.content_views = [None, None, None];
+    state.tab_buttons = [None, None, None, None];
+    state.content_views = [None, None, None, None];
     state.keys_hold_popup = None;
     state.keys_toggle_popup = None;
     state.keys_preset_popup = None;
@@ -1535,33 +1738,6 @@ unsafe fn build_audio_tab(
         add_subview(container, fmt_popup);
         y -= 38.0;
 
-        // Buffered streaming toggle
-        let buffered_on = std::env::var("CODESCRIBE_BUFFERED_STREAM")
-            .unwrap_or_default()
-            .trim()
-            == "1";
-        let buf_check = create_checkbox(
-            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 20.0)),
-            "Backspace-magic streaming",
-            buffered_on,
-        );
-        button_set_action(buf_check, action_handler, sel!(onBufferedToggled:));
-        add_subview(container, buf_check);
-        y -= 18.0;
-
-        let buf_desc = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(pad + 22.0, y),
-                &CGSize::new(content_w - 22.0, 16.0),
-            ),
-            text: "Progressive transcription with correction".to_string(),
-            font_size: ui_tokens::MICRO_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, buf_desc);
-        y -= 34.0;
-
         // Beep on start toggle
         let beep_check = create_checkbox(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 20.0)),
@@ -1606,8 +1782,151 @@ unsafe fn build_audio_tab(
     } // unsafe
 }
 
+unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry::CGRect) -> Id {
+    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    unsafe {
+        let ns_view = Class::get("NSView").unwrap();
+        let ns_scroll_view = Class::get("NSScrollView").unwrap();
+
+        let container: Id = msg_send![ns_view, alloc];
+        let container: Id = msg_send![container, initWithFrame: frame];
+
+        let pad = ui_tokens::EDGE_PADDING;
+        let content_w = frame.size.width - pad * 2.0;
+        let mut y = frame.size.height - 40.0;
+        let primary = crate::ui_helpers::color_label();
+        let secondary = crate::ui_helpers::color_secondary_label();
+
+        let title = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 22.0)),
+            text: "Voice Lab".to_string(),
+            font_size: ui_tokens::BODY_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, title);
+        y -= 20.0;
+
+        let subtitle = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: "Hot-reload transcription engine controls (persisted to .env)".to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, subtitle);
+        y -= 14.0;
+
+        let scroll_h = (y - 18.0).max(160.0);
+        let scroll_frame = CGRect::new(&CGPoint::new(pad, 12.0), &CGSize::new(content_w, scroll_h));
+        let scroll: Id = msg_send![ns_scroll_view, alloc];
+        let scroll: Id = msg_send![scroll, initWithFrame: scroll_frame];
+        let _: () = msg_send![scroll, setHasVerticalScroller: true];
+        let _: () = msg_send![scroll, setHasHorizontalScroller: false];
+        let _: () = msg_send![scroll, setAutohidesScrollers: true];
+        let _: () = msg_send![scroll, setBorderType: 0_isize];
+        let _: () = msg_send![scroll, setDrawsBackground: false];
+        let _: () = msg_send![
+            scroll,
+            setAutoresizingMask: 2_isize | 16_isize // width + height sizable
+        ];
+
+        let mut doc_h: f64 = 18.0;
+        for spec in VOICE_LAB_FIELDS {
+            doc_h += if spec.kind == VoiceLabFieldKind::Bool {
+                40.0
+            } else {
+                58.0
+            };
+        }
+        doc_h = doc_h.max(scroll_h + 8.0);
+
+        let doc_w = (content_w - 14.0).max(260.0);
+        let doc_view: Id = msg_send![ns_view, alloc];
+        let doc_view: Id = msg_send![doc_view, initWithFrame:
+            CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(doc_w, doc_h))
+        ];
+        let _: () = msg_send![
+            doc_view,
+            setAutoresizingMask: 2_isize // width sizable
+        ];
+
+        let mut row_y = doc_h - 24.0;
+        for (idx, spec) in VOICE_LAB_FIELDS.iter().enumerate() {
+            match spec.kind {
+                VoiceLabFieldKind::Bool => {
+                    let checked = parse_env_bool(&voice_lab_value(spec));
+                    let title = format!("{} ({})", spec.label, spec.key);
+                    let check = create_checkbox(
+                        CGRect::new(&CGPoint::new(0.0, row_y), &CGSize::new(doc_w - 6.0, 20.0)),
+                        &title,
+                        checked,
+                    );
+                    let _: () = msg_send![check, setTag: idx as isize];
+                    button_set_action(check, action_handler, sel!(onVoiceLabToggleChanged:));
+                    add_subview(doc_view, check);
+                    row_y -= 18.0;
+
+                    let desc = create_label(LabelConfig {
+                        frame: CGRect::new(
+                            &CGPoint::new(22.0, row_y),
+                            &CGSize::new(doc_w - 24.0, 16.0),
+                        ),
+                        text: spec.description.to_string(),
+                        font_size: ui_tokens::MICRO_FONT_SIZE,
+                        text_color: secondary,
+                        ..Default::default()
+                    });
+                    add_subview(doc_view, desc);
+                    row_y -= 22.0;
+                }
+                VoiceLabFieldKind::Value => {
+                    let label = create_label(LabelConfig {
+                        frame: CGRect::new(&CGPoint::new(0.0, row_y), &CGSize::new(doc_w, 16.0)),
+                        text: format!("{} ({})", spec.label, spec.key),
+                        font_size: ui_tokens::MICRO_FONT_SIZE,
+                        text_color: secondary,
+                        ..Default::default()
+                    });
+                    add_subview(doc_view, label);
+                    row_y -= 20.0;
+
+                    let current = voice_lab_value(spec);
+                    let field = create_text_input(
+                        CGRect::new(&CGPoint::new(0.0, row_y), &CGSize::new(doc_w - 6.0, 22.0)),
+                        spec.default_value,
+                        &current,
+                    );
+                    let _: () = msg_send![field, setTag: idx as isize];
+                    button_set_action(field, action_handler, sel!(onVoiceLabFieldChanged:));
+                    add_subview(doc_view, field);
+                    row_y -= 20.0;
+
+                    let desc = create_label(LabelConfig {
+                        frame: CGRect::new(
+                            &CGPoint::new(0.0, row_y),
+                            &CGSize::new(doc_w - 8.0, 16.0),
+                        ),
+                        text: spec.description.to_string(),
+                        font_size: ui_tokens::MICRO_FONT_SIZE,
+                        text_color: secondary,
+                        ..Default::default()
+                    });
+                    add_subview(doc_view, desc);
+                    row_y -= 20.0;
+                }
+            }
+        }
+
+        let _: () = msg_send![scroll, setDocumentView: doc_view];
+        add_subview(container, scroll);
+        container
+    }
+}
+
 // ============================================================================
-// Settings handler stubs (Keys + Audio tabs)
+// Settings handler stubs (Keys + Audio + Voice Lab tabs)
 // ============================================================================
 
 pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
@@ -1968,16 +2287,53 @@ pub(super) extern "C" fn on_volume_changed(_this: &Object, _cmd: objc::runtime::
     }
 }
 
-pub(super) extern "C" fn on_buffered_toggled(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+pub(super) extern "C" fn on_voice_lab_toggle_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
     unsafe {
-        let state: isize = msg_send![sender, state];
-        let enabled = state == 1;
-        info!("Settings: buffered streaming -> {}", enabled);
+        let tag: isize = msg_send![sender, tag];
+        let Some(spec) = voice_lab_spec_from_tag(tag) else {
+            return;
+        };
+        if spec.kind != VoiceLabFieldKind::Bool {
+            return;
+        }
+        let checked_state: isize = msg_send![sender, state];
+        let enabled = checked_state == 1;
+        info!("Settings: {} -> {}", spec.key, enabled);
         let config = Config::load();
-        let _ = config.save_to_env(
-            "CODESCRIBE_BUFFERED_STREAM",
-            if enabled { "1" } else { "0" },
-        );
+        let _ = config.save_to_env(spec.key, if enabled { "1" } else { "0" });
+    }
+}
+
+pub(super) extern "C" fn on_voice_lab_field_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    unsafe {
+        let tag: isize = msg_send![sender, tag];
+        let Some(spec) = voice_lab_spec_from_tag(tag) else {
+            return;
+        };
+        if spec.kind != VoiceLabFieldKind::Value {
+            return;
+        }
+
+        let ns_val: Id = msg_send![sender, stringValue];
+        let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
+        if cstr.is_null() {
+            return;
+        }
+        let value = std::ffi::CStr::from_ptr(cstr)
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        info!("Settings: {} -> {}", spec.key, value);
+        let config = Config::load();
+        let _ = config.save_to_env(spec.key, &value);
     }
 }
 
