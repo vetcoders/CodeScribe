@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use codescribe::os::hotkeys;
 use codescribe::{ai_formatting, audio, whisper};
+use codescribe_core::vad;
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -280,23 +281,25 @@ async fn handle_transcribe_file(
     eprintln!("Language: {}", language.as_deref().unwrap_or("auto-detect"));
     eprintln!("Model loaded in {:?}", start.elapsed());
 
-    // Load audio only if needed (language detection or streaming)
-    let audio_data = if stream || language.is_none() {
-        Some(audio::load_audio_file(&file)?)
-    } else {
-        None
-    };
+    // Always load audio (needed for VAD pre-filter + language detection)
+    let (samples, sample_rate) = audio::load_audio_file(&file)?;
+    let total_sec = samples.len() as f32 / sample_rate as f32;
+
+    // ── Silero VAD pre-filter: extract speech-only regions ──
+    let (speech_samples, vad_stats) = vad::extract_speech(&samples, sample_rate);
+    let speech_sec = speech_samples.len() as f32 / sample_rate as f32;
+    eprintln!(
+        "Silero VAD: {:.1}s speech / {:.1}s total ({:.0}% speech) | {}",
+        speech_sec, total_sec, vad_stats.speech_pct, vad_stats.sparkline
+    );
 
     // Detect language if not specified
     let lang = if let Some(l) = language {
         l
     } else {
-        let (samples, sample_rate) = audio_data
-            .as_ref()
-            .expect("audio data required for language detection");
         eprintln!("Detecting language...");
         let start = Instant::now();
-        let detected = whisper::detect_language(samples, *sample_rate)?;
+        let detected = whisper::detect_language(&speech_samples, sample_rate)?;
         eprintln!("Detected: {} ({:?})", detected, start.elapsed());
         detected
     };
@@ -315,20 +318,21 @@ async fn handle_transcribe_file(
                 emitter.emit_cumulative(cumulative);
             }
         };
-        let (samples, sample_rate) = audio_data
-            .as_ref()
-            .expect("audio data required for streaming");
-        let _raw_text =
-            whisper::transcribe_streaming(samples, *sample_rate, Some(&lang), Some(&callback))?;
+        let _raw_text = whisper::transcribe_streaming(
+            &speech_samples,
+            sample_rate,
+            Some(&lang),
+            Some(&callback),
+        )?;
         eprintln!("Transcription time: {:?}", start.elapsed());
         emitter.finish();
         return Ok(());
     }
 
-    // Transcribe (non-streaming)
+    // Transcribe (non-streaming) — speech-only samples
     eprintln!("Transcribing...");
     let start = Instant::now();
-    let raw_text = whisper::transcribe_file(&file, Some(&lang))?;
+    let raw_text = whisper::transcribe(&speech_samples, sample_rate, Some(&lang))?;
     eprintln!("Transcription time: {:?}", start.elapsed());
 
     // Format with AI if requested

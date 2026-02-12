@@ -81,8 +81,8 @@ pub mod tts_api {
 /// Voice activity detection using Silero VAD (neural network)
 pub mod vad_api {
     pub use crate::vad::{
-        AccumulatingVad, CHUNK_SIZE, Resampler, SAMPLE_RATE, SileroVad, VadConfig,
-        default_model_path,
+        AccumulatingVad, CHUNK_SIZE, Resampler, SAMPLE_RATE, SileroVad, VadConfig, VadExtractStats,
+        default_model_path, extract_speech,
     };
 }
 
