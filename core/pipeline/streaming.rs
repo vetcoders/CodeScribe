@@ -71,7 +71,7 @@ pub struct SessionConfig {
 
 // ── Hallucination filter ─────────────────────────────────────────────────────
 
-const WHISPER_HALLUCINATIONS: &[&str] = &[
+const WHISPER_HALLUCINATIONS_COMMON: &[&str] = &[
     "thank you",
     "thanks for watching",
     "thanks for listening",
@@ -84,21 +84,67 @@ const WHISPER_HALLUCINATIONS: &[&str] = &[
     "www.",
 ];
 
+const WHISPER_HALLUCINATIONS_PL: &[&str] = &[
+    "napisy stworzone przez społeczność",
+    "tłumaczenie",
+    "transkrypcja",
+];
+
 const SHORT_SPEECH_WHITELIST: &[&str] = &[
     "tak", "nie", "co?", "co", "dobra", "dobrze", "ok", "okej", "no", "no?", "mhm", "aha", "jasne",
     "pewnie", "super", "hej", "halo", "cześć", "siema", "dzięki", "proszę",
 ];
 
-pub(crate) fn is_hallucination(text: &str) -> bool {
+const MIN_UTTERANCE_SEC: f32 = 0.50;
+const SHORT_UTTERANCE_LOW_CONFIDENCE: f32 = 0.55;
+const MAX_WORDS_PER_SEC: f32 = 5.0;
+const WORD_RATE_MIN_WORDS: usize = 6;
+
+fn is_polish_language(language: Option<&str>) -> bool {
+    language
+        .map(|lang| {
+            let normalized = lang.to_ascii_lowercase();
+            normalized == "pl" || normalized.starts_with("pl-")
+        })
+        .unwrap_or(false)
+}
+
+fn text_words_per_second(text: &str, audio_samples: usize, sample_rate: u32) -> Option<f32> {
+    if audio_samples == 0 || sample_rate == 0 {
+        return None;
+    }
+    let words = text.split_whitespace().count();
+    if words < WORD_RATE_MIN_WORDS {
+        return None;
+    }
+    let duration_s = audio_samples as f32 / sample_rate as f32;
+    if duration_s <= 0.0 {
+        return None;
+    }
+    Some(words as f32 / duration_s)
+}
+
+fn should_drop_short_utterance(audio_samples: usize, sample_rate: u32, speech_prob: f32) -> bool {
+    let duration_s = audio_samples as f32 / sample_rate as f32;
+    duration_s < MIN_UTTERANCE_SEC && speech_prob < SHORT_UTTERANCE_LOW_CONFIDENCE
+}
+
+pub(crate) fn is_hallucination(text: &str, language: Option<&str>) -> bool {
     let lower = text.trim().to_lowercase();
     if SHORT_SPEECH_WHITELIST.iter().any(|w| lower == *w) {
         return false;
     }
-    if WHISPER_HALLUCINATIONS.iter().any(|h| lower == *h) {
+    let is_pl = is_polish_language(language);
+    if WHISPER_HALLUCINATIONS_COMMON.iter().any(|h| lower == *h)
+        || (is_pl && WHISPER_HALLUCINATIONS_PL.iter().any(|h| lower == *h))
+    {
         return true;
     }
     if lower.len() < 30
-        && WHISPER_HALLUCINATIONS.iter().any(|h| lower.contains(h))
+        && (WHISPER_HALLUCINATIONS_COMMON
+            .iter()
+            .any(|h| lower.contains(h))
+            || (is_pl && WHISPER_HALLUCINATIONS_PL.iter().any(|h| lower.contains(h))))
         && lower.split_whitespace().count() <= 4
     {
         return true;
@@ -141,7 +187,7 @@ impl TranscriptionPipeline {
     }
 
     pub(crate) fn postprocess(&mut self, text: &str) -> Option<String> {
-        if is_hallucination(text) {
+        if is_hallucination(text, self.language.as_deref()) {
             self.hallucination_drops += 1;
             return None;
         }
@@ -165,7 +211,7 @@ impl TranscriptionPipeline {
         &mut self,
         text: &str,
     ) -> Result<String, PostprocessDrop> {
-        if is_hallucination(text) {
+        if is_hallucination(text, self.language.as_deref()) {
             self.hallucination_drops += 1;
             return Err(PostprocessDrop::Hallucination);
         }
@@ -518,15 +564,33 @@ pub(crate) async fn transcription_session(
 
     loop {
         // Start next utterance transcription if possible.
-        if utterance_in_flight.is_none()
-            && correction_in_flight.is_none()
-            && let Some(item) = pending_utterances.pop_front()
-        {
-            let lang = pipeline.language.clone();
-            let handle =
-                spawn_utterance_transcription(item.audio.clone(), output_sample_rate, lang);
-            utterance_in_flight = Some(handle);
-            utterance_active = Some(item);
+        if utterance_in_flight.is_none() && correction_in_flight.is_none() {
+            while let Some(item) = pending_utterances.pop_front() {
+                if should_drop_short_utterance(
+                    item.audio.len(),
+                    output_sample_rate,
+                    item.max_speech_prob,
+                ) {
+                    pipeline.hallucination_drops = pipeline.hallucination_drops.saturating_add(1);
+                    event_sink.on_event(&EngineEvent::Drop {
+                        kind: DropKind::Hallucination,
+                        text: String::new(),
+                        reason: format!(
+                            "Short utterance dropped: {:.3}s with low VAD prob {:.2}",
+                            item.audio.len() as f32 / output_sample_rate as f32,
+                            item.max_speech_prob
+                        ),
+                    });
+                    continue;
+                }
+
+                let lang = pipeline.language.clone();
+                let handle =
+                    spawn_utterance_transcription(item.audio.clone(), output_sample_rate, lang);
+                utterance_in_flight = Some(handle);
+                utterance_active = Some(item);
+                break;
+            }
         }
 
         // If audio is closed and there is no work left, finish.
@@ -543,9 +607,11 @@ pub(crate) async fn transcription_session(
                 match maybe_data {
                     Some(data) => {
                         for event in session.feed(&data, sample_rate) {
-                            let (utterance, is_final) = match event {
-                                SpeechEvent::Utterance(u) => (u, false),
-                                SpeechEvent::UtteranceFinal(u) => (u, true),
+                            let (utterance, is_final, max_speech_prob) = match event {
+                                SpeechEvent::Utterance(u) => (u, false, session.segment_speech_prob()),
+                                SpeechEvent::UtteranceFinal(u) => {
+                                    (u, true, session.segment_speech_prob())
+                                }
                                 _ => continue,
                             };
 
@@ -565,6 +631,7 @@ pub(crate) async fn transcription_session(
                             pending_utterances.push_back(UtteranceWorkItem {
                                 audio: utterance,
                                 is_final,
+                                max_speech_prob,
                             });
                         }
                     }
@@ -583,10 +650,14 @@ pub(crate) async fn transcription_session(
                                 });
                             }
 
-                            let (utterance, is_final) = match event {
-                                SpeechEvent::Utterance(u) => (u, false),
-                                SpeechEvent::UtteranceFinal(u) => (u, true),
-                                _ => (Vec::new(), false),
+                            let (utterance, is_final, max_speech_prob) = match event {
+                                SpeechEvent::Utterance(u) => {
+                                    (u, false, session.segment_speech_prob())
+                                }
+                                SpeechEvent::UtteranceFinal(u) => {
+                                    (u, true, session.segment_speech_prob())
+                                }
+                                _ => (Vec::new(), false, 0.0),
                             };
 
                             if !utterance.is_empty() {
@@ -599,7 +670,11 @@ pub(crate) async fn transcription_session(
                                     vad_started = true;
                                 }
                                 if pending_utterances.len() < MAX_PENDING_UTTERANCES {
-                                    pending_utterances.push_back(UtteranceWorkItem { audio: utterance, is_final });
+                                    pending_utterances.push_back(UtteranceWorkItem {
+                                        audio: utterance,
+                                        is_final,
+                                        max_speech_prob,
+                                    });
                                 } else {
                                     dropped_utterances = dropped_utterances.saturating_add(1);
                                 }
@@ -652,7 +727,11 @@ pub(crate) async fn transcription_session(
             result = async {
                 utterance_in_flight.as_mut().unwrap().await
             }, if utterance_in_flight.is_some() => {
-                let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem { audio: Vec::new(), is_final: false });
+                let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem {
+                    audio: Vec::new(),
+                    is_final: false,
+                    max_speech_prob: 0.0,
+                });
                 // Track audio duration for timestamp computation.
                 utterance_audio_samples += item.audio.len();
 
@@ -663,44 +742,63 @@ pub(crate) async fn transcription_session(
                             suffix_snapshot = pipeline.last_suffix.clone();
                         }
 
-                        match pipeline.postprocess_with_reason(&raw_text) {
-                            Ok(cleaned) => {
-                                preview_rev += 1;
-                                if !accumulated_text.is_empty() {
-                                    accumulated_text.push(' ');
-                                }
-                                accumulated_text.push_str(cleaned.trim());
+                        if let Some(words_per_sec) =
+                            text_words_per_second(&raw_text, item.audio.len(), output_sample_rate)
+                                .filter(|wps| *wps > MAX_WORDS_PER_SEC)
+                        {
+                            pipeline.hallucination_drops =
+                                pipeline.hallucination_drops.saturating_add(1);
+                            event_sink.on_event(&EngineEvent::Drop {
+                                kind: DropKind::Hallucination,
+                                text: raw_text.clone(),
+                                reason: format!(
+                                    "Word-rate anomaly: {:.1} words/s exceeds {:.1} words/s limit",
+                                    words_per_sec, MAX_WORDS_PER_SEC
+                                ),
+                            });
+                        } else {
+                            match pipeline.postprocess_with_reason(&raw_text) {
+                                Ok(cleaned) => {
+                                    preview_rev += 1;
+                                    if !accumulated_text.is_empty() {
+                                        accumulated_text.push(' ');
+                                    }
+                                    accumulated_text.push_str(cleaned.trim());
 
-                                event_sink.on_event(&EngineEvent::Preview {
-                                    rev: preview_rev,
-                                    text: accumulated_text.clone(),
-                                });
+                                    event_sink.on_event(&EngineEvent::Preview {
+                                        rev: preview_rev,
+                                        text: accumulated_text.clone(),
+                                    });
 
-                                if let Some(path) = stream_log_path.as_deref() {
-                                    let _ = append_to_stream_log(path, cleaned.trim());
+                                    if let Some(path) = stream_log_path.as_deref() {
+                                        let _ = append_to_stream_log(path, cleaned.trim());
+                                    }
                                 }
-                            }
-                            Err(PostprocessDrop::Hallucination) => {
-                                event_sink.on_event(&EngineEvent::Drop {
-                                    kind: DropKind::Hallucination,
-                                    text: raw_text.clone(),
-                                    reason: format!("Hallucination pattern: '{}'", raw_text.trim()),
-                                });
-                            }
-                            Err(PostprocessDrop::OverlapEmpty) => {
-                                event_sink.on_event(&EngineEvent::Drop {
-                                    kind: DropKind::OverlapEmpty,
-                                    text: raw_text.clone(),
-                                    reason: "Overlap dedup produced empty result".to_string(),
-                                });
-                            }
-                            Err(PostprocessDrop::FilteredEmpty) => {
-                                filtered_empty_drops += 1;
-                                event_sink.on_event(&EngineEvent::Drop {
-                                    kind: DropKind::FilteredEmpty,
-                                    text: raw_text.clone(),
-                                    reason: "Empty after lexicon/cleanup (not semantic gate)".to_string(),
-                                });
+                                Err(PostprocessDrop::Hallucination) => {
+                                    event_sink.on_event(&EngineEvent::Drop {
+                                        kind: DropKind::Hallucination,
+                                        text: raw_text.clone(),
+                                        reason: format!(
+                                            "Hallucination pattern: '{}'",
+                                            raw_text.trim()
+                                        ),
+                                    });
+                                }
+                                Err(PostprocessDrop::OverlapEmpty) => {
+                                    event_sink.on_event(&EngineEvent::Drop {
+                                        kind: DropKind::OverlapEmpty,
+                                        text: raw_text.clone(),
+                                        reason: "Overlap dedup produced empty result".to_string(),
+                                    });
+                                }
+                                Err(PostprocessDrop::FilteredEmpty) => {
+                                    filtered_empty_drops += 1;
+                                    event_sink.on_event(&EngineEvent::Drop {
+                                        kind: DropKind::FilteredEmpty,
+                                        text: raw_text.clone(),
+                                        reason: "Empty after lexicon/cleanup (not semantic gate)".to_string(),
+                                    });
+                                }
                             }
                         }
 
@@ -1020,15 +1118,28 @@ pub(crate) async fn buffered_transcription_worker(
 
     loop {
         // Start next utterance transcription if possible.
-        if utterance_in_flight.is_none()
-            && correction_in_flight.is_none()
-            && let Some(item) = pending_utterances.pop_front()
-        {
-            let lang = pipeline.language.clone();
-            let handle =
-                spawn_utterance_transcription(item.audio.clone(), output_sample_rate, lang);
-            utterance_in_flight = Some(handle);
-            utterance_active = Some(item);
+        if utterance_in_flight.is_none() && correction_in_flight.is_none() {
+            while let Some(item) = pending_utterances.pop_front() {
+                if should_drop_short_utterance(
+                    item.audio.len(),
+                    output_sample_rate,
+                    item.max_speech_prob,
+                ) {
+                    pipeline.hallucination_drops = pipeline.hallucination_drops.saturating_add(1);
+                    debug!(
+                        "Dropping short utterance in buffered worker: {:.3}s (prob {:.2})",
+                        item.audio.len() as f32 / output_sample_rate as f32,
+                        item.max_speech_prob
+                    );
+                    continue;
+                }
+                let lang = pipeline.language.clone();
+                let handle =
+                    spawn_utterance_transcription(item.audio.clone(), output_sample_rate, lang);
+                utterance_in_flight = Some(handle);
+                utterance_active = Some(item);
+                break;
+            }
         }
 
         // If audio is closed and there is no work left, finish.
@@ -1045,9 +1156,11 @@ pub(crate) async fn buffered_transcription_worker(
                 match maybe_data {
                     Some(data) => {
                         for event in session.feed(&data, sample_rate) {
-                            let (utterance, is_final) = match event {
-                                SpeechEvent::Utterance(u) => (u, false),
-                                SpeechEvent::UtteranceFinal(u) => (u, true),
+                            let (utterance, is_final, max_speech_prob) = match event {
+                                SpeechEvent::Utterance(u) => (u, false, session.segment_speech_prob()),
+                                SpeechEvent::UtteranceFinal(u) => {
+                                    (u, true, session.segment_speech_prob())
+                                }
                                 _ => continue,
                             };
 
@@ -1066,21 +1179,30 @@ pub(crate) async fn buffered_transcription_worker(
                             pending_utterances.push_back(UtteranceWorkItem {
                                 audio: utterance,
                                 is_final,
+                                max_speech_prob,
                             });
                         }
                     }
                     None => {
                         audio_closed = true;
                         if let Some(event) = session.flush() {
-                            let (utterance, is_final) = match event {
-                                SpeechEvent::Utterance(u) => (u, false),
-                                SpeechEvent::UtteranceFinal(u) => (u, true),
-                                _ => (Vec::new(), false),
+                            let (utterance, is_final, max_speech_prob) = match event {
+                                SpeechEvent::Utterance(u) => {
+                                    (u, false, session.segment_speech_prob())
+                                }
+                                SpeechEvent::UtteranceFinal(u) => {
+                                    (u, true, session.segment_speech_prob())
+                                }
+                                _ => (Vec::new(), false, 0.0),
                             };
 
                             if !utterance.is_empty() {
                                 if pending_utterances.len() < MAX_PENDING_UTTERANCES {
-                                    pending_utterances.push_back(UtteranceWorkItem { audio: utterance, is_final });
+                                    pending_utterances.push_back(UtteranceWorkItem {
+                                        audio: utterance,
+                                        is_final,
+                                        max_speech_prob,
+                                    });
                                 } else {
                                     dropped_utterances = dropped_utterances.saturating_add(1);
                                 }
@@ -1119,14 +1241,28 @@ pub(crate) async fn buffered_transcription_worker(
             result = async {
                 utterance_in_flight.as_mut().unwrap().await
             }, if utterance_in_flight.is_some() => {
-                let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem { audio: Vec::new(), is_final: false });
+                let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem {
+                    audio: Vec::new(),
+                    is_final: false,
+                    max_speech_prob: 0.0,
+                });
                 match result {
                     Ok(Ok(raw_text)) => {
                         if utterance_count == 0 && correction_audio_buf.is_empty() {
                             suffix_snapshot = pipeline.last_suffix.clone();
                         }
 
-                        if let Some(cleaned) = pipeline.postprocess(&raw_text) {
+                        if let Some(words_per_sec) =
+                            text_words_per_second(&raw_text, item.audio.len(), output_sample_rate)
+                                .filter(|wps| *wps > MAX_WORDS_PER_SEC)
+                        {
+                            pipeline.hallucination_drops =
+                                pipeline.hallucination_drops.saturating_add(1);
+                            debug!(
+                                "Dropping buffered transcript due to word-rate anomaly: {:.1} words/s",
+                                words_per_sec
+                            );
+                        } else if let Some(cleaned) = pipeline.postprocess(&raw_text) {
                             {
                                 let mut guard = emitter.lock().await;
                                 guard.push_segment(cleaned.clone());
@@ -1230,6 +1366,7 @@ pub(crate) async fn buffered_transcription_worker(
 struct UtteranceWorkItem {
     audio: Vec<f32>,
     is_final: bool,
+    max_speech_prob: f32,
 }
 
 fn spawn_chunk_transcription(
@@ -1534,10 +1671,14 @@ mod tests {
     #[test]
     fn test_postprocess_components() {
         // Hallucination
-        assert!(is_hallucination("Thank you"));
-        assert!(is_hallucination("  Dziękuję za uwagę  "));
-        assert!(!is_hallucination("Tak")); // Whitelisted
-        assert!(!is_hallucination("This is a normal sentence."));
+        assert!(is_hallucination("Thank you", None));
+        assert!(is_hallucination("  Dziękuję za uwagę  ", Some("pl")));
+        assert!(is_hallucination(
+            "Napisy stworzone przez społeczność",
+            Some("pl")
+        ));
+        assert!(!is_hallucination("Tak", Some("pl"))); // Whitelisted
+        assert!(!is_hallucination("This is a normal sentence.", Some("en")));
 
         // Overlap
         let mut pipeline = TranscriptionPipeline::new(None);
@@ -1552,6 +1693,31 @@ mod tests {
 
         let res = pipeline.strip_overlap("Hello world");
         assert_eq!(res, "Hello world");
+    }
+
+    #[test]
+    fn test_short_utterance_gate_requires_low_confidence() {
+        let sample_rate = 16_000;
+        let short = (0.2 * sample_rate as f32) as usize;
+        assert!(should_drop_short_utterance(short, sample_rate, 0.40));
+        assert!(!should_drop_short_utterance(short, sample_rate, 0.80));
+    }
+
+    #[test]
+    fn test_word_rate_detection() {
+        let sample_rate = 16_000;
+        let half_second = (0.5 * sample_rate as f32) as usize;
+        let wps = text_words_per_second("raz dwa trzy cztery pięć sześć", half_second, sample_rate)
+            .expect("should compute words/s");
+        assert!(wps > MAX_WORDS_PER_SEC);
+
+        let normal = text_words_per_second(
+            "to jest normalna fraza z kilkoma słowami",
+            (sample_rate * 2) as usize,
+            sample_rate,
+        )
+        .expect("should compute words/s");
+        assert!(normal < MAX_WORDS_PER_SEC);
     }
 
     #[test]

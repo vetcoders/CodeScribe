@@ -121,6 +121,8 @@ pub(crate) struct SpeechSession {
     last_vad_heartbeat: Instant,
     /// Peak speech probability seen across this session (for flush fallback).
     max_speech_prob: f32,
+    /// Peak speech probability for the currently active utterance/segment.
+    segment_peak_prob: f32,
     /// Speech probability at the last VAD boundary (Start or End).
     last_boundary_prob: f32,
     /// Wall-clock instant when this session was created.
@@ -210,6 +212,7 @@ impl SpeechSession {
             vad_frames_speech: 0,
             last_vad_heartbeat: Instant::now(),
             max_speech_prob: 0.0,
+            segment_peak_prob: 0.0,
             last_boundary_prob: 0.0,
             session_start: Instant::now(),
             last_flush_fallback: false,
@@ -320,6 +323,7 @@ impl SpeechSession {
             vad_frames_speech: 0,
             last_vad_heartbeat: Instant::now(),
             max_speech_prob: 0.0,
+            segment_peak_prob: 0.0,
             last_boundary_prob: 0.0,
             session_start: Instant::now(),
             last_flush_fallback: false,
@@ -471,6 +475,7 @@ impl SpeechSession {
                 self.segment_start = Some(raw_start);
                 self.last_emit_raw = raw_start;
                 self.last_boundary_prob = speech_prob;
+                self.segment_peak_prob = speech_prob;
             }
 
             if let Some(end_sample) = end_event {
@@ -546,6 +551,7 @@ impl SpeechSession {
             }
             self.pending_end = None;
             self.last_emit_raw = end;
+            self.segment_peak_prob = 0.0;
             self.trim_raw_buffer(end.saturating_sub(self.pre_roll_raw));
         }
 
@@ -579,6 +585,7 @@ impl SpeechSession {
                         end,
                         chunk.len()
                     );
+                    self.segment_peak_prob = 0.0;
                     return Some(match self.mode {
                         SpeechMode::Stream { .. } => SpeechEvent::Chunk(chunk),
                         SpeechMode::Utterance { .. } => SpeechEvent::UtteranceFinal(chunk),
@@ -599,6 +606,7 @@ impl SpeechSession {
                         chunk.len()
                     );
                     self.last_flush_fallback = true;
+                    self.segment_peak_prob = 0.0;
                     return Some(match self.mode {
                         SpeechMode::Stream { .. } => SpeechEvent::Chunk(chunk),
                         SpeechMode::Utterance { .. } => SpeechEvent::UtteranceFinal(chunk),
@@ -639,6 +647,7 @@ impl SpeechSession {
         if let Some(iter_state) = self.iter_state.as_mut() {
             iter_state.reset();
         }
+        self.segment_peak_prob = 0.0;
         self.last_append_at = Instant::now();
         match self.mode {
             SpeechMode::Stream { .. } => SpeechEvent::Chunk(chunk),
@@ -648,6 +657,18 @@ impl SpeechSession {
 
     fn update_vad_heartbeat(&mut self, speech_prob: f32) {
         self.max_speech_prob = self.max_speech_prob.max(speech_prob);
+        let iter_triggered = self
+            .iter_state
+            .as_ref()
+            .is_some_and(|state| state.triggered());
+        if self.segment_start.is_some()
+            || self.in_speech
+            || iter_triggered
+            || !self.pending_speech.is_empty()
+            || !self.pending_samples.is_empty()
+        {
+            self.segment_peak_prob = self.segment_peak_prob.max(speech_prob);
+        }
         self.vad_frames_total = self.vad_frames_total.saturating_add(1);
         if speech_prob >= self.threshold {
             self.vad_frames_speech = self.vad_frames_speech.saturating_add(1);
@@ -844,6 +865,16 @@ impl SpeechSession {
         self.max_speech_prob
     }
 
+    /// Peak speech probability for the current utterance/segment.
+    pub(crate) fn segment_speech_prob(&self) -> f32 {
+        let prob = self.segment_peak_prob.max(self.last_boundary_prob);
+        if prob > 0.0 {
+            prob
+        } else {
+            self.max_speech_prob
+        }
+    }
+
     /// Override VAD threshold (test-only). Set impossibly high to prevent
     /// VadIterState from firing Start, exercising the flush fallback path.
     #[cfg(test)]
@@ -1028,7 +1059,9 @@ pub(crate) fn hardcoded_utterance_gate_config() -> GateConfig {
 
     // Keep fast start + tight pre-roll like streaming, unless explicitly overridden.
     if std::env::var("CODESCRIBE_VAD_MIN_SPEECH_SEC").is_err() {
-        vad_cfg.min_speech_duration_sec = 0.05;
+        // In utterance mode we prefer robustness over ultra-low latency.
+        // 0.5s filters out noisy micro-bursts that frequently trigger Whisper hallucinations.
+        vad_cfg.min_speech_duration_sec = 0.50;
     }
     if std::env::var("CODESCRIBE_VAD_PRE_ROLL_SEC").is_err() {
         vad_cfg.pre_roll_sec = 0.064;

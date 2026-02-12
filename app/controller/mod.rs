@@ -1230,6 +1230,11 @@ impl RecordingController {
                 Arc::new(helpers::RoutingDeltaSink);
             let mut pe = PresentationEmitter::new(tb, Some(delta_sink), None);
             pe.set_utterance_callback(Some(Arc::new(move |text: String| {
+                if is_assistive_session {
+                    // Close the current streaming user bubble immediately at utterance boundary
+                    // to prevent next preview from appending into the previous message.
+                    crate::voice_chat_ui::finalize_voice_chat_user_message();
+                }
                 let controller = controller.clone();
                 let expected_session = expected_session.clone();
                 tokio::spawn(async move {
@@ -1261,6 +1266,10 @@ impl RecordingController {
             let expected_session = new_session_id.clone();
             let is_assistive_session = is_assistive;
             recorder.set_utterance_callback(Some(Arc::new(move |text: String| {
+                if is_assistive_session {
+                    // Keep utterance boundaries explicit in assistive mode.
+                    crate::voice_chat_ui::finalize_voice_chat_user_message();
+                }
                 let controller = controller.clone();
                 let expected_session = expected_session.clone();
                 tokio::spawn(async move {
@@ -1410,8 +1419,8 @@ impl RecordingController {
 
         let config = self.config.read().await.clone();
         let language_opt = Some(config.whisper_language.as_str().to_string());
-        let user_needs_separator = self.toggle_user_has_text.load(Ordering::SeqCst);
-        let assistant_needs_separator = self.toggle_assistant_has_text.load(Ordering::SeqCst);
+        let user_needs_separator = false;
+        let assistant_needs_separator = false;
 
         let result = self
             .process_transcript_text_pipeline(types::TranscriptPipelineParams {
@@ -1427,7 +1436,7 @@ impl RecordingController {
                 audio_path: None,
                 cloud_text_opt: None,
                 cloud_handle: None,
-                append_mode: true,
+                append_mode: false,
                 user_needs_separator,
                 assistant_needs_separator,
                 skip_user_bubble,
@@ -1683,7 +1692,7 @@ impl RecordingController {
 
         // In assistive mode, we want to update overlay state even if the window hasn't been
         // realized on the main thread yet. This avoids "dead" overlays due to timing.
-        let chat_active = assistive || crate::voice_chat_ui::is_voice_chat_overlay_visible();
+        let chat_active = assistive;
         let assistive_loop = assistive && self.assistive_loop_active.load(Ordering::SeqCst);
 
         let mut raw_text_opt = None;
@@ -1883,7 +1892,7 @@ impl RecordingController {
             warn!("Detected repetition loop in transcription - will clean up");
         }
 
-        let chat_active = assistive || crate::voice_chat_ui::is_voice_chat_overlay_visible();
+        let chat_active = assistive;
 
         let effective_hold_mode = if assistive && matches!(hold_mode, HoldMode::Raw) {
             // Toggle-assistive path doesn't have a meaningful hold-mode; treat as Chat
@@ -2080,80 +2089,22 @@ impl RecordingController {
             if should_use_ai {
                 info!("Formatting mode (Left Option): correcting transcript via AI");
 
-                crate::hide_transcription_overlay();
-                crate::show_voice_chat_overlay();
-                crate::show_agent_tab();
-                if append_mode {
-                    if user_needs_separator {
-                        crate::voice_chat_ui::append_voice_chat_user_delta("\n\n");
-                    }
-                    crate::voice_chat_ui::append_voice_chat_user_delta(&clean_text);
-                    self.toggle_user_has_text.store(true, Ordering::SeqCst);
-                } else {
-                    crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
-                }
-                crate::voice_chat_ui::set_voice_chat_sending(true);
-                crate::voice_chat_ui::update_voice_chat_status("Formatting...");
-
                 let lang_str = language_opt.map(String::from);
-
-                // Determine streaming mode from config
-                let transcript_mode = config.transcript_send_mode;
-                let use_streaming = matches!(
-                    transcript_mode,
-                    crate::config::TranscriptSendMode::Streaming
-                );
-
-                // Callback for streaming AI response to overlay
-                let delta_callback = if use_streaming {
-                    let needs_prefix = append_mode && assistant_needs_separator;
-                    let prefix_sent = Arc::new(AtomicBool::new(false));
-                    let assistant_has_text = self.toggle_assistant_has_text.clone();
-                    Some(Arc::new(move |text: &str| {
-                        if needs_prefix && !prefix_sent.swap(true, Ordering::SeqCst) {
-                            crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
-                        }
-                        crate::voice_chat_ui::append_voice_chat_assistant_delta(text);
-                        assistant_has_text.store(true, Ordering::SeqCst);
-                    }) as Arc<dyn Fn(&str) + Send + Sync>)
-                } else {
-                    None
-                };
-
                 let result = crate::ai_formatting::format_text_with_status(
                     &clean_text,
                     lang_str.as_deref(),
                     false,
-                    delta_callback,
+                    None,
                 )
                 .await;
                 let kind = match result.status {
                     crate::ai_formatting::AiFormatStatus::Applied => {
-                        // Display formatted text in overlay
-                        crate::show_voice_chat_overlay();
-                        crate::voice_chat_ui::update_voice_chat_status("Formatted:");
-                        if append_mode {
-                            if assistant_needs_separator {
-                                crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
-                            }
-                            crate::voice_chat_ui::append_voice_chat_assistant_delta(&result.text);
-                            self.toggle_assistant_has_text.store(true, Ordering::SeqCst);
-                        } else {
-                            crate::voice_chat_ui::set_voice_chat_text(&result.text);
-                        }
-                        info!(
-                            "Formatted response displayed in overlay ({} chars)",
-                            result.text.len()
-                        );
                         crate::state::history::TranscriptKind::Ai
                     }
                     crate::ai_formatting::AiFormatStatus::Failed => {
-                        crate::voice_chat_ui::update_voice_chat_status("Formatting Failed");
-                        crate::voice_chat_ui::add_voice_chat_error_message("Formatting Failed");
                         crate::state::history::TranscriptKind::AiFailed
                     }
                     crate::ai_formatting::AiFormatStatus::Skipped => {
-                        crate::voice_chat_ui::set_voice_chat_sending(false);
                         crate::state::history::TranscriptKind::Raw
                     }
                 };
@@ -2184,79 +2135,22 @@ impl RecordingController {
                 // Toggle ON: formatting only (no augmentation)
                 info!("Formatting mode (Toggle): correcting transcript via AI");
 
-                crate::hide_transcription_overlay();
-                crate::show_voice_chat_overlay();
-                crate::show_agent_tab();
-                if append_mode {
-                    if user_needs_separator {
-                        crate::voice_chat_ui::append_voice_chat_user_delta("\n\n");
-                    }
-                    crate::voice_chat_ui::append_voice_chat_user_delta(&clean_text);
-                    self.toggle_user_has_text.store(true, Ordering::SeqCst);
-                } else {
-                    crate::voice_chat_ui::add_voice_chat_user_message(&clean_text);
-                }
-                crate::voice_chat_ui::set_voice_chat_sending(true);
-                crate::voice_chat_ui::update_voice_chat_status("Formatting...");
-
                 let lang_str = language_opt.map(String::from);
-
-                // Determine streaming mode from config
-                let transcript_mode = config.transcript_send_mode;
-                let use_streaming = matches!(
-                    transcript_mode,
-                    crate::config::TranscriptSendMode::Streaming
-                );
-
-                // Callback for streaming AI response to overlay
-                let delta_callback = if use_streaming {
-                    let needs_prefix = append_mode && assistant_needs_separator;
-                    let prefix_sent = Arc::new(AtomicBool::new(false));
-                    let assistant_has_text = self.toggle_assistant_has_text.clone();
-                    Some(Arc::new(move |text: &str| {
-                        if needs_prefix && !prefix_sent.swap(true, Ordering::SeqCst) {
-                            crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
-                        }
-                        crate::voice_chat_ui::append_voice_chat_assistant_delta(text);
-                        assistant_has_text.store(true, Ordering::SeqCst);
-                    }) as Arc<dyn Fn(&str) + Send + Sync>)
-                } else {
-                    None
-                };
-
                 let result = crate::ai_formatting::format_text_with_status(
                     &clean_text,
                     lang_str.as_deref(),
                     false,
-                    delta_callback,
+                    None,
                 )
                 .await;
                 let kind = match result.status {
                     crate::ai_formatting::AiFormatStatus::Applied => {
-                        // Display formatted text in overlay
-                        crate::voice_chat_ui::update_voice_chat_status("Formatted:");
-                        if append_mode {
-                            if assistant_needs_separator {
-                                crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
-                            }
-                            crate::voice_chat_ui::append_voice_chat_assistant_delta(&result.text);
-                            self.toggle_assistant_has_text.store(true, Ordering::SeqCst);
-                        } else {
-                            crate::voice_chat_ui::set_voice_chat_text(&result.text);
-                        }
-                        info!(
-                            "Formatted response displayed in overlay ({} chars)",
-                            result.text.len()
-                        );
                         crate::state::history::TranscriptKind::Ai
                     }
                     crate::ai_formatting::AiFormatStatus::Failed => {
-                        crate::voice_chat_ui::update_voice_chat_status("Formatting Failed");
-                        crate::voice_chat_ui::add_voice_chat_error_message("Formatting Failed");
                         crate::state::history::TranscriptKind::AiFailed
                     }
                     crate::ai_formatting::AiFormatStatus::Skipped => {
-                        crate::voice_chat_ui::set_voice_chat_sending(false);
                         crate::state::history::TranscriptKind::Raw
                     }
                 };

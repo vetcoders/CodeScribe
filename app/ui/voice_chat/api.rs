@@ -110,6 +110,7 @@ pub fn add_voice_chat_error_message(text: &str) {
     let text_owned = text.to_string();
     Queue::main().exec_async(move || {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.active_assistant_stream_index = None;
         let mode = message_mode_label(&state);
         state.messages.push(ChatMessage {
             role: ChatRole::System,
@@ -130,6 +131,7 @@ pub fn add_voice_chat_user_message(text: &str) {
     let text_owned = text.to_string();
     Queue::main().exec_async(move || {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.active_user_stream_index = None;
         let mode = message_mode_label(&state);
         state.messages.push(ChatMessage {
             role: ChatRole::User,
@@ -857,7 +859,22 @@ fn try_update_message_view_in_place(state: &mut VoiceChatOverlayState, index: us
 fn finalize_user_message_impl(text: &str) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     ensure_agent_tab_visible(&mut state);
-    let idx = last_message_index(&state, ChatRole::User).unwrap_or_else(|| {
+    let idx = if let Some(idx) = state.active_user_stream_index.take() {
+        if is_valid_stream_message(&state, idx, ChatRole::User) {
+            idx
+        } else {
+            let mode = message_mode_label(&state);
+            state.messages.push(ChatMessage {
+                role: ChatRole::User,
+                text: String::new(),
+                is_streaming: false,
+                is_error: false,
+                timestamp: SystemTime::now(),
+                mode: Some(mode),
+            });
+            state.messages.len() - 1
+        }
+    } else {
         let mode = message_mode_label(&state);
         state.messages.push(ChatMessage {
             role: ChatRole::User,
@@ -868,7 +885,7 @@ fn finalize_user_message_impl(text: &str) {
             mode: Some(mode),
         });
         state.messages.len() - 1
-    });
+    };
     if let Some(msg) = state.messages.get_mut(idx) {
         msg.text = text.to_string();
         msg.is_streaming = false;
@@ -879,16 +896,16 @@ fn finalize_user_message_impl(text: &str) {
 
 fn finalize_user_message_state_only_impl() {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(last) = state
-        .messages
-        .iter_mut()
-        .rev()
-        .find(|msg| msg.role == ChatRole::User)
-    {
+    let Some(idx) = state
+        .active_user_stream_index
+        .take()
+        .filter(|idx| is_valid_stream_message(&state, *idx, ChatRole::User))
+    else {
+        return;
+    };
+    if let Some(last) = state.messages.get_mut(idx) {
         last.is_streaming = false;
         last.is_error = false;
-    } else {
-        return;
     }
     update_chat_view_with_state(&mut state, true);
 }
@@ -896,7 +913,22 @@ fn finalize_user_message_state_only_impl() {
 fn finalize_assistant_message_impl(text: &str, is_error: bool) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     ensure_agent_tab_visible(&mut state);
-    let idx = last_message_index(&state, ChatRole::Assistant).unwrap_or_else(|| {
+    let idx = if let Some(idx) = state.active_assistant_stream_index.take() {
+        if is_valid_stream_message(&state, idx, ChatRole::Assistant) {
+            idx
+        } else {
+            let mode = message_mode_label(&state);
+            state.messages.push(ChatMessage {
+                role: ChatRole::Assistant,
+                text: String::new(),
+                is_streaming: false,
+                is_error,
+                timestamp: SystemTime::now(),
+                mode: Some(mode),
+            });
+            state.messages.len() - 1
+        }
+    } else {
         let mode = message_mode_label(&state);
         state.messages.push(ChatMessage {
             role: ChatRole::Assistant,
@@ -907,7 +939,7 @@ fn finalize_assistant_message_impl(text: &str, is_error: bool) {
             mode: Some(mode),
         });
         state.messages.len() - 1
-    });
+    };
     if let Some(msg) = state.messages.get_mut(idx) {
         msg.text = text.to_string();
         msg.is_streaming = false;
@@ -920,16 +952,16 @@ fn finalize_assistant_message_impl(text: &str, is_error: bool) {
 
 fn finalize_assistant_message_state_only_impl(is_error: bool) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(last) = state
-        .messages
-        .iter_mut()
-        .rev()
-        .find(|msg| msg.role == ChatRole::Assistant)
-    {
+    let Some(idx) = state
+        .active_assistant_stream_index
+        .take()
+        .filter(|idx| is_valid_stream_message(&state, *idx, ChatRole::Assistant))
+    else {
+        return;
+    };
+    if let Some(last) = state.messages.get_mut(idx) {
         last.is_streaming = false;
         last.is_error = is_error;
-    } else {
-        return;
     }
     state.is_sending = false;
     update_chat_view_with_state(&mut state, true);
@@ -956,6 +988,8 @@ pub(super) fn clear_voice_chat_text_impl() {
     let btn_ptr = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.messages.clear();
+        state.active_user_stream_index = None;
+        state.active_assistant_stream_index = None;
         state.manual_draft.clear();
         state.is_sending = false;
         state.attachments.clear();
@@ -1118,22 +1152,53 @@ pub(super) fn commit_last_user_message_impl() {
 pub(super) fn discard_last_message_impl() {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if state.messages.pop().is_some() {
+        if let Some(idx) = state.active_user_stream_index
+            && idx >= state.messages.len()
+        {
+            state.active_user_stream_index = None;
+        }
+        if let Some(idx) = state.active_assistant_stream_index
+            && idx >= state.messages.len()
+        {
+            state.active_assistant_stream_index = None;
+        }
         update_chat_view_with_state(&mut state, true);
     }
 }
 
-fn last_message_index(state: &VoiceChatOverlayState, role: ChatRole) -> Option<usize> {
-    state.messages.iter().rposition(|msg| msg.role == role)
+fn active_stream_index_mut(
+    state: &mut VoiceChatOverlayState,
+    role: ChatRole,
+) -> Option<&mut Option<usize>> {
+    match role {
+        ChatRole::User => Some(&mut state.active_user_stream_index),
+        ChatRole::Assistant => Some(&mut state.active_assistant_stream_index),
+        ChatRole::System => None,
+    }
+}
+
+fn active_stream_index(state: &VoiceChatOverlayState, role: ChatRole) -> Option<usize> {
+    match role {
+        ChatRole::User => state.active_user_stream_index,
+        ChatRole::Assistant => state.active_assistant_stream_index,
+        ChatRole::System => None,
+    }
+}
+
+fn is_valid_stream_message(state: &VoiceChatOverlayState, idx: usize, role: ChatRole) -> bool {
+    state
+        .messages
+        .get(idx)
+        .map(|msg| msg.role == role && msg.is_streaming)
+        .unwrap_or(false)
 }
 
 fn get_or_create_streaming_message_index(
     state: &mut VoiceChatOverlayState,
     role: ChatRole,
 ) -> usize {
-    if let Some(idx) = state
-        .messages
-        .iter()
-        .rposition(|msg| msg.role == role && msg.is_streaming)
+    if let Some(idx) = active_stream_index(state, role)
+        && is_valid_stream_message(state, idx, role)
     {
         return idx;
     }
@@ -1147,7 +1212,11 @@ fn get_or_create_streaming_message_index(
         timestamp: SystemTime::now(),
         mode: Some(mode),
     });
-    state.messages.len() - 1
+    let idx = state.messages.len() - 1;
+    if let Some(active_idx) = active_stream_index_mut(state, role) {
+        *active_idx = Some(idx);
+    }
+    idx
 }
 
 pub(super) fn update_chat_view_with_state(
@@ -2208,6 +2277,8 @@ pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
     state.attachment_chip_strip = None;
     state.active_tab = Tab::Drawer;
     state.pending_tab = None;
+    state.active_user_stream_index = None;
+    state.active_assistant_stream_index = None;
     state.is_sending = false;
     state.manual_draft.clear();
     state.conversation_state = ConversationModeState::Inactive;
