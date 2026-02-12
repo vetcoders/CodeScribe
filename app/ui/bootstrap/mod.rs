@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -221,6 +222,76 @@ fn parse_env_bool(v: &str) -> bool {
 
 fn voice_lab_value(spec: &VoiceLabFieldSpec) -> String {
     std::env::var(spec.key).unwrap_or_else(|_| spec.default_value.to_string())
+}
+
+fn voice_lab_value_from_snapshot(
+    spec: &VoiceLabFieldSpec,
+    env_snapshot: &HashMap<String, String>,
+) -> String {
+    env_snapshot
+        .get(spec.key)
+        .cloned()
+        .unwrap_or_else(|| spec.default_value.to_string())
+}
+
+fn parse_ranged_f32(raw: &str, min: f32, max: f32) -> Option<f32> {
+    let parsed = raw.parse::<f32>().ok()?;
+    if !parsed.is_finite() || parsed < min || parsed > max {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn parse_ranged_u64(raw: &str, min: u64, max: u64) -> Option<u64> {
+    let parsed = raw.parse::<u64>().ok()?;
+    if parsed < min || parsed > max {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn parse_ranged_usize(raw: &str, min: usize, max: usize) -> Option<usize> {
+    let parsed = raw.parse::<usize>().ok()?;
+    if parsed < min || parsed > max {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn validate_voice_lab_value(spec: &VoiceLabFieldSpec, raw_value: &str) -> Option<String> {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return if spec.default_value.is_empty() {
+            Some(String::new())
+        } else {
+            None
+        };
+    }
+
+    let valid = match spec.key {
+        "CODESCRIBE_BUFFER_DELAY_MS" => parse_ranged_u64(trimmed, 0, 60_000).is_some(),
+        "CODESCRIBE_TYPING_CPS" => parse_ranged_f32(trimmed, 5.0, 120.0).is_some(),
+        "CODESCRIBE_EMIT_WORDS_MAX" => parse_ranged_usize(trimmed, 1, 12).is_some(),
+        "CODESCRIBE_STREAM_CHUNK_SEC" => parse_ranged_f32(trimmed, 0.5, 30.0).is_some(),
+        "CODESCRIBE_STREAM_OVERLAP_RATIO" => parse_ranged_f32(trimmed, 0.05, 0.8).is_some(),
+        "CODESCRIBE_STREAM_SIMILARITY" => parse_ranged_f32(trimmed, 0.0, 1.0).is_some(),
+        "CODESCRIBE_STREAM_NOVELTY" => parse_ranged_f32(trimmed, 0.0, 1.0).is_some(),
+        "CODESCRIBE_BUFFERED_CORRECTION_UTTERANCES" => parse_ranged_usize(trimmed, 1, 10).is_some(),
+        "CODESCRIBE_BUFFERED_CORRECTION_SEC" => parse_ranged_f32(trimmed, 1.0, 60.0).is_some(),
+        "CODESCRIBE_BUFFERED_CORRECTION_PREFIX" => parse_ranged_f32(trimmed, 0.4, 0.9).is_some(),
+        "CODESCRIBE_BUFFERED_INTERIM_SEC" => parse_ranged_f32(trimmed, 1.0, 30.0).is_some(),
+        "CODESCRIBE_UTTERANCE_INTERIM_SEC" => parse_ranged_f32(trimmed, 1.0, 30.0).is_some(),
+        "BACKEND_MAX_UPLOAD_MB" => parse_ranged_u64(trimmed, 1, 200).is_some(),
+        // String fields.
+        "WHISPER_MODEL" | "CODESCRIBE_STREAM_LOG_PATH" => true,
+        _ => true,
+    };
+
+    if valid {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
 }
 
 fn voice_lab_spec_from_tag(tag: isize) -> Option<&'static VoiceLabFieldSpec> {
@@ -1787,6 +1858,7 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
     unsafe {
         let ns_view = Class::get("NSView").unwrap();
         let ns_scroll_view = Class::get("NSScrollView").unwrap();
+        let env_snapshot: HashMap<String, String> = std::env::vars().collect();
 
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
@@ -1810,12 +1882,21 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Hot-reload transcription engine controls (persisted to .env)".to_string(),
+            text: "Hot-reload transcription engine controls (persisted to config)".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
         });
         add_subview(container, subtitle);
+        y -= 16.0;
+        let apply_hint = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 14.0)),
+            text: "Apply: press Enter or click outside the field.".to_string(),
+            font_size: 10.0,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, apply_hint);
         y -= 14.0;
 
         let scroll_h = (y - 18.0).max(160.0);
@@ -1856,7 +1937,8 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
         for (idx, spec) in VOICE_LAB_FIELDS.iter().enumerate() {
             match spec.kind {
                 VoiceLabFieldKind::Bool => {
-                    let checked = parse_env_bool(&voice_lab_value(spec));
+                    let checked =
+                        parse_env_bool(&voice_lab_value_from_snapshot(spec, &env_snapshot));
                     let title = format!("{} ({})", spec.label, spec.key);
                     let check = create_checkbox(
                         CGRect::new(&CGPoint::new(0.0, row_y), &CGSize::new(doc_w - 6.0, 20.0)),
@@ -1892,7 +1974,7 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
                     add_subview(doc_view, label);
                     row_y -= 20.0;
 
-                    let current = voice_lab_value(spec);
+                    let current = voice_lab_value_from_snapshot(spec, &env_snapshot);
                     let field = create_text_input(
                         CGRect::new(&CGPoint::new(0.0, row_y), &CGSize::new(doc_w - 6.0, 22.0)),
                         spec.default_value,
@@ -2331,9 +2413,18 @@ pub(super) extern "C" fn on_voice_lab_field_changed(
             .to_string_lossy()
             .trim()
             .to_string();
-        info!("Settings: {} -> {}", spec.key, value);
+        let Some(validated) = validate_voice_lab_value(spec, &value) else {
+            warn!(
+                "Settings: rejected invalid value for {} -> {:?}",
+                spec.key, value
+            );
+            set_text_field_string(sender, &voice_lab_value(spec));
+            return;
+        };
+        info!("Settings: {} -> {}", spec.key, validated);
         let config = Config::load();
-        let _ = config.save_to_env(spec.key, &value);
+        let _ = config.save_to_env(spec.key, &validated);
+        set_text_field_string(sender, &validated);
     }
 }
 
@@ -2448,6 +2539,46 @@ fn send_ipc(cmd: IpcCommand) -> Result<IpcResponse, String> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn voice_lab_validation_rejects_invalid_numeric() {
+        let spec = VoiceLabFieldSpec {
+            key: "CODESCRIBE_STREAM_CHUNK_SEC",
+            label: "Chunk sec",
+            default_value: "4.0",
+            description: "",
+            kind: VoiceLabFieldKind::Value,
+        };
+        assert!(validate_voice_lab_value(&spec, "abc").is_none());
+        assert!(validate_voice_lab_value(&spec, "0.1").is_none());
+        assert_eq!(
+            validate_voice_lab_value(&spec, "4.5"),
+            Some("4.5".to_string())
+        );
+    }
+
+    #[test]
+    fn voice_lab_validation_handles_empty_by_default_policy() {
+        let non_empty = VoiceLabFieldSpec {
+            key: "WHISPER_MODEL",
+            label: "Whisper cloud model",
+            default_value: "mlx-community/whisper-large-v3-mlx",
+            description: "",
+            kind: VoiceLabFieldKind::Value,
+        };
+        let allow_empty = VoiceLabFieldSpec {
+            key: "CODESCRIBE_STREAM_LOG_PATH",
+            label: "Stream log path",
+            default_value: "",
+            description: "",
+            kind: VoiceLabFieldKind::Value,
+        };
+        assert!(validate_voice_lab_value(&non_empty, " ").is_none());
+        assert_eq!(
+            validate_voice_lab_value(&allow_empty, " "),
+            Some(String::new())
+        );
+    }
 
     #[test]
     #[serial]
