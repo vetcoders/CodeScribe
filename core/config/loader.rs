@@ -584,14 +584,16 @@ impl Config {
                 "HOLD_START_DELAY_MS"
                 | "DOUBLE_TAP_INTERVAL_MS"
                 | "CODESCRIBE_BUFFER_DELAY_MS"
-                | "CODESCRIBE_TYPING_CPS"
                 | "CODESCRIBE_EMIT_WORDS_MAX"
                 | "BACKEND_MAX_UPLOAD_MB" => {
                     if let Ok(v) = value.parse::<u64>() {
                         settings.set_u64(key, v);
                     }
                 }
-                "SOUND_VOLUME" | "TOGGLE_SILENCE_SEC" | "CODESCRIBE_BUFFERED_INTERIM_SEC" => {
+                "SOUND_VOLUME"
+                | "TOGGLE_SILENCE_SEC"
+                | "CODESCRIBE_TYPING_CPS"
+                | "CODESCRIBE_BUFFERED_INTERIM_SEC" => {
                     if let Ok(v) = value.parse::<f32>() {
                         settings.set_f32(key, v);
                     }
@@ -753,11 +755,6 @@ impl Config {
                             settings_ref.buffer_delay_ms = Some(v);
                         }
                     }
-                    "CODESCRIBE_TYPING_CPS" => {
-                        if let Ok(v) = value.parse::<u64>() {
-                            settings_ref.typing_cps = Some(v);
-                        }
-                    }
                     "CODESCRIBE_EMIT_WORDS_MAX" => {
                         if let Ok(v) = value.parse::<u64>() {
                             settings_ref.emit_words_max = Some(v);
@@ -772,6 +769,11 @@ impl Config {
                     "TOGGLE_SILENCE_SEC" => {
                         if let Ok(v) = value.parse::<f32>() {
                             settings_ref.toggle_silence_sec = Some(v);
+                        }
+                    }
+                    "CODESCRIBE_TYPING_CPS" => {
+                        if let Ok(v) = value.parse::<f32>() {
+                            settings_ref.typing_cps = Some(v);
                         }
                     }
                     "CODESCRIBE_BUFFERED_INTERIM_SEC" => {

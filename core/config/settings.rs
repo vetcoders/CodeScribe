@@ -84,7 +84,7 @@ pub struct UserSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_delay_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub typing_cps: Option<u64>,
+    pub typing_cps: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emit_words_max: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,7 +220,6 @@ impl UserSettings {
             "HOLD_START_DELAY_MS" => self.hold_start_delay_ms = Some(value),
             "DOUBLE_TAP_INTERVAL_MS" => self.double_tap_interval_ms = Some(value),
             "CODESCRIBE_BUFFER_DELAY_MS" => self.buffer_delay_ms = Some(value),
-            "CODESCRIBE_TYPING_CPS" => self.typing_cps = Some(value),
             "CODESCRIBE_EMIT_WORDS_MAX" => self.emit_words_max = Some(value),
             "BACKEND_MAX_UPLOAD_MB" => self.backend_max_upload_mb = Some(value),
             other => {
@@ -238,6 +237,7 @@ impl UserSettings {
         match key {
             "SOUND_VOLUME" => self.sound_volume = Some(value),
             "TOGGLE_SILENCE_SEC" => self.toggle_silence_sec = Some(value),
+            "CODESCRIBE_TYPING_CPS" => self.typing_cps = Some(value),
             "CODESCRIBE_BUFFERED_INTERIM_SEC" => self.buffered_interim_sec = Some(value),
             other => {
                 warn!("Unknown f32 setting key: {other}");

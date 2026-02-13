@@ -134,7 +134,7 @@ pub fn migrate_if_needed() {
         settings.buffer_delay_ms = Some(n);
     }
     if let Ok(v) = std::env::var("CODESCRIBE_TYPING_CPS")
-        && let Ok(n) = v.parse::<u64>()
+        && let Ok(n) = v.parse::<f32>()
     {
         settings.typing_cps = Some(n);
     }

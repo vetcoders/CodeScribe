@@ -28,6 +28,7 @@ fn setup_test_env() -> TempDir {
         std::env::remove_var("HOLD_EXCLUSIVE");
         std::env::remove_var("HOTKEY_DOUBLE_TAP_LEFT");
         std::env::remove_var("HOTKEY_DOUBLE_TAP_RIGHT");
+        std::env::remove_var("CODESCRIBE_TYPING_CPS");
     }
     tmp
 }
@@ -227,6 +228,32 @@ fn test_settings_buffered_stream_toggle() {
         settings.buffered_stream,
         Some(false),
         "last value persisted in JSON"
+    );
+}
+
+#[test]
+#[serial]
+fn test_settings_typing_cps_decimal_persistence() {
+    let _tmp = setup_test_env();
+
+    let config = Config::load();
+    config
+        .save_to_env("CODESCRIBE_TYPING_CPS", "36.5")
+        .expect("save typing cps");
+
+    assert_eq!(
+        std::env::var("CODESCRIBE_TYPING_CPS").unwrap(),
+        "36.5",
+        "runtime env should preserve decimal value"
+    );
+
+    let settings = codescribe::config::UserSettings::load();
+    let persisted = settings
+        .typing_cps
+        .expect("typing_cps should be persisted to settings.json");
+    assert!(
+        (persisted - 36.5).abs() < 0.0001,
+        "typing_cps should persist as f32 (expected 36.5, got {persisted})"
     );
 }
 

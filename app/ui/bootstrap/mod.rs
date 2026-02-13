@@ -2011,29 +2011,29 @@ unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect) -> Id {
         // ── Whisper Model ──────────────────────────────────────
         let whisper_embedded = codescribe_core::stt::whisper::embedded::is_embedded_available();
         let whisper_status = if whisper_embedded {
-            "Embedded (~894 MB in binary)"
+            "Embedded (~894 MB in binary)".to_string()
         } else {
             let path =
                 std::env::var("CODESCRIBE_MODEL_PATH").unwrap_or_else(|_| "(not set)".to_string());
-            Box::leak(format!("External: {}", path).into_boxed_str())
+            format!("External: {path}")
         };
-        add_row("Whisper", whisper_status, whisper_embedded);
+        add_row("Whisper", &whisper_status, whisper_embedded);
 
         // ── VAD (Silero) ───────────────────────────────────────
         let vad_embedded = codescribe_core::vad::embedded::is_embedded_available();
         let vad_status = if vad_embedded {
-            "Silero v6 embedded (2.3 MB)"
+            "Silero v6 embedded (2.3 MB)".to_string()
         } else {
             let path = codescribe_core::vad::user_model_path();
             if path.exists() {
-                Box::leak(format!("Silero v6: {}", path.display()).into_boxed_str())
+                format!("Silero v6: {}", path.display())
             } else {
-                "Not found (will auto-download)"
+                "Not found (will auto-download)".to_string()
             }
         };
         add_row(
             "VAD",
-            vad_status,
+            &vad_status,
             vad_embedded || codescribe_core::vad::user_model_path().exists(),
         );
 
