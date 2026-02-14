@@ -152,12 +152,37 @@ pub fn check_microphone() -> PermissionStatus {
 /// Request Microphone permission
 ///
 /// Shows system dialog asking user to grant microphone access.
-/// Returns true only when access is already granted.
+/// Returns true when access is granted.
 #[cfg(target_os = "macos")]
 pub fn request_microphone() -> bool {
-    // This module exposes synchronous APIs only; onboarding will deep-link to
-    // System Settings when the permission isn't granted.
-    check_microphone() == PermissionStatus::Granted
+    match check_microphone() {
+        PermissionStatus::Granted => return true,
+        PermissionStatus::Denied => return false,
+        PermissionStatus::NotDetermined => {}
+    }
+
+    let Some(av_class) = Class::get("AVCaptureDevice") else {
+        return false;
+    };
+
+    let media_type = CFString::new("soun");
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    unsafe {
+        let request_block = block::ConcreteBlock::new(move |granted: bool| {
+            let _ = tx.send(granted);
+        })
+        .copy();
+
+        let _: () = msg_send![
+            av_class,
+            requestAccessForMediaType: media_type.as_concrete_TypeRef()
+            completionHandler: &*request_block
+        ];
+    }
+
+    rx.recv_timeout(std::time::Duration::from_secs(60))
+        .unwrap_or_else(|_| check_microphone() == PermissionStatus::Granted)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -255,7 +280,7 @@ fn has_full_disk_access() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn open_privacy_settings(deeplink: &str) {
+pub fn open_privacy_settings(deeplink: &str) {
     let url = format!(
         "x-apple.systempreferences:com.apple.preference.security?{}",
         deeplink

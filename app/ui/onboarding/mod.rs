@@ -11,7 +11,6 @@ use crate::ui::shared::helpers::{
 };
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
-use lazy_static::lazy_static;
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{msg_send, sel, sel_impl};
@@ -23,8 +22,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
-use std::sync::{Mutex, Once};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -149,14 +147,11 @@ impl Default for OnboardingState {
     }
 }
 
-lazy_static! {
-    static ref ONBOARDING_STATE: Mutex<OnboardingState> = Mutex::new(OnboardingState::default());
-}
+static ONBOARDING_STATE: LazyLock<Mutex<OnboardingState>> =
+    LazyLock::new(|| Mutex::new(OnboardingState::default()));
 
-static ACTION_HANDLER_INIT: Once = Once::new();
-static mut ACTION_HANDLER_CLASS: *const Class = std::ptr::null();
-static WINDOW_DELEGATE_INIT: Once = Once::new();
-static mut WINDOW_DELEGATE_CLASS: *const Class = std::ptr::null();
+static ACTION_HANDLER_CLASS: OnceLock<&'static Class> = OnceLock::new();
+static WINDOW_DELEGATE_CLASS: OnceLock<&'static Class> = OnceLock::new();
 
 const PERMISSION_ORDER: [PermissionKind; 5] = [
     PermissionKind::Microphone,
@@ -297,56 +292,48 @@ fn is_main_thread() -> bool {
     }
 }
 
-fn action_handler_class() -> *const Class {
-    unsafe {
-        ACTION_HANDLER_INIT.call_once(|| {
-            let superclass = Class::get("NSObject").expect("NSObject class missing");
-            let mut decl = ClassDecl::new("CodeScribeOnboardingActionHandler", superclass)
-                .expect("Failed to create onboarding action handler class");
+fn action_handler_class() -> &'static Class {
+    ACTION_HANDLER_CLASS.get_or_init(|| unsafe {
+        let superclass = Class::get("NSObject").expect("NSObject class missing");
+        let mut decl = ClassDecl::new("CodeScribeOnboardingActionHandler", superclass)
+            .expect("Failed to create onboarding action handler class");
 
-            decl.add_method(
-                sel!(onPrimaryAction:),
-                on_primary_action as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
-                sel!(onBackAction:),
-                on_back_action as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
-                sel!(onSkipAction:),
-                on_skip_action as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
-                sel!(onLanguageSelected:),
-                on_language_selected as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
-                sel!(onHotkeySelected:),
-                on_hotkey_selected as extern "C" fn(&Object, Sel, Id),
-            );
+        decl.add_method(
+            sel!(onPrimaryAction:),
+            on_primary_action as extern "C" fn(&Object, Sel, Id),
+        );
+        decl.add_method(
+            sel!(onBackAction:),
+            on_back_action as extern "C" fn(&Object, Sel, Id),
+        );
+        decl.add_method(
+            sel!(onSkipAction:),
+            on_skip_action as extern "C" fn(&Object, Sel, Id),
+        );
+        decl.add_method(
+            sel!(onLanguageSelected:),
+            on_language_selected as extern "C" fn(&Object, Sel, Id),
+        );
+        decl.add_method(
+            sel!(onHotkeySelected:),
+            on_hotkey_selected as extern "C" fn(&Object, Sel, Id),
+        );
 
-            ACTION_HANDLER_CLASS = decl.register();
-        });
-
-        ACTION_HANDLER_CLASS
-    }
+        decl.register()
+    })
 }
 
-fn window_delegate_class() -> *const Class {
-    unsafe {
-        WINDOW_DELEGATE_INIT.call_once(|| {
-            let superclass = Class::get("NSObject").expect("NSObject class missing");
-            let mut decl = ClassDecl::new("CodeScribeOnboardingWindowDelegate", superclass)
-                .expect("Failed to create onboarding window delegate class");
-            decl.add_method(
-                sel!(windowWillClose:),
-                on_window_will_close as extern "C" fn(&Object, Sel, Id),
-            );
-            WINDOW_DELEGATE_CLASS = decl.register();
-        });
-
-        WINDOW_DELEGATE_CLASS
-    }
+fn window_delegate_class() -> &'static Class {
+    WINDOW_DELEGATE_CLASS.get_or_init(|| unsafe {
+        let superclass = Class::get("NSObject").expect("NSObject class missing");
+        let mut decl = ClassDecl::new("CodeScribeOnboardingWindowDelegate", superclass)
+            .expect("Failed to create onboarding window delegate class");
+        decl.add_method(
+            sel!(windowWillClose:),
+            on_window_will_close as extern "C" fn(&Object, Sel, Id),
+        );
+        decl.register()
+    })
 }
 
 extern "C" fn on_primary_action(_this: &Object, _sel: Sel, _sender: Id) {
@@ -389,12 +376,21 @@ extern "C" fn on_hotkey_selected(_this: &Object, _sel: Sel, sender: Id) {
 
 extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, _notification: Id) {
     let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let delegate_ptr = state.window_delegate.take();
+    let handler_ptr = state.action_handler.take();
     state.window = None;
-    state.window_delegate = None;
-    state.action_handler = None;
     state.full_disk_polling = false;
     state.scheduled_auto_advance_step = None;
     drop(state);
+
+    unsafe {
+        if let Some(ptr) = delegate_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = handler_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+    }
 
     stop_modal();
 }
@@ -436,7 +432,7 @@ fn show_onboarding_wizard_impl() {
 
         let ns_window = Class::get("NSWindow").unwrap();
         let window: Id = msg_send![ns_window, alloc];
-        let style = NSWindowStyleMask::Titled;
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
         let window: Id = msg_send![
             window,
             initWithContentRect: frame
@@ -1480,7 +1476,7 @@ fn request_permission(kind: PermissionKind) -> bool {
         PermissionKind::Microphone => {
             let result = permissions::request_microphone();
             if !result {
-                open_privacy_settings("Privacy_Microphone");
+                permissions::open_privacy_settings("Privacy_Microphone");
             }
             result
         }
@@ -1489,20 +1485,12 @@ fn request_permission(kind: PermissionKind) -> bool {
         PermissionKind::ScreenRecording => {
             let result = permissions::request_screen_recording();
             if !result {
-                open_privacy_settings("Privacy_ScreenCapture");
+                permissions::open_privacy_settings("Privacy_ScreenCapture");
             }
             result
         }
         PermissionKind::FullDiskAccess => permissions::request_full_disk_access(),
     }
-}
-
-fn open_privacy_settings(deeplink: &str) {
-    let url = format!(
-        "x-apple.systempreferences:com.apple.preference.security?{}",
-        deeplink
-    );
-    let _ = Command::new("open").arg(url).spawn();
 }
 
 fn configure_label(label: Id, centered: bool, multiline: bool) {
