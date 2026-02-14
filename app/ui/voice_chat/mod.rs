@@ -11,9 +11,9 @@ mod state;
 
 // Re-export public API
 pub use api::{
-    add_voice_chat_error_message, add_voice_chat_user_message, append_voice_chat_assistant_delta,
-    append_voice_chat_user_delta, clear_voice_chat_text, filter_drawer,
-    finalize_voice_chat_assistant_message, finalize_voice_chat_user_message,
+    add_voice_chat_error_message, add_voice_chat_system_message, add_voice_chat_user_message,
+    append_voice_chat_assistant_delta, append_voice_chat_user_delta, clear_voice_chat_text,
+    filter_drawer, finalize_voice_chat_assistant_message, finalize_voice_chat_user_message,
     hide_voice_chat_overlay, is_auto_send_enabled, is_conversation_active,
     is_voice_chat_overlay_visible, refresh_drawer, request_settings_tab_on_open,
     reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_send_callback,

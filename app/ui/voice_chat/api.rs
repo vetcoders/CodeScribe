@@ -126,6 +126,24 @@ pub fn add_voice_chat_error_message(text: &str) {
     });
 }
 
+/// Add a non-error system message to the chat log.
+pub fn add_voice_chat_system_message(text: &str) {
+    let text_owned = text.to_string();
+    Queue::main().exec_async(move || {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mode = message_mode_label(&state);
+        state.messages.push(ChatMessage {
+            role: ChatRole::System,
+            text: text_owned.clone(),
+            is_streaming: false,
+            is_error: false,
+            timestamp: SystemTime::now(),
+            mode: Some(mode),
+        });
+        update_chat_view_with_state(&mut state, true);
+    });
+}
+
 /// Add a user message to the chat
 pub fn add_voice_chat_user_message(text: &str) {
     let text_owned = text.to_string();

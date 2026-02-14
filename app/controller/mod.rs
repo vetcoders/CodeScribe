@@ -1894,7 +1894,7 @@ impl RecordingController {
 
         let chat_active = assistive;
 
-        let effective_hold_mode = if assistive && matches!(hold_mode, HoldMode::Raw) {
+        let mut effective_hold_mode = if assistive && matches!(hold_mode, HoldMode::Raw) {
             // Toggle-assistive path doesn't have a meaningful hold-mode; treat as Chat
             // but allow optional selection context if it was captured.
             HoldMode::Chat
@@ -1971,12 +1971,27 @@ impl RecordingController {
                 ));
             }
 
+            let missing_selection = matches!(effective_hold_mode, HoldMode::Selection)
+                && ctx.selected_text.as_deref().unwrap_or("").trim().is_empty();
+            if missing_selection {
+                warn!(
+                    "Selection mode requested, but no selected text captured; falling back to Chat mode"
+                );
+                effective_hold_mode = HoldMode::Chat;
+                if chat_active {
+                    crate::voice_chat_ui::update_voice_chat_status(
+                        "Selection unavailable - chat fallback",
+                    );
+                    crate::voice_chat_ui::add_voice_chat_system_message(
+                        "Selection was not detected. Continuing without selected-text context.",
+                    );
+                }
+            }
+
             // Split behavior:
             // - Chat: ignore selection.
-            // - Selection: require selection; never fallback to clipboard by default.
-            if matches!(effective_hold_mode, HoldMode::Selection)
-                && ctx.selected_text.as_deref().unwrap_or("").trim().is_empty()
-            {
+            // - Selection: if no selection was captured, we already downgraded to Chat mode.
+            if missing_selection && matches!(effective_hold_mode, HoldMode::Selection) {
                 if chat_active {
                     crate::voice_chat_ui::set_voice_chat_sending(false);
                     crate::voice_chat_ui::update_voice_chat_status("No selection");
