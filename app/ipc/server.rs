@@ -84,21 +84,60 @@ async fn handle_client(stream: UnixStream, controller: Arc<RecordingController>)
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
+    let mut event_rx: Option<tokio::sync::broadcast::Receiver<codescribe_core::ipc::IpcEvent>> =
+        None;
 
-    while reader.read_line(&mut line).await? > 0 {
-        let cmd = match serde_json::from_str::<IpcCommand>(&line) {
-            Ok(cmd) => cmd,
-            Err(e) => {
-                let response = IpcResponse::Error(format!("Invalid JSON: {}", e));
-                write_response(&mut writer, &response).await?;
+    loop {
+        tokio::select! {
+            read_result = reader.read_line(&mut line) => {
+                let n = read_result?;
+                if n == 0 {
+                    break;
+                }
+
+                let cmd = match serde_json::from_str::<IpcCommand>(&line) {
+                    Ok(cmd) => cmd,
+                    Err(e) => {
+                        let response = IpcResponse::Error(format!("Invalid JSON: {}", e));
+                        write_response(&mut writer, &response).await?;
+                        line.clear();
+                        continue;
+                    }
+                };
+
+                match cmd {
+                    IpcCommand::Subscribe => {
+                        event_rx = Some(controller.subscribe_events());
+                        write_response(&mut writer, &IpcResponse::Ok).await?;
+                    }
+                    IpcCommand::Unsubscribe => {
+                        event_rx = None;
+                        write_response(&mut writer, &IpcResponse::Ok).await?;
+                    }
+                    _ => {
+                        let response = handle_command(cmd, &controller).await;
+                        write_response(&mut writer, &response).await?;
+                    }
+                }
+
                 line.clear();
-                continue;
             }
-        };
-
-        let response = handle_command(cmd, &controller).await;
-        write_response(&mut writer, &response).await?;
-        line.clear();
+            event = async {
+                event_rx.as_mut().expect("event_rx checked by guard").recv().await
+            }, if event_rx.is_some() => {
+                match event {
+                    Ok(ev) => {
+                        write_response(&mut writer, &IpcResponse::Event(ev)).await?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("IPC subscriber lagged by {} event(s)", n);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        event_rx = None;
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -271,6 +310,9 @@ async fn handle_command(cmd: IpcCommand, controller: &RecordingController) -> Ip
                 Ok(()) => IpcResponse::Ok,
                 Err(e) => IpcResponse::Error(format!("Failed to stop recording: {}", e)),
             }
+        }
+        IpcCommand::Subscribe | IpcCommand::Unsubscribe => {
+            IpcResponse::Error("Subscribe/Unsubscribe are handled at connection level".to_string())
         }
     }
 }

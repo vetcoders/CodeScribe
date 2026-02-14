@@ -126,8 +126,32 @@ pub fn raw_save_enabled() -> bool {
 // Event-based routing (new pipeline)
 // ═══════════════════════════════════════════════════════════
 
+use chrono::SecondsFormat;
+use codescribe_core::ipc::{EngineEventWire, IpcEvent, IpcEventPayload};
 use codescribe_core::pipeline::contracts::{EngineEvent, EventSink, TranscriptDelta};
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
+
+/// Broadcasts sanitized engine events to IPC subscribers.
+pub(crate) struct IpcBroadcastSink {
+    tx: broadcast::Sender<IpcEvent>,
+}
+
+impl IpcBroadcastSink {
+    pub(crate) fn new(tx: broadcast::Sender<IpcEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+impl EventSink for IpcBroadcastSink {
+    fn on_event(&self, event: &EngineEvent) {
+        let ipc_event = IpcEvent {
+            timestamp: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            payload: IpcEventPayload::Engine(EngineEventWire::from(event)),
+        };
+        let _ = self.tx.send(ipc_event);
+    }
+}
 
 /// Routes `EngineEvent`s to the appropriate UI based on session state.
 ///

@@ -35,7 +35,7 @@ use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -52,6 +52,7 @@ use crate::{BadgeMode, hide_hold_badge, show_badge_for_mode};
 
 // Moshi conversation engine and audio output
 use codescribe_core::conversation::{ConversationEngine, MoshiConfig};
+use codescribe_core::ipc::{IpcEvent, IpcEventPayload};
 use codescribe_core::tts::AudioPlayer;
 
 // UI state for conversation mode
@@ -181,6 +182,9 @@ pub struct RecordingController {
 
     /// Task handle for conversation audio processing loop
     conversation_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+
+    /// Broadcast stream for IPC subscribers.
+    event_broadcast: broadcast::Sender<IpcEvent>,
 }
 
 impl RecordingController {
@@ -219,6 +223,7 @@ impl RecordingController {
 
         let config = Arc::new(RwLock::new(config));
         setup_voice_chat_send_callback(Arc::clone(&config));
+        let (event_broadcast, _) = broadcast::channel::<IpcEvent>(256);
 
         Self {
             config,
@@ -243,6 +248,7 @@ impl RecordingController {
             conversation_stop_flag: Arc::new(AtomicBool::new(false)),
             conversation_generation: Arc::new(AtomicU64::new(0)),
             conversation_task: Arc::new(Mutex::new(None)),
+            event_broadcast,
         }
     }
 
@@ -283,6 +289,7 @@ impl RecordingController {
         }
 
         setup_voice_chat_send_callback(Arc::clone(&config));
+        let (event_broadcast, _) = broadcast::channel::<IpcEvent>(256);
 
         Self {
             config,
@@ -307,12 +314,44 @@ impl RecordingController {
             conversation_stop_flag: Arc::new(AtomicBool::new(false)),
             conversation_generation: Arc::new(AtomicU64::new(0)),
             conversation_task: Arc::new(Mutex::new(None)),
+            event_broadcast,
         }
     }
 
     /// Get current state
     pub async fn current_state(&self) -> State {
         *self.state.read().await
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<IpcEvent> {
+        self.event_broadcast.subscribe()
+    }
+
+    async fn set_state(&self, new_state: State) {
+        Self::set_state_with_broadcast(&self.state, &self.event_broadcast, new_state).await;
+    }
+
+    async fn set_state_with_broadcast(
+        state: &Arc<RwLock<State>>,
+        event_broadcast: &broadcast::Sender<IpcEvent>,
+        new_state: State,
+    ) {
+        let old_state = {
+            let mut guard = state.write().await;
+            let old = *guard;
+            *guard = new_state;
+            old
+        };
+
+        if old_state != new_state {
+            let _ = event_broadcast.send(IpcEvent {
+                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                payload: IpcEventPayload::StateChange {
+                    from: old_state.to_ipc_str().to_string(),
+                    to: new_state.to_ipc_str().to_string(),
+                },
+            });
+        }
     }
 
     /// Replace controller configuration at runtime
@@ -652,7 +691,7 @@ impl RecordingController {
         helpers::set_conversation_session(true);
 
         // 5. Transition to CONVERSATION state
-        *self.state.write().await = State::Conversation;
+        self.set_state(State::Conversation).await;
         info!("STATE TRANSITION: IDLE → CONVERSATION");
 
         // 6. Update UI
@@ -669,6 +708,7 @@ impl RecordingController {
         let generation_arc = Arc::clone(&self.conversation_generation);
         let state = Arc::clone(&self.state);
         let recorder = Arc::clone(&self.recorder);
+        let event_broadcast = self.event_broadcast.clone();
 
         let task = tokio::spawn(async move {
             Self::conversation_audio_loop(
@@ -679,6 +719,7 @@ impl RecordingController {
                 generation_arc,
                 generation,
                 state,
+                event_broadcast,
             )
             .await;
         });
@@ -691,6 +732,7 @@ impl RecordingController {
     /// The main conversation audio processing loop
     ///
     /// Runs in a background task: captures audio → ConversationEngine → speaker
+    #[allow(clippy::too_many_arguments)]
     async fn conversation_audio_loop(
         engine: Arc<Mutex<Option<ConversationEngine>>>,
         player: Arc<Mutex<Option<AudioPlayer>>>,
@@ -699,6 +741,7 @@ impl RecordingController {
         generation_counter: Arc<AtomicU64>,
         my_generation: u64,
         state: Arc<RwLock<State>>,
+        event_broadcast: broadcast::Sender<IpcEvent>,
     ) {
         info!(
             "Conversation audio loop started (generation {})",
@@ -722,7 +765,7 @@ impl RecordingController {
             if let Err(e) = rec.recorder.start().await {
                 error!("Failed to start recorder for conversation: {}", e);
                 // Full cleanup on failure: state, session flag, badge, UI
-                *state.write().await = State::Idle;
+                Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
                 helpers::set_conversation_session(false);
                 hide_hold_badge();
                 crate::voice_chat_ui::update_voice_chat_status("Recorder error");
@@ -885,7 +928,7 @@ impl RecordingController {
             // This loop owns the current session - safe to cleanup
             stop_flag.store(true, Ordering::SeqCst);
 
-            *state.write().await = State::Idle;
+            Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
             helpers::set_conversation_session(false);
             hide_hold_badge();
             crate::voice_chat_ui::update_voice_chat_status("Conversation ended");
@@ -946,7 +989,7 @@ impl RecordingController {
         }
 
         // 7. Transition back to IDLE
-        *self.state.write().await = State::Idle;
+        self.set_state(State::Idle).await;
         info!("STATE TRANSITION: CONVERSATION → IDLE");
 
         // 8. Update UI
@@ -1004,6 +1047,7 @@ impl RecordingController {
         let delay = Duration::from_millis(delay_ms);
         let vad_flag = Arc::clone(&self.vad_triggered);
         let assistive_context = Arc::clone(&self.assistive_context);
+        let event_broadcast = self.event_broadcast.clone();
         let opened_overlay_for_transcription =
             Arc::clone(&self.opened_voice_chat_overlay_for_transcription);
 
@@ -1054,8 +1098,13 @@ impl RecordingController {
                 let tb = rec.transcript_buffer_handle();
                 let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
                     Arc::new(helpers::RoutingDeltaSink);
-                let pe = PresentationEmitter::new(tb, Some(delta_sink), None);
-                rec.set_event_sink(Some(Arc::new(pe)));
+                let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
+                    Arc::new(PresentationEmitter::new(tb, Some(delta_sink), None));
+                let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
+                    Arc::new(helpers::IpcBroadcastSink::new(event_broadcast.clone()));
+                rec.set_event_sink(Some(
+                    codescribe_core::pipeline::sinks::FanoutEventSink::pair(pe, ipc_sink),
+                ));
 
                 if !cfg!(test)
                     && let Err(e) = rec
@@ -1136,7 +1185,7 @@ impl RecordingController {
             }
 
             // Transition to REC_HOLD
-            *state.write().await = State::RecHold;
+            Self::set_state_with_broadcast(&state, &event_broadcast, State::RecHold).await;
             info!(
                 "STATE TRANSITION: IDLE → REC_HOLD (assistive={})",
                 is_assistive
@@ -1224,6 +1273,7 @@ impl RecordingController {
             let controller = OVERLAY_CONTROLLER.get().cloned();
             let expected_session = new_session_id.clone();
             let is_assistive_session = is_assistive;
+            let event_broadcast = self.event_broadcast.clone();
 
             let tb = recorder.transcript_buffer_handle();
             let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
@@ -1253,7 +1303,12 @@ impl RecordingController {
                 });
             })));
 
-            recorder.set_event_sink(Some(Arc::new(pe)));
+            let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> = Arc::new(pe);
+            let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
+                Arc::new(helpers::IpcBroadcastSink::new(event_broadcast));
+            recorder.set_event_sink(Some(
+                codescribe_core::pipeline::sinks::FanoutEventSink::pair(pe, ipc_sink),
+            ));
 
             if !cfg!(test) {
                 recorder
@@ -1360,7 +1415,7 @@ impl RecordingController {
         }
 
         // Transition to REC_TOGGLE
-        *self.state.write().await = State::RecToggle;
+        self.set_state(State::RecToggle).await;
         info!("STATE TRANSITION: IDLE → REC_TOGGLE (pulsing badge)");
 
         Ok(())
@@ -1472,7 +1527,7 @@ impl RecordingController {
         drop(recorder);
 
         // Reset state
-        *self.state.write().await = State::Idle;
+        self.set_state(State::Idle).await;
         *self.assistive_mode.write().await = false;
         *self.hold_mode.write().await = HoldMode::Raw;
         *self.force_raw_mode.write().await = false;
@@ -1530,7 +1585,7 @@ impl RecordingController {
 
         // Transition to BUSY
         debug!("STATE TRANSITION: {} → BUSY", current_state);
-        *self.state.write().await = State::Busy;
+        self.set_state(State::Busy).await;
 
         // Get session ID and mode flags before we reset them
         let session_id = self.session_id.read().await.clone();
@@ -1547,7 +1602,7 @@ impl RecordingController {
             .await;
 
         // Always reset to IDLE, even on error
-        *self.state.write().await = State::Idle;
+        self.set_state(State::Idle).await;
         *self.assistive_mode.write().await = false;
         *self.hold_mode.write().await = HoldMode::Raw;
         *self.force_raw_mode.write().await = false;
@@ -2316,7 +2371,7 @@ impl RecordingController {
 
     /// Internal helper to reset all state variables
     async fn reset_state(&self) {
-        *self.state.write().await = State::Idle;
+        self.set_state(State::Idle).await;
         *self.assistive_mode.write().await = false;
         *self.hold_mode.write().await = HoldMode::Raw;
         *self.force_raw_mode.write().await = false;
