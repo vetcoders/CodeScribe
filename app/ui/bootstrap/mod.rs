@@ -31,7 +31,12 @@ mod handlers;
 // Type alias for Objective-C object pointers
 type Id = *mut Object;
 
-const SIDEBAR_WIDTH: f64 = 132.0;
+const SIDEBAR_WIDTH: f64 = 154.0;
+const SETTINGS_WINDOW_WIDTH: f64 = 760.0;
+const SETTINGS_WINDOW_HEIGHT: f64 = 660.0;
+const SETTINGS_HEADER_HEIGHT: f64 = 92.0;
+const SETTINGS_CONTENT_INSET_X: f64 = 20.0;
+const SETTINGS_CONTENT_INSET_Y: f64 = 12.0;
 const TAB_SETUP: usize = 0;
 const TAB_KEYS: usize = 1;
 const TAB_AUDIO: usize = 2;
@@ -303,8 +308,8 @@ fn show_bootstrap_overlay_impl() {
             return;
         }
         let visible: CGRect = msg_send![screen, visibleFrame];
-        let window_width = 720.0;
-        let window_height = 640.0;
+        let window_width = SETTINGS_WINDOW_WIDTH;
+        let window_height = SETTINGS_WINDOW_HEIGHT;
         let x = visible.origin.x + (visible.size.width - window_width) * 0.5;
         let y = visible.origin.y + (visible.size.height - window_height) * 0.5;
         let frame = CGRect::new(
@@ -314,7 +319,7 @@ fn show_bootstrap_overlay_impl() {
 
         // Settings window should be fixed-size (no resize / fullscreen), to avoid AppKit
         // fullscreen transition crashes with our custom content setup.
-        let window = create_floating_window(frame, "Settings", false, false);
+        let window = create_floating_window(frame, "Settings", true, false);
         let _: () = msg_send![window, setOpaque: false];
         let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
         // Disallow fullscreen/zoom to avoid triggering AppKit fullscreen snapshots that can crash.
@@ -380,10 +385,17 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
             root,
             setAutoresizingMask: 2_isize | 16_isize // NSViewWidthSizable | NSViewHeightSizable
         ];
-        // No corner radius on the root container; individual panes will handle their own if needed,
-        // or the window itself handles clipping. Since it's a full-size content window, we rely on window mask.
-        // Actually, for a floating window, we might want rounded corners on the content if it's detached,
-        // but here we are building a standard window structure.
+        let _: () = msg_send![root, setWantsLayer: true];
+        let root_layer: Id = msg_send![root, layer];
+        if !root_layer.is_null() {
+            let _: () = msg_send![root_layer, setCornerRadius: ui_tokens::CORNER_RADIUS_LG];
+            let _: () = msg_send![root_layer, setMasksToBounds: true];
+            let border = ui_colors::separator();
+            let border: Id = msg_send![border, colorWithAlphaComponent: 0.34f64];
+            let cg_border: Id = msg_send![border, CGColor];
+            let _: () = msg_send![root_layer, setBorderColor: cg_border];
+            let _: () = msg_send![root_layer, setBorderWidth: 1.0f64];
+        }
         add_subview(parent, root);
 
         let action_handler_class = action_handler_class();
@@ -584,14 +596,14 @@ unsafe fn build_settings_ui(
         ];
         add_subview(root_view, sidebar_bg);
 
-        // Right: Content (Material: WindowBackground)
+        // Right: Content (Material: HUDWindow for richer contrast, aligned with onboarding)
         let content_bg_frame = CGRect::new(
             &CGPoint::new(SIDEBAR_WIDTH, 0.0),
             &CGSize::new(settings_width - SIDEBAR_WIDTH, settings_height),
         );
         let content_bg = create_glass_effect_view_with(
             content_bg_frame,
-            NSVisualEffectMaterial::WindowBackground,
+            NSVisualEffectMaterial::HUDWindow,
             objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
             objc2_app_kit::NSVisualEffectState::Active,
         );
@@ -601,30 +613,62 @@ unsafe fn build_settings_ui(
         ];
         add_subview(root_view, content_bg);
 
+        let split_divider = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(SIDEBAR_WIDTH - 0.5, 0.0),
+                &CGSize::new(1.0, settings_height),
+            ),
+            text: String::new(),
+            background_color: Some(ui_colors::separator()),
+            ..Default::default()
+        });
+        let _: () = msg_send![split_divider, setAlphaValue: 0.52f64];
+        add_subview(root_view, split_divider);
+
         // ── Header (inside Content BG) ───────────────────────────────
-        let header_h = 80.0; // Slightly shorter header for modern feel
+        let header_h = SETTINGS_HEADER_HEIGHT;
         let content_area_w = content_bg_frame.size.width;
-        let content_area_h = settings_height; // Full height available in bg, but we'll inset content below header
+        let content_area_h = settings_height;
+
+        let header_bg = create_glass_effect_view_with(
+            CGRect::new(
+                &CGPoint::new(0.0, content_area_h - header_h),
+                &CGSize::new(content_area_w, header_h),
+            ),
+            NSVisualEffectMaterial::Titlebar,
+            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
+            objc2_app_kit::NSVisualEffectState::Active,
+        );
+        let _: () = msg_send![header_bg, setAutoresizingMask: 2_isize | 8_isize];
+        let header_layer: Id = msg_send![header_bg, layer];
+        if !header_layer.is_null() {
+            let border = ui_colors::separator();
+            let border: Id = msg_send![border, colorWithAlphaComponent: 0.5f64];
+            let cg_border: Id = msg_send![border, CGColor];
+            let _: () = msg_send![header_layer, setBorderColor: cg_border];
+            let _: () = msg_send![header_layer, setBorderWidth: 1.0f64];
+        }
+        add_subview(content_bg, header_bg);
 
         let title_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(30.0, content_area_h - 40.0),
-                &CGSize::new(content_area_w - 60.0, 24.0),
+                &CGPoint::new(30.0, header_h - 40.0),
+                &CGSize::new(content_area_w - 60.0, 26.0),
             ),
             text: "Welcome to CodeScribe".to_string(),
-            font_size: 18.0,
+            font_size: 19.0,
             bold: true,
             text_color: crate::ui_helpers::color_label(),
             background_color: None,
             selectable: false,
             editable: false,
         });
-        add_subview(content_bg, title_label);
+        add_subview(header_bg, title_label);
 
         let subtitle_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(30.0, content_area_h - 60.0),
-                &CGSize::new(content_area_w - 60.0, 16.0),
+                &CGPoint::new(30.0, header_h - 60.0),
+                &CGSize::new(content_area_w - 60.0, 18.0),
             ),
             text: "Native macOS speech-to-text with AI formatting".to_string(),
             font_size: ui_tokens::SMALL_FONT_SIZE,
@@ -632,13 +676,23 @@ unsafe fn build_settings_ui(
             text_color: crate::ui_helpers::color_secondary_label(),
             ..Default::default()
         });
-        add_subview(content_bg, subtitle_label);
+        add_subview(header_bg, subtitle_label);
+
+        let sidebar_title = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(16.0, settings_height - 38.0),
+                &CGSize::new(SIDEBAR_WIDTH - 26.0, 20.0),
+            ),
+            text: "Settings".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: crate::ui_helpers::color_label(),
+            ..Default::default()
+        });
+        add_subview(sidebar_bg, sidebar_title);
 
         // Sidebar tab buttons (inside sidebar_bg)
-        // Vertically centered or top-aligned? Standard is top, below window traffic lights if visible.
-        // Since it's a frameless window with titlebar, traffic lights are at top-left.
-        // We start buttons a bit lower.
-        let tab_start_y = settings_height - 60.0;
+        let tab_start_y = settings_height - 88.0;
         let tab_names = ["Setup", "Keys", "Audio", "Voice Lab", "Engine"];
         let tab_sels = [
             sel!(onTabSetup:),
@@ -650,12 +704,12 @@ unsafe fn build_settings_ui(
         let mut tab_buttons: [Option<usize>; TAB_COUNT] = [None; TAB_COUNT];
 
         for (i, (name, sel)) in tab_names.iter().zip(tab_sels.iter()).enumerate() {
-            let btn_height = 36.0;
-            let gap = 4.0;
+            let btn_height = 38.0;
+            let gap = 6.0;
             let btn_y = tab_start_y - (btn_height + gap) * (i as f64);
             let btn_frame = CGRect::new(
-                &CGPoint::new(8.0, btn_y),
-                &CGSize::new(SIDEBAR_WIDTH - 16.0, btn_height),
+                &CGPoint::new(10.0, btn_y),
+                &CGSize::new(SIDEBAR_WIDTH - 20.0, btn_height),
             );
 
             let tab_btn = create_sidebar_tab_button(btn_frame, name, i == TAB_SETUP);
@@ -669,12 +723,15 @@ unsafe fn build_settings_ui(
         // ====================================================================
         // Relative to content_bg: origin is (0,0)
         let tab_content_frame = CGRect::new(
-            &CGPoint::new(0.0, 0.0),
-            &CGSize::new(content_area_w, content_area_h - header_h),
+            &CGPoint::new(SETTINGS_CONTENT_INSET_X, SETTINGS_CONTENT_INSET_Y),
+            &CGSize::new(
+                (content_area_w - SETTINGS_CONTENT_INSET_X * 2.0).max(240.0),
+                (content_area_h - header_h - SETTINGS_CONTENT_INSET_Y * 2.0).max(220.0),
+            ),
         );
 
         // --- Setup tab (index 0) ---
-        let content_width = content_area_w;
+        let content_width = tab_content_frame.size.width;
         let content_h = tab_content_frame.size.height;
 
         let setup_view: Id = msg_send![ns_view, alloc];
@@ -686,7 +743,6 @@ unsafe fn build_settings_ui(
         let primary = crate::ui_helpers::color_label();
         let secondary = crate::ui_helpers::color_secondary_label();
         let mut y = content_h - 20.0;
-        let mono_font = crate::ui_helpers::monospace_font(ui_tokens::SMALL_FONT_SIZE);
         let mono_font_input = crate::ui_helpers::monospace_font(ui_tokens::BODY_FONT_SIZE);
 
         // ── Permission indicators ────────────────────────────────────
@@ -709,7 +765,6 @@ unsafe fn build_settings_ui(
                 text_color: permission_color(*granted),
                 ..Default::default()
             });
-            let _: () = msg_send![lbl, setFont: mono_font];
             add_subview(setup_view, lbl);
             perm_labels[i] = Some(lbl as usize);
         }
@@ -751,7 +806,6 @@ unsafe fn build_settings_ui(
                 text_color: secondary,
                 ..Default::default()
             });
-            let _: () = msg_send![status_lbl, setFont: mono_font];
             add_subview(setup_view, status_lbl);
             step_status_labels[i] = Some(status_lbl as usize);
 
@@ -1052,24 +1106,32 @@ unsafe fn create_sidebar_tab_button(
         // NSImageLeft = 2
         let _: () = msg_send![btn, setImagePosition: 2_isize];
 
-        let font: Id = msg_send![ns_font, systemFontOfSize: 13.0f64];
+        let font: Id = msg_send![ns_font, systemFontOfSize: 13.5f64];
         let _: () = msg_send![btn, setFont: font];
 
         let _: () = msg_send![btn, setWantsLayer: true];
         let layer: Id = msg_send![btn, layer];
         if !layer.is_null() {
             let bg = if active {
-                // Active selection color (accent color with some transparency)
                 let ns_color = Class::get("NSColor").unwrap();
                 let accent: Id = msg_send![ns_color, controlAccentColor];
                 let semi: Id = msg_send![accent, colorWithAlphaComponent: 0.2f64];
                 semi
             } else {
-                crate::ui_helpers::color_clear()
+                let base = ui_colors::panel_bg();
+                msg_send![base, colorWithAlphaComponent: 0.20f64]
             };
             let cg_color: Id = msg_send![bg, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg_color];
-            let _: () = msg_send![layer, setCornerRadius: 6.0f64]; // Rounded rect selection
+            let _: () = msg_send![layer, setCornerRadius: ui_tokens::CORNER_RADIUS_SM];
+            let border = ui_colors::separator();
+            let border: Id = msg_send![
+                border,
+                colorWithAlphaComponent: if active { 0.56f64 } else { 0.24f64 }
+            ];
+            let cg_border: Id = msg_send![border, CGColor];
+            let _: () = msg_send![layer, setBorderColor: cg_border];
+            let _: () = msg_send![layer, setBorderWidth: 1.0f64];
         }
 
         let tint = if active {
@@ -1113,14 +1175,25 @@ pub(super) fn switch_tab(index: usize) {
                 let _: () = msg_send![btn, setWantsLayer: true];
                 let layer: Id = msg_send![btn, layer];
                 if !layer.is_null() {
-                    let bg = if active {
-                        ui_colors::panel_bg()
+                    let bg: Id = if active {
+                        let ns_color = Class::get("NSColor").unwrap();
+                        let accent: Id = msg_send![ns_color, controlAccentColor];
+                        msg_send![accent, colorWithAlphaComponent: 0.2f64]
                     } else {
-                        crate::ui_helpers::color_clear()
+                        let base = ui_colors::panel_bg();
+                        msg_send![base, colorWithAlphaComponent: 0.20f64]
                     };
                     let cg_color: Id = msg_send![bg, CGColor];
                     let _: () = msg_send![layer, setBackgroundColor: cg_color];
                     let _: () = msg_send![layer, setCornerRadius: ui_tokens::CORNER_RADIUS_SM];
+                    let border = ui_colors::separator();
+                    let border: Id = msg_send![
+                        border,
+                        colorWithAlphaComponent: if active { 0.56f64 } else { 0.24f64 }
+                    ];
+                    let cg_border: Id = msg_send![border, CGColor];
+                    let _: () = msg_send![layer, setBorderColor: cg_border];
+                    let _: () = msg_send![layer, setBorderWidth: 1.0f64];
                 }
 
                 let tint = if active {

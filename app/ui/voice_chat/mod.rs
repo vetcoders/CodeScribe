@@ -637,6 +637,11 @@ fn show_voice_chat_overlay_impl() {
         if !sidebar_layer.is_null() {
             let _: () = msg_send![sidebar_layer, setCornerRadius: ui_tokens::CORNER_RADIUS_MD];
             let _: () = msg_send![sidebar_layer, setMasksToBounds: true];
+            let border = ui_colors::separator();
+            let border: Id = msg_send![border, colorWithAlphaComponent: 0.28f64];
+            let cg_border: Id = msg_send![border, CGColor];
+            let _: () = msg_send![sidebar_layer, setBorderColor: cg_border];
+            let _: () = msg_send![sidebar_layer, setBorderWidth: 1.0f64];
         }
         let _: () = msg_send![sidebar_controller, setView: sidebar_view];
 
@@ -651,6 +656,20 @@ fn show_voice_chat_overlay_impl() {
             )
         ];
         let _: () = msg_send![content_view, setWantsLayer: true];
+        let content_layer: Id = msg_send![content_view, layer];
+        if !content_layer.is_null() {
+            let bg = ui_colors::card_bg();
+            let bg: Id = msg_send![bg, colorWithAlphaComponent: 0.56f64];
+            let cg_bg: Id = msg_send![bg, CGColor];
+            let _: () = msg_send![content_layer, setBackgroundColor: cg_bg];
+            let _: () = msg_send![content_layer, setCornerRadius: ui_tokens::CORNER_RADIUS_MD];
+            let _: () = msg_send![content_layer, setMasksToBounds: true];
+            let border = ui_colors::separator();
+            let border: Id = msg_send![border, colorWithAlphaComponent: 0.24f64];
+            let cg_border: Id = msg_send![border, CGColor];
+            let _: () = msg_send![content_layer, setBorderColor: cg_border];
+            let _: () = msg_send![content_layer, setBorderWidth: 1.0f64];
+        }
         let _: () = msg_send![content_controller, setView: content_view];
 
         let has_sidebar_ctor: bool =
@@ -865,6 +884,13 @@ fn show_voice_chat_overlay_impl() {
             let cg_border: Id = msg_send![border, CGColor];
             let _: () = msg_send![input_layer, setBorderColor: cg_border];
             let _: () = msg_send![input_layer, setBorderWidth: 1.0f64];
+            let shadow = color_secondary_label();
+            let shadow: Id = msg_send![shadow, colorWithAlphaComponent: 0.28f64];
+            let cg_shadow: Id = msg_send![shadow, CGColor];
+            let _: () = msg_send![input_layer, setShadowColor: cg_shadow];
+            let _: () = msg_send![input_layer, setShadowOpacity: 0.9f64];
+            let _: () = msg_send![input_layer, setShadowRadius: 10.0f64];
+            let _: () = msg_send![input_layer, setShadowOffset: CGSize::new(0.0, 2.0)];
         }
         add_subview(content_view, input_bar);
 
