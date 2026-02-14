@@ -2241,6 +2241,7 @@ pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime
             set_keys_popup_index(state.keys_toggle_popup, 0);
         }
         mark_keys_preset_custom();
+        sync_runtime_config_via_ipc();
     }
 }
 
@@ -2263,6 +2264,7 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
                 set_keys_popup_index(state.keys_hold_popup, 0);
                 set_keys_popup_index(state.keys_toggle_popup, 4);
                 set_keys_checkbox_state(state.keys_exclusive_checkbox, true);
+                sync_runtime_config_via_ipc();
             }
             // Safe (no toggles)
             1 => {
@@ -2279,6 +2281,7 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
                 set_keys_popup_index(state.keys_hold_popup, 0);
                 set_keys_popup_index(state.keys_toggle_popup, 0);
                 set_keys_checkbox_state(state.keys_exclusive_checkbox, false);
+                sync_runtime_config_via_ipc();
             }
             _ => {
                 info!("Settings: hotkey preset -> custom");
@@ -2301,6 +2304,7 @@ pub(super) extern "C" fn on_hold_exclusive_changed(
         let _ = config.save_to_env("HOLD_EXCLUSIVE", if hold_exclusive { "1" } else { "0" });
         hotkeys::set_exclusive_mode(hold_exclusive);
         mark_keys_preset_custom();
+        sync_runtime_config_via_ipc();
     }
 }
 
@@ -2332,11 +2336,12 @@ pub(super) extern "C" fn on_toggle_trigger_changed(
             hotkeys::set_exclusive_mode(false);
 
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            set_keys_popup_index(state.keys_hold_popup, 1);
+            set_keys_popup_index(state.keys_hold_popup, 2);
             set_keys_checkbox_state(state.keys_exclusive_checkbox, true);
         }
 
         mark_keys_preset_custom();
+        sync_runtime_config_via_ipc();
     }
 }
 pub(super) extern "C" fn on_language_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
@@ -2517,6 +2522,7 @@ pub(super) extern "C" fn on_delay_changed(_this: &Object, _cmd: objc::runtime::S
         if let Some(ptr) = label_ptr {
             set_text_field_string(ptr as Id, &format!("{ms} ms"));
         }
+        sync_runtime_config_via_ipc();
     }
 }
 
@@ -2539,6 +2545,7 @@ pub(super) extern "C" fn on_double_tap_interval_changed(
         if let Some(ptr) = label_ptr {
             set_text_field_string(ptr as Id, &format!("{ms} ms"));
         }
+        sync_runtime_config_via_ipc();
     }
 }
 
@@ -2738,6 +2745,12 @@ fn send_ipc(cmd: IpcCommand) -> Result<IpcResponse, String> {
     reader.read_line(&mut line).map_err(|e| e.to_string())?;
 
     serde_json::from_str::<IpcResponse>(&line).map_err(|e| e.to_string())
+}
+
+fn sync_runtime_config_via_ipc() {
+    if let Err(e) = send_ipc(IpcCommand::ReloadRuntimeConfig) {
+        warn!("Settings: runtime config sync via IPC failed: {e}");
+    }
 }
 
 #[cfg(test)]

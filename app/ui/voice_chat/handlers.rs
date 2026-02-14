@@ -1158,6 +1158,49 @@ extern "C" fn on_more_menu(this: &Object, _cmd: Sel, sender: Id) {
         let sep2: Id = msg_send![ns_menu_item, separatorItem];
         let _: () = msg_send![menu, addItem: sep2];
 
+        let export_all_copy: Id = msg_send![ns_menu_item, alloc];
+        let export_all_copy: Id = msg_send![
+            export_all_copy,
+            initWithTitle: ns_string("Export all (copy markdown)")
+            action: sel!(onExportAllCopy:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![export_all_copy, setTarget: target];
+        let _: () = msg_send![menu, addItem: export_all_copy];
+
+        let export_all_save: Id = msg_send![ns_menu_item, alloc];
+        let export_all_save: Id = msg_send![
+            export_all_save,
+            initWithTitle: ns_string("Export all (save markdown)")
+            action: sel!(onExportAllSave:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![export_all_save, setTarget: target];
+        let _: () = msg_send![menu, addItem: export_all_save];
+
+        let export_assistant_copy: Id = msg_send![ns_menu_item, alloc];
+        let export_assistant_copy: Id = msg_send![
+            export_assistant_copy,
+            initWithTitle: ns_string("Export assistant (copy markdown)")
+            action: sel!(onExportAssistantCopy:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![export_assistant_copy, setTarget: target];
+        let _: () = msg_send![menu, addItem: export_assistant_copy];
+
+        let export_assistant_save: Id = msg_send![ns_menu_item, alloc];
+        let export_assistant_save: Id = msg_send![
+            export_assistant_save,
+            initWithTitle: ns_string("Export assistant (save markdown)")
+            action: sel!(onExportAssistantSave:)
+            keyEquivalent: ns_string("")
+        ];
+        let _: () = msg_send![export_assistant_save, setTarget: target];
+        let _: () = msg_send![menu, addItem: export_assistant_save];
+
+        let sep3: Id = msg_send![ns_menu_item, separatorItem];
+        let _: () = msg_send![menu, addItem: sep3];
+
         let shortcuts_item: Id = msg_send![ns_menu_item, alloc];
         let shortcuts_item: Id = msg_send![
             shortcuts_item,

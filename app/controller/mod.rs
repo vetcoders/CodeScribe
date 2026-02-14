@@ -1995,22 +1995,21 @@ impl RecordingController {
 
             let lang_str = language_opt.map(String::from);
 
-            // Determine streaming mode from config
-            let transcript_mode = config.transcript_send_mode;
-            let use_streaming = matches!(
-                transcript_mode,
-                crate::config::TranscriptSendMode::Streaming
-            );
+            // Assistive/chat responses should always stream to preserve progressive feedback.
+            let use_streaming = chat_active;
 
             // Callback for streaming AI response to overlay
+            let streamed_any_delta = Arc::new(AtomicBool::new(false));
             let delta_callback = if use_streaming && chat_active {
                 let needs_prefix = append_mode && assistant_needs_separator;
                 let prefix_sent = Arc::new(AtomicBool::new(false));
                 let assistant_has_text = self.toggle_assistant_has_text.clone();
+                let streamed_any_delta = Arc::clone(&streamed_any_delta);
                 Some(Arc::new(move |text: &str| {
                     if needs_prefix && !prefix_sent.swap(true, Ordering::SeqCst) {
                         crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
                     }
+                    streamed_any_delta.store(true, Ordering::SeqCst);
                     crate::voice_chat_ui::append_voice_chat_assistant_delta(text);
                     assistant_has_text.store(true, Ordering::SeqCst);
                 }) as Arc<dyn Fn(&str) + Send + Sync>)
@@ -2028,10 +2027,13 @@ impl RecordingController {
             let kind = match result.status {
                 crate::ai_formatting::AiFormatStatus::Applied => {
                     if chat_active {
+                        let streamed = use_streaming && streamed_any_delta.load(Ordering::SeqCst);
                         // Display AI response in overlay
                         crate::show_voice_chat_overlay();
                         crate::voice_chat_ui::update_voice_chat_status("AI Response:");
-                        if append_mode {
+                        if streamed {
+                            crate::voice_chat_ui::finalize_voice_chat_assistant_message();
+                        } else if append_mode {
                             if assistant_needs_separator {
                                 crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
                             }

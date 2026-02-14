@@ -762,7 +762,13 @@ mod macos {
             }
 
             if !hold_mods_block_toggle {
-                let current_tap_is_right = was_right_option || (is_option_key && is_right_option);
+                // Prefer the actual keycode from this release event when available.
+                // Fallback to remembered side only for generic flags-change events.
+                let current_tap_is_right = if is_option_key {
+                    is_right_option
+                } else {
+                    was_right_option
+                };
 
                 if current_tap_is_right {
                     state.last_left_tap_ts = None;

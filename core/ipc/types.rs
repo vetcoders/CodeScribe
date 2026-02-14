@@ -7,6 +7,7 @@ pub enum IpcCommand {
     SaveConfig {
         config: Box<crate::config::Config>,
     },
+    ReloadRuntimeConfig,
 
     // Prompts
     GetPrompt {

@@ -855,7 +855,10 @@ pub async fn format_text_with_status(
             get_formatting_endpoint().unwrap_or_default()
         };
         let endpoint_format = detect_format(&endpoint);
-        let route = match (endpoint_format, use_streaming()) {
+        // If caller provides a delta callback, force SSE to preserve live chat UX even if
+        // LLM_USE_STREAMING was disabled globally.
+        let streaming_enabled = use_streaming() || on_delta.is_some();
+        let route = match (endpoint_format, streaming_enabled) {
             (EndpointFormat::OllamaChat, _) => "ollama",
             (EndpointFormat::ResponsesApi, true) => "responses-sse",
             (EndpointFormat::ResponsesApi, false) => "responses-json",
@@ -873,6 +876,7 @@ pub async fn format_text_with_status(
                 &user_message,
                 &system_prompt,
                 assistive,
+                streaming_enabled,
                 on_delta.clone(),
                 retry_policy.inter_chunk_timeout,
             ),
@@ -997,13 +1001,14 @@ async fn call_provider_once(
     user_message: &str,
     system_prompt: &str,
     assistive: bool,
+    streaming_enabled: bool,
     on_delta: Option<AiStreamCallback>,
     inter_chunk_timeout: Duration,
 ) -> Result<String> {
     match endpoint_format {
         EndpointFormat::OllamaChat => call_ollama(user_message, system_prompt, assistive).await,
         EndpointFormat::ResponsesApi => {
-            if use_streaming() {
+            if streaming_enabled {
                 call_llm_endpoint_streaming(
                     user_message,
                     system_prompt,
@@ -1258,7 +1263,11 @@ async fn call_llm_endpoint_streaming(
             }
 
             // Parse SSE data lines
-            if let Some(data) = line.strip_prefix("data: ") {
+            if let Some(data) = line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+            {
+                let data = data.trim_start();
                 if data == "[DONE]" {
                     saw_done = true;
                     break;

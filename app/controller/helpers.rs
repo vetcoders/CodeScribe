@@ -69,18 +69,19 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
             crate::voice_chat_ui::update_voice_chat_status("Sending...");
             crate::voice_chat_ui::set_voice_chat_sending(true);
 
-            let (lang_str, transcript_mode) = {
+            let lang_str = {
                 let cfg = config.read().await;
-                (cfg.whisper_language, cfg.transcript_send_mode)
+                cfg.whisper_language
             };
 
-            let use_streaming = matches!(
-                transcript_mode,
-                crate::config::TranscriptSendMode::Streaming
-            );
+            // Chat overlay should always stream assistant deltas when provider supports SSE.
+            let use_streaming = true;
+            let streamed_any_delta = Arc::new(AtomicBool::new(false));
 
             let delta_callback = if use_streaming {
-                Some(Arc::new(|delta: &str| {
+                let streamed_any_delta = Arc::clone(&streamed_any_delta);
+                Some(Arc::new(move |delta: &str| {
+                    streamed_any_delta.store(true, Ordering::SeqCst);
                     crate::voice_chat_ui::append_voice_chat_assistant_delta(delta);
                 }) as Arc<dyn Fn(&str) + Send + Sync>)
             } else {
@@ -98,7 +99,11 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
             match result.status {
                 crate::ai_formatting::AiFormatStatus::Applied => {
                     crate::voice_chat_ui::update_voice_chat_status("AI Response:");
-                    crate::voice_chat_ui::set_voice_chat_text(&result.text);
+                    if use_streaming && streamed_any_delta.load(Ordering::SeqCst) {
+                        crate::voice_chat_ui::finalize_voice_chat_assistant_message();
+                    } else {
+                        crate::voice_chat_ui::set_voice_chat_text(&result.text);
+                    }
                 }
                 crate::ai_formatting::AiFormatStatus::Failed => {
                     crate::voice_chat_ui::update_voice_chat_status("AI Failed");

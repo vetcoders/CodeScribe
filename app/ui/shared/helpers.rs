@@ -1163,6 +1163,10 @@ pub fn create_floating_window(
             let _: () = msg_send![window, setStyleMask: full_style];
             let _: () = msg_send![window, setTitleVisibility: 1_isize]; // NSWindowTitleHidden
             let _: () = msg_send![window, setTitlebarAppearsTransparent: true];
+            let _: () = msg_send![window, setOpaque: false];
+            let ns_color = Class::get("NSColor").unwrap();
+            let clear: Id = msg_send![ns_color, clearColor];
+            let _: () = msg_send![window, setBackgroundColor: clear];
         }
 
         let _: () = msg_send![window, setMovableByWindowBackground: true];

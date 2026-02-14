@@ -366,10 +366,10 @@ fn show_voice_chat_overlay_impl() {
         x -= gap + btn_w;
         let favorites_button_x = x;
         x -= gap + btn_w;
-        let export_button_x = x;
+        let record_button_x = x;
 
         // Keep the tab control between the title and the right-side icon cluster.
-        let right_cluster_start_x = export_button_x;
+        let right_cluster_start_x = record_button_x;
         let tab_x = title_x + title_w + 10.0;
         let status_pill_w = ui_tokens::STATUS_PILL_WIDTH;
         let tab_btn_w = (btn_w - 2.0).max(24.0);
@@ -387,7 +387,7 @@ fn show_voice_chat_overlay_impl() {
             "",
             button_style::INLINE,
         );
-        let _ = set_button_symbol(tab_drawer_button, "tray.full");
+        let _ = set_button_symbol(tab_drawer_button, "tray");
         style_toolbar_icon_button(tab_drawer_button);
         button_set_action(tab_drawer_button, action_handler, sel!(onTabDrawer:));
         set_tooltip(tab_drawer_button, "Drawer");
@@ -395,7 +395,6 @@ fn show_voice_chat_overlay_impl() {
             tab_drawer_button,
             setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        set_focus_ring(tab_drawer_button);
         add_subview(header_controls, tab_drawer_button);
 
         let tab_agent_button = create_button(
@@ -414,7 +413,6 @@ fn show_voice_chat_overlay_impl() {
             tab_agent_button,
             setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        set_focus_ring(tab_agent_button);
         add_subview(header_controls, tab_agent_button);
 
         let tab_settings_button = create_button(
@@ -433,7 +431,6 @@ fn show_voice_chat_overlay_impl() {
             tab_settings_button,
             setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        set_focus_ring(tab_settings_button);
         add_subview(header_controls, tab_settings_button);
 
         // Status pill (global status: Idle / Listening / Processing / Error).
@@ -495,26 +492,26 @@ fn show_voice_chat_overlay_impl() {
         add_subview(status_pill, status_label);
         add_subview(header_controls, status_pill);
 
-        let export_button = create_button(
+        let record_button = create_button(
             CGRect::new(
-                &CGPoint::new(export_button_x, header_btn_y),
+                &CGPoint::new(record_button_x, header_btn_y),
                 &CGSize::new(btn_w, btn_h),
             ),
             "",
             button_style::INLINE,
         );
-        let has_symbol = set_button_symbol(export_button, "arrow.down.to.line");
+        let has_symbol = set_button_symbol(record_button, "record.circle");
         if !has_symbol {
-            let _: () = msg_send![export_button, setTitle: ns_string("Export")];
+            let _: () = msg_send![record_button, setTitle: ns_string("Rec")];
         }
-        style_toolbar_icon_button(export_button);
-        button_set_action(export_button, action_handler, sel!(onExportMenu:));
-        set_tooltip(export_button, "Export conversation (Markdown)");
+        style_toolbar_icon_button(record_button);
+        button_set_action(record_button, action_handler, sel!(onStartRecording:));
+        set_tooltip(record_button, "Start/stop recording");
         let _: () = msg_send![
-            export_button,
+            record_button,
             setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
-        add_subview(header_controls, export_button);
+        add_subview(header_controls, record_button);
 
         // Drawer favorites filter (hearts on/off)
         let favorites_button = create_button(
