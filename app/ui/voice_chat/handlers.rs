@@ -126,6 +126,10 @@ pub fn action_handler_class() -> *const Class {
                 on_start_recording as extern "C" fn(&Object, Sel, Id),
             );
             decl.add_method(
+                sel!(onHeaderRecord:),
+                on_header_record as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
                 sel!(onShowOverlay:),
                 on_show_overlay as extern "C" fn(&Object, Sel, Id),
             );
@@ -968,6 +972,13 @@ extern "C" fn on_start_recording(_this: &Object, _cmd: Sel, _sender: Id) {
     info!("CTA: start recording");
 }
 
+extern "C" fn on_header_record(_this: &Object, _cmd: Sel, _sender: Id) {
+    // Header record button is chat-native: keep the session in assistive/chat mode.
+    crate::hide_transcription_overlay();
+    crate::controller::request_toggle_recording_start(true);
+    info!("Header CTA: toggle assistive recording");
+}
+
 extern "C" fn on_show_overlay(_this: &Object, _cmd: Sel, _sender: Id) {
     crate::show_voice_chat_overlay();
     info!("CTA: show overlay");
@@ -1103,15 +1114,14 @@ extern "C" fn on_export_assistant_save(_this: &Object, _cmd: Sel, _sender: Id) {
 extern "C" fn on_show_shortcuts(_this: &Object, _cmd: Sel, _sender: Id) {
     let config = Config::load();
     let (hold, toggle) = super::shortcuts_lines(config.hold_mods, config.toggle_trigger);
-    unsafe {
-        let ns_alert = Class::get("NSAlert").unwrap();
-        let alert: Id = msg_send![ns_alert, new];
-        let _: () = msg_send![alert, setMessageText: ns_string("Keyboard Shortcuts")];
-        let _: () =
-            msg_send![alert, setInformativeText: ns_string(&format!("{}\n{}", hold, toggle))];
-        let _: () = msg_send![alert, setAlertStyle: 1_isize]; // NSAlertStyleInformational
-        let _: () = msg_send![alert, runModal];
-    }
+    crate::show_voice_chat_overlay();
+    crate::voice_chat_ui::show_agent_tab();
+    crate::voice_chat_ui::add_voice_chat_system_message(&format!(
+        "Keyboard shortcuts:\n{}\n{}",
+        hold, toggle
+    ));
+    crate::voice_chat_ui::update_voice_chat_status("Shortcuts");
+    info!("Displayed keyboard shortcuts inline (non-modal)");
 }
 
 extern "C" fn on_more_menu(this: &Object, _cmd: Sel, sender: Id) {

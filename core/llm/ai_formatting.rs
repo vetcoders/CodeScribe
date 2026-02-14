@@ -290,11 +290,9 @@ fn detect_format(endpoint: &str) -> EndpointFormat {
     }
 }
 
-/// Streaming = default. Opt-out via LLM_USE_STREAMING=0|false.
+/// Streaming is mandatory for chat/assistant UX consistency.
+/// `LLM_USE_STREAMING` is intentionally ignored.
 fn use_streaming() -> bool {
-    if let Ok(val) = env::var("LLM_USE_STREAMING") {
-        return val != "0" && val.to_lowercase() != "false";
-    }
     true
 }
 
@@ -855,9 +853,8 @@ pub async fn format_text_with_status(
             get_formatting_endpoint().unwrap_or_default()
         };
         let endpoint_format = detect_format(&endpoint);
-        // If caller provides a delta callback, force SSE to preserve live chat UX even if
-        // LLM_USE_STREAMING was disabled globally.
-        let streaming_enabled = use_streaming() || on_delta.is_some();
+        // Streaming is always enabled. `on_delta` only decides whether UI receives live chunks.
+        let streaming_enabled = use_streaming();
         let route = match (endpoint_format, streaming_enabled) {
             (EndpointFormat::OllamaChat, _) => "ollama",
             (EndpointFormat::ResponsesApi, true) => "responses-sse",

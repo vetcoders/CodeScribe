@@ -667,8 +667,8 @@ fn build_onboarding_ui(root: Id, action_handler: Id) -> UiRefs {
 
         let icon_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(content_center - 50.0, 410.0),
-                &CGSize::new(100.0, 34.0),
+                &CGPoint::new(content_center - 72.0, 410.0),
+                &CGSize::new(144.0, 34.0),
             ),
             text: String::new(),
             font_size: 24.0,
@@ -811,7 +811,7 @@ fn build_onboarding_ui(root: Id, action_handler: Id) -> UiRefs {
 
         let hotkey_hold = create_radio_button(
             CGRect::new(&CGPoint::new(0.0, 90.0), &CGSize::new(390.0, 24.0)),
-            "Hold to Talk (Ctrl+Option)",
+            "Hold to Talk (Fn/Globe)",
             false,
         );
         let _: () = msg_send![hotkey_hold, setTag: 0_isize];
@@ -1065,7 +1065,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Choose Hotkey Mode");
             set_text_if_present(
                 ui.description_label,
-                "Pick how you want to start and stop recording.",
+                "Pick how you want to start and stop recording. Hold mode uses Fn/Globe.",
             );
             set_hidden_if_present(ui.hotkey_view, false);
             set_button_title_if_present(ui.primary_button, "Continue");
@@ -1459,27 +1459,27 @@ fn save_hotkey_mode() {
         toggle_trigger_runtime,
     ) = match mode {
         HotkeyModeChoice::HoldToTalk => (
-            "ctrl_alt",
+            "fn",
             "none",
             false,
             false,
-            HoldMods::CtrlAlt,
+            HoldMods::Fn,
             ToggleTrigger::None,
         ),
         HotkeyModeChoice::Toggle => (
             "none",
             "double_option",
             true,
-            false,
+            true,
             HoldMods::None,
             ToggleTrigger::DoubleOption,
         ),
         HotkeyModeChoice::Both => (
-            "ctrl_alt",
+            "fn",
             "double_option",
             true,
             true,
-            HoldMods::CtrlAlt,
+            HoldMods::Fn,
             ToggleTrigger::DoubleOption,
         ),
     };

@@ -44,7 +44,6 @@ async fn e2e_retry_on_failure_responses_api() {
         std::env::set_var("LLM_FORMATTING_MODEL", "test-model");
         std::env::set_var("LLM_API_KEY", "test-key");
         std::env::set_var("LLM_FORMATTING_API_KEY", "test-key");
-        std::env::set_var("LLM_USE_STREAMING", "0");
     }
 
     // Mockito matches mocks in declaration order (FIFO).
@@ -59,9 +58,15 @@ async fn e2e_retry_on_failure_responses_api() {
     let success_after_retry = server
         .mock("POST", "/v1/responses")
         .with_status(200)
-        .with_header("content-type", "application/json")
+        .with_header("content-type", "text/event-stream")
         .with_body(
-            r#"{"id":"resp_test_1","output":[{"type":"message","content":[{"type":"output_text","text":"Hello world."}]}]}"#,
+            r#"data: {"type":"response.output_text.delta","delta":"Hello world."}
+
+data: {"type":"response.completed","response":{"id":"resp_test_1"}}
+
+data: [DONE]
+
+"#,
         )
         .expect(1)
         .create_async()
@@ -77,7 +82,7 @@ async fn e2e_retry_on_failure_responses_api() {
 
 #[tokio::test]
 #[serial]
-async fn e2e_retry_on_non_streaming_timeout_keeps_previous_response_id() {
+async fn e2e_retry_on_attempt_timeout_keeps_previous_response_id() {
     let mut server = mockito::Server::new_async().await;
     let endpoint = format!("{}/v1/responses", server.url());
 
@@ -96,7 +101,6 @@ async fn e2e_retry_on_non_streaming_timeout_keeps_previous_response_id() {
         std::env::set_var("LLM_FORMATTING_MODEL", "test-model");
         std::env::set_var("LLM_API_KEY", "test-key");
         std::env::set_var("LLM_FORMATTING_API_KEY", "test-key");
-        std::env::set_var("LLM_USE_STREAMING", "0");
     }
     assert_eq!(
         std::env::var("LLM_FORMATTING_ENDPOINT").expect("LLM_FORMATTING_ENDPOINT"),
@@ -127,14 +131,28 @@ async fn e2e_retry_on_non_streaming_timeout_keeps_previous_response_id() {
             previous.as_deref() == Some("prev_nonstream_1")
         })
         .with_status(200)
-        .with_header("content-type", "application/json")
+        .with_header("content-type", "text/event-stream")
         .with_body_from_request(move |_| {
             let seq = response_sequence_body.fetch_add(1, Ordering::SeqCst);
             if seq == 0 {
                 std::thread::sleep(Duration::from_millis(500));
-                br#"{"id":"resp_nonstream_slow","output":[{"type":"message","content":[{"type":"output_text","text":"too late"}]}]}"#.to_vec()
+                br#"data: {"type":"response.output_text.delta","delta":"too late"}
+
+data: {"type":"response.completed","response":{"id":"resp_nonstream_slow"}}
+
+data: [DONE]
+
+"#
+                .to_vec()
             } else {
-                br#"{"id":"resp_nonstream_final","output":[{"type":"message","content":[{"type":"output_text","text":"Hello world."}]}]}"#.to_vec()
+                br#"data: {"type":"response.output_text.delta","delta":"Hello world."}
+
+data: {"type":"response.completed","response":{"id":"resp_nonstream_final"}}
+
+data: [DONE]
+
+"#
+                .to_vec()
             }
         })
         .create_async()
@@ -155,7 +173,7 @@ async fn e2e_retry_on_non_streaming_timeout_keeps_previous_response_id() {
     );
     assert!(
         response_sequence.load(Ordering::SeqCst) >= 2,
-        "Expected at least two non-streaming attempts"
+        "Expected at least two attempts"
     );
     assert_eq!(out.trim(), "Hello world.");
 
@@ -188,7 +206,6 @@ async fn e2e_retry_on_sse_inter_chunk_timeout_keeps_previous_response_id() {
         std::env::set_var("LLM_FORMATTING_MODEL", "test-model");
         std::env::set_var("LLM_API_KEY", "test-key");
         std::env::set_var("LLM_FORMATTING_API_KEY", "test-key");
-        std::env::set_var("LLM_USE_STREAMING", "1");
     }
 
     let seen_sse_flags: Shared<SseRequestLog> = Arc::new(Mutex::new(Vec::new()));

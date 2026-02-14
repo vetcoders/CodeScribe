@@ -505,7 +505,7 @@ fn show_voice_chat_overlay_impl() {
             let _: () = msg_send![record_button, setTitle: ns_string("Rec")];
         }
         style_toolbar_icon_button(record_button);
-        button_set_action(record_button, action_handler, sel!(onStartRecording:));
+        button_set_action(record_button, action_handler, sel!(onHeaderRecord:));
         set_tooltip(record_button, "Start/stop recording");
         let _: () = msg_send![
             record_button,

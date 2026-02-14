@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -259,10 +260,30 @@ pub fn schedule_bootstrap() {
     });
 }
 
+static SHOW_OVERLAY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
 pub fn show_bootstrap_overlay() {
+    // Fast path: if window already exists, just show it on main thread.
+    {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ptr) = state.window {
+            drop(state);
+            Queue::main().exec_async(move || unsafe {
+                let window = ptr as Id;
+                window_show(window);
+            });
+            return;
+        }
+    }
+
+    // Slow path: need to create window — guard against concurrent thread spawns.
+    if SHOW_OVERLAY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return;
+    }
     std::thread::spawn(|| {
         let config = Config::load();
         Queue::main().exec_async(move || {
+            SHOW_OVERLAY_IN_FLIGHT.store(false, Ordering::SeqCst);
             let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.config_cache = Some(config);
             drop(state);
@@ -1925,7 +1946,8 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
         let scroll_frame = CGRect::new(&CGPoint::new(pad, 12.0), &CGSize::new(content_w, scroll_h));
         let scroll: Id = msg_send![ns_scroll_view, alloc];
         let scroll: Id = msg_send![scroll, initWithFrame: scroll_frame];
-        let _: () = msg_send![scroll, setHasVerticalScroller: true];
+        // Configure the vertical scroller after we know actual document height.
+        let _: () = msg_send![scroll, setHasVerticalScroller: false];
         let _: () = msg_send![scroll, setHasHorizontalScroller: false];
         let _: () = msg_send![scroll, setAutohidesScrollers: true];
         let _: () = msg_send![scroll, setBorderType: 0_isize];
@@ -1943,7 +1965,9 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
                 58.0
             };
         }
-        doc_h = doc_h.max(scroll_h + 8.0);
+        doc_h = doc_h.max(18.0);
+        let needs_vertical_scroll = doc_h > (scroll_h + 1.0);
+        let _: () = msg_send![scroll, setHasVerticalScroller: needs_vertical_scroll];
 
         let doc_w = (content_w - 14.0).max(260.0);
         let doc_view: Id = msg_send![ns_view, alloc];
@@ -2229,16 +2253,20 @@ pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime
         };
         info!("Settings: hold modifier -> {}", value);
         let config = Config::load();
-        let _ = config.save_to_env("HOLD_MODS", value);
         hotkeys::set_hold_mods(mods);
 
         // If DoubleCtrl toggle is enabled, Ctrl-only hold is unsafe → disable toggle.
         if mods == HoldMods::Ctrl && config.toggle_trigger == ToggleTrigger::DoubleCtrl {
-            let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::None.as_str());
+            let _ = config.save_to_env_many(&[
+                ("HOLD_MODS", value),
+                ("TOGGLE_TRIGGER", ToggleTrigger::None.as_str()),
+            ]);
             hotkeys::set_toggle_trigger(ToggleTrigger::None);
 
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             set_keys_popup_index(state.keys_toggle_popup, 0);
+        } else {
+            let _ = config.save_to_env("HOLD_MODS", value);
         }
         mark_keys_preset_custom();
         sync_runtime_config_via_ipc();
@@ -2253,9 +2281,11 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
             0 => {
                 info!("Settings: hotkey preset -> fn_recommended");
                 let config = Config::load();
-                let _ = config.save_to_env("HOLD_MODS", HoldMods::Fn.as_str());
-                let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::DoubleOption.as_str());
-                let _ = config.save_to_env("HOLD_EXCLUSIVE", "0");
+                let _ = config.save_to_env_many(&[
+                    ("HOLD_MODS", HoldMods::Fn.as_str()),
+                    ("TOGGLE_TRIGGER", ToggleTrigger::DoubleOption.as_str()),
+                    ("HOLD_EXCLUSIVE", "0"),
+                ]);
                 hotkeys::set_hold_mods(HoldMods::Fn);
                 hotkeys::set_toggle_trigger(ToggleTrigger::DoubleOption);
                 hotkeys::set_exclusive_mode(false);
@@ -2270,9 +2300,11 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
             1 => {
                 info!("Settings: hotkey preset -> safe");
                 let config = Config::load();
-                let _ = config.save_to_env("HOLD_MODS", HoldMods::Fn.as_str());
-                let _ = config.save_to_env("TOGGLE_TRIGGER", ToggleTrigger::None.as_str());
-                let _ = config.save_to_env("HOLD_EXCLUSIVE", "1");
+                let _ = config.save_to_env_many(&[
+                    ("HOLD_MODS", HoldMods::Fn.as_str()),
+                    ("TOGGLE_TRIGGER", ToggleTrigger::None.as_str()),
+                    ("HOLD_EXCLUSIVE", "1"),
+                ]);
                 hotkeys::set_hold_mods(HoldMods::Fn);
                 hotkeys::set_toggle_trigger(ToggleTrigger::None);
                 hotkeys::set_exclusive_mode(true);
@@ -2330,8 +2362,10 @@ pub(super) extern "C" fn on_toggle_trigger_changed(
 
         // If enabling DoubleCtrl and hold is Ctrl-only, switch to Ctrl+Option and enable modes.
         if trigger == ToggleTrigger::DoubleCtrl && config.hold_mods == HoldMods::Ctrl {
-            let _ = config.save_to_env("HOLD_MODS", HoldMods::CtrlAlt.as_str());
-            let _ = config.save_to_env("HOLD_EXCLUSIVE", "0");
+            let _ = config.save_to_env_many(&[
+                ("HOLD_MODS", HoldMods::CtrlAlt.as_str()),
+                ("HOLD_EXCLUSIVE", "0"),
+            ]);
             hotkeys::set_hold_mods(HoldMods::CtrlAlt);
             hotkeys::set_exclusive_mode(false);
 

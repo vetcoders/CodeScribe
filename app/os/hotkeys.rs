@@ -341,8 +341,9 @@ mod macos {
         ctrl_down_ts: Option<Instant>,
         /// Option is currently held
         option_down: bool,
-        /// Whether the currently held Option is the RIGHT Option key
-        right_option_held: bool,
+        /// Side captured on Option key-down: Some(true)=right, Some(false)=left.
+        /// We require a matching side on key-up to accept a tap gesture.
+        option_side: Option<bool>,
         /// A non-modifier key was pressed while modifier(s) held - invalidates gesture
         key_pressed_during_modifier: bool,
         /// Event sender
@@ -363,7 +364,7 @@ mod macos {
                 ctrl_down: false,
                 ctrl_down_ts: None,
                 option_down: false,
-                right_option_held: false,
+                option_side: None,
                 key_pressed_during_modifier: false,
                 tx,
             }
@@ -714,20 +715,28 @@ mod macos {
 
         // Skip Option processing if toggle is disabled
         if matches!(toggle_trigger, ToggleTrigger::None) {
-            // Still track option_down state but don't process double-tap
-            if option_now && !state.option_down {
-                state.option_down = true;
-            } else if !option_now && state.option_down {
+            // Still track option-down state for combo invalidation, but strictly by Option key events.
+            if is_option_key {
+                if option_now {
+                    state.option_down = true;
+                    state.option_side = Some(is_right_option);
+                } else {
+                    state.option_down = false;
+                    state.option_side = None;
+                }
+            } else if !option_now {
+                // Defensive cleanup when flags desync (never emit toggles here).
                 state.option_down = false;
+                state.option_side = None;
             }
             return event;
         }
 
         // Detect Option double-tap for toggle gesture (left/right)
-        if option_now && !state.option_down {
+        if is_option_key && option_now && !state.option_down {
             // Option just pressed
             state.option_down = true;
-            state.right_option_held = is_right_option;
+            state.option_side = Some(is_right_option);
             tracing::debug!(
                 "Option pressed (right={}, keycode={})",
                 is_right_option,
@@ -735,14 +744,39 @@ mod macos {
             );
         } else if !option_now && state.option_down {
             // Option just released
-            let was_right_option = state.right_option_held;
             state.option_down = false;
-            state.right_option_held = false;
+            let pressed_side = state.option_side.take();
+
+            // Strict side handling:
+            // if release did not come from an Option key event, drop the gesture.
+            if !is_option_key {
+                tracing::debug!(
+                    "Option released without Option keycode (keycode={}); dropping gesture",
+                    keycode
+                );
+                state.last_left_tap_ts = None;
+                state.last_right_tap_ts = None;
+                state.key_pressed_during_modifier = false;
+                return event;
+            }
+
+            // If key-down side and key-up side disagree, treat as invalid gesture.
+            if let Some(pressed_right) = pressed_side
+                && pressed_right != is_right_option
+            {
+                tracing::warn!(
+                    "Option press/release side mismatch (down_right={}, up_right={}) - dropping tap",
+                    pressed_right,
+                    is_right_option
+                );
+                state.last_left_tap_ts = None;
+                state.last_right_tap_ts = None;
+                return event;
+            }
 
             tracing::debug!(
-                "Option released (right={}, was_right={}, keycode={})",
+                "Option released (right={}, keycode={})",
                 is_right_option,
-                was_right_option,
                 keycode
             );
 
@@ -762,13 +796,7 @@ mod macos {
             }
 
             if !hold_mods_block_toggle {
-                // Prefer the actual keycode from this release event when available.
-                // Fallback to remembered side only for generic flags-change events.
-                let current_tap_is_right = if is_option_key {
-                    is_right_option
-                } else {
-                    was_right_option
-                };
+                let current_tap_is_right = is_right_option;
 
                 if current_tap_is_right {
                     state.last_left_tap_ts = None;

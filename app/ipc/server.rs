@@ -136,11 +136,9 @@ async fn handle_command(cmd: IpcCommand, controller: &RecordingController) -> Ip
             IpcResponse::Ok
         }
         IpcCommand::ReloadRuntimeConfig => {
+            // UI handlers already set hotkey atomics synchronously before
+            // sending this IPC command — only controller config reload needed.
             let config = Config::load();
-            hotkeys::set_hold_mods(config.hold_mods);
-            hotkeys::set_toggle_trigger(config.toggle_trigger);
-            hotkeys::set_exclusive_mode(config.hold_exclusive);
-            hotkeys::set_double_tap_interval_ms(config.double_tap_interval_ms);
             controller.set_config(config).await;
             IpcResponse::Ok
         }
