@@ -5,7 +5,8 @@ use std::sync::Once;
 
 use super::{
     TAB_AUDIO, TAB_ENGINE, TAB_KEYS, TAB_SETUP, TAB_VOICE_LAB, handle_bootstrap_window_closed,
-    handle_finish, handle_hotkey_done, handle_show_overlay, handle_test_mic,
+    handle_finish, handle_hotkey_done, handle_open_accessibility_settings,
+    handle_open_input_monitoring_settings, handle_show_overlay, handle_test_mic,
     on_assistive_endpoint_changed, on_assistive_key_changed, on_assistive_model_changed,
     on_beep_toggled, on_clear_assistive_key, on_clear_llm_key, on_delay_changed,
     on_double_tap_interval_changed, on_enter_send_toggled, on_formatting_level_changed,
@@ -185,6 +186,14 @@ pub fn action_handler_class() -> *const Class {
                 sel!(onRefreshPermissions:),
                 on_refresh_permissions as extern "C" fn(&Object, Sel, Id),
             );
+            decl.add_method(
+                sel!(onOpenAccessibilitySettings:),
+                on_open_accessibility_settings as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onOpenInputMonitoringSettings:),
+                on_open_input_monitoring_settings as extern "C" fn(&Object, Sel, Id),
+            );
 
             ACTION_HANDLER_CLASS = decl.register();
         });
@@ -244,6 +253,14 @@ extern "C" fn on_tab_voice_lab(_this: &Object, _sel: Sel, _sender: Id) {
 
 extern "C" fn on_tab_engine(_this: &Object, _sel: Sel, _sender: Id) {
     switch_tab(TAB_ENGINE);
+}
+
+extern "C" fn on_open_accessibility_settings(_this: &Object, _sel: Sel, _sender: Id) {
+    handle_open_accessibility_settings();
+}
+
+extern "C" fn on_open_input_monitoring_settings(_this: &Object, _sel: Sel, _sender: Id) {
+    handle_open_input_monitoring_settings();
 }
 
 extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, _notification: Id) {

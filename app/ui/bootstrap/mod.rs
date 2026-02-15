@@ -818,11 +818,12 @@ unsafe fn build_settings_ui(
         for (i, (name, granted)) in perm_names.iter().zip(perms.iter()).enumerate() {
             let dot = if *granted { "\u{25CF}" } else { "\u{25CB}" };
             let text = format!("{} {}", dot, name);
+            let perm_frame = CGRect::new(
+                &CGPoint::new(pad + perm_w * i as f64, y),
+                &CGSize::new(perm_w, 18.0),
+            );
             let lbl = create_label(LabelConfig {
-                frame: CGRect::new(
-                    &CGPoint::new(pad + perm_w * i as f64, y),
-                    &CGSize::new(perm_w, 18.0),
-                ),
+                frame: perm_frame,
                 text,
                 font_size: ui_tokens::SMALL_FONT_SIZE,
                 bold: true,
@@ -831,6 +832,43 @@ unsafe fn build_settings_ui(
             });
             add_subview(setup_view, lbl);
             perm_labels[i] = Some(lbl as usize);
+
+            // Setup convenience shortcuts: click status to open relevant privacy pane.
+            if i == 1 || i == 2 {
+                let click_target = create_button(perm_frame, "", button_style::INLINE);
+                let responds_bordered: bool =
+                    msg_send![click_target, respondsToSelector: sel!(setBordered:)];
+                if responds_bordered {
+                    let _: () = msg_send![click_target, setBordered: false];
+                }
+                let responds_transparent: bool =
+                    msg_send![click_target, respondsToSelector: sel!(setTransparent:)];
+                if responds_transparent {
+                    let _: () = msg_send![click_target, setTransparent: true];
+                }
+                if i == 1 {
+                    button_set_action(
+                        click_target,
+                        action_handler,
+                        sel!(onOpenAccessibilitySettings:),
+                    );
+                    set_tooltip(
+                        click_target,
+                        "Open System Settings > Privacy > Accessibility",
+                    );
+                } else {
+                    button_set_action(
+                        click_target,
+                        action_handler,
+                        sel!(onOpenInputMonitoringSettings:),
+                    );
+                    set_tooltip(
+                        click_target,
+                        "Open System Settings > Privacy > Input Monitoring",
+                    );
+                }
+                add_subview(setup_view, click_target);
+            }
         }
 
         let refresh_btn = button(
@@ -1290,6 +1328,16 @@ pub(super) fn handle_test_mic() {
         let _ = send_ipc(IpcCommand::StopRecording);
         update_step_status(STEP_TEST_MIC, "done");
     });
+}
+
+pub(super) fn handle_open_accessibility_settings() {
+    #[cfg(target_os = "macos")]
+    crate::os::permissions::open_privacy_settings("Privacy_Accessibility");
+}
+
+pub(super) fn handle_open_input_monitoring_settings() {
+    #[cfg(target_os = "macos")]
+    crate::os::permissions::open_privacy_settings("Privacy_ListenEvent");
 }
 
 pub(super) fn handle_show_overlay() {
