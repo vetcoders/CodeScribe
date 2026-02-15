@@ -616,17 +616,13 @@ async fn run_daemon() -> Result<()> {
         }
     });
 
-    // Quality Loop daemon (self-improvement) — OFF by default.
-    //
-    // The daemon is useful, but if it survives app restarts it can confuse macOS
-    // permissions / input monitoring workflows. Turn it on explicitly when needed.
-    let quality_child = if env_bool("CODESCRIBE_AUTOSTART_QUALITY_DAEMON", false) {
-        spawn_quality_daemon()
-    } else {
-        stop_quality_daemon_if_running();
-        codescribe::quality_loop::mark_daemon_unavailable();
-        None
-    };
+    // Quality Loop daemon — DISABLED until memory leak is fixed.
+    // The daemon loads Whisper (~3GB) + MiniLM (~224MB) into OnceLock singletons
+    // that are never freed, consuming ~5GB RAM while idle between 30-min cycles.
+    // See: ~/AI_notes/projects/codescribe/reports/2026-02-15_AGENT_01_quality-daemon-memory.md
+    let quality_child: Option<QualityDaemonHandle> = None;
+    stop_quality_daemon_if_running();
+    codescribe::quality_loop::mark_daemon_unavailable();
 
     tray::run_with_hotkeys(hotkey_manager)?;
 

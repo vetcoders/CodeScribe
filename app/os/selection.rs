@@ -201,27 +201,37 @@ fn selected_text_from_frontmost(
 ) -> Option<String> {
     // Prefer Accessibility selection if available (doesn't depend on clipboard).
     //
-    // Some apps report `AXSelectedTextRange.length == 0` even when `AXSelectedText` is non-empty,
-    // so we do *not* early-return on length==0 before checking `AXSelectedText`.
+    // IMPORTANT: Only trust AXSelectedText when AXSelectedTextRange confirms a real
+    // selection exists (length > 0). Some apps (e.g. Notes) return the FULL text
+    // content from AXSelectedText when nothing is selected, which would cause inline
+    // edit to replace the entire document.
     let sel_len = crate::ui::get_selected_text_length();
     info!(
         "Selection capture: AX range length={:?}, app={:?}",
         sel_len,
         frontmost_app.unwrap_or("(none)")
     );
-    if let Some(selected) = crate::ui::get_selected_text(max_chars) {
-        info!("Selection capture: AX text OK ({} chars)", selected.chars().count());
-        return Some(selected);
+    if matches!(sel_len, Some(n) if n > 0) {
+        if let Some(selected) = crate::ui::get_selected_text(max_chars) {
+            info!("Selection capture: AX text OK ({} chars, range={})",
+                selected.chars().count(), sel_len.unwrap_or(0));
+            return Some(selected);
+        }
     }
-    info!("Selection capture: AX text returned None, trying Cmd+C fallback");
+    info!("Selection capture: AX range empty/unavailable (len={:?}), trying Cmd+C fallback",
+        sel_len);
 
-    // Cmd+C fallback is enabled by default for web browsers where AX selection is unreliable
-    // (notably Safari). The explicit env flag still overrides this behavior.
+    // Cmd+C fallback is enabled by default for:
+    // 1. Web browsers where AX selection is unreliable (notably Safari).
+    // 2. Any app where AXSelectedTextRange is unavailable (sel_len == None),
+    //    because AXSelectedText alone can't distinguish selection from full content.
+    // The explicit env flag still overrides this behavior.
     // We snapshot+restore to avoid clipboard pollution and treat "unchanged clipboard" as no selection.
-    let fallback_default = prefer_copy_fallback_for_app(frontmost_app);
+    let range_unavailable = sel_len.is_none();
+    let fallback_default = range_unavailable || prefer_copy_fallback_for_app(frontmost_app);
     if !env_flag("ASSISTIVE_CONTEXT_COPY_FALLBACK", fallback_default) {
         info!(
-            "Selection capture: Cmd+C fallback disabled for {:?} (not in browser list)",
+            "Selection capture: Cmd+C fallback disabled for {:?}",
             frontmost_app.unwrap_or("(none)")
         );
         return None;
