@@ -346,8 +346,9 @@ fn show_bootstrap_overlay_impl() {
             &CGSize::new(window_width, window_height),
         );
 
-        // Allow manual resize again (user request), while still disallowing fullscreen zoom.
-        let window = create_floating_window(frame, "Settings", true, true);
+        // Settings window should be fixed-size (no resize / fullscreen), to avoid AppKit
+        // fullscreen transition crashes with our custom content setup.
+        let window = create_floating_window(frame, "Settings", true, false);
         let _: () = msg_send![window, setOpaque: false];
         let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
         // Disallow fullscreen/zoom to avoid triggering AppKit fullscreen snapshots that can crash.

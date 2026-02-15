@@ -500,8 +500,7 @@ impl RecordingController {
             self.recover_stale_recorder_if_idle().await;
         }
 
-        // TEMP: elevated to info! to diagnose hold_mode detection issue
-        info!(
+        debug!(
             "Hotkey event: type={:?} action={:?} assistive={} hold_mode={:?} force_raw={} force_ai={} state={}",
             event.key_type,
             event.action,
@@ -2293,7 +2292,7 @@ impl RecordingController {
             // Assistive/chat responses should always stream to preserve progressive feedback.
             let use_streaming = chat_active;
 
-            // Callback for streaming AI response to overlay
+            // Callback for streaming AI response to overlay (assistant channel only).
             let streamed_any_delta = Arc::new(AtomicBool::new(false));
             let delta_callback = if use_streaming && chat_active {
                 let needs_prefix = append_mode && assistant_needs_separator;
@@ -2312,11 +2311,12 @@ impl RecordingController {
                 None
             };
 
-            let result = crate::ai_formatting::format_text_with_status(
+            let result = crate::ai_formatting::format_text_with_status_channels(
                 &assistive_input,
                 lang_str.as_deref(),
                 true,
                 delta_callback,
+                None,
             )
             .await;
             let kind = match result.status {
@@ -2345,6 +2345,13 @@ impl RecordingController {
                             "Assistive response displayed in overlay ({} chars)",
                             result.text.len()
                         );
+
+                        if let Some(reasoning_text) = result.reasoning_text.clone() {
+                            crate::voice_chat_ui::add_voice_chat_system_message(&format!(
+                                "Reasoning summary:\n{}",
+                                reasoning_text
+                            ));
+                        }
                     } else if is_inline {
                         info!(
                             "Inline edit: skipping overlay display ({} chars)",
@@ -2392,7 +2399,7 @@ impl RecordingController {
                 )
             }
         } else if force_ai {
-            // Explicit force path: ALWAYS formatting (no augmentation).
+            // Left double Option: ALWAYS formatting (no augmentation)
             // Auto-paste like hold mode — formatted text goes where the cursor is.
             let should_use_ai = crate::ai_formatting::has_api_key();
             if should_use_ai {

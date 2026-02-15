@@ -230,10 +230,14 @@ fn selected_text_from_frontmost(
     let range_unavailable = sel_len.is_none();
     let fallback_default = range_unavailable || prefer_copy_fallback_for_app(frontmost_app);
     if !env_flag("ASSISTIVE_CONTEXT_COPY_FALLBACK", fallback_default) {
-        info!(
-            "Selection capture: Cmd+C fallback disabled for {:?}",
-            frontmost_app.unwrap_or("(none)")
-        );
+        if matches!(sel_len, Some(0)) {
+            debug!("Assistive context: selection length is 0; Cmd+C fallback disabled");
+        } else {
+            info!(
+                "Selection capture: Cmd+C fallback disabled for {:?}",
+                frontmost_app.unwrap_or("(none)")
+            );
+        }
         return None;
     }
     if matches!(sel_len, Some(0)) {
