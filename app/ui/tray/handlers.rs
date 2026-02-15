@@ -193,10 +193,15 @@ fn handle_toggle_quick_notes() {
     let _ = config.save_to_env("QUICK_NOTES_ENABLED", if new_state { "1" } else { "0" });
     send_menu_event(TrayMenuEvent::SetQuickNotesEnabled(new_state));
 
+    if !new_state {
+        let _ = config.save_to_env("QUICK_NOTES_SAVE_ONLY", "0");
+        send_menu_event(TrayMenuEvent::SetQuickNotesSaveOnly(false));
+    }
+
     NOTES_MENU_ITEMS.with(|items_cell| {
         if let Some(ref items) = *items_cell.borrow() {
             items.quick_notes_toggle.set_checked(new_state);
-            // If disabled, also uncheck "save-only" in the UI (config remains on disk).
+            // If disabled, also uncheck "save-only" in the UI and persisted config.
             if !new_state {
                 items.quick_notes_save_only.set_checked(false);
             }
