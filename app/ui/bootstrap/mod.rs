@@ -499,11 +499,44 @@ fn permission_color(granted: bool) -> Id {
     }
 }
 
+fn keychain_key_value(account: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(account)
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
+    keychain::load_key(account).filter(|value| !value.trim().is_empty())
+}
+
 fn keychain_key_is_set(account: &str) -> bool {
-    std::env::var(account)
-        .ok()
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
+    keychain_key_value(account).is_some()
+}
+
+fn key_field_placeholder(account: &str) -> String {
+    let default = "API Key (stored in Keychain)".to_string();
+    let Some(value) = keychain_key_value(account) else {
+        return default;
+    };
+
+    let suffix: String = value
+        .chars()
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    if suffix.is_empty() {
+        return "API Key (stored in Keychain)".to_string();
+    }
+
+    if value.starts_with("sk-") {
+        format!("API Key (stored: sk-********{})", suffix)
+    } else {
+        format!("API Key (stored: ********{})", suffix)
+    }
 }
 
 fn key_status_text(is_set: bool) -> &'static str {
@@ -526,9 +559,14 @@ fn key_status_color(is_set: bool) -> Id {
 }
 
 fn update_keychain_status_labels() {
-    let (llm_label, assist_label) = {
+    let (llm_label, assist_label, llm_field, assist_field) = {
         let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        (state.llm_key_status_label, state.assistive_key_status_label)
+        (
+            state.llm_key_status_label,
+            state.assistive_key_status_label,
+            state.llm_key_field,
+            state.assistive_key_field,
+        )
     };
     unsafe {
         if let Some(ptr) = llm_label {
@@ -542,6 +580,16 @@ fn update_keychain_status_labels() {
             let label = ptr as Id;
             set_text_field_string(label, key_status_text(is_set));
             let _: () = msg_send![label, setTextColor: key_status_color(is_set)];
+        }
+        if let Some(ptr) = llm_field {
+            let placeholder = key_field_placeholder("LLM_API_KEY");
+            let ph = ns_string(&placeholder);
+            let _: () = msg_send![ptr as Id, setPlaceholderString: ph];
+        }
+        if let Some(ptr) = assist_field {
+            let placeholder = key_field_placeholder("LLM_ASSISTIVE_API_KEY");
+            let ph = ns_string(&placeholder);
+            let _: () = msg_send![ptr as Id, setPlaceholderString: ph];
         }
     }
 }
@@ -969,7 +1017,7 @@ unsafe fn build_settings_ui(
 
         let llm_key_field = create_secure_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
-            "API Key (stored in Keychain)",
+            &key_field_placeholder("LLM_API_KEY"),
         );
         let _: () = msg_send![llm_key_field, setFont: mono_font_input];
         button_set_action(llm_key_field, action_handler, sel!(onLlmKeyChanged:));
@@ -1034,7 +1082,7 @@ unsafe fn build_settings_ui(
 
         let assist_key_field = create_secure_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
-            "API Key (stored in Keychain)",
+            &key_field_placeholder("LLM_ASSISTIVE_API_KEY"),
         );
         let _: () = msg_send![assist_key_field, setFont: mono_font_input];
         button_set_action(
