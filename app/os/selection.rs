@@ -270,6 +270,44 @@ fn selected_text_from_frontmost(
     Some(copied)
 }
 
+/// Replace the currently selected text in the frontmost application.
+///
+/// Uses direct AX attribute write (`AXSelectedText`). No clipboard pollution.
+/// Returns `Ok("ax")` on success, `Err` when target is read-only / unsupported.
+///
+/// Caller should fall back to overlay display when this fails (e.g. terminal output).
+#[cfg(target_os = "macos")]
+pub fn replace_selected_text(new_text: &str) -> Result<&'static str, String> {
+    use tracing::info;
+
+    if new_text.is_empty() {
+        return Err("replace_selected_text called with empty text".into());
+    }
+
+    match crate::ui::set_selected_text(new_text) {
+        Ok(true) => {
+            info!(
+                "replace_selected_text: AX write succeeded ({} chars)",
+                new_text.len()
+            );
+            Ok("ax")
+        }
+        Ok(false) => {
+            debug!("replace_selected_text: AX write unsupported (target likely read-only)");
+            Err("target_not_editable".into())
+        }
+        Err(e) => {
+            debug!("replace_selected_text: AX write error: {}", e);
+            Err(format!("ax_write_failed: {}", e))
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn replace_selected_text(_new_text: &str) -> Result<&'static str, String> {
+    Err("replace_selected_text is only supported on macOS".into())
+}
+
 #[cfg(not(target_os = "macos"))]
 fn selected_text_from_frontmost(
     _max_chars: usize,

@@ -13,7 +13,9 @@ use dispatch::Queue;
 use lazy_static::lazy_static;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use objc2_app_kit::{NSVisualEffectMaterial, NSWindowButton, NSWindowCollectionBehavior};
+use objc2_app_kit::{
+    NSVisualEffectMaterial, NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask,
+};
 use tracing::{info, warn};
 
 use crate::config::{Config, HoldMods, ToggleTrigger, keychain};
@@ -319,6 +321,11 @@ fn show_bootstrap_overlay_impl() {
             }
         }; // Release lock before AppKit call.
         if let Some(window) = reuse_window {
+            ensure_settings_window_resize_policy(
+                window,
+                SETTINGS_WINDOW_WIDTH,
+                SETTINGS_WINDOW_HEIGHT,
+            );
             window_show(window);
             return;
         }
@@ -339,18 +346,14 @@ fn show_bootstrap_overlay_impl() {
             &CGSize::new(window_width, window_height),
         );
 
-        // Settings window should be fixed-size (no resize / fullscreen), to avoid AppKit
-        // fullscreen transition crashes with our custom content setup.
-        let window = create_floating_window(frame, "Settings", true, false);
+        // Allow manual resize again (user request), while still disallowing fullscreen zoom.
+        let window = create_floating_window(frame, "Settings", true, true);
         let _: () = msg_send![window, setOpaque: false];
         let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
         // Disallow fullscreen/zoom to avoid triggering AppKit fullscreen snapshots that can crash.
         let _: () =
             msg_send![window, setCollectionBehavior: NSWindowCollectionBehavior::FullScreenNone];
-        // Hard lock the size (no resize handles, no zoom).
-        let fixed_size = CGSize::new(window_width, window_height);
-        let _: () = msg_send![window, setContentMinSize: fixed_size];
-        let _: () = msg_send![window, setContentMaxSize: fixed_size];
+        ensure_settings_window_resize_policy(window, window_width, window_height);
         let zoom_btn: Id = msg_send![window, standardWindowButton: NSWindowButton::ZoomButton];
         if !zoom_btn.is_null() {
             let _: () = msg_send![zoom_btn, setEnabled: false];
@@ -369,6 +372,21 @@ fn show_bootstrap_overlay_impl() {
         } // Release lock before AppKit call to avoid nested-runloop deadlock.
 
         window_show(window);
+    }
+}
+
+unsafe fn ensure_settings_window_resize_policy(window: Id, min_width: f64, min_height: f64) {
+    unsafe {
+        // Ensure resizable style even for windows created by previous app versions.
+        let current_style: NSWindowStyleMask = msg_send![window, styleMask];
+        let resizable_style = current_style | NSWindowStyleMask::Resizable;
+        let _: () = msg_send![window, setStyleMask: resizable_style];
+
+        // Keep sane minimum while removing any stale max-size lock.
+        let min_size = CGSize::new(min_width, min_height);
+        let _: () = msg_send![window, setContentMinSize: min_size];
+        let max_size = CGSize::new(100000.0, 100000.0);
+        let _: () = msg_send![window, setContentMaxSize: max_size];
     }
 }
 
@@ -881,19 +899,13 @@ unsafe fn build_settings_ui(
             add_subview(setup_view, lbl);
             perm_labels[i] = Some(lbl as usize);
 
-            // Setup convenience shortcuts: click status to open relevant privacy pane.
+            // Setup convenience shortcuts: dedicated open buttons on a second row.
             if i == 1 || i == 2 {
-                let click_target = create_button(perm_frame, "", button_style::INLINE);
-                let responds_bordered: bool =
-                    msg_send![click_target, respondsToSelector: sel!(setBordered:)];
-                if responds_bordered {
-                    let _: () = msg_send![click_target, setBordered: false];
-                }
-                let responds_transparent: bool =
-                    msg_send![click_target, respondsToSelector: sel!(setTransparent:)];
-                if responds_transparent {
-                    let _: () = msg_send![click_target, setTransparent: true];
-                }
+                let open_btn_frame = CGRect::new(
+                    &CGPoint::new(pad + perm_w * i as f64 + 18.0, y - 22.0),
+                    &CGSize::new(56.0, 18.0),
+                );
+                let click_target = create_button(open_btn_frame, "Open", button_style::ROUNDED);
                 if i == 1 {
                     button_set_action(
                         click_target,
@@ -928,7 +940,7 @@ unsafe fn build_settings_ui(
         );
         button_set_action(refresh_btn, action_handler, sel!(onRefreshPermissions:));
         add_subview(setup_view, refresh_btn);
-        y -= 32.0;
+        y -= 54.0;
 
         // ── Quick-start steps ────────────────────────────────────────
         let step_defs: [(&str, objc::runtime::Sel, &str); 3] = [
@@ -1140,6 +1152,28 @@ unsafe fn build_settings_ui(
             ..Default::default()
         });
         add_subview(setup_view, _quality_desc);
+        y -= 22.0;
+
+        let dock_icon_check = create_checkbox(
+            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 20.0)),
+            "Show app icon in Dock",
+            config.show_dock_icon,
+        );
+        button_set_action(dock_icon_check, action_handler, sel!(onDockIconToggled:));
+        add_subview(setup_view, dock_icon_check);
+        y -= 18.0;
+
+        let _dock_desc = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(pad + 22.0, y),
+                &CGSize::new(field_w - 22.0, 16.0),
+            ),
+            text: "When off, CodeScribe runs as tray-only (menu bar icon stays).".to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(setup_view, _dock_desc);
 
         // ── Footer buttons ───────────────────────────────────────────
         let finish_btn = button(
@@ -2849,6 +2883,24 @@ pub(super) extern "C" fn on_quality_daemon_toggled(
             "CODESCRIBE_AUTOSTART_QUALITY_DAEMON",
             if enabled { "1" } else { "0" },
         );
+    }
+}
+
+pub(super) extern "C" fn on_dock_icon_toggled(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    unsafe {
+        let state: isize = msg_send![sender, state];
+        let show_dock_icon = state == 1;
+        info!("Settings: show dock icon -> {}", show_dock_icon);
+        let config = Config::load();
+        let _ = config.save_to_env("SHOW_DOCK_ICON", if show_dock_icon { "1" } else { "0" });
+        crate::set_dock_icon_visibility(show_dock_icon);
+        if show_dock_icon {
+            crate::set_dock_icon();
+        }
     }
 }
 

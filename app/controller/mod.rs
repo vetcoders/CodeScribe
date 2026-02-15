@@ -32,6 +32,8 @@ pub use types::{HotkeyAction, HotkeyInput, HotkeyType, State};
 use crate::presentation::emitter::PresentationEmitter;
 use crate::stream_postprocess::StreamPostProcessor;
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
+use dispatch::Queue;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -53,6 +55,7 @@ use crate::{BadgeMode, hide_hold_badge, show_badge_for_mode};
 // Moshi conversation engine and audio output
 use codescribe_core::conversation::{ConversationEngine, MoshiConfig};
 use codescribe_core::ipc::{IpcEvent, IpcEventPayload};
+use codescribe_core::llm::edit_blocks;
 use codescribe_core::tts::AudioPlayer;
 
 // UI state for conversation mode
@@ -62,6 +65,59 @@ use helpers::{raw_save_enabled, route_transcription_delta, setup_voice_chat_send
 use types::ValidatedAudioPath;
 
 static OVERLAY_CONTROLLER: OnceLock<Arc<RecordingController>> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn activate_target_app(app_name: &str) {
+    use objc::msg_send;
+    use objc::runtime::{Class, Object};
+    use objc::{sel, sel_impl};
+
+    let wanted = app_name.trim().to_lowercase();
+    if wanted.is_empty() {
+        return;
+    }
+
+    // Activate via NSWorkspace — no shell usage.
+    unsafe {
+        let Some(ns_workspace) = Class::get("NSWorkspace") else {
+            return;
+        };
+        let workspace: *mut Object = msg_send![ns_workspace, sharedWorkspace];
+        if workspace.is_null() {
+            return;
+        }
+
+        let running: *mut Object = msg_send![workspace, runningApplications];
+        if running.is_null() {
+            return;
+        }
+
+        let count: usize = msg_send![running, count];
+        for i in 0..count {
+            let app: *mut Object = msg_send![running, objectAtIndex: i];
+            if app.is_null() {
+                continue;
+            }
+
+            let name: *mut Object = msg_send![app, localizedName];
+            if name.is_null() {
+                continue;
+            }
+
+            let name_cstr: *const std::ffi::c_char = msg_send![name, UTF8String];
+            if name_cstr.is_null() {
+                continue;
+            }
+
+            let name_str = std::ffi::CStr::from_ptr(name_cstr).to_string_lossy();
+            let candidate = name_str.trim().to_lowercase();
+            if candidate == wanted || candidate.contains(&wanted) || wanted.contains(&candidate) {
+                let _: bool = msg_send![app, activateWithOptions: 1u64];
+                break;
+            }
+        }
+    }
+}
 
 /// Register the controller for overlay actions (commit/close fragment).
 pub fn register_overlay_controller(controller: Arc<RecordingController>) {
@@ -444,7 +500,8 @@ impl RecordingController {
             self.recover_stale_recorder_if_idle().await;
         }
 
-        debug!(
+        // TEMP: elevated to info! to diagnose hold_mode detection issue
+        info!(
             "Hotkey event: type={:?} action={:?} assistive={} hold_mode={:?} force_raw={} force_ai={} state={}",
             event.key_type,
             event.action,
@@ -459,7 +516,6 @@ impl RecordingController {
         if matches!(event.action, HotkeyAction::Down | HotkeyAction::Press) {
             match event.key_type {
                 HotkeyType::Hold => {
-                    *self.hold_mode.write().await = event.hold_mode;
                     match event.hold_mode {
                         HoldMode::Raw => {
                             // If we're already in an assistive session (Chat/Selection) and the user
@@ -469,6 +525,8 @@ impl RecordingController {
                             // and then disappears).
                             //
                             // We treat assistive mode as "latched" for the duration of a recording.
+                            // NOTE: hold_mode write is deferred to AFTER this check to prevent
+                            // corrupting the mode while the latch rejects the update.
                             if matches!(current_state, State::RecHold | State::RecToggle)
                                 && *self.assistive_mode.read().await
                             {
@@ -476,6 +534,7 @@ impl RecordingController {
                                 return Ok(());
                             }
 
+                            *self.hold_mode.write().await = event.hold_mode;
                             *self.assistive_mode.write().await = false;
                             *self.assistive_context.write().await = None;
                             *self.force_raw_mode.write().await = !event.force_ai;
@@ -491,6 +550,7 @@ impl RecordingController {
                             }
                         }
                         HoldMode::Chat => {
+                            *self.hold_mode.write().await = event.hold_mode;
                             *self.assistive_mode.write().await = true;
                             *self.force_raw_mode.write().await = false;
                             *self.force_ai_mode.write().await = false;
@@ -511,13 +571,16 @@ impl RecordingController {
                                         .frontmost_app,
                                 );
                                 set_assistive_session(true);
-                                crate::hide_transcription_overlay();
+                                crate::hide_transcription_overlay_with_reason(
+                                    "switch_to_assistive_chat",
+                                );
                                 crate::show_voice_chat_overlay();
                                 crate::show_agent_tab();
                                 crate::voice_chat_ui::update_voice_chat_status("Listening...");
                             }
                         }
                         HoldMode::Selection => {
+                            *self.hold_mode.write().await = event.hold_mode;
                             *self.assistive_mode.write().await = true;
                             *self.force_raw_mode.write().await = false;
                             *self.force_ai_mode.write().await = false;
@@ -538,7 +601,9 @@ impl RecordingController {
                                         .frontmost_app,
                                 );
                                 set_assistive_session(true);
-                                crate::hide_transcription_overlay();
+                                crate::hide_transcription_overlay_with_reason(
+                                    "switch_to_assistive_selection",
+                                );
                                 crate::show_voice_chat_overlay();
                                 crate::show_agent_tab();
                                 crate::voice_chat_ui::update_voice_chat_status("Listening...");
@@ -1206,8 +1271,8 @@ impl RecordingController {
             // Transition to REC_HOLD as soon as recorder starts to avoid IDLE/active races.
             Self::set_state_with_broadcast(&state, &event_broadcast, State::RecHold).await;
             info!(
-                "STATE TRANSITION: IDLE → REC_HOLD (assistive={})",
-                is_assistive
+                "STATE TRANSITION: IDLE → REC_HOLD (assistive={}, hold_mode={:?})",
+                is_assistive, hold_mode
             );
 
             // Play start beep if enabled
@@ -1247,7 +1312,7 @@ impl RecordingController {
                         .frontmost_app,
                 );
 
-                crate::hide_transcription_overlay();
+                crate::hide_transcription_overlay_with_reason("start_assistive_hold");
                 crate::show_voice_chat_overlay();
                 crate::show_agent_tab();
                 crate::voice_chat_ui::update_voice_chat_status("Listening...");
@@ -1576,7 +1641,7 @@ impl RecordingController {
                     .frontmost_app,
             );
 
-            crate::hide_transcription_overlay();
+            crate::hide_transcription_overlay_with_reason("start_assistive_toggle");
             crate::show_voice_chat_overlay();
             crate::show_agent_tab();
             crate::voice_chat_ui::update_voice_chat_status("Listening...");
@@ -1805,47 +1870,25 @@ impl RecordingController {
                 crate::voice_chat_ui::update_voice_chat_status("Ready");
                 info!("Processing finished successfully. State reset to IDLE.");
 
-                // Overlay policy (POC):
+                // Overlay policy:
+                // - Inline edit: auto-hide (text replaced in-place, overlay not needed).
                 // - Assistive: keep chat overlay alive (bubbles persist).
-                // - Raw: auto-paste only, hide overlay.
-                // - AI formatting: no auto-paste, show decision overlay.
-                if !assistive {
-                    let cfg = self.config.read().await.clone();
-                    let show_decision_overlay = if force_ai {
-                        true
-                    } else if force_raw {
-                        false
-                    } else if cfg.quick_notes_enabled && cfg.quick_notes_save_only {
-                        // In save-only flow, avoid decision overlays.
-                        false
-                    } else {
-                        // Toggle mode: decision overlay only when AI formatting is ON.
-                        cfg.ai_formatting_enabled && crate::ai_formatting::has_api_key()
-                    };
-
-                    if show_decision_overlay {
-                        let opened = self
-                            .opened_voice_chat_overlay_for_transcription
-                            .swap(false, Ordering::SeqCst);
-                        if opened {
-                            crate::voice_chat_ui::hide_voice_chat_overlay();
-                        }
-                        crate::enter_decision_mode();
-                        crate::schedule_auto_hide();
-                    } else {
-                        let opened = self
-                            .opened_voice_chat_overlay_for_transcription
-                            .swap(false, Ordering::SeqCst);
-                        if opened {
-                            crate::voice_chat_ui::hide_voice_chat_overlay();
-                        }
-                        if cfg.quick_notes_enabled && cfg.quick_notes_save_only {
-                            crate::hide_transcription_overlay();
-                        } else {
-                            crate::enter_decision_mode();
-                            crate::schedule_auto_hide();
-                        }
+                // - Dictation (RAW/AI/save-only): keep final transcript briefly, then auto-hide.
+                let is_inline_edit = self.config.read().await.inline_edit_enabled
+                    && assistive
+                    && matches!(hold_mode, HoldMode::Selection);
+                if !assistive || is_inline_edit {
+                    let opened = self
+                        .opened_voice_chat_overlay_for_transcription
+                        .swap(false, Ordering::SeqCst);
+                    if opened {
+                        crate::voice_chat_ui::hide_voice_chat_overlay();
                     }
+
+                    // Keep final transcript visible briefly (also for RAW/save-only),
+                    // then auto-hide. This gives user feedback even when we auto-paste.
+                    crate::enter_decision_mode();
+                    crate::schedule_auto_hide();
                 }
             }
             Err(e) => {
@@ -1859,7 +1902,7 @@ impl RecordingController {
                 if opened {
                     crate::voice_chat_ui::hide_voice_chat_overlay();
                 }
-                crate::hide_transcription_overlay();
+                crate::hide_transcription_overlay_with_reason("finish_error");
             }
         }
 
@@ -2154,13 +2197,18 @@ impl RecordingController {
         // - Need formatting? → Double Option (respects setting)
         // - AI chat? → Hold + Shift (Chat)
         // - AI on selection? → Hold + Cmd (Selection)
-        let (formatted_text, output_kind, mut should_auto_paste) = if assistive {
+        let (mut formatted_text, output_kind, mut should_auto_paste) = if assistive {
             info!(
                 "Assistive mode ({:?}): augmenting transcript via AI",
                 effective_hold_mode
             );
 
-            if chat_active {
+            // Inline edit candidate: skip overlay entirely — result goes in-place.
+            // If selection is missing (detected later), mode falls to Chat and overlay is shown then.
+            let inline_edit_candidate = config.inline_edit_enabled
+                && matches!(effective_hold_mode, HoldMode::Selection);
+
+            if chat_active && !inline_edit_candidate {
                 crate::show_voice_chat_overlay();
                 if skip_user_bubble {
                     // Event pipeline: Preview already streamed text into the bubble.
@@ -2219,6 +2267,13 @@ impl RecordingController {
                 );
                 effective_hold_mode = HoldMode::Chat;
                 if chat_active {
+                    // Inline edit skipped overlay earlier; now that we fell back to Chat, show it.
+                    if inline_edit_candidate {
+                        crate::show_voice_chat_overlay();
+                        crate::voice_chat_ui::set_voice_chat_user_text(&clean_text);
+                        crate::voice_chat_ui::show_agent_tab();
+                        crate::voice_chat_ui::set_voice_chat_sending(true);
+                    }
                     crate::voice_chat_ui::update_voice_chat_status(
                         "Selection unavailable - chat fallback",
                     );
@@ -2266,7 +2321,11 @@ impl RecordingController {
             .await;
             let kind = match result.status {
                 crate::ai_formatting::AiFormatStatus::Applied => {
-                    if chat_active {
+                    // Inline edit: text is replaced in-place in the target app.
+                    // Skip overlay display to avoid stealing focus and freezing.
+                    let is_inline = config.inline_edit_enabled
+                        && matches!(effective_hold_mode, HoldMode::Selection);
+                    if chat_active && !is_inline {
                         let streamed = use_streaming && streamed_any_delta.load(Ordering::SeqCst);
                         // Display AI response in overlay
                         crate::show_voice_chat_overlay();
@@ -2284,6 +2343,11 @@ impl RecordingController {
                         }
                         info!(
                             "Assistive response displayed in overlay ({} chars)",
+                            result.text.len()
+                        );
+                    } else if is_inline {
+                        info!(
+                            "Inline edit: skipping overlay display ({} chars)",
                             result.text.len()
                         );
                     }
@@ -2304,7 +2368,11 @@ impl RecordingController {
                     crate::state::history::TranscriptKind::Raw
                 }
             };
-            (result.text, kind, false)
+            // Inline edit: Selection mode auto-pastes back (replaces the selection in-place).
+            let inline_paste = config.inline_edit_enabled
+                && matches!(effective_hold_mode, HoldMode::Selection)
+                && matches!(result.status, crate::ai_formatting::AiFormatStatus::Applied);
+            (result.text, kind, inline_paste)
         } else if force_raw {
             // Ctrl Hold: ALWAYS raw transcript (fast dictation mode)
             // Post-processed clean_text is used (lexicon + cleanup already applied)
@@ -2468,8 +2536,16 @@ impl RecordingController {
             }
 
             // Optional: make Quick Notes "save-only".
+            // Keep hold-to-talk RAW behavior predictable: raw hold should still paste at cursor.
             if config.quick_notes_save_only {
-                should_auto_paste = false;
+                if force_raw {
+                    info!(
+                        "Quick Notes save-only enabled, but keeping auto-paste for force_raw session"
+                    );
+                } else {
+                    should_auto_paste = false;
+                    info!("Auto-paste disabled by Quick Notes save-only mode");
+                }
             }
         }
 
@@ -2488,9 +2564,144 @@ impl RecordingController {
         if cfg!(test) {
             info!("Skipping paste in tests (mode={})", mode_label);
         } else if should_auto_paste {
-            // Paste the text into the active application
-            clipboard::paste_text(&formatted_text).context("Failed to paste text")?;
-            info!("Text pasted successfully");
+            // Paste the text into the app that was frontmost when recording started.
+            #[cfg(target_os = "macos")]
+            {
+                let target_app = self
+                    .assistive_context
+                    .read()
+                    .await
+                    .clone()
+                    .and_then(|ctx| ctx.frontmost_app)
+                    .map(|v| v.trim().to_string())
+                    .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("CodeScribe"));
+
+                let current_frontmost = tokio::task::spawn_blocking(capture_frontmost_app_only)
+                    .await
+                    .ok()
+                    .and_then(|ctx| ctx.frontmost_app)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+
+                let should_reactivate_target = current_frontmost.eq_ignore_ascii_case("CodeScribe");
+                info!(
+                    "Auto-paste focus check: current='{}' target='{}' reactivate={}",
+                    if current_frontmost.is_empty() {
+                        "<unknown>"
+                    } else {
+                        &current_frontmost
+                    },
+                    target_app.as_deref().unwrap_or("<none>"),
+                    should_reactivate_target
+                );
+
+                if should_reactivate_target && let Some(app_name) = target_app {
+                    Queue::main().exec_async(move || activate_target_app(&app_name));
+                    tokio::time::sleep(Duration::from_millis(160)).await;
+                }
+            }
+
+            // Inline edit: use replace_selected_text (AX write → clipboard fallback)
+            // to replace the selection in-place. Regular paste for all other modes.
+            let is_inline_edit = config.inline_edit_enabled
+                && assistive
+                && matches!(effective_hold_mode, HoldMode::Selection);
+
+            if is_inline_edit {
+                // Retrieve original selection for surgical SEARCH/REPLACE editing.
+                let original_selection = self
+                    .assistive_context
+                    .read()
+                    .await
+                    .clone()
+                    .and_then(|ctx| ctx.selected_text)
+                    .unwrap_or_default();
+
+                // Try SEARCH/REPLACE blocks for surgical edit; fall back to full replacement.
+                let mut skip_ax_write = false;
+                let final_text =
+                    if let Some(blocks) = edit_blocks::parse_edit_blocks(&formatted_text) {
+                        match edit_blocks::validate_and_apply(&original_selection, &blocks) {
+                            Ok(result) => {
+                                info!(
+                                    "Inline edit: applied {} SEARCH/REPLACE block(s) ({} -> {} chars)",
+                                    blocks.len(),
+                                    original_selection.len(),
+                                    result.len()
+                                );
+                                result
+                            }
+                            Err(e) => {
+                                warn!("Inline edit: SEARCH/REPLACE apply failed: {e}");
+                                // Show full AI response in overlay + clipboard — user decides.
+                                let display_text =
+                                    edit_blocks::strip_markdown_fences(&formatted_text);
+                                let _ = clipboard::set_clipboard(&display_text);
+                                crate::show_voice_chat_overlay();
+                                crate::voice_chat_ui::set_voice_chat_text(&display_text);
+                                crate::voice_chat_ui::update_voice_chat_status(
+                                    "Edit failed \u{2014} copied to clipboard",
+                                );
+                                info!(
+                                    "Inline edit: overlay fallback ({} chars, error: {e})",
+                                    display_text.len()
+                                );
+                                skip_ax_write = true;
+                                display_text
+                            }
+                        }
+                    } else {
+                        info!(
+                            "Inline edit: no SEARCH/REPLACE blocks, using full replacement"
+                        );
+                        edit_blocks::strip_markdown_fences(&formatted_text)
+                    };
+
+                if !skip_ax_write {
+                    let text_for_replace = final_text.clone();
+                    let inline_ok = match tokio::task::spawn_blocking(move || {
+                        crate::os::selection::replace_selected_text(&text_for_replace)
+                    })
+                    .await
+                    {
+                        Ok(Ok(method)) => {
+                            info!("Inline edit succeeded (method={})", method);
+                            crate::audio::play_sound("Tink");
+                            true
+                        }
+                        Ok(Err(e)) => {
+                            warn!("Inline edit failed: {e}. Falling back to overlay + clipboard.");
+                            false
+                        }
+                        Err(e) => {
+                            warn!("Inline edit task join error: {e}. Falling back to overlay + clipboard.");
+                            false
+                        }
+                    };
+
+                    if !inline_ok {
+                        // Target is read-only (e.g. terminal output): show result in overlay
+                        // and copy to clipboard so user can Cmd+V manually.
+                        let _ = clipboard::set_clipboard(&final_text);
+                        crate::show_voice_chat_overlay();
+                        crate::voice_chat_ui::set_voice_chat_text(&final_text);
+                        crate::voice_chat_ui::update_voice_chat_status("Copied to clipboard");
+                        info!(
+                            "Inline edit fallback: overlay shown + clipboard ({} chars)",
+                            final_text.len()
+                        );
+                    }
+                }
+                // Update formatted_text so transcript save records the actual
+                // result that was inserted, not the raw AI response with markers.
+                formatted_text = final_text;
+            } else if let Err(e) = clipboard::paste_text(&formatted_text) {
+                warn!("Auto-paste failed: {e}. Falling back to clipboard copy.");
+                let _ = clipboard::set_clipboard(&formatted_text);
+            } else {
+                info!("Text pasted successfully");
+            }
         } else {
             info!("Auto-paste skipped (mode={})", mode_label);
         }

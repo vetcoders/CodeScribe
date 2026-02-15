@@ -974,7 +974,7 @@ extern "C" fn on_start_recording(_this: &Object, _cmd: Sel, _sender: Id) {
 
 extern "C" fn on_header_record(_this: &Object, _cmd: Sel, _sender: Id) {
     // Header record button is chat-native: keep the session in assistive/chat mode.
-    crate::hide_transcription_overlay();
+    crate::hide_transcription_overlay_with_reason("voice_chat_header_record");
     crate::controller::request_toggle_recording_start(true);
     info!("Header CTA: toggle assistive recording");
 }

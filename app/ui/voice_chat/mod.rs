@@ -31,7 +31,7 @@ use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
 use objc2_app_kit::{
     NSBackingStoreType, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use std::thread;
 use std::time::Duration;
@@ -205,7 +205,7 @@ fn show_voice_chat_overlay_impl() {
 
         let overlay_window_class = overlay_window_class();
         let window: Id = msg_send![overlay_window_class, alloc];
-        let style_mask = NSWindowStyleMask::Borderless
+        let style_mask = NSWindowStyleMask::Titled
             | NSWindowStyleMask::FullSizeContentView
             | NSWindowStyleMask::Resizable;
         let backing = NSBackingStoreType::Buffered;
@@ -244,6 +244,21 @@ fn show_voice_chat_overlay_impl() {
         let delegate_class = window_delegate_class();
         let window_delegate: Id = msg_send![delegate_class, new];
         let _: () = msg_send![window, setDelegate: window_delegate];
+
+        // Hide traffic light buttons (Titled adds them; we only need the resize handles).
+        let close_btn: Id = msg_send![window, standardWindowButton: NSWindowButton::CloseButton];
+        if !close_btn.is_null() {
+            let _: () = msg_send![close_btn, setHidden: true];
+        }
+        let miniaturize_btn: Id =
+            msg_send![window, standardWindowButton: NSWindowButton::MiniaturizeButton];
+        if !miniaturize_btn.is_null() {
+            let _: () = msg_send![miniaturize_btn, setHidden: true];
+        }
+        let zoom_btn: Id = msg_send![window, standardWindowButton: NSWindowButton::ZoomButton];
+        if !zoom_btn.is_null() {
+            let _: () = msg_send![zoom_btn, setHidden: true];
+        }
 
         let content_view: Id = msg_send![window, contentView];
         let ns_mut_array = Class::get("NSMutableArray").unwrap();

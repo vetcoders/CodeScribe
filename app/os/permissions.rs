@@ -549,6 +549,7 @@ pub fn diagnostics_report() -> String {
         "DOUBLE_TAP_INTERVAL_MS",
         "TOGGLE_SILENCE_SEC",
         "TOGGLE_TRIGGER",
+        "SHOW_DOCK_ICON",
         "CODESCRIBE_BUFFERED_STREAM",
         "CODESCRIBE_STREAM_CHUNK_SEC",
     ] {

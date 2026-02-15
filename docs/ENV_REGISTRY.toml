@@ -731,6 +731,13 @@ reload = "restart"
 category = "ui"
 description = "Show tray icon glyph"
 
+[vars.SHOW_DOCK_ICON]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "ui"
+description = "Show app icon in Dock (disable for tray-only mode)"
+
 [vars.START_AT_LOGIN]
 default = "0"
 type = "bool"
@@ -843,6 +850,13 @@ type = "bool"
 reload = "restart"
 category = "storage"
 description = "Quick Notes save-only mode (skip auto-paste)"
+
+[vars.INLINE_EDIT_ENABLED]
+default = "0"
+type = "bool"
+reload = "restart"
+category = "assistive"
+description = "Selection mode replaces selected text in-place with AI response"
 
 [vars.CODESCRIBE_NOTES_DIR]
 default = ""

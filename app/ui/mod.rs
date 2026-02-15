@@ -37,6 +37,7 @@ type AXId = *mut std::ffi::c_void;
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXUIElementCopyAttributeValue(element: AXId, attribute: AXId, value: *mut AXId) -> i32;
+    fn AXUIElementSetAttributeValue(element: AXId, attribute: AXId, value: AXId) -> i32;
     fn AXUIElementCreateSystemWide() -> AXId;
     fn AXValueGetValue(value: AXId, type_: i32, value_ptr: *mut std::ffi::c_void) -> bool;
     fn CFRelease(cf: AXId);
@@ -392,6 +393,68 @@ pub fn get_selected_text(max_chars: usize) -> Option<String> {
         }
 
         Some(s)
+    }
+}
+
+/// Replace the currently selected text in the focused UI element via Accessibility API.
+///
+/// This attempts a direct AX attribute write (`AXSelectedText`), which replaces
+/// the selection without touching the clipboard. Not all apps support this —
+/// returns `Ok(true)` on success, `Ok(false)` if the attribute is read-only or
+/// unsupported, and `Err` on unexpected failures.
+///
+/// Callers should fall back to clipboard-based paste when this returns `Ok(false)`.
+pub fn set_selected_text(new_text: &str) -> Result<bool, String> {
+    unsafe {
+        let system_wide = AXUIElementCreateSystemWide();
+        if system_wide.is_null() {
+            return Err("AXUIElementCreateSystemWide returned null".into());
+        }
+
+        let mut focused_element: AXId = ptr::null_mut();
+        let attr_name = CFString::new(AX_FOCUSED_UIELEMENT_ATTRIBUTE);
+        let result = AXUIElementCopyAttributeValue(
+            system_wide,
+            attr_name.as_concrete_TypeRef() as AXId,
+            &mut focused_element,
+        );
+
+        CFRelease(system_wide);
+
+        if result != AX_ERROR_SUCCESS || focused_element.is_null() {
+            return Err(format!(
+                "Failed to get focused element (AXError={})",
+                result
+            ));
+        }
+
+        // Build a CFString from the replacement text
+        let cf_new_text = CFString::new(new_text);
+        let selected_attr = CFString::new(AX_SELECTED_TEXT_ATTRIBUTE);
+
+        let set_result = AXUIElementSetAttributeValue(
+            focused_element,
+            selected_attr.as_concrete_TypeRef() as AXId,
+            cf_new_text.as_concrete_TypeRef() as AXId,
+        );
+
+        CFRelease(focused_element);
+
+        if set_result == AX_ERROR_SUCCESS {
+            debug!(
+                "set_selected_text: AX write succeeded ({} chars)",
+                new_text.len()
+            );
+            Ok(true)
+        } else {
+            // AXErrorAttributeUnsupported = -25205, AXErrorActionUnsupported = -25206,
+            // AXErrorNotImplemented = -25208 — all mean "read-only, try fallback"
+            debug!(
+                "set_selected_text: AX write not supported (AXError={}), fallback needed",
+                set_result
+            );
+            Ok(false)
+        }
     }
 }
 
@@ -847,6 +910,33 @@ pub fn set_dock_icon() {
         // Set as application icon
         let _: () = msg_send![shared_app, setApplicationIconImage: ns_image];
         debug!("Dock icon set successfully");
+    });
+}
+
+/// Toggle Dock icon visibility at runtime.
+///
+/// `show = true` switches app to regular activation policy (Dock icon visible).
+/// `show = false` switches app to accessory policy (tray/menu-bar only).
+pub fn set_dock_icon_visibility(show: bool) {
+    Queue::main().exec_async(move || unsafe {
+        let ns_app_class = Class::get("NSApplication").expect("NSApplication class not found");
+        let shared_app: Id = msg_send![ns_app_class, sharedApplication];
+
+        if shared_app.is_null() {
+            warn!("Failed to get NSApplication sharedApplication");
+            return;
+        }
+
+        // NSApplicationActivationPolicy:
+        // 0 = Regular (Dock + menu bar), 1 = Accessory (no Dock, no menu bar), 2 = Prohibited
+        let activation_policy: isize = if show { 0 } else { 1 };
+        let applied: bool = msg_send![shared_app, setActivationPolicy: activation_policy];
+        if !applied {
+            warn!("Failed to set Dock icon visibility (show={show})");
+            return;
+        }
+
+        debug!("Dock icon visibility set (show={show})");
     });
 }
 

@@ -9,12 +9,12 @@ use super::{
     handle_open_input_monitoring_settings, handle_show_overlay, handle_test_mic,
     on_assistive_endpoint_changed, on_assistive_key_changed, on_assistive_model_changed,
     on_beep_toggled, on_clear_assistive_key, on_clear_llm_key, on_delay_changed,
-    on_double_tap_interval_changed, on_enter_send_toggled, on_formatting_level_changed,
-    on_formatting_toggled, on_hold_exclusive_changed, on_hold_mod_changed, on_language_changed,
-    on_llm_endpoint_changed, on_llm_key_changed, on_llm_model_changed, on_preset_changed,
-    on_quality_daemon_toggled, on_refresh_permissions, on_save_api_settings,
-    on_toggle_trigger_changed, on_voice_lab_field_changed, on_voice_lab_toggle_changed,
-    on_volume_changed, switch_tab,
+    on_dock_icon_toggled, on_double_tap_interval_changed, on_enter_send_toggled,
+    on_formatting_level_changed, on_formatting_toggled, on_hold_exclusive_changed,
+    on_hold_mod_changed, on_language_changed, on_llm_endpoint_changed, on_llm_key_changed,
+    on_llm_model_changed, on_preset_changed, on_quality_daemon_toggled, on_refresh_permissions,
+    on_save_api_settings, on_toggle_trigger_changed, on_voice_lab_field_changed,
+    on_voice_lab_toggle_changed, on_volume_changed, switch_tab,
 };
 
 pub type Id = *mut Object;
@@ -179,6 +179,10 @@ pub fn action_handler_class() -> *const Class {
             decl.add_method(
                 sel!(onQualityDaemonToggled:),
                 on_quality_daemon_toggled as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onDockIconToggled:),
+                on_dock_icon_toggled as extern "C" fn(&Object, Sel, Id),
             );
 
             // Permission refresh

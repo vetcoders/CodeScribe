@@ -52,7 +52,8 @@ pub mod dev;
 pub use ui::{
     BadgeMode, HoldBadgeConfig, focused_element_accepts_text, get_caret_position,
     get_cursor_position, hide_hold_badge, install_basic_edit_menu, set_dock_icon,
-    show_badge_for_mode, show_hold_badge, show_hold_badge_with_config,
+    set_dock_icon_visibility, set_selected_text, show_badge_for_mode, show_hold_badge,
+    show_hold_badge_with_config,
 };
 
 #[cfg(target_os = "macos")]
@@ -83,8 +84,8 @@ pub use voice_chat_ui::{
 pub use transcription_overlay::{
     TranscriptionOverlayConfig, append_transcription_delta, clear_transcription_text,
     enter_decision_mode, enter_recording_mode, get_transcription_text, hide_transcription_overlay,
-    is_transcription_overlay_visible, schedule_auto_hide, set_transcription_text,
-    show_transcription_overlay, update_transcription_status,
+    hide_transcription_overlay_with_reason, is_transcription_overlay_visible, schedule_auto_hide,
+    set_transcription_text, show_transcription_overlay, update_transcription_status,
 };
 
 #[cfg(target_os = "macos")]

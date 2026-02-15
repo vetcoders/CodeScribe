@@ -26,7 +26,7 @@ use objc2_app_kit::{
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::ui::shared::status::status_from_detail;
@@ -43,7 +43,9 @@ use std::sync::Once;
 type Id = *mut Object;
 
 // Window level constants
-const NS_FLOATING_WINDOW_LEVEL: i64 = 3;
+// Use status-level so the ephemeral transcript remains visible even when we
+// return focus to the target app for auto-paste.
+const NS_FLOATING_WINDOW_LEVEL: i64 = 25;
 const NS_PROGRESS_INDICATOR_STYLE_SPINNING: i64 = 1;
 const NSTRACKING_MOUSE_ENTERED_AND_EXITED: u64 = 1 << 0;
 const NSTRACKING_ACTIVE_ALWAYS: u64 = 1 << 7;
@@ -57,11 +59,17 @@ const OVERLAY_STATUS_HEIGHT: f64 = 28.0;
 const OVERLAY_BUTTON_HEIGHT: f64 = 28.0;
 const OVERLAY_BUTTON_MARGIN: f64 = 8.0;
 const OVERLAY_CORNER_RADIUS: f64 = 16.0;
+const OVERLAY_TEXT_TOP_RESERVED: f64 = OVERLAY_STATUS_HEIGHT + 36.0;
+const OVERLAY_TEXT_BOTTOM_RESERVED: f64 =
+    OVERLAY_PADDING + OVERLAY_BUTTON_HEIGHT + OVERLAY_BUTTON_MARGIN;
 const MAX_TAIL_LINES: usize = 16;
 const MAX_TAIL_CHARS: usize = 2000;
 
 // Auto-hide delay after recording completes
 const AUTO_HIDE_DELAY_SECS: u64 = 5;
+// If cursor keeps hovering the overlay, force-close after this timeout.
+const AUTO_HIDE_FORCE_TIMEOUT_SECS: u64 = 8;
+const AUTO_HIDE_RECHECK_MS: u64 = 250;
 
 /// Configuration for the transcription overlay
 #[derive(Debug, Clone)]
@@ -193,7 +201,7 @@ extern "C" fn on_augment_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
 
 /// Handler: Archive (no-op save already happened; just close overlay)
 extern "C" fn on_archive_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
-    hide_transcription_overlay();
+    hide_transcription_overlay_with_reason("archive_button");
 }
 
 /// Handler: Commit recording (stop stream + enter decision mode)
@@ -274,6 +282,10 @@ fn set_status_message(state: &TranscriptionOverlayState, msg: &str, show: bool) 
             set_hidden(status_ptr as Id, !show);
         }
     }
+    // Hint is only useful in decision mode; hide it while transient status is shown.
+    if show {
+        set_auto_hide_hint_visible(state, false);
+    }
     let status_kind = status_from_detail(msg);
     let _ = crate::tray::update_tray_status(status_kind.to_tray());
     if let Some(spinner_ptr) = state.progress_indicator {
@@ -319,7 +331,7 @@ fn run_ai_copy(text: String, augment: bool) {
                         set_buttons_enabled(&state, true);
                     } else {
                         info!("Copied formatted transcript ({} chars)", result.text.len());
-                        hide_transcription_overlay();
+                        hide_transcription_overlay_with_reason("ai_copy_success");
                     }
                 }
                 crate::ai_formatting::AiFormatStatus::Failed => {
@@ -394,7 +406,7 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
     let text_width = state.window_width - OVERLAY_PADDING * 2.0;
     let mut text_height = measure_text_height(text_field_ptr, text_width);
     let mut required_window_height =
-        text_height + OVERLAY_PADDING * 3.0 + OVERLAY_BUTTON_HEIGHT + OVERLAY_BUTTON_MARGIN;
+        text_height + OVERLAY_TEXT_BOTTOM_RESERVED + OVERLAY_TEXT_TOP_RESERVED;
 
     if required_window_height > state.max_height {
         trim_text_to_tail(&mut state.accumulated_text);
@@ -403,7 +415,7 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
         }
         text_height = measure_text_height(text_field_ptr, text_width);
         required_window_height =
-            text_height + OVERLAY_PADDING * 3.0 + OVERLAY_BUTTON_HEIGHT + OVERLAY_BUTTON_MARGIN;
+            text_height + OVERLAY_TEXT_BOTTOM_RESERVED + OVERLAY_TEXT_TOP_RESERVED;
     }
 
     let target_height = required_window_height
@@ -429,14 +441,11 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
         let text_frame = CGRect {
             origin: CGPoint {
                 x: OVERLAY_PADDING,
-                y: OVERLAY_PADDING + OVERLAY_BUTTON_HEIGHT + OVERLAY_BUTTON_MARGIN,
+                y: OVERLAY_TEXT_BOTTOM_RESERVED,
             },
             size: CGSize {
                 width: state.window_width - OVERLAY_PADDING * 2.0,
-                height: target_height
-                    - OVERLAY_PADDING * 3.0
-                    - OVERLAY_BUTTON_HEIGHT
-                    - OVERLAY_BUTTON_MARGIN,
+                height: target_height - OVERLAY_TEXT_BOTTOM_RESERVED - OVERLAY_TEXT_TOP_RESERVED,
             },
         };
         let _: () = msg_send![text_field_ptr, setFrame: text_frame];
@@ -679,6 +688,12 @@ fn show_transcription_overlay_impl() {
         let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
         let _: () = msg_send![window, setMovableByWindowBackground: true];
         let _: () = msg_send![window, setHasShadow: true];
+        // Keep overlay visible even when another app becomes active for paste.
+        let supports_hides_on_deactivate: bool =
+            msg_send![window, respondsToSelector: sel!(setHidesOnDeactivate:)];
+        if supports_hides_on_deactivate {
+            let _: () = msg_send![window, setHidesOnDeactivate: false];
+        }
 
         // Join all spaces (follow focus)
         // Make sure the overlay shows up even when the user is in a fullscreen Space.
@@ -799,15 +814,14 @@ fn show_transcription_overlay_impl() {
 
         // === Text field for transcription (main area) ===
         let button_height = OVERLAY_BUTTON_HEIGHT;
-        let button_margin = OVERLAY_BUTTON_MARGIN;
         let text_frame = CGRect {
             origin: CGPoint {
                 x: padding,
-                y: padding + button_height + button_margin,
+                y: OVERLAY_TEXT_BOTTOM_RESERVED,
             },
             size: CGSize {
                 width: window_width - padding * 2.0,
-                height: window_height - padding * 3.0 - button_height - button_margin,
+                height: window_height - OVERLAY_TEXT_BOTTOM_RESERVED - OVERLAY_TEXT_TOP_RESERVED,
             },
         };
 
@@ -1077,16 +1091,48 @@ pub fn schedule_auto_hide() {
     });
 
     std::thread::spawn(move || {
+        let started = Instant::now();
         std::thread::sleep(Duration::from_secs(AUTO_HIDE_DELAY_SECS));
 
         if should_auto_hide(generation) {
-            hide_transcription_overlay();
+            hide_transcription_overlay_with_reason("auto_hide_timer");
             debug!(
                 "Transcription overlay auto-hidden after {}s",
                 AUTO_HIDE_DELAY_SECS
             );
         } else {
-            debug!("Auto-hide skipped");
+            // If skip was caused by hover, keep checking. Force-close eventually
+            // so the overlay cannot get stuck forever.
+            loop {
+                let still_valid = AUTO_HIDE_GENERATION.load(Ordering::SeqCst) == generation
+                    && AUTO_HIDE_PENDING.load(Ordering::SeqCst);
+                if !still_valid {
+                    debug!("Auto-hide canceled by newer generation/state");
+                    return;
+                }
+
+                let hovered = {
+                    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                    state.hover_active
+                };
+
+                if !hovered {
+                    hide_transcription_overlay_with_reason("auto_hide_after_hover_exit");
+                    debug!("Transcription overlay auto-hidden after hover exit");
+                    return;
+                }
+
+                if started.elapsed() >= Duration::from_secs(AUTO_HIDE_FORCE_TIMEOUT_SECS) {
+                    hide_transcription_overlay_with_reason("auto_hide_force_timeout");
+                    debug!(
+                        "Transcription overlay force-hidden after {}s",
+                        AUTO_HIDE_FORCE_TIMEOUT_SECS
+                    );
+                    return;
+                }
+
+                std::thread::sleep(Duration::from_millis(AUTO_HIDE_RECHECK_MS));
+            }
         }
     });
 }
@@ -1169,40 +1215,29 @@ fn set_recording_status(state: &TranscriptionOverlayState, show: bool) {
 
 /// Hide the transcription overlay window (with fade-out animation)
 pub fn hide_transcription_overlay() {
+    hide_transcription_overlay_with_reason("unspecified");
+}
+
+pub fn hide_transcription_overlay_with_reason(reason: &'static str) {
     // Cancel any pending auto-hide
     AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
 
-    Queue::main().exec_async(|| {
-        hide_transcription_overlay_impl();
+    info!("Overlay hide requested: reason={reason}");
+    Queue::main().exec_async(move || {
+        hide_transcription_overlay_impl(reason);
     });
 }
 
-/// Closes a window by raw pointer (used for delayed close after animation)
-fn close_window_by_ptr(window_ptr: usize) {
-    unsafe {
-        window_close(window_ptr as Id);
-    }
-}
-
-fn hide_transcription_overlay_impl() {
+fn hide_transcription_overlay_impl(reason: &'static str) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(window_ptr) = state.window.take() {
         let window = window_ptr as Id;
-
-        // Fade out animation (0.15s)
+        // Close immediately to avoid delayed-close races with newly created overlays.
         unsafe {
-            animate_fade(window, 0.0, 0.15);
+            window_close(window);
         }
 
-        // Close window after brief delay for animation
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
-            Queue::main().exec_async(move || {
-                close_window_by_ptr(window_ptr);
-            });
-        });
-
-        debug!("Transcription overlay hidden");
+        info!("Overlay hidden: reason={reason}");
     }
     state.text_field = None;
     state.status_field = None;

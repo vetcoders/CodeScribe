@@ -143,6 +143,9 @@ impl Config {
         if let Ok(val) = std::env::var("SHOW_TRAY_GLYPH") {
             self.show_tray_glyph = val.parse().unwrap_or(true);
         }
+        if let Ok(val) = std::env::var("SHOW_DOCK_ICON") {
+            self.show_dock_icon = val.parse().unwrap_or(true);
+        }
         if let Ok(val) = std::env::var("HOLD_INDICATOR") {
             self.hold_indicator = val.parse().unwrap_or(true);
         }
@@ -253,6 +256,11 @@ impl Config {
         // System
         if let Ok(val) = std::env::var("START_AT_LOGIN") {
             self.start_at_login = matches!(val.as_str(), "1" | "true" | "yes" | "on");
+        }
+
+        // Inline Edit
+        if let Ok(val) = std::env::var("INLINE_EDIT_ENABLED") {
+            self.inline_edit_enabled = matches!(val.as_str(), "1" | "true" | "yes" | "on");
         }
 
         // Debugging (default: on to keep paired .wav with transcripts)
@@ -474,6 +482,12 @@ impl Config {
         {
             self.start_at_login = v;
         }
+        if std::env::var("SHOW_DOCK_ICON").is_err()
+            && let Some(v) = settings.show_dock_icon
+        {
+            self.show_dock_icon = v;
+            unsafe { std::env::set_var("SHOW_DOCK_ICON", if v { "1" } else { "0" }) };
+        }
         if std::env::var("AGENT_ENTER_SENDS").is_err()
             && let Some(v) = settings.agent_enter_sends
         {
@@ -589,6 +603,7 @@ impl Config {
                 | "QUICK_NOTES_ENABLED"
                 | "QUICK_NOTES_SAVE_ONLY"
                 | "START_AT_LOGIN"
+                | "SHOW_DOCK_ICON"
                 | "AGENT_ENTER_SENDS" => {
                     let bool_val = matches!(value, "1" | "true" | "yes" | "on");
                     settings.set_bool(key, bool_val);
@@ -737,6 +752,7 @@ impl Config {
                     | "QUICK_NOTES_ENABLED"
                     | "QUICK_NOTES_SAVE_ONLY"
                     | "START_AT_LOGIN"
+                    | "SHOW_DOCK_ICON"
                     | "AGENT_ENTER_SENDS" => {
                         let bv = matches!(*value, "1" | "true" | "yes" | "on");
                         match *key {
@@ -755,6 +771,7 @@ impl Config {
                                 settings_ref.quick_notes_save_only = Some(bv)
                             }
                             "START_AT_LOGIN" => settings_ref.start_at_login = Some(bv),
+                            "SHOW_DOCK_ICON" => settings_ref.show_dock_icon = Some(bv),
                             "AGENT_ENTER_SENDS" => settings_ref.agent_enter_sends = Some(bv),
                             _ => {}
                         }

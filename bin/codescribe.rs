@@ -461,8 +461,6 @@ async fn run_daemon() -> Result<()> {
     eprintln!("CodeScribe daemon starting...");
 
     #[cfg(target_os = "macos")]
-    codescribe::set_dock_icon();
-    #[cfg(target_os = "macos")]
     codescribe::install_basic_edit_menu();
 
     tokio::task::spawn_blocking(|| {
@@ -492,6 +490,13 @@ async fn run_daemon() -> Result<()> {
     }
 
     let config = Config::load();
+    #[cfg(target_os = "macos")]
+    {
+        codescribe::set_dock_icon_visibility(config.show_dock_icon);
+        if config.show_dock_icon {
+            codescribe::set_dock_icon();
+        }
+    }
     sync_hotkey_config(&config);
 
     let ipc_controller = Arc::clone(&controller);

@@ -313,6 +313,23 @@ async fn handle_command(cmd: IpcCommand, controller: &RecordingController) -> Ip
                 Err(e) => IpcResponse::Error(format!("Failed to stop recording: {}", e)),
             }
         }
+        IpcCommand::ReplaceSelectedText { text } => {
+            if text.trim().is_empty() {
+                return IpcResponse::Error("Empty replacement text".to_string());
+            }
+
+            match tokio::task::spawn_blocking(move || {
+                crate::os::selection::replace_selected_text(&text)
+            })
+            .await
+            {
+                Ok(Ok(method)) => {
+                    IpcResponse::Message(format!("Replaced via {}", method))
+                }
+                Ok(Err(e)) => IpcResponse::Error(format!("Replace failed: {}", e)),
+                Err(e) => IpcResponse::Error(format!("Task join error: {}", e)),
+            }
+        }
         IpcCommand::Subscribe | IpcCommand::Unsubscribe => {
             IpcResponse::Error("Subscribe/Unsubscribe are handled at connection level".to_string())
         }
@@ -433,6 +450,11 @@ fn persist_config(config: &Config) -> Result<()> {
     put(
         "SHOW_TRAY_GLYPH",
         bool_to_env(config.show_tray_glyph),
+        &mut env_vars,
+    );
+    put(
+        "SHOW_DOCK_ICON",
+        bool_to_env(config.show_dock_icon),
         &mut env_vars,
     );
     put(
@@ -667,6 +689,7 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
         | "USE_LOCAL_STT"
         | "HISTORY_ENABLED"
         | "START_AT_LOGIN"
+        | "SHOW_DOCK_ICON"
         | "CODESCRIBE_BUFFERED_STREAM"
         | "HOTKEY_DOUBLE_TAP_LEFT"
         | "HOTKEY_DOUBLE_TAP_RIGHT"
@@ -681,6 +704,7 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
                 "USE_LOCAL_STT" => settings.use_local_stt = Some(bool_val),
                 "HISTORY_ENABLED" => settings.history_enabled = Some(bool_val),
                 "START_AT_LOGIN" => settings.start_at_login = Some(bool_val),
+                "SHOW_DOCK_ICON" => settings.show_dock_icon = Some(bool_val),
                 "CODESCRIBE_BUFFERED_STREAM" => settings.buffered_stream = Some(bool_val),
                 "HOTKEY_DOUBLE_TAP_LEFT" => settings.double_tap_left = Some(bool_val),
                 "HOTKEY_DOUBLE_TAP_RIGHT" => settings.double_tap_right = Some(bool_val),

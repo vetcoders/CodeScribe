@@ -46,6 +46,13 @@ pub enum IpcCommand {
     },
     StopRecording,
 
+    // Inline edit
+    /// Replace the currently selected text in the frontmost application.
+    /// Tries direct AX write first, falls back to clipboard paste.
+    ReplaceSelectedText {
+        text: String,
+    },
+
     // Event stream
     Subscribe,
     Unsubscribe,

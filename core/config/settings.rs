@@ -78,6 +78,8 @@ pub struct UserSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_at_login: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_dock_icon: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_enter_sends: Option<bool>,
 
     // ── Voice Lab survivors (user-facing UX knobs) ──
@@ -138,6 +140,7 @@ pub const PROMOTED_SETTINGS_KEYS: &[&str] = &[
     "QUICK_NOTES_ENABLED",
     "QUICK_NOTES_SAVE_ONLY",
     "START_AT_LOGIN",
+    "SHOW_DOCK_ICON",
     "AGENT_ENTER_SENDS",
     // Voice Lab survivors
     "CODESCRIBE_BUFFER_DELAY_MS",
@@ -269,6 +272,7 @@ impl UserSettings {
             "QUICK_NOTES_ENABLED" => self.quick_notes_enabled = Some(value),
             "QUICK_NOTES_SAVE_ONLY" => self.quick_notes_save_only = Some(value),
             "START_AT_LOGIN" => self.start_at_login = Some(value),
+            "SHOW_DOCK_ICON" => self.show_dock_icon = Some(value),
             "AGENT_ENTER_SENDS" => self.agent_enter_sends = Some(value),
             other => {
                 warn!("Unknown bool setting key: {other}");

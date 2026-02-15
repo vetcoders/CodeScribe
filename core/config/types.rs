@@ -267,6 +267,10 @@ pub struct Config {
     #[serde(default = "default_show_tray_glyph")]
     pub show_tray_glyph: bool,
 
+    /// Whether to show app icon in Dock (when false, app stays tray-only)
+    #[serde(default = "default_show_dock_icon")]
+    pub show_dock_icon: bool,
+
     /// Whether to show hold indicator badge
     #[serde(default = "default_hold_indicator")]
     pub hold_indicator: bool,
@@ -362,6 +366,12 @@ pub struct Config {
     #[serde(default)]
     pub start_at_login: bool,
 
+    // ===== Inline Edit =====
+    /// When true, Selection mode (Hold+Cmd) replaces the selected text in-place
+    /// instead of only showing the AI response in the overlay.
+    #[serde(default)]
+    pub inline_edit_enabled: bool,
+
     // ===== Agent =====
     /// When true, Enter sends the message (Shift+Enter for newline).
     /// When false, Enter inserts newline (Cmd+Enter sends).
@@ -388,6 +398,7 @@ impl Default for Config {
             ai_max_tokens: default_ai_max_tokens(),
             ai_assistive_max_tokens: default_ai_assistive_max_tokens(),
             show_tray_glyph: default_show_tray_glyph(),
+            show_dock_icon: default_show_dock_icon(),
             hold_indicator: default_hold_indicator(),
             hold_badge_size: default_hold_badge_size(),
             hold_badge_offset_x: default_hold_badge_offset_x(),
@@ -410,6 +421,7 @@ impl Default for Config {
             stt_api_key: None,
             restore_clipboard: default_restore_clipboard(),
             restore_clipboard_delay_ms: default_restore_clipboard_delay_ms(),
+            inline_edit_enabled: false,
             start_at_login: false,
             agent_enter_sends: default_agent_enter_sends(),
             dump_audio_logs: default_dump_audio_logs(),

@@ -107,6 +107,9 @@ pub fn migrate_if_needed() {
     if let Ok(v) = std::env::var("START_AT_LOGIN") {
         settings.start_at_login = Some(v == "1" || v.eq_ignore_ascii_case("true"));
     }
+    if let Ok(v) = std::env::var("SHOW_DOCK_ICON") {
+        settings.show_dock_icon = Some(v == "1" || v.eq_ignore_ascii_case("true"));
+    }
     if let Ok(v) = std::env::var("AGENT_ENTER_SENDS") {
         settings.agent_enter_sends = Some(v == "1" || v.eq_ignore_ascii_case("true"));
     }
