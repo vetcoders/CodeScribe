@@ -2667,6 +2667,10 @@ impl RecordingController {
                     {
                         Ok(Ok(method)) => {
                             info!("Inline edit succeeded (method={})", method);
+                            // Safety net: some apps (e.g. Taio) report AX write
+                            // success but silently ignore it. Copy to clipboard so
+                            // user can Cmd+V if the app didn't apply the change.
+                            let _ = clipboard::set_clipboard(&final_text);
                             crate::audio::play_sound("Tink");
                             true
                         }

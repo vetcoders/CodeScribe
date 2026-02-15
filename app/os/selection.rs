@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::os::clipboard::{self, ClipboardSnapshot};
 
@@ -84,9 +84,9 @@ pub fn capture_assistive_context() -> AssistiveContext {
     let selected_text =
         selected_text_from_frontmost(max_chars, copy_delay_ms, frontmost_app.as_deref());
 
-    debug!(
-        "Assistive context captured (app_present={}, selected_chars={})",
-        frontmost_app.is_some(),
+    info!(
+        "Assistive context: app={:?}, selected_chars={}",
+        frontmost_app.as_deref().unwrap_or("(none)"),
         selected_text
             .as_ref()
             .map(|s| s.chars().count())
@@ -204,18 +204,26 @@ fn selected_text_from_frontmost(
     // Some apps report `AXSelectedTextRange.length == 0` even when `AXSelectedText` is non-empty,
     // so we do *not* early-return on length==0 before checking `AXSelectedText`.
     let sel_len = crate::ui::get_selected_text_length();
+    info!(
+        "Selection capture: AX range length={:?}, app={:?}",
+        sel_len,
+        frontmost_app.unwrap_or("(none)")
+    );
     if let Some(selected) = crate::ui::get_selected_text(max_chars) {
+        info!("Selection capture: AX text OK ({} chars)", selected.chars().count());
         return Some(selected);
     }
+    info!("Selection capture: AX text returned None, trying Cmd+C fallback");
 
     // Cmd+C fallback is enabled by default for web browsers where AX selection is unreliable
     // (notably Safari). The explicit env flag still overrides this behavior.
     // We snapshot+restore to avoid clipboard pollution and treat "unchanged clipboard" as no selection.
     let fallback_default = prefer_copy_fallback_for_app(frontmost_app);
     if !env_flag("ASSISTIVE_CONTEXT_COPY_FALLBACK", fallback_default) {
-        if matches!(sel_len, Some(0)) {
-            debug!("Assistive context: selection length is 0; Cmd+C fallback disabled");
-        }
+        info!(
+            "Selection capture: Cmd+C fallback disabled for {:?} (not in browser list)",
+            frontmost_app.unwrap_or("(none)")
+        );
         return None;
     }
     if matches!(sel_len, Some(0)) {
