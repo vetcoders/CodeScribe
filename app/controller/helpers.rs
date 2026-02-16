@@ -219,10 +219,16 @@ impl EventSink for ControllerEventRouter {
                     cb();
                 }
             }
-            EngineEvent::Preview { text, .. } => {
+            EngineEvent::Preview { rev, text } => {
                 // Compute minimal BACKSPACE-encoded delta from full preview text.
                 let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(td) = TranscriptDelta::from_diff(&last, text) {
+                    debug!(
+                        rev = *rev,
+                        delta_len = td.delta.chars().count(),
+                        text_len = text.chars().count(),
+                        "BOUNDARY preview_delta"
+                    );
                     if is_assistive_session() {
                         crate::voice_chat_ui::append_voice_chat_user_delta(&td.delta);
                     } else {
@@ -247,7 +253,11 @@ impl EventSink for ControllerEventRouter {
                     }
                 }
             }
-            EngineEvent::Correction { text, .. } => {
+            EngineEvent::Correction {
+                rev,
+                text,
+                previous_text,
+            } => {
                 // Compute delta from last_preview and apply — keeps is_streaming=true
                 // in assistive mode (set_voice_chat_user_text would finalize the bubble).
                 let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
@@ -258,7 +268,22 @@ impl EventSink for ControllerEventRouter {
                     debug!("Ignoring Correction with empty last_preview (post-final)");
                     return;
                 }
+                if *last != *previous_text {
+                    debug!(
+                        rev = *rev,
+                        last_len = last.chars().count(),
+                        previous_len = previous_text.chars().count(),
+                        "Ignoring stale Correction (baseline mismatch)"
+                    );
+                    return;
+                }
                 if let Some(td) = TranscriptDelta::from_diff(&last, text) {
+                    debug!(
+                        rev = *rev,
+                        delta_len = td.delta.chars().count(),
+                        text_len = text.chars().count(),
+                        "BOUNDARY correction_delta"
+                    );
                     if is_assistive_session() {
                         crate::voice_chat_ui::append_voice_chat_user_delta(&td.delta);
                     } else {
@@ -284,7 +309,9 @@ impl EventSink for ControllerEventRouter {
                     }
                 }
             }
-            EngineEvent::UtteranceFinal { text, .. } => {
+            EngineEvent::UtteranceFinal {
+                utterance_id, text, ..
+            } => {
                 // Reset last_preview — engine clears accumulated_text on utterance boundary,
                 // so next Preview starts fresh.
                 {
@@ -293,6 +320,11 @@ impl EventSink for ControllerEventRouter {
                 }
                 // Accumulate finalized text across utterance boundaries.
                 let trimmed = text.trim();
+                debug!(
+                    utterance_id = *utterance_id,
+                    text_len = trimmed.chars().count(),
+                    "BOUNDARY final"
+                );
                 if !trimmed.is_empty() {
                     let mut prefix = self
                         .finalized_prefix

@@ -165,6 +165,7 @@ pub(crate) struct TranscriptionPipeline {
 }
 
 /// Reason a postprocess step dropped content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PostprocessDrop {
     Hallucination,
     OverlapEmpty,
@@ -247,6 +248,33 @@ impl TranscriptionPipeline {
         }
         self.last_suffix = processed.get(start..).unwrap_or("").to_string();
     }
+}
+
+/// Run correction postprocess against a snapshot suffix without permanently
+/// mutating pipeline suffix state on failure.
+fn postprocess_correction_with_snapshot(
+    pipeline: &mut TranscriptionPipeline,
+    raw_text: &str,
+    suffix_snapshot: &str,
+) -> std::result::Result<String, PostprocessDrop> {
+    let current_suffix = pipeline.last_suffix.clone();
+    pipeline.last_suffix = suffix_snapshot.to_string();
+    match pipeline.postprocess_with_reason(raw_text) {
+        Ok(cleaned) => Ok(cleaned),
+        Err(drop) => {
+            pipeline.last_suffix = current_suffix;
+            Err(drop)
+        }
+    }
+}
+
+fn correction_is_stale(
+    expected_preview_rev: u64,
+    current_preview_rev: u64,
+    expected_text: &str,
+    current_text: &str,
+) -> bool {
+    expected_preview_rev != current_preview_rev || expected_text != current_text
 }
 
 // ── BufferedEmitter ──────────────────────────────────────────────────────────
@@ -363,7 +391,7 @@ impl BufferedEmitter {
             return false;
         }
 
-        const CORRECTION_COOLDOWN_MS: u64 = 500;
+        const CORRECTION_COOLDOWN_MS: u64 = 250;
         if let Some(ref _corrected) = self.correction_pending {
             let can_correct = self
                 .last_correction_at
@@ -565,11 +593,14 @@ pub(crate) async fn transcription_session(
 
     // Phase 2 (buffered correction) — re-transcription in flight.
     let mut correction_in_flight: Option<tokio::task::JoinHandle<Result<RawTranscript>>> = None;
-    let mut correction_current_suffix: Option<String> = None;
+    let mut correction_expected_preview_rev: Option<u64> = None;
+    let mut correction_expected_text: Option<String> = None;
+    let mut correction_suffix_snapshot: Option<String> = None;
 
     loop {
-        // Start next utterance transcription if possible.
-        if utterance_in_flight.is_none() && correction_in_flight.is_none() {
+        // Start next utterance transcription as soon as possible.
+        // Correction runs in parallel and is guarded as best-effort/stale-safe.
+        if utterance_in_flight.is_none() {
             while let Some(item) = pending_utterances.pop_front() {
                 if should_drop_short_utterance(
                     item.audio.len(),
@@ -691,42 +722,72 @@ pub(crate) async fn transcription_session(
             result = async {
                 correction_in_flight.as_mut().unwrap().await
             }, if correction_in_flight.is_some() => {
-                let current_suffix = correction_current_suffix.take().unwrap_or_default();
+                let expected_preview_rev = correction_expected_preview_rev.take().unwrap_or(preview_rev);
+                let expected_text = correction_expected_text.take().unwrap_or_default();
+                let suffix_snapshot = correction_suffix_snapshot.take().unwrap_or_default();
                 match result {
                     Ok(Ok(raw)) => {
-                        // Suppress stale corrections that arrive after UtteranceFinal
-                        // already cleared accumulated_text. Without this guard, the
-                        // corrected text would appear as phantom content in the next
-                        // utterance window.
-                        if accumulated_text.is_empty() {
-                            debug!("Suppressing stale correction (utterance already finalized)");
-                            if !current_suffix.is_empty() {
-                                pipeline.last_suffix = current_suffix;
+                        if correction_is_stale(
+                            expected_preview_rev,
+                            preview_rev,
+                            &expected_text,
+                            &accumulated_text,
+                        ) {
+                            debug!(
+                                expected_preview_rev,
+                                preview_rev,
+                                expected_len = expected_text.chars().count(),
+                                current_len = accumulated_text.chars().count(),
+                                "Suppressing stale correction (preview advanced or text changed)"
+                            );
+                        } else {
+                            match postprocess_correction_with_snapshot(
+                                &mut pipeline,
+                                &raw.text,
+                                &suffix_snapshot,
+                            ) {
+                                Ok(cleaned) => {
+                                    if cleaned != accumulated_text {
+                                        let previous_text = accumulated_text.clone();
+                                        preview_rev += 1;
+                                        corrections_applied += 1;
+                                        debug!(
+                                            rev = preview_rev,
+                                            previous_len = previous_text.chars().count(),
+                                            corrected_len = cleaned.chars().count(),
+                                            "BOUNDARY correction"
+                                        );
+                                        event_sink.on_event(&EngineEvent::Correction {
+                                            rev: preview_rev,
+                                            text: cleaned.clone(),
+                                            previous_text,
+                                        });
+                                        // Update accumulated text so next Preview builds from corrected state.
+                                        accumulated_text = cleaned;
+                                    } else {
+                                        debug!("Skipping correction emit: no text delta after postprocess");
+                                    }
+                                }
+                                Err(PostprocessDrop::Hallucination) => {
+                                    pipeline.hallucination_drops =
+                                        pipeline.hallucination_drops.saturating_add(1);
+                                    debug!("Correction dropped as hallucination");
+                                }
+                                Err(PostprocessDrop::OverlapEmpty) => {
+                                    pipeline.overlap_strips = pipeline.overlap_strips.saturating_add(1);
+                                    debug!("Correction dropped as overlap-empty");
+                                }
+                                Err(PostprocessDrop::FilteredEmpty) => {
+                                    filtered_empty_drops += 1;
+                                    debug!("Correction dropped as filtered-empty");
+                                }
                             }
-                        } else if let Some(cleaned) = pipeline.postprocess(&raw.text) {
-                            let previous_text = accumulated_text.clone();
-                            preview_rev += 1;
-                            corrections_applied += 1;
-                            event_sink.on_event(&EngineEvent::Correction {
-                                rev: preview_rev,
-                                text: cleaned.clone(),
-                                previous_text,
-                            });
-                            // Update accumulated_text so next Preview builds on corrected state.
-                            accumulated_text = cleaned;
-                        } else if !current_suffix.is_empty() {
-                            pipeline.last_suffix = current_suffix;
                         }
                     }
                     _ => {
                         warn!("Re-transcription failed; keeping Phase 1 draft");
-                        if !current_suffix.is_empty() {
-                            pipeline.last_suffix = current_suffix;
-                        }
                     }
                 }
-
-                utterance_count = 0;
                 correction_in_flight = None;
             }
             result = async {
@@ -783,6 +844,11 @@ pub(crate) async fn transcription_session(
                                     accumulated_text.push_str(cleaned.trim());
                                     utterance_segments.extend(raw_segments.clone());
 
+                                    debug!(
+                                        rev = preview_rev,
+                                        text_len = accumulated_text.chars().count(),
+                                        "BOUNDARY preview"
+                                    );
                                     event_sink.on_event(&EngineEvent::Preview {
                                         rev: preview_rev,
                                         text: accumulated_text.clone(),
@@ -828,6 +894,13 @@ pub(crate) async fn transcription_session(
                                 + utterance_audio_samples as f32 / output_sample_rate as f32;
                             let had_content = !final_text.is_empty();
                             if had_content {
+                                debug!(
+                                    utterance_id,
+                                    text_len = final_text.chars().count(),
+                                    start_ts = utterance_start_s,
+                                    end_ts,
+                                    "BOUNDARY final"
+                                );
                                 event_sink.on_event(&EngineEvent::UtteranceFinal {
                                     utterance_id,
                                     text: final_text,
@@ -854,9 +927,9 @@ pub(crate) async fn transcription_session(
                                 vad_started = false;
                             }
 
-                            // Reset Phase 2 correction state on utterance boundary.
-                            // Any in-flight correction will be suppressed by the
-                            // accumulated_text.is_empty() guard in the correction handler.
+                            // Reset Phase 2 correction window on utterance boundary.
+                            // Any in-flight correction will be suppressed by stale guards
+                            // (preview rev + baseline text mismatch).
                             correction_audio_buf.clear();
                             utterance_count = 0;
                         } else {
@@ -871,15 +944,22 @@ pub(crate) async fn transcription_session(
                             if utterance_count >= correction_min_utterances || audio_duration_s >= correction_min_sec {
                                 let audio = std::mem::take(&mut correction_audio_buf);
                                 let lang = pipeline.language.clone();
-
-                                let current_suffix = pipeline.last_suffix.clone();
-                                pipeline.last_suffix = suffix_snapshot.clone();
-                                correction_current_suffix = Some(current_suffix);
+                                correction_expected_preview_rev = Some(preview_rev);
+                                correction_expected_text = Some(accumulated_text.clone());
+                                correction_suffix_snapshot = Some(suffix_snapshot.clone());
+                                utterance_count = 0;
 
                                 // Abort stale correction task to prevent task leak + suffix corruption.
                                 if let Some(old) = correction_in_flight.take() {
                                     old.abort();
+                                    debug!("Aborted stale in-flight correction task");
                                 }
+                                debug!(
+                                    expected_rev = preview_rev,
+                                    baseline_len = accumulated_text.chars().count(),
+                                    audio_sec = audio_duration_s,
+                                    "BOUNDARY correction_scheduled"
+                                );
                                 correction_in_flight = Some(spawn_utterance_transcription(
                                     audio,
                                     output_sample_rate,
@@ -920,6 +1000,13 @@ pub(crate) async fn transcription_session(
         } else {
             utterance_segments
         };
+        debug!(
+            utterance_id,
+            text_len = remaining.chars().count(),
+            start_ts = utterance_start_s,
+            end_ts,
+            "BOUNDARY final_flush"
+        );
         event_sink.on_event(&EngineEvent::UtteranceFinal {
             utterance_id,
             text: remaining,
@@ -1141,11 +1228,13 @@ pub(crate) async fn buffered_transcription_worker(
 
     // Phase 2 (buffered correction) — re-transcription in flight.
     let mut correction_in_flight: Option<tokio::task::JoinHandle<Result<RawTranscript>>> = None;
-    let mut correction_current_suffix: Option<String> = None;
+    let mut correction_expected_text: Option<String> = None;
+    let mut correction_suffix_snapshot: Option<String> = None;
 
     loop {
-        // Start next utterance transcription if possible.
-        if utterance_in_flight.is_none() && correction_in_flight.is_none() {
+        // Start next utterance transcription as soon as possible.
+        // Correction is best-effort and must not stall preview cadence.
+        if utterance_in_flight.is_none() {
             while let Some(item) = pending_utterances.pop_front() {
                 if should_drop_short_utterance(
                     item.audio.len(),
@@ -1241,28 +1330,46 @@ pub(crate) async fn buffered_transcription_worker(
             result = async {
                 correction_in_flight.as_mut().unwrap().await
             }, if correction_in_flight.is_some() => {
-                let current_suffix = correction_current_suffix.take().unwrap_or_default();
+                let expected_text = correction_expected_text.take().unwrap_or_default();
+                let suffix_snapshot = correction_suffix_snapshot.take().unwrap_or_default();
                 match result {
                     Ok(Ok(raw)) => {
-                        if let Some(cleaned) = pipeline.postprocess(&raw.text) {
-                            let mut guard = emitter.lock().await;
-                            guard.push_correction(cleaned);
-                            // postprocess() already updated last_suffix to match re-transcription.
-                        } else if !current_suffix.is_empty() {
-                            // Re-transcription was empty/filtered — restore suffix so next utterance
-                            // deduplicates against the Phase-1 draft.
-                            pipeline.last_suffix = current_suffix;
+                        if expected_text != pending_utterance_text {
+                            debug!(
+                                expected_len = expected_text.chars().count(),
+                                current_len = pending_utterance_text.chars().count(),
+                                "Suppressing stale buffered correction (text advanced)"
+                            );
+                        } else {
+                            match postprocess_correction_with_snapshot(
+                                &mut pipeline,
+                                &raw.text,
+                                &suffix_snapshot,
+                            ) {
+                                Ok(cleaned) => {
+                                    let mut guard = emitter.lock().await;
+                                    guard.push_correction(cleaned);
+                                }
+                                Err(PostprocessDrop::Hallucination) => {
+                                    pipeline.hallucination_drops =
+                                        pipeline.hallucination_drops.saturating_add(1);
+                                    debug!("Buffered correction dropped as hallucination");
+                                }
+                                Err(PostprocessDrop::OverlapEmpty) => {
+                                    pipeline.overlap_strips =
+                                        pipeline.overlap_strips.saturating_add(1);
+                                    debug!("Buffered correction dropped as overlap-empty");
+                                }
+                                Err(PostprocessDrop::FilteredEmpty) => {
+                                    debug!("Buffered correction dropped as filtered-empty");
+                                }
+                            }
                         }
                     }
                     _ => {
                         warn!("Re-transcription failed; keeping Phase 1 draft");
-                        if !current_suffix.is_empty() {
-                            pipeline.last_suffix = current_suffix;
-                        }
                     }
                 }
-
-                utterance_count = 0;
                 correction_in_flight = None;
             }
             result = async {
@@ -1324,15 +1431,20 @@ pub(crate) async fn buffered_transcription_worker(
                             if utterance_count >= correction_min_utterances || audio_duration_s >= correction_min_sec {
                                 let audio = std::mem::take(&mut correction_audio_buf);
                                 let lang = pipeline.language.clone();
-
-                                let current_suffix = pipeline.last_suffix.clone();
-                                pipeline.last_suffix = suffix_snapshot.clone();
-                                correction_current_suffix = Some(current_suffix);
+                                correction_expected_text = Some(pending_utterance_text.clone());
+                                correction_suffix_snapshot = Some(suffix_snapshot.clone());
+                                utterance_count = 0;
 
                                 // Abort stale correction task to prevent task leak.
                                 if let Some(old) = correction_in_flight.take() {
                                     old.abort();
+                                    debug!("Aborted stale buffered correction task");
                                 }
+                                debug!(
+                                    baseline_len = pending_utterance_text.chars().count(),
+                                    audio_sec = audio_duration_s,
+                                    "BOUNDARY buffered_correction_scheduled"
+                                );
                                 correction_in_flight = Some(spawn_utterance_transcription(
                                     audio,
                                     output_sample_rate,
@@ -1674,11 +1786,11 @@ fn env_usize(key: &str, default: usize) -> usize {
 }
 
 fn buffered_correction_min_utterances() -> usize {
-    env_usize("CODESCRIBE_BUFFERED_CORRECTION_UTTERANCES", 2).clamp(1, 10)
+    env_usize("CODESCRIBE_BUFFERED_CORRECTION_UTTERANCES", 1).clamp(1, 10)
 }
 
 fn buffered_correction_min_sec() -> f32 {
-    env_f32("CODESCRIBE_BUFFERED_CORRECTION_SEC", 6.0).clamp(1.0, 60.0)
+    env_f32("CODESCRIBE_BUFFERED_CORRECTION_SEC", 2.5).clamp(1.0, 60.0)
 }
 
 fn buffered_correction_prefix_ratio() -> f64 {
@@ -1822,5 +1934,42 @@ mod tests {
         let mut target = before.to_string();
         apply_delta_to_string(&mut target, &delta);
         assert_eq!(target, after);
+    }
+
+    #[test]
+    fn test_correction_stale_guard_detects_preview_rev_drift() {
+        assert!(correction_is_stale(7, 8, "draft", "draft"));
+        assert!(!correction_is_stale(7, 7, "draft", "draft"));
+    }
+
+    #[test]
+    fn test_correction_stale_guard_detects_text_drift() {
+        assert!(correction_is_stale(9, 9, "ala ma", "ala ma kota"));
+    }
+
+    #[test]
+    fn test_postprocess_correction_with_snapshot_restores_suffix_on_drop() {
+        let mut pipeline = TranscriptionPipeline::new(None);
+        pipeline.last_suffix = "current-tail".to_string();
+
+        let result =
+            postprocess_correction_with_snapshot(&mut pipeline, "Thank you", "snapshot-tail");
+        assert!(matches!(result, Err(PostprocessDrop::Hallucination)));
+        assert_eq!(pipeline.last_suffix, "current-tail");
+    }
+
+    #[test]
+    fn test_postprocess_correction_with_snapshot_updates_suffix_on_success() {
+        let mut pipeline = TranscriptionPipeline::new(None);
+        pipeline.last_suffix = "old-tail".to_string();
+
+        let corrected = postprocess_correction_with_snapshot(
+            &mut pipeline,
+            "to jest poprawny tekst",
+            "snapshot-tail",
+        )
+        .expect("correction should pass");
+        assert!(!corrected.is_empty());
+        assert_ne!(pipeline.last_suffix, "old-tail");
     }
 }

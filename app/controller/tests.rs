@@ -590,3 +590,41 @@ async fn test_finish_recording_resets_unconditionally_toggle_mode() {
     assert!(!*controller.force_ai_mode.read().await);
     assert!(!*controller.force_raw_mode.read().await);
 }
+
+#[test]
+fn test_action_quality_probe_reports_expected_metrics() {
+    let raw = "Kubernetes wymoga konfiguracji";
+    let final_text = "Kubernetes wymaga konfiguracji.";
+    let stats = crate::stream_postprocess::StreamPostProcessStats {
+        input_chunks: 10,
+        dropped_chunks: 2,
+        ..Default::default()
+    };
+    let probe = ActionQualityProbe::from_transcripts(raw, final_text, &stats);
+
+    assert_eq!(probe.raw_chars, raw.chars().count());
+    assert_eq!(probe.final_chars, final_text.chars().count());
+    assert!(probe.raw_final_diff_ratio > 0.0);
+    assert!(probe.correction_ratio > 0.0);
+    assert!((probe.drop_ratio - 0.2).abs() < 0.001);
+}
+
+#[test]
+fn test_action_quality_probe_is_independent_from_action_routing() {
+    let stats = crate::stream_postprocess::StreamPostProcessStats {
+        input_chunks: 8,
+        dropped_chunks: 1,
+        ..Default::default()
+    };
+    let save_probe = ActionQualityProbe::from_transcripts("to jest test", "To jest test.", &stats);
+    let copy_probe = ActionQualityProbe::from_transcripts("to jest test", "To jest test.", &stats);
+    let augment_probe =
+        ActionQualityProbe::from_transcripts("to jest test", "To jest test.", &stats);
+
+    assert!((save_probe.raw_final_diff_ratio - copy_probe.raw_final_diff_ratio).abs() < 1e-6);
+    assert!((save_probe.raw_final_diff_ratio - augment_probe.raw_final_diff_ratio).abs() < 1e-6);
+    assert!((save_probe.correction_ratio - copy_probe.correction_ratio).abs() < 1e-6);
+    assert!((save_probe.correction_ratio - augment_probe.correction_ratio).abs() < 1e-6);
+    assert!((save_probe.drop_ratio - copy_probe.drop_ratio).abs() < 1e-6);
+    assert!((save_probe.drop_ratio - augment_probe.drop_ratio).abs() < 1e-6);
+}

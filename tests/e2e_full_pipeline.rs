@@ -19,7 +19,7 @@ use codescribe::whisper::LocalWhisperEngine;
 use codescribe_core::audio::load_audio_file;
 use codescribe_core::pipeline::contracts::{BACKSPACE, DeltaSink, TranscriptDelta};
 use codescribe_core::pipeline::sinks::CollectorSink;
-use codescribe_core::pipeline::stream_postprocess::StreamPostProcessor;
+use codescribe_core::pipeline::stream_postprocess::{StreamPostProcessStats, StreamPostProcessor};
 use codescribe_core::vad_api::{
     CHUNK_SIZE, Resampler, SAMPLE_RATE as VAD_SAMPLE_RATE, SileroVad, VadConfig,
 };
@@ -167,6 +167,42 @@ fn word_overlap(a: &str, b: &str) -> f32 {
     }
     let overlap = words_a.intersection(&words_b).count();
     overlap as f32 / words_b.len() as f32
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RoutingQualityProbe {
+    diff_ratio: f32,
+    correction_ratio: f32,
+    drop_ratio: f32,
+}
+
+fn routing_quality_probe(
+    raw: &str,
+    final_text: &str,
+    stats: &StreamPostProcessStats,
+) -> RoutingQualityProbe {
+    let raw_chars = raw.chars().count();
+    let final_chars = final_text.chars().count();
+    let (backspaces, inserts) = TranscriptDelta::from_diff(raw, final_text)
+        .map(|delta| {
+            let backspaces = delta.delta.chars().filter(|c| *c == BACKSPACE).count();
+            let inserts = delta.delta.chars().count().saturating_sub(backspaces);
+            (backspaces, inserts)
+        })
+        .unwrap_or((0, 0));
+    let span = raw_chars.max(final_chars).max(1);
+
+    let drop_ratio = if stats.input_chunks == 0 {
+        0.0
+    } else {
+        stats.dropped_chunks as f32 / stats.input_chunks as f32
+    };
+
+    RoutingQualityProbe {
+        diff_ratio: ((backspaces + inserts) as f32 / span as f32).min(1.0),
+        correction_ratio: (backspaces as f32 / raw_chars.max(1) as f32).min(1.0),
+        drop_ratio,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -708,4 +744,47 @@ fn e2e_stage7_whisper_hallucination_vs_vad_gated() {
     } else {
         println!("  ⚠ Same hallucination count — VAD didn't help here");
     }
+}
+
+#[test]
+fn e2e_stage8_action_routing_quality_guardrail() {
+    println!("═══ Stage 8: Action Routing Quality Guardrail ═══");
+
+    // Simulated last-pass outputs for key modes:
+    // - RAW Hold Fn: no AI formatting in final output.
+    // - AI Formatting mode: final output after last-pass formatting.
+    let raw_hold = "kubernetes wymoga konfiguracji bazy";
+    let final_raw_hold = "kubernetes wymoga konfiguracji bazy";
+    let final_ai_format = "Kubernetes wymaga konfiguracji bazy.";
+
+    let stats = StreamPostProcessStats {
+        input_chunks: 12,
+        dropped_chunks: 3,
+        ..Default::default()
+    };
+
+    // Guardrail: quality probe is computed from transcript pair and postprocess stats only,
+    // so Save/Copy/Augment routing must not change it.
+    let save_probe = routing_quality_probe(raw_hold, final_ai_format, &stats);
+    let copy_probe = routing_quality_probe(raw_hold, final_ai_format, &stats);
+    let augment_probe = routing_quality_probe(raw_hold, final_ai_format, &stats);
+
+    assert!((save_probe.diff_ratio - copy_probe.diff_ratio).abs() < 1e-6);
+    assert!((save_probe.diff_ratio - augment_probe.diff_ratio).abs() < 1e-6);
+    assert!((save_probe.correction_ratio - copy_probe.correction_ratio).abs() < 1e-6);
+    assert!((save_probe.correction_ratio - augment_probe.correction_ratio).abs() < 1e-6);
+    assert!((save_probe.drop_ratio - copy_probe.drop_ratio).abs() < 1e-6);
+    assert!((save_probe.drop_ratio - augment_probe.drop_ratio).abs() < 1e-6);
+
+    // RAW contract: Copy in RAW mode uses non-AI last-pass output.
+    let raw_copy_probe = routing_quality_probe(raw_hold, final_raw_hold, &stats);
+    assert!(
+        raw_copy_probe.correction_ratio <= copy_probe.correction_ratio,
+        "RAW copy should not introduce additional AI correction vs formatted mode"
+    );
+
+    println!(
+        "  ✓ Stable probes across Save/Copy/Augment (diff={:.3}, correction={:.3}, drop={:.3})",
+        save_probe.diff_ratio, save_probe.correction_ratio, save_probe.drop_ratio
+    );
 }

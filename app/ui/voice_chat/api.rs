@@ -163,6 +163,21 @@ pub fn add_voice_chat_user_message(text: &str) {
     });
 }
 
+/// Seed chat with a transcript and submit it as a user message.
+///
+/// This is used by transcription-overlay `Augment` to perform an explicit handoff
+/// from dictation to chat.
+pub fn handoff_transcript_to_chat(transcript: &str) {
+    let transcript_owned = transcript.trim().to_string();
+    if transcript_owned.is_empty() {
+        return;
+    }
+
+    Queue::main().exec_async(move || {
+        handoff_transcript_to_chat_impl(&transcript_owned);
+    });
+}
+
 /// Submit the current draft (manual send)
 pub fn send_voice_chat_draft() {
     Queue::main().exec_async(|| {
@@ -1002,6 +1017,38 @@ fn ensure_agent_tab_visible(state: &mut VoiceChatOverlayState) {
         if state.active_tab != Tab::Agent {
             update_active_tab_locked(state, Tab::Agent);
         }
+    }
+}
+
+fn handoff_transcript_to_chat_impl(transcript: &str) {
+    let callback = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        ensure_agent_tab_visible(&mut state);
+        state.active_user_stream_index = None;
+        let mode = message_mode_label(&state);
+        state.messages.push(ChatMessage {
+            role: ChatRole::User,
+            text: transcript.to_string(),
+            is_streaming: false,
+            is_error: false,
+            timestamp: SystemTime::now(),
+            mode: Some(mode),
+        });
+        state.is_sending = true;
+        update_chat_view_with_state(&mut state, true);
+        update_send_button_with_state(&mut state);
+
+        let handler_guard = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        handler_guard.clone()
+    };
+
+    if let Some(handler) = callback {
+        handler(transcript.to_string());
+    } else {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.is_sending = false;
+        update_send_button_with_state(&mut state);
+        warn!("No voice-chat send callback set; transcript handoff kept as user message");
     }
 }
 
@@ -2668,6 +2715,9 @@ fn chat_markdown_from_messages(messages: &[ChatMessage], assistant_only: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn filtered_drawer_entries_respects_query_and_favorites() {
@@ -2731,6 +2781,64 @@ mod tests {
 
         update_active_tab_locked(&mut state, Tab::Drawer);
         assert_eq!(state.active_tab, Tab::Drawer);
+    }
+
+    #[test]
+    #[serial]
+    fn handoff_transcript_to_chat_adds_user_message_without_callback() {
+        {
+            let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+            *cb = None;
+        }
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            *state = VoiceChatOverlayState::default();
+        }
+
+        handoff_transcript_to_chat_impl("transcript payload");
+
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, ChatRole::User);
+        assert_eq!(state.messages[0].text, "transcript payload");
+        assert!(
+            !state.is_sending,
+            "without callback, handoff must not stay in sending state"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn handoff_transcript_to_chat_invokes_callback() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(String::new()));
+        {
+            let count = Arc::clone(&call_count);
+            let observed = Arc::clone(&observed);
+            let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+            *cb = Some(Arc::new(move |text: String| {
+                count.fetch_add(1, Ordering::SeqCst);
+                let mut guard = observed.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = text;
+            }));
+        }
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            *state = VoiceChatOverlayState::default();
+        }
+
+        handoff_transcript_to_chat_impl("augment this");
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        let payload = observed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(payload, "augment this");
+
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.messages.len(), 1);
+        assert!(state.is_sending);
+
+        let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        *cb = None;
     }
 }
 

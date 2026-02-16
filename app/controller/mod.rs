@@ -63,6 +63,56 @@ use types::ValidatedAudioPath;
 
 static OVERLAY_CONTROLLER: OnceLock<Arc<RecordingController>> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy)]
+struct ActionQualityProbe {
+    raw_chars: usize,
+    final_chars: usize,
+    raw_final_diff_ratio: f32,
+    correction_ratio: f32,
+    drop_ratio: f32,
+}
+
+impl ActionQualityProbe {
+    fn from_transcripts(
+        raw_text: &str,
+        final_text: &str,
+        post_stats: &crate::stream_postprocess::StreamPostProcessStats,
+    ) -> Self {
+        let raw_chars = raw_text.chars().count();
+        let final_chars = final_text.chars().count();
+
+        let (backspaces, inserted_chars) =
+            codescribe_core::pipeline::contracts::TranscriptDelta::from_diff(raw_text, final_text)
+                .map(|delta| {
+                    let backspaces = delta
+                        .delta
+                        .chars()
+                        .filter(|c| *c == codescribe_core::pipeline::contracts::BACKSPACE)
+                        .count();
+                    let inserted = delta.delta.chars().count().saturating_sub(backspaces);
+                    (backspaces, inserted)
+                })
+                .unwrap_or((0, 0));
+
+        let span = raw_chars.max(final_chars).max(1);
+        let raw_final_diff_ratio = ((backspaces + inserted_chars) as f32 / span as f32).min(1.0);
+        let correction_ratio = (backspaces as f32 / raw_chars.max(1) as f32).min(1.0);
+        let drop_ratio = if post_stats.input_chunks == 0 {
+            0.0
+        } else {
+            post_stats.dropped_chunks as f32 / post_stats.input_chunks as f32
+        };
+
+        Self {
+            raw_chars,
+            final_chars,
+            raw_final_diff_ratio,
+            correction_ratio,
+            drop_ratio,
+        }
+    }
+}
+
 /// Register the controller for overlay actions (commit/close fragment).
 pub fn register_overlay_controller(controller: Arc<RecordingController>) {
     if OVERLAY_CONTROLLER.set(controller).is_err() {
@@ -2091,16 +2141,22 @@ impl RecordingController {
         // This ensures ALL output paths receive clean text regardless of mode.
         // Contract: every chunk/transcript passes through StreamPostProcessor before
         // reaching overlay, clipboard, augmentation, or dataset.
-        let clean_text = {
+        let (clean_text, postprocess_stats) = {
             let mut finalizer = StreamPostProcessor::new();
-            finalizer
+            let clean_text = finalizer
                 .process(&raw_text)
-                .unwrap_or_else(|| raw_text.clone())
+                .unwrap_or_else(|| raw_text.clone());
+            let stats = finalizer.stats();
+            (clean_text, stats)
         };
         info!(
-            "Post-processed transcript ({} chars, delta={})",
+            "Post-processed transcript ({} chars, delta={}, drops={}/{}, gate_drops={}, lexicon_rewrites={})",
             clean_text.len(),
-            raw_text.len() as i64 - clean_text.len() as i64
+            raw_text.len() as i64 - clean_text.len() as i64,
+            postprocess_stats.dropped_chunks,
+            postprocess_stats.input_chunks,
+            postprocess_stats.gate_drops,
+            postprocess_stats.lexicon_rewrites
         );
 
         if raw_save_enabled {
@@ -2429,10 +2485,25 @@ impl RecordingController {
             formatted_text.len(),
             mode_label
         );
+        let quality_probe =
+            ActionQualityProbe::from_transcripts(&raw_text, &formatted_text, &postprocess_stats);
+        info!(
+            "Action quality guardrail: mode={} assistive={} raw_chars={} final_chars={} diff_raw_final={:.3} correction_ratio={:.3} drop_ratio={:.3} route_independent=true",
+            mode_label,
+            assistive,
+            quality_probe.raw_chars,
+            quality_probe.final_chars,
+            quality_probe.raw_final_diff_ratio,
+            quality_probe.correction_ratio,
+            quality_probe.drop_ratio
+        );
         if !assistive {
             // Keep the ephemeral transcription overlay in sync with what we will paste/save.
             // This makes it easier to understand differences between streaming preview and final-pass output.
-            crate::set_transcription_text(&formatted_text);
+            crate::transcription_overlay::set_transcription_action_contract(
+                &raw_text,
+                &formatted_text,
+            );
         }
 
         // Quick Notes: optionally save to daily note file (dictation-only).

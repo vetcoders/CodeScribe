@@ -14,13 +14,13 @@ pub use api::{
     add_voice_chat_error_message, add_voice_chat_system_message, add_voice_chat_user_message,
     append_voice_chat_assistant_delta, append_voice_chat_user_delta, clear_voice_chat_text,
     filter_drawer, finalize_voice_chat_assistant_message, finalize_voice_chat_user_message,
-    hide_voice_chat_overlay, is_auto_send_enabled, is_conversation_active,
-    is_voice_chat_overlay_visible, refresh_drawer, request_settings_tab_on_open,
-    reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_send_callback,
-    set_voice_chat_sending, set_voice_chat_target_app, set_voice_chat_text,
-    set_voice_chat_user_text, show_agent_tab, show_drawer_tab, show_settings_tab,
-    update_conversation_state, update_drawer_after_save, update_voice_chat_context_summary,
-    update_voice_chat_status,
+    handoff_transcript_to_chat, hide_voice_chat_overlay, is_auto_send_enabled,
+    is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
+    request_settings_tab_on_open, reset_voice_chat_activity, send_voice_chat_draft,
+    set_voice_chat_send_callback, set_voice_chat_sending, set_voice_chat_target_app,
+    set_voice_chat_text, set_voice_chat_user_text, show_agent_tab, show_drawer_tab,
+    show_settings_tab, update_conversation_state, update_drawer_after_save,
+    update_voice_chat_context_summary, update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 

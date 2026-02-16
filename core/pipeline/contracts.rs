@@ -81,9 +81,16 @@ pub const BACKSPACE: char = '\u{0008}';
 
 /// An incremental update to the transcript buffer.
 ///
-/// The `delta` string may contain `\u{0008}` (backspace) characters
-/// that instruct the consumer to delete preceding characters before
-/// appending the rest. This allows corrections without full-buffer resend.
+/// # Hard contract (append + backspace only)
+///
+/// - The payload is a UTF-8 char stream interpreted left-to-right.
+/// - Any non-`\u{0008}` char means append that char to the tail.
+/// - `\u{0008}` means remove one char from the current tail (if any).
+/// - Backspace underflow is a no-op (never panic, never index by byte).
+/// - Producers must emit deltas in-order; consumers must apply in the same order.
+///
+/// This contract keeps live correction cheap and deterministic without resending
+/// full buffers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptDelta {
     pub delta: String,
@@ -116,6 +123,8 @@ impl TranscriptDelta {
     ///
     /// Finds the common prefix, emits backspaces for the removed tail of `before`,
     /// then appends the new tail of `after`. Returns `None` if texts are identical.
+    ///
+    /// Output always follows the hard contract: only append chars + backspaces.
     pub fn from_diff(before: &str, after: &str) -> Option<Self> {
         if before == after {
             return None;
@@ -134,6 +143,9 @@ impl TranscriptDelta {
     }
 
     /// Apply this delta to a mutable string buffer (the inverse of `from_diff`).
+    ///
+    /// Backspace underflow is intentionally ignored, keeping this operation
+    /// idempotent and safe for partial buffers.
     pub fn apply(&self, target: &mut String) {
         for ch in self.delta.chars() {
             if ch == BACKSPACE {
@@ -232,7 +244,8 @@ pub enum EngineEvent {
     /// # Semantics (contract)
     ///
     /// - `text` is the full corrected utterance-local text (replaces, not appends).
-    /// - `previous_text` is what was shown before correction.
+    /// - `previous_text` is what was shown before correction and acts as a baseline
+    ///   for stale-correction guards in sinks.
     /// - Sinks should apply this as a replacement (delta diff or full overwrite)
     ///   and update their `last_preview` to `text`.
     /// - Must NOT finalize streaming state (keep `is_streaming = true` in UI).
@@ -389,6 +402,13 @@ mod tests {
     }
 
     #[test]
+    fn delta_apply_backspace_underflow_is_noop() {
+        let mut buf = String::new();
+        TranscriptDelta::from_raw("\u{0008}\u{0008}abc").apply(&mut buf);
+        assert_eq!(buf, "abc");
+    }
+
+    #[test]
     fn delta_from_diff_unicode_polish() {
         let before = "Zółty pies";
         let after = "Żółty pies";
@@ -441,6 +461,19 @@ mod tests {
         let before = "Hello 🌍";
         let after = "Hello 🌎";
         let delta = TranscriptDelta::from_diff(before, after).unwrap();
+        let mut buf = before.to_string();
+        delta.apply(&mut buf);
+        assert_eq!(buf, after);
+    }
+
+    #[test]
+    fn delta_from_diff_mixed_replace_contains_backspace_and_append() {
+        let before = "alpha beta";
+        let after = "alpha gamma";
+        let delta = TranscriptDelta::from_diff(before, after).unwrap();
+        assert!(delta.delta.contains(BACKSPACE));
+        assert!(delta.delta.ends_with("gamma"));
+
         let mut buf = before.to_string();
         delta.apply(&mut buf);
         assert_eq!(buf, after);
