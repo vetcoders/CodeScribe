@@ -212,17 +212,15 @@ The `\u{0008}` character is ASCII backspace. The UI applies it character-by-char
 | **PresentationEmitter**       | `app/presentation/emitter.rs`  | Typing animation via BufferedEmitter |
 | **route_transcription_delta** | `app/controller/helpers.rs`    | Legacy: routes delta by mode     |
 
-### Two pipeline paths
+### Runtime pipeline path
 
-**Event pipeline** (`CODESCRIBE_EVENT_PIPELINE=1`):
-- `ControllerEventRouter` implements `EventSink` and routes events to UI.
+App runtime uses a single path:
+- `start_event_session` → `transcription_session` (event pipeline only).
 - Preview → computes delta via `TranscriptDelta::from_diff` → `append_*_delta`.
 - Correction → delta diff (keeps `is_streaming = true`).
 - UtteranceFinal → utterance callback → AI pipeline (skips user bubble re-write).
 
-**Legacy pipeline** (default):
-- `DeltaSink` callback → `route_transcription_delta` → direct delta append.
-- `utterance_callback` → `handle_toggle_utterance` → full commit path.
+Legacy worker path is kept only as deprecated compatibility/diagnostic code and is not used by app runtime.
 
 ### Session modes
 

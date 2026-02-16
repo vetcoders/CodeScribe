@@ -3,11 +3,11 @@
 //! This module provides a minimal floating overlay window that:
 //! - Shows status during recording (Recording..., Processing...)
 //! - Displays live streaming transcription text
-//! - Result goes to clipboard (no chat, no conversation)
+//! - Supports explicit decision actions (Save/Copy/Augment) after recording
 //! - Auto-hides after recording completion
 //!
 //! Use this for: Ctrl hold (raw), Left ⌥⌥ toggle (normal)
-//! For AI modes (Chat/Selection, Option toggles), use voice_chat_ui instead.
+//! For agent chat conversations, use voice_chat_ui overlay.
 //!
 //! Design: macOS Tahoe Liquid Glass (NSVisualEffectView, HudWindow material)
 
@@ -64,7 +64,7 @@ const OVERLAY_TEXT_MIN_HEIGHT: f64 = 44.0;
 const OVERLAY_BUTTON_HEIGHT: f64 = 28.0;
 const OVERLAY_BUTTON_MARGIN: f64 = 8.0;
 const OVERLAY_CORNER_RADIUS: f64 = 16.0;
-const OVERLAY_HEADER_LABEL: &str = "CodeScribe - Transkrypcja";
+const OVERLAY_HEADER_LABEL: &str = "CodeScribe - Dictation Overlay";
 
 // Auto-hide delay after recording completes
 const AUTO_HIDE_DELAY_SECS: u64 = 5;
@@ -89,6 +89,15 @@ impl Default for TranscriptionOverlayConfig {
     }
 }
 
+/// Source-of-truth mode for transcription overlay actions in decision mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptionActionContractMode {
+    /// Copy/Augment use raw transcript captured from STT.
+    Raw,
+    /// Copy/Augment use last-pass/formatted transcript.
+    AiFormat,
+}
+
 /// Transcription overlay state
 struct TranscriptionOverlayState {
     window: Option<usize>,
@@ -107,6 +116,7 @@ struct TranscriptionOverlayState {
     decision_mode: bool,
     hover_active: bool,
     action_handler: Option<usize>,
+    action_contract_mode: TranscriptionActionContractMode,
     raw_text: String,
     last_pass_text: String,
     accumulated_text: String,
@@ -136,6 +146,7 @@ lazy_static::lazy_static! {
         decision_mode: false,
         hover_active: false,
         action_handler: None,
+        action_contract_mode: TranscriptionActionContractMode::Raw,
         raw_text: String::new(),
         last_pass_text: String::new(),
         accumulated_text: String::new(),
@@ -203,13 +214,26 @@ fn action_handler_class() -> *const Class {
 }
 
 fn action_text_for_contract(state: &TranscriptionOverlayState) -> String {
-    if !state.last_pass_text.trim().is_empty() {
-        return state.last_pass_text.clone();
+    match state.action_contract_mode {
+        TranscriptionActionContractMode::Raw => {
+            if !state.raw_text.trim().is_empty() {
+                state.raw_text.clone()
+            } else if !state.accumulated_text.trim().is_empty() {
+                state.accumulated_text.clone()
+            } else {
+                state.last_pass_text.clone()
+            }
+        }
+        TranscriptionActionContractMode::AiFormat => {
+            if !state.last_pass_text.trim().is_empty() {
+                state.last_pass_text.clone()
+            } else if !state.accumulated_text.trim().is_empty() {
+                state.accumulated_text.clone()
+            } else {
+                state.raw_text.clone()
+            }
+        }
     }
-    if !state.accumulated_text.trim().is_empty() {
-        return state.accumulated_text.clone();
-    }
-    state.raw_text.clone()
 }
 
 /// Handler: Copy transcript using contract source of truth.
@@ -242,6 +266,7 @@ extern "C" fn on_augment_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
         return;
     }
     crate::show_voice_chat_overlay();
+    crate::show_agent_tab();
     crate::voice_chat_ui::handoff_transcript_to_chat(&text);
     hide_transcription_overlay();
 }
@@ -300,12 +325,82 @@ fn set_recording_button_visible(state: &TranscriptionOverlayState, visible: bool
     }
 }
 
-fn set_auto_hide_hint_visible(state: &TranscriptionOverlayState, visible: bool) {
-    if let Some(label_ptr) = state.auto_hide_label {
-        unsafe {
-            set_hidden(label_ptr as Id, !visible);
+fn action_contract_source_label(mode: TranscriptionActionContractMode) -> &'static str {
+    match mode {
+        TranscriptionActionContractMode::Raw => "RAW",
+        TranscriptionActionContractMode::AiFormat => "AI-FORMAT",
+    }
+}
+
+fn copy_action_tooltip(mode: TranscriptionActionContractMode) -> &'static str {
+    match mode {
+        TranscriptionActionContractMode::Raw => "Copy RAW transcript",
+        TranscriptionActionContractMode::AiFormat => "Copy last-pass/formatted transcript",
+    }
+}
+
+fn augment_action_tooltip(mode: TranscriptionActionContractMode) -> &'static str {
+    match mode {
+        TranscriptionActionContractMode::Raw => "Open Agent overlay and hand off RAW transcript",
+        TranscriptionActionContractMode::AiFormat => {
+            "Open Agent overlay and hand off last-pass/formatted transcript"
         }
     }
+}
+
+fn decision_hint_text(mode: TranscriptionActionContractMode, include_auto_hide: bool) -> String {
+    let base = format!(
+        "Dictation overlay | Source: {} | Save closes | Augment -> Agent",
+        action_contract_source_label(mode)
+    );
+    if include_auto_hide {
+        format!("{base} | Auto-hide {}s", AUTO_HIDE_DELAY_SECS)
+    } else {
+        base
+    }
+}
+
+fn refresh_action_contract_ui(state: &TranscriptionOverlayState, include_auto_hide_hint: bool) {
+    if let Some(copy_ptr) = state.copy_button {
+        unsafe {
+            set_tooltip(
+                copy_ptr as Id,
+                copy_action_tooltip(state.action_contract_mode),
+            );
+        }
+    }
+    if let Some(augment_ptr) = state.augment_button {
+        unsafe {
+            set_tooltip(
+                augment_ptr as Id,
+                augment_action_tooltip(state.action_contract_mode),
+            );
+        }
+    }
+    if let Some(save_ptr) = state.save_button {
+        unsafe {
+            set_tooltip(
+                save_ptr as Id,
+                "Close dictation overlay (transcript already saved)",
+            );
+        }
+    }
+    if let Some(label_ptr) = state.auto_hide_label {
+        unsafe {
+            if include_auto_hide_hint {
+                let hint = decision_hint_text(state.action_contract_mode, true);
+                set_text(label_ptr as Id, &hint);
+                set_tooltip(label_ptr as Id, "Transcription overlay action contract");
+                set_hidden(label_ptr as Id, false);
+            } else {
+                set_hidden(label_ptr as Id, true);
+            }
+        }
+    }
+}
+
+fn set_auto_hide_hint_visible(state: &TranscriptionOverlayState, visible: bool) {
+    refresh_action_contract_ui(state, visible);
 }
 
 fn overlay_status_label(kind: UiStatus) -> &'static str {
@@ -692,6 +787,7 @@ fn show_transcription_overlay_impl() {
         state.accumulated_text.clear();
         state.raw_text.clear();
         state.last_pass_text.clear();
+        state.action_contract_mode = TranscriptionActionContractMode::Raw;
 
         // Get classes
         let ns_window_class = Class::get("NSWindow");
@@ -887,7 +983,7 @@ fn show_transcription_overlay_impl() {
                 &CGPoint::new(OVERLAY_PADDING, info_y),
                 &CGSize::new(window_width - OVERLAY_PADDING * 2.0, OVERLAY_INFO_HEIGHT),
             ),
-            text: format!("Overlay hides after {}s", AUTO_HIDE_DELAY_SECS),
+            text: decision_hint_text(TranscriptionActionContractMode::Raw, true),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             bold: false,
             text_color: ui_colors::overlay_hint_text(),
@@ -1012,6 +1108,19 @@ fn show_transcription_overlay_impl() {
         let copy_button = create_button(copy_frame, "Copy", button_style::ROUNDED);
         let augment_button = create_button(augment_frame, "Augment", button_style::ROUNDED);
         let commit_button = create_button(commit_frame, "Finish", button_style::ROUNDED);
+        set_tooltip(
+            copy_button,
+            copy_action_tooltip(TranscriptionActionContractMode::Raw),
+        );
+        set_tooltip(
+            augment_button,
+            augment_action_tooltip(TranscriptionActionContractMode::Raw),
+        );
+        set_tooltip(
+            save_button,
+            "Close dictation overlay (transcript already saved)",
+        );
+        set_tooltip(commit_button, "Stop recording and enter decision mode");
 
         button_set_action(save_button, action_handler, sel!(onSaveTranscript:));
         button_set_action(copy_button, action_handler, sel!(onCopyTranscript:));
@@ -1056,6 +1165,7 @@ fn show_transcription_overlay_impl() {
         state.last_layout_resize_at = Instant::now();
         state.pending_layout_resize = false;
 
+        refresh_action_contract_ui(&state, false);
         reset_overlay_to_idle(&state);
         resize_overlay_to_fit_text(&mut state);
 
@@ -1109,19 +1219,22 @@ fn set_transcription_text_impl(text: &str) {
 
 /// Set decision-mode action contract payload.
 ///
-/// `last_pass_text` is the source of truth for `Copy` and `Augment`.
-pub fn set_transcription_action_contract(raw_text: &str, last_pass_text: &str) {
+/// `mode` defines whether `Copy`/`Augment` use RAW or last-pass text.
+pub fn set_transcription_action_contract(
+    raw_text: &str,
+    last_pass_text: &str,
+    mode: TranscriptionActionContractMode,
+) {
     let raw_text_owned = raw_text.to_string();
     let last_pass_owned = last_pass_text.to_string();
+    let mode_copy = mode;
     Queue::main().exec_async(move || {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.raw_text = raw_text_owned;
-        state.last_pass_text = if last_pass_owned.trim().is_empty() {
-            state.raw_text.clone()
-        } else {
-            last_pass_owned
-        };
-        state.accumulated_text = state.last_pass_text.clone();
+        state.last_pass_text = last_pass_owned;
+        state.action_contract_mode = mode_copy;
+        state.accumulated_text = action_text_for_contract(&state);
+        refresh_action_contract_ui(&state, state.decision_mode);
         update_overlay_text_and_layout(&mut state);
     });
 }
@@ -1144,6 +1257,7 @@ fn clear_transcription_text_impl() {
     state.accumulated_text.clear();
     state.raw_text.clear();
     state.last_pass_text.clear();
+    state.action_contract_mode = TranscriptionActionContractMode::Raw;
 
     if let Some(text_view_ptr) = state.text_view {
         unsafe {
@@ -1236,6 +1350,7 @@ pub fn enter_decision_mode() {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.decision_mode = true;
         set_action_buttons_visible(&state, true);
+        set_auto_hide_hint_visible(&state, true);
         set_recording_button_visible(&state, false);
         // Clear recording indicator, restore white text color
         set_recording_status(&state, false);
@@ -1308,6 +1423,7 @@ fn hide_transcription_overlay_impl() {
     state.decision_mode = false;
     state.hover_active = false;
     state.action_handler = None;
+    state.action_contract_mode = TranscriptionActionContractMode::Raw;
     state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
     state.last_layout_resize_at = Instant::now();
     state.pending_layout_resize = false;
@@ -1423,8 +1539,22 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_action_text_prefers_last_pass_contract() {
+    fn test_action_text_uses_raw_contract_source_in_raw_mode() {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.raw_text = "raw transcript".to_string();
+        state.accumulated_text = "overlay preview".to_string();
+        state.last_pass_text = "final last-pass".to_string();
+
+        let text = action_text_for_contract(&state);
+        assert_eq!(text, "raw transcript");
+    }
+
+    #[test]
+    #[serial]
+    fn test_action_text_uses_last_pass_contract_source_in_ai_mode() {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.action_contract_mode = TranscriptionActionContractMode::AiFormat;
         state.raw_text = "raw transcript".to_string();
         state.accumulated_text = "overlay preview".to_string();
         state.last_pass_text = "final last-pass".to_string();
@@ -1435,8 +1565,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_action_text_falls_back_to_overlay_preview() {
+    fn test_action_text_ai_mode_falls_back_to_overlay_preview() {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.action_contract_mode = TranscriptionActionContractMode::AiFormat;
         state.raw_text = "raw transcript".to_string();
         state.accumulated_text = "overlay preview".to_string();
         state.last_pass_text.clear();

@@ -38,7 +38,10 @@ pub fn is_conversation_session() -> bool {
 }
 
 /// Route transcription delta to the active overlay.
-/// Assistive sessions stream into chat bubbles; non-assistive uses transcription overlay.
+///
+/// Contract:
+/// - Assistive sessions stream into Agent overlay chat bubbles.
+/// - Non-assistive sessions stream into Dictation/Transcription overlay preview.
 pub fn route_transcription_delta(delta: &str) {
     if is_assistive_session() {
         crate::voice_chat_ui::append_voice_chat_user_delta(delta);

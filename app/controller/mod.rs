@@ -113,6 +113,21 @@ impl ActionQualityProbe {
     }
 }
 
+fn resolve_transcription_action_contract_mode(
+    force_raw: bool,
+    force_ai: bool,
+    ai_formatting_enabled: bool,
+    ai_key_available: bool,
+) -> crate::transcription_overlay::TranscriptionActionContractMode {
+    if force_raw {
+        crate::transcription_overlay::TranscriptionActionContractMode::Raw
+    } else if force_ai || (ai_formatting_enabled && ai_key_available) {
+        crate::transcription_overlay::TranscriptionActionContractMode::AiFormat
+    } else {
+        crate::transcription_overlay::TranscriptionActionContractMode::Raw
+    }
+}
+
 /// Register the controller for overlay actions (commit/close fragment).
 pub fn register_overlay_controller(controller: Arc<RecordingController>) {
     if OVERLAY_CONTROLLER.set(controller).is_err() {
@@ -187,6 +202,12 @@ pub struct RecordingController {
 
     /// Task handle for delayed hold-start (800ms default)
     hold_start_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Monotonic generation for hold-start tasks.
+    ///
+    /// Every cancel/reschedule bumps this value. Spawned tasks compare their
+    /// captured generation before/after critical awaits to avoid stale-start races.
+    #[allow(dead_code)]
+    hold_start_generation: Arc<AtomicU64>,
 
     /// Lock to serialize finish_recording calls
     serial_lock: Arc<Mutex<()>>,
@@ -285,6 +306,7 @@ impl RecordingController {
             force_ai_mode: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(None)),
             hold_start_task: Arc::new(Mutex::new(None)),
+            hold_start_generation: Arc::new(AtomicU64::new(0)),
             serial_lock: Arc::new(Mutex::new(())),
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
@@ -351,6 +373,7 @@ impl RecordingController {
             force_ai_mode: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(None)),
             hold_start_task: Arc::new(Mutex::new(None)),
+            hold_start_generation: Arc::new(AtomicU64::new(0)),
             serial_lock: Arc::new(Mutex::new(())),
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
@@ -434,14 +457,58 @@ impl RecordingController {
 
     /// Cancel any pending delayed hold-start task
     async fn cancel_pending_hold_start(&self) {
+        let generation = self.hold_start_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let mut task_guard = self.hold_start_task.lock().await;
-        if let Some(task) = task_guard.take()
-            && !task.is_finished()
-        {
-            debug!("Cancelling pending hold-start task");
-            task.abort();
-            let _ = task.await; // Suppress cancellation errors
+        if let Some(task) = task_guard.take() {
+            if task.is_finished() {
+                let _ = task.await;
+            } else {
+                debug!("Invalidated pending hold-start task (generation={generation})");
+            }
         }
+    }
+
+    fn clear_recorder_callbacks(recorder: &mut StreamingRecorder) {
+        recorder.set_utterance_callback(None);
+        recorder.set_utterance_silence_sec(None);
+        recorder.set_event_sink(None);
+    }
+
+    #[allow(dead_code)]
+    async fn ensure_recorder_ready_for_start(
+        recorder: &mut StreamingRecorder,
+        context: &str,
+    ) -> Result<()> {
+        if recorder.recorder.is_active() {
+            warn!("{context}: recorder already active before start; forcing stale-session stop");
+            recorder
+                .stop_without_saving()
+                .await
+                .with_context(|| format!("{context}: failed stale-session stop"))?;
+            info!("{context}: stale recorder stopped before start");
+        }
+
+        Self::clear_recorder_callbacks(recorder);
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    async fn reset_session_after_start_failure(&self, context: &str) {
+        warn!("{context}: resetting controller flags after failed start");
+        self.set_state(State::Idle).await;
+        *self.assistive_mode.write().await = false;
+        *self.hold_mode.write().await = HoldMode::Raw;
+        *self.force_raw_mode.write().await = false;
+        *self.force_ai_mode.write().await = false;
+        *self.session_id.write().await = None;
+        *self.assistive_context.write().await = None;
+        self.assistive_loop_active.store(false, Ordering::SeqCst);
+        self.toggle_user_has_text.store(false, Ordering::SeqCst);
+        self.toggle_assistant_has_text
+            .store(false, Ordering::SeqCst);
+        set_assistive_session(false);
+        hide_hold_badge();
+        crate::voice_chat_ui::update_voice_chat_status("Ready");
     }
 
     fn is_already_in_progress_error(error: &anyhow::Error) -> bool {
@@ -451,7 +518,9 @@ impl RecordingController {
     }
 
     async fn recover_stale_recorder_if_idle(&self) {
-        if self.current_state().await != State::Idle {
+        let _serial_guard = self.serial_lock.lock().await;
+
+        if *self.state.read().await != State::Idle {
             return;
         }
 
@@ -464,14 +533,83 @@ impl RecordingController {
         if let Err(e) = recorder.stop_without_saving().await {
             warn!("Recorder recovery: forced stop failed: {e}");
         }
-        recorder.set_utterance_callback(None);
-        recorder.set_utterance_silence_sec(None);
-        recorder.set_event_sink(None);
+        Self::clear_recorder_callbacks(&mut recorder);
         drop(recorder);
 
+        *self.assistive_mode.write().await = false;
+        *self.hold_mode.write().await = HoldMode::Raw;
+        *self.force_raw_mode.write().await = false;
+        *self.force_ai_mode.write().await = false;
+        *self.assistive_context.write().await = None;
         *self.session_id.write().await = None;
         self.assistive_loop_active.store(false, Ordering::SeqCst);
+        self.toggle_user_has_text.store(false, Ordering::SeqCst);
+        self.toggle_assistant_has_text
+            .store(false, Ordering::SeqCst);
         set_assistive_session(false);
+        hide_hold_badge();
+        crate::voice_chat_ui::update_voice_chat_status("Ready");
+        info!("Recorder recovery: stale active stream cleared, controller remains IDLE");
+    }
+
+    fn configure_hold_event_sink(
+        recorder: &mut StreamingRecorder,
+        event_broadcast: broadcast::Sender<IpcEvent>,
+    ) {
+        let tb = recorder.transcript_buffer_handle();
+        let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
+            Arc::new(helpers::RoutingDeltaSink);
+        let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
+            Arc::new(PresentationEmitter::new(tb, Some(delta_sink), None));
+        let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
+            Arc::new(helpers::IpcBroadcastSink::new(event_broadcast));
+        recorder.set_event_sink(Some(
+            codescribe_core::pipeline::sinks::FanoutEventSink::pair(pe, ipc_sink),
+        ));
+    }
+
+    fn configure_toggle_event_sink(
+        recorder: &mut StreamingRecorder,
+        controller: Option<Arc<RecordingController>>,
+        expected_session: String,
+        is_assistive_session: bool,
+        event_broadcast: broadcast::Sender<IpcEvent>,
+    ) {
+        let tb = recorder.transcript_buffer_handle();
+        let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
+            Arc::new(helpers::RoutingDeltaSink);
+        let mut pe = PresentationEmitter::new(tb, Some(delta_sink), None);
+
+        pe.set_utterance_callback(Some(Arc::new(move |text: String| {
+            if is_assistive_session {
+                // Close current streaming user bubble at utterance boundary
+                // so next preview starts a fresh user message.
+                crate::voice_chat_ui::finalize_voice_chat_user_message();
+            }
+            let controller = controller.clone();
+            let expected_session = expected_session.clone();
+            tokio::spawn(async move {
+                if let Some(controller) = controller
+                    && let Err(e) = controller
+                        .handle_toggle_utterance(
+                            text,
+                            expected_session,
+                            is_assistive_session,
+                            true, // skip_user_bubble: Preview already streams into bubble
+                        )
+                        .await
+                {
+                    warn!("Toggle utterance processing failed: {}", e);
+                }
+            });
+        })));
+
+        let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> = Arc::new(pe);
+        let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
+            Arc::new(helpers::IpcBroadcastSink::new(event_broadcast));
+        recorder.set_event_sink(Some(
+            codescribe_core::pipeline::sinks::FanoutEventSink::pair(pe, ipc_sink),
+        ));
     }
 
     /// Handle hotkey event - main entry point for state machine
@@ -488,10 +626,11 @@ impl RecordingController {
     /// - **Toggle + force_ai=true**: force AI formatting (normal hands-off)
     /// - **Toggle + assistive=true**: force Assistive hands-off
     pub async fn handle_hotkey_event(&self, event: HotkeyInput) -> Result<()> {
-        let current_state = self.current_state().await;
+        let mut current_state = self.current_state().await;
 
         if current_state == State::Idle {
             self.recover_stale_recorder_if_idle().await;
+            current_state = self.current_state().await;
         }
 
         debug!(
@@ -1129,6 +1268,7 @@ impl RecordingController {
 
         // Cancel any existing delayed start
         self.cancel_pending_hold_start().await;
+        let task_generation = self.hold_start_generation.load(Ordering::SeqCst);
 
         // Reset VAD flag for new session
         self.vad_triggered.store(false, Ordering::SeqCst);
@@ -1141,6 +1281,7 @@ impl RecordingController {
         let assistive_context = Arc::clone(&self.assistive_context);
         let event_broadcast = self.event_broadcast.clone();
         let serial_lock = Arc::clone(&self.serial_lock);
+        let hold_start_generation = Arc::clone(&self.hold_start_generation);
         let opened_overlay_for_transcription =
             Arc::clone(&self.opened_voice_chat_overlay_for_transcription);
 
@@ -1148,8 +1289,18 @@ impl RecordingController {
             // Wait for the configured delay
             tokio::time::sleep(delay).await;
 
+            if hold_start_generation.load(Ordering::SeqCst) != task_generation {
+                debug!("Hold-start cancelled: superseded generation before lock");
+                return;
+            }
+
             // Serialize with other start/stop operations.
             let _serial_guard = serial_lock.lock().await;
+
+            if hold_start_generation.load(Ordering::SeqCst) != task_generation {
+                debug!("Hold-start cancelled: superseded generation while waiting for lock");
+                return;
+            }
 
             // Check if we're still in IDLE state
             let current_state = *state.read().await;
@@ -1170,10 +1321,16 @@ impl RecordingController {
             // Start the recorder (skip in tests: no CoreAudio device needed)
             // hang_sec is configured via CODESCRIBE_VAD_MAX_SILENCE_SEC env var (single source of truth)
             let mut rec = recorder.lock().await;
+            if let Err(e) =
+                Self::ensure_recorder_ready_for_start(&mut rec, "Hold-start preflight").await
+            {
+                error!("Hold-start aborted: {e}");
+                *session_id.write().await = None;
+                set_assistive_session(false);
+                return;
+            }
             // Hold-to-talk: the key-down is the source of truth. Don't auto-stop mid-hold.
             rec.recorder.config.auto_silence = false;
-            rec.set_utterance_callback(None);
-            rec.set_utterance_silence_sec(None);
             rec.recorder.set_on_vad_stop(move || {
                 info!("VAD callback: setting vad_triggered flag");
                 vad_flag.store(true, Ordering::SeqCst);
@@ -1183,75 +1340,54 @@ impl RecordingController {
             // so the very first deltas route to the correct overlay.
             set_assistive_session(is_assistive);
 
-            let use_event_pipeline = std::env::var("CODESCRIBE_EVENT_PIPELINE")
-                .ok()
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-
-            if use_event_pipeline {
-                // Event-based pipeline: PresentationEmitter routes through BufferedEmitter
-                // (Backspace Magic). Hold mode has no utterance callback — text is collected on key-up.
-                let tb = rec.transcript_buffer_handle();
-                let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
-                    Arc::new(helpers::RoutingDeltaSink);
-                let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
-                    Arc::new(PresentationEmitter::new(tb, Some(delta_sink), None));
-                let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
-                    Arc::new(helpers::IpcBroadcastSink::new(event_broadcast.clone()));
-                rec.set_event_sink(Some(
-                    codescribe_core::pipeline::sinks::FanoutEventSink::pair(pe, ipc_sink),
-                ));
-            }
+            // Runtime pipeline is always event-based. Hold mode has no utterance callback;
+            // text is finalized on key-up in `finish_recording`.
+            Self::configure_hold_event_sink(&mut rec, event_broadcast.clone());
             if !cfg!(test) {
-                let start_result = if use_event_pipeline {
-                    rec.start_event_session(Some(language.as_str().to_string()))
-                        .await
-                } else {
-                    rec.start(Some(language.as_str().to_string())).await
-                };
+                let start_result = rec
+                    .start_event_session(Some(language.as_str().to_string()))
+                    .await;
                 if let Err(e) = start_result {
                     if Self::is_already_in_progress_error(&e) {
                         warn!("Hold-start hit stale recorder lock; forcing stop and retrying once");
                         if let Err(stop_err) = rec.stop_without_saving().await {
                             warn!("Hold-start stale-recorder recovery failed: {stop_err}");
                         }
-                        rec.set_utterance_callback(None);
-                        rec.set_utterance_silence_sec(None);
-
-                        let retry_result = if use_event_pipeline {
-                            let tb = rec.transcript_buffer_handle();
-                            let delta_sink: Arc<
-                                dyn codescribe_core::pipeline::contracts::DeltaSink,
-                            > = Arc::new(helpers::RoutingDeltaSink);
-                            let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
-                                Arc::new(PresentationEmitter::new(tb, Some(delta_sink), None));
-                            let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
-                                Arc::new(helpers::IpcBroadcastSink::new(event_broadcast.clone()));
-                            rec.set_event_sink(Some(
-                                codescribe_core::pipeline::sinks::FanoutEventSink::pair(
-                                    pe, ipc_sink,
-                                ),
-                            ));
-                            rec.start_event_session(Some(language.as_str().to_string()))
-                                .await
-                        } else {
-                            rec.set_event_sink(None);
-                            rec.start(Some(language.as_str().to_string())).await
-                        };
+                        Self::clear_recorder_callbacks(&mut rec);
+                        Self::configure_hold_event_sink(&mut rec, event_broadcast.clone());
+                        let retry_result = rec
+                            .start_event_session(Some(language.as_str().to_string()))
+                            .await;
                         if let Err(retry_err) = retry_result {
                             error!("Failed to start recorder after recovery: {retry_err}");
+                            Self::clear_recorder_callbacks(&mut rec);
                             *session_id.write().await = None;
                             set_assistive_session(false);
                             return;
                         }
                     } else {
                         error!("Failed to start recorder: {e}");
+                        Self::clear_recorder_callbacks(&mut rec);
                         *session_id.write().await = None;
                         set_assistive_session(false);
                         return;
                     }
                 }
             }
+
+            if hold_start_generation.load(Ordering::SeqCst) != task_generation {
+                warn!("Hold-start superseded after recorder start; stopping stale session");
+                if rec.recorder.is_active()
+                    && let Err(stop_err) = rec.stop_without_saving().await
+                {
+                    warn!("Hold-start stale-session stop failed: {stop_err}");
+                }
+                Self::clear_recorder_callbacks(&mut rec);
+                *session_id.write().await = None;
+                set_assistive_session(false);
+                return;
+            }
+            drop(rec);
 
             // Transition to REC_HOLD as soon as recorder starts to avoid IDLE/active races.
             Self::set_state_with_broadcast(&state, &event_broadcast, State::RecHold).await;
@@ -1382,6 +1518,14 @@ impl RecordingController {
 
         // Start the recorder
         let mut recorder = self.recorder.lock().await;
+        if let Err(e) =
+            Self::ensure_recorder_ready_for_start(&mut recorder, "Toggle-start preflight").await
+        {
+            drop(recorder);
+            self.reset_session_after_start_failure("Toggle-start preflight")
+                .await;
+            return Err(e);
+        }
 
         // Toggle mode: continuous recording; silence only triggers per-utterance send.
         recorder.recorder.config.auto_silence = false;
@@ -1392,192 +1536,52 @@ impl RecordingController {
         // so the very first deltas route to the correct overlay.
         set_assistive_session(is_assistive);
 
-        let use_event_pipeline = std::env::var("CODESCRIBE_EVENT_PIPELINE")
-            .ok()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        // Runtime pipeline is always event-based.
+        Self::configure_toggle_event_sink(
+            &mut recorder,
+            OVERLAY_CONTROLLER.get().cloned(),
+            new_session_id.clone(),
+            is_assistive,
+            self.event_broadcast.clone(),
+        );
 
-        if use_event_pipeline {
-            // Event-based pipeline: PresentationEmitter routes through BufferedEmitter
-            // (Backspace Magic). Toggle mode gets utterance callback for auto-send.
-            let controller = OVERLAY_CONTROLLER.get().cloned();
-            let expected_session = new_session_id.clone();
-            let is_assistive_session = is_assistive;
-            let event_broadcast = self.event_broadcast.clone();
-
-            let tb = recorder.transcript_buffer_handle();
-            let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
-                Arc::new(helpers::RoutingDeltaSink);
-            let mut pe = PresentationEmitter::new(tb, Some(delta_sink), None);
-            pe.set_utterance_callback(Some(Arc::new(move |text: String| {
-                if is_assistive_session {
-                    // Close the current streaming user bubble immediately at utterance boundary
-                    // to prevent next preview from appending into the previous message.
-                    crate::voice_chat_ui::finalize_voice_chat_user_message();
+        // Skip actual audio stream in tests (no CoreAudio device needed)
+        if !cfg!(test)
+            && let Err(e) = recorder
+                .start_event_session(Some(language.as_str().to_string()))
+                .await
+        {
+            if Self::is_already_in_progress_error(&e) {
+                warn!("Toggle start hit stale recorder lock; forcing stop and retrying once");
+                if let Err(stop_err) = recorder.stop_without_saving().await {
+                    warn!("Toggle stale-recorder recovery failed: {stop_err}");
                 }
-                let controller = controller.clone();
-                let expected_session = expected_session.clone();
-                tokio::spawn(async move {
-                    if let Some(controller) = controller
-                        && let Err(e) = controller
-                            .handle_toggle_utterance(
-                                text,
-                                expected_session,
-                                is_assistive_session,
-                                true, // skip_user_bubble: Preview already streams into bubble
-                            )
-                            .await
-                    {
-                        warn!("Toggle utterance processing failed: {}", e);
-                    }
-                });
-            })));
-
-            let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> = Arc::new(pe);
-            let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
-                Arc::new(helpers::IpcBroadcastSink::new(event_broadcast));
-            recorder.set_event_sink(Some(
-                codescribe_core::pipeline::sinks::FanoutEventSink::pair(pe, ipc_sink),
-            ));
-
-            if !cfg!(test)
-                && let Err(e) = recorder
+                Self::clear_recorder_callbacks(&mut recorder);
+                Self::configure_toggle_event_sink(
+                    &mut recorder,
+                    OVERLAY_CONTROLLER.get().cloned(),
+                    new_session_id.clone(),
+                    is_assistive,
+                    self.event_broadcast.clone(),
+                );
+                if let Err(retry_err) = recorder
                     .start_event_session(Some(language.as_str().to_string()))
                     .await
-            {
-                if Self::is_already_in_progress_error(&e) {
-                    warn!("Toggle start hit stale recorder lock; forcing stop and retrying once");
-                    if let Err(stop_err) = recorder.stop_without_saving().await {
-                        warn!("Toggle stale-recorder recovery failed: {stop_err}");
-                    }
-                    recorder.set_utterance_callback(None);
-                    recorder.set_utterance_silence_sec(None);
-
-                    let retry_controller = OVERLAY_CONTROLLER.get().cloned();
-                    let retry_expected_session = new_session_id.clone();
-                    let retry_assistive_session = is_assistive;
-                    let retry_event_broadcast = self.event_broadcast.clone();
-                    let tb = recorder.transcript_buffer_handle();
-                    let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
-                        Arc::new(helpers::RoutingDeltaSink);
-                    let mut retry_pe = PresentationEmitter::new(tb, Some(delta_sink), None);
-                    retry_pe.set_utterance_callback(Some(Arc::new(move |text: String| {
-                        if retry_assistive_session {
-                            crate::voice_chat_ui::finalize_voice_chat_user_message();
-                        }
-                        let controller = retry_controller.clone();
-                        let expected_session = retry_expected_session.clone();
-                        tokio::spawn(async move {
-                            if let Some(controller) = controller
-                                && let Err(e) = controller
-                                    .handle_toggle_utterance(
-                                        text,
-                                        expected_session,
-                                        retry_assistive_session,
-                                        true,
-                                    )
-                                    .await
-                            {
-                                warn!("Toggle utterance processing failed: {}", e);
-                            }
-                        });
-                    })));
-                    let retry_pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
-                        Arc::new(retry_pe);
-                    let retry_ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
-                        Arc::new(helpers::IpcBroadcastSink::new(retry_event_broadcast));
-                    recorder.set_event_sink(Some(
-                        codescribe_core::pipeline::sinks::FanoutEventSink::pair(
-                            retry_pe,
-                            retry_ipc_sink,
-                        ),
+                {
+                    drop(recorder);
+                    self.reset_session_after_start_failure("Toggle-start retry")
+                        .await;
+                    return Err(anyhow::anyhow!(
+                        "Failed to start event session after recovery: {retry_err}"
                     ));
-                    if let Err(retry_err) = recorder
-                        .start_event_session(Some(language.as_str().to_string()))
-                        .await
-                    {
-                        *self.session_id.write().await = None;
-                        self.assistive_loop_active.store(false, Ordering::SeqCst);
-                        set_assistive_session(false);
-                        return Err(anyhow::anyhow!(
-                            "Failed to start event session after recovery: {retry_err}"
-                        ));
-                    }
-                } else {
-                    *self.session_id.write().await = None;
-                    self.assistive_loop_active.store(false, Ordering::SeqCst);
-                    set_assistive_session(false);
-                    return Err(e);
                 }
-            }
-        } else {
-            // Legacy pipeline: separate delta_callback + utterance_callback
-            let controller = OVERLAY_CONTROLLER.get().cloned();
-            let expected_session = new_session_id.clone();
-            let is_assistive_session = is_assistive;
-            recorder.set_utterance_callback(Some(Arc::new(move |text: String| {
-                if is_assistive_session {
-                    // Keep utterance boundaries explicit in assistive mode.
-                    crate::voice_chat_ui::finalize_voice_chat_user_message();
-                }
-                let controller = controller.clone();
-                let expected_session = expected_session.clone();
-                tokio::spawn(async move {
-                    if let Some(controller) = controller
-                        && let Err(e) = controller
-                            .handle_toggle_utterance(
-                                text,
-                                expected_session,
-                                is_assistive_session,
-                                true, // skip_user_bubble: delta_callback already streams into bubble
-                            )
-                            .await
-                    {
-                        warn!("Toggle utterance processing failed: {}", e);
-                    }
-                });
-            })));
-
-            // Set streaming callback for overlay updates (routed by session mode)
-            recorder.set_delta_callback(Some(Arc::new(
-                codescribe_core::pipeline::sinks::CallbackSink::new(Arc::new(|text: &str| {
-                    route_transcription_delta(text);
-                })),
-            )));
-
-            // Skip actual audio stream in tests (no CoreAudio device needed)
-            if !cfg!(test)
-                && let Err(e) = recorder
-                    .start_with_buffered(Some(language.as_str().to_string()), true)
-                    .await
-            {
-                if Self::is_already_in_progress_error(&e) {
-                    warn!("Toggle start hit stale recorder lock; forcing stop and retrying once");
-                    if let Err(stop_err) = recorder.stop_without_saving().await {
-                        warn!("Toggle stale-recorder recovery failed: {stop_err}");
-                    }
-                    recorder.set_utterance_callback(None);
-                    recorder.set_utterance_silence_sec(None);
-                    recorder.set_event_sink(None);
-                    if let Err(retry_err) = recorder
-                        .start_with_buffered(Some(language.as_str().to_string()), true)
-                        .await
-                    {
-                        *self.session_id.write().await = None;
-                        self.assistive_loop_active.store(false, Ordering::SeqCst);
-                        set_assistive_session(false);
-                        return Err(anyhow::anyhow!(
-                            "Failed to start buffered recorder after recovery: {retry_err}"
-                        ));
-                    }
-                } else {
-                    *self.session_id.write().await = None;
-                    self.assistive_loop_active.store(false, Ordering::SeqCst);
-                    set_assistive_session(false);
-                    return Err(e);
-                }
+            } else {
+                drop(recorder);
+                self.reset_session_after_start_failure("Toggle-start").await;
+                return Err(e);
             }
         }
+        drop(recorder);
 
         // Transition to REC_TOGGLE immediately after recorder starts.
         self.set_state(State::RecToggle).await;
@@ -1737,14 +1741,14 @@ impl RecordingController {
 
         // Stop recording and flush buffered worker
         let mut recorder = self.recorder.lock().await;
-        if !cfg!(test) {
-            let _ = recorder
-                .stop_without_saving()
-                .await
-                .context("Failed to stop recorder")?;
+        let mut stop_error: Option<anyhow::Error> = None;
+        if !cfg!(test)
+            && let Err(e) = recorder.stop_without_saving().await
+        {
+            warn!("Toggle stop: recorder stop failed; continuing cleanup: {e}");
+            stop_error = Some(e);
         }
-        recorder.set_utterance_callback(None);
-        recorder.set_utterance_silence_sec(None);
+        Self::clear_recorder_callbacks(&mut recorder);
         drop(recorder);
 
         // Reset state
@@ -1768,6 +1772,10 @@ impl RecordingController {
 
         hide_hold_badge();
         crate::voice_chat_ui::update_voice_chat_status("Ready");
+
+        if let Some(e) = stop_error {
+            return Err(anyhow::anyhow!("Failed to stop recorder: {e}"));
+        }
 
         Ok(())
     }
@@ -2184,6 +2192,7 @@ impl RecordingController {
         } else {
             hold_mode
         };
+        let ai_key_available = crate::ai_formatting::has_api_key();
 
         // Determine final text based on mode (NEW architecture):
         //
@@ -2395,7 +2404,7 @@ impl RecordingController {
         } else if force_ai {
             // Left double Option: ALWAYS formatting (no augmentation)
             // Auto-paste like hold mode — formatted text goes where the cursor is.
-            let should_use_ai = crate::ai_formatting::has_api_key();
+            let should_use_ai = ai_key_available;
             if should_use_ai {
                 info!("Formatting mode (Left Option): correcting transcript via AI");
 
@@ -2439,7 +2448,7 @@ impl RecordingController {
         } else {
             // Double Option: respects AI Formatting toggle setting
             let ai_formatting_enabled = config.ai_formatting_enabled;
-            let should_use_ai = ai_formatting_enabled && crate::ai_formatting::has_api_key();
+            let should_use_ai = ai_formatting_enabled && ai_key_available;
 
             if should_use_ai {
                 // Toggle ON: formatting only (no augmentation)
@@ -2515,11 +2524,18 @@ impl RecordingController {
             quality_probe.drop_ratio
         );
         if !assistive {
+            let action_contract_mode = resolve_transcription_action_contract_mode(
+                force_raw,
+                force_ai,
+                config.ai_formatting_enabled,
+                ai_key_available,
+            );
             // Keep the ephemeral transcription overlay in sync with what we will paste/save.
             // This makes it easier to understand differences between streaming preview and final-pass output.
             crate::transcription_overlay::set_transcription_action_contract(
                 &raw_text,
                 &formatted_text,
+                action_contract_mode,
             );
         }
 

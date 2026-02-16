@@ -563,23 +563,45 @@ extern "C" fn perform_key_equivalent(_this: &Object, _cmd: Sel, event: Id) -> bo
 /// Monotonic generation counter for zoom save debounce.
 static ZOOM_SAVE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+fn canonical_zoom_level(zoom: f64) -> f64 {
+    UserSettings::normalized_chat_zoom(zoom).unwrap_or(1.0)
+}
+
 fn adjust_chat_zoom(delta: f64) {
     let zoom = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.zoom_level = (state.zoom_level + delta).clamp(0.75, 2.0);
-        state.zoom_level
+        let prev = canonical_zoom_level(state.zoom_level);
+        let next = canonical_zoom_level(state.zoom_level + delta);
+        if (next - prev).abs() < f64::EPSILON {
+            None
+        } else {
+            state.zoom_level = next;
+            Some(next)
+        }
+    };
+    let Some(zoom) = zoom else {
+        return;
     };
     reflow_agent_after_resize_impl();
     schedule_zoom_save(zoom);
 }
 
 fn set_chat_zoom(level: f64) {
-    {
+    let zoom = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.zoom_level = level;
-    }
+        let next = canonical_zoom_level(level);
+        if (state.zoom_level - next).abs() < f64::EPSILON {
+            None
+        } else {
+            state.zoom_level = next;
+            Some(next)
+        }
+    };
+    let Some(zoom) = zoom else {
+        return;
+    };
     reflow_agent_after_resize_impl();
-    schedule_zoom_save(level);
+    schedule_zoom_save(zoom);
 }
 
 /// Debounced save: waits 500ms, then saves only if no newer zoom change occurred.
@@ -591,12 +613,9 @@ fn schedule_zoom_save(zoom: f64) {
             return; // newer zoom change supersedes
         }
         let mut settings = UserSettings::load();
-        settings.chat_zoom = if (zoom - 1.0).abs() < 0.01 {
-            None
-        } else {
-            Some(zoom)
-        };
-        let _ = settings.save();
+        if !settings.set_chat_zoom(zoom) {
+            debug!("Chat zoom unchanged after debounce; skipping settings save");
+        }
     });
 }
 
@@ -1861,5 +1880,18 @@ pub fn clear_search_field() {
             set_text_field_string(sf as Id, "");
             set_hidden(sf as Id, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_zoom_level;
+
+    #[test]
+    fn test_canonical_zoom_level_rounds_and_clamps() {
+        assert!((canonical_zoom_level(1.0) - 1.0).abs() < f64::EPSILON);
+        assert!((canonical_zoom_level(1.129) - 1.13).abs() < 0.0001);
+        assert!((canonical_zoom_level(0.2) - 0.75).abs() < 0.0001);
+        assert!((canonical_zoom_level(2.8) - 2.0).abs() < 0.0001);
     }
 }

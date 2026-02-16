@@ -199,6 +199,42 @@ async fn test_hold_down_sets_force_raw_mode() {
     );
 }
 
+#[test]
+fn test_action_contract_mode_prefers_raw_when_forced() {
+    let mode = resolve_transcription_action_contract_mode(true, false, true, true);
+    assert_eq!(
+        mode,
+        crate::transcription_overlay::TranscriptionActionContractMode::Raw
+    );
+}
+
+#[test]
+fn test_action_contract_mode_uses_ai_format_when_force_ai_enabled() {
+    let mode = resolve_transcription_action_contract_mode(false, true, false, false);
+    assert_eq!(
+        mode,
+        crate::transcription_overlay::TranscriptionActionContractMode::AiFormat
+    );
+}
+
+#[test]
+fn test_action_contract_mode_uses_ai_format_for_toggle_ai_path() {
+    let mode = resolve_transcription_action_contract_mode(false, false, true, true);
+    assert_eq!(
+        mode,
+        crate::transcription_overlay::TranscriptionActionContractMode::AiFormat
+    );
+}
+
+#[test]
+fn test_action_contract_mode_uses_raw_for_toggle_without_ai() {
+    let mode = resolve_transcription_action_contract_mode(false, false, true, false);
+    assert_eq!(
+        mode,
+        crate::transcription_overlay::TranscriptionActionContractMode::Raw
+    );
+}
+
 #[tokio::test]
 async fn test_toggle_press_does_not_set_force_raw_mode() {
     let controller = RecordingController::new();
@@ -627,4 +663,151 @@ fn test_action_quality_probe_is_independent_from_action_routing() {
     assert!((save_probe.correction_ratio - augment_probe.correction_ratio).abs() < 1e-6);
     assert!((save_probe.drop_ratio - copy_probe.drop_ratio).abs() < 1e-6);
     assert!((save_probe.drop_ratio - augment_probe.drop_ratio).abs() < 1e-6);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_rapid_hold_toggle_switch_recovers_to_idle_without_stuck_state() {
+    let controller = RecordingController::new();
+    controller.config.write().await.hold_start_delay_ms = 40;
+
+    let hold_down = HotkeyInput {
+        key_type: HotkeyType::Hold,
+        action: HotkeyAction::Down,
+        assistive: false,
+        hold_mode: HoldMode::Raw,
+        force_raw: true,
+        force_ai: false,
+    };
+    let hold_up = HotkeyInput {
+        key_type: HotkeyType::Hold,
+        action: HotkeyAction::Up,
+        assistive: false,
+        hold_mode: HoldMode::Raw,
+        force_raw: true,
+        force_ai: false,
+    };
+    let toggle_press = HotkeyInput {
+        key_type: HotkeyType::Toggle,
+        action: HotkeyAction::Press,
+        assistive: false,
+        hold_mode: HoldMode::Raw,
+        force_raw: true,
+        force_ai: false,
+    };
+
+    controller.handle_hotkey_event(hold_down).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Toggle should take control and prevent stale hold-start from reviving later.
+    controller
+        .handle_hotkey_event(toggle_press.clone())
+        .await
+        .unwrap();
+    assert_eq!(controller.current_state().await, State::RecToggle);
+
+    controller
+        .handle_hotkey_event(toggle_press.clone())
+        .await
+        .unwrap();
+    controller.handle_hotkey_event(hold_up).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(controller.current_state().await, State::Idle);
+    assert!(controller.session_id.read().await.is_none());
+    assert!(
+        !controller
+            .assistive_loop_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(!is_assistive_session());
+}
+
+#[tokio::test]
+#[serial]
+async fn test_repeated_hold_cancel_near_delay_never_starts_stale_session() {
+    let controller = RecordingController::new();
+    controller.config.write().await.hold_start_delay_ms = 45;
+
+    let hold_down = HotkeyInput {
+        key_type: HotkeyType::Hold,
+        action: HotkeyAction::Down,
+        assistive: false,
+        hold_mode: HoldMode::Raw,
+        force_raw: true,
+        force_ai: false,
+    };
+    let hold_up = HotkeyInput {
+        key_type: HotkeyType::Hold,
+        action: HotkeyAction::Up,
+        assistive: false,
+        hold_mode: HoldMode::Raw,
+        force_raw: true,
+        force_ai: false,
+    };
+
+    for _ in 0..6 {
+        controller
+            .handle_hotkey_event(hold_down.clone())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        controller
+            .handle_hotkey_event(hold_up.clone())
+            .await
+            .unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(controller.current_state().await, State::Idle);
+    assert!(!controller.is_recording().await);
+    assert!(controller.session_id.read().await.is_none());
+}
+
+#[tokio::test]
+async fn test_reset_session_after_start_failure_clears_transient_state() {
+    let controller = RecordingController::new();
+    *controller.state.write().await = State::RecToggle;
+    *controller.assistive_mode.write().await = true;
+    *controller.hold_mode.write().await = HoldMode::Chat;
+    *controller.force_raw_mode.write().await = true;
+    *controller.force_ai_mode.write().await = true;
+    *controller.session_id.write().await = Some("failed-start-session".to_string());
+    *controller.assistive_context.write().await = Some(AssistiveContext::default());
+    controller
+        .assistive_loop_active
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    controller
+        .toggle_user_has_text
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    controller
+        .toggle_assistant_has_text
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    set_assistive_session(true);
+
+    controller.reset_session_after_start_failure("test").await;
+
+    assert_eq!(controller.current_state().await, State::Idle);
+    assert!(!*controller.assistive_mode.read().await);
+    assert_eq!(*controller.hold_mode.read().await, HoldMode::Raw);
+    assert!(!*controller.force_raw_mode.read().await);
+    assert!(!*controller.force_ai_mode.read().await);
+    assert!(controller.session_id.read().await.is_none());
+    assert!(controller.assistive_context.read().await.is_none());
+    assert!(
+        !controller
+            .assistive_loop_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(
+        !controller
+            .toggle_user_has_text
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(
+        !controller
+            .toggle_assistant_has_text
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(!is_assistive_session());
 }

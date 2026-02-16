@@ -58,7 +58,8 @@ Poniższe działają „same z siebie” — jeśli ich nie ustawisz, aplikacja 
 
 - `CODESCRIBE_STREAM_CHUNK_SEC` – domyślnie `3.0` (HOT RELOADED)
 - `CODESCRIBE_STREAM_OVERLAP_RATIO` – domyślnie `0.2` (HOT RELOADED)
-- `CODESCRIBE_BUFFERED_STREAM` – domyślnie `1` (HOT RELOADED)
+- `CODESCRIBE_BUFFERED_STREAM` – **deprecated compatibility flag** (nie przełącza już runtime pipeline)
+- `CODESCRIBE_EVENT_PIPELINE` – **deprecated migration flag** (event pipeline jest zawsze ON)
 - `CODESCRIBE_BUFFER_DELAY_MS` – domyślnie `3000` (HOT RELOADED)
 - `CODESCRIBE_TYPING_CPS` – domyślnie `30` (HOT RELOADED)
 - `CODESCRIBE_EMIT_WORDS_MAX` – max słów na tick (buffered), domyślnie `3` (HOT RELOADED)
@@ -133,9 +134,10 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 - `LLM_FORMATTING_*` **nadpisuje** `LLM_*` dla formattingu (HOT RELOADED)
 - `LLM_ASSISTIVE_*` **nadpisuje** `LLM_*` dla assistive (HOT RELOADED)
 
-**Streaming vs buffered**
+**Streaming runtime**
 
-- `CODESCRIBE_BUFFERED_STREAM=1` → **ignoruje** chunking (`CODESCRIBE_STREAM_CHUNK_SEC`) (HOT RELOADED)
+- App runtime używa jednej ścieżki: `start_event_session` + `transcription_session`.
+- `CODESCRIBE_EVENT_PIPELINE` i `CODESCRIBE_BUFFERED_STREAM` są flagami kompatybilności (nie przełączają architektury).
 - `TRANSCRIPT_SEND_MODE=streaming` wysyła delty do overlayu (RESTART NEEDED)
 
 **Overlay pozycja**
@@ -162,7 +164,8 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 
 - `CODESCRIBE_STREAM_CHUNK_SEC` (HOT RELOADED)
 - `CODESCRIBE_STREAM_OVERLAP_RATIO` (HOT RELOADED)
-- `CODESCRIBE_BUFFERED_STREAM` (HOT RELOADED)
+- `CODESCRIBE_BUFFERED_STREAM` (deprecated compatibility flag; no runtime routing)
+- `CODESCRIBE_EVENT_PIPELINE` (deprecated migration flag; event pipeline always on)
 - `CODESCRIBE_BUFFER_DELAY_MS` (HOT RELOADED)
 - `CODESCRIBE_TYPING_CPS` (HOT RELOADED)
 - `CODESCRIBE_VAD_THRESHOLD` (RESTART NEEDED)

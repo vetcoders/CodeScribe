@@ -176,6 +176,7 @@ pub(crate) fn transcribe_long(
 }
 
 /// Transcribe a single chunk via the ONNX engine (blocking lock).
+#[allow(dead_code)]
 pub(crate) fn transcribe_chunk(
     audio: &[f32],
     sample_rate: u32,
@@ -310,6 +311,7 @@ impl OnnxEngine {
     /// with `use_cache_branch=false`, so no past_key_values management needed.
     /// This is O(n²) in token count but correct — KV cache optimization can
     /// come later after we verify quality.
+    #[allow(dead_code)]
     fn transcribe_internal(
         &mut self,
         samples: &[f32],
@@ -321,6 +323,7 @@ impl OnnxEngine {
             .text)
     }
 
+    #[allow(dead_code)]
     fn transcribe_internal_raw(
         &mut self,
         samples: &[f32],

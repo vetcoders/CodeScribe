@@ -257,6 +257,32 @@ fn test_settings_typing_cps_decimal_persistence() {
     );
 }
 
+#[test]
+#[serial]
+fn test_settings_chat_zoom_dirty_check_skips_equivalent_writes() {
+    let _tmp = setup_test_env();
+    let mut settings = codescribe::config::UserSettings::load();
+    let path = codescribe::config::UserSettings::settings_path();
+
+    // Effective default zoom (1.0) should not create or rewrite settings.
+    assert!(!settings.set_chat_zoom(1.0));
+    assert!(!path.exists(), "default zoom should stay implicit (None)");
+
+    // First real write.
+    assert!(settings.set_chat_zoom(1.125));
+    let first_json = fs::read_to_string(&path).expect("read settings after first zoom write");
+
+    // Equivalent value after rounding (1.129 -> 1.13) should be a no-op.
+    assert!(!settings.set_chat_zoom(1.129));
+    let second_json = fs::read_to_string(&path).expect("read settings after no-op zoom write");
+    assert_eq!(first_json, second_json);
+
+    // New effective value should persist.
+    assert!(settings.set_chat_zoom(1.25));
+    let third_json = fs::read_to_string(&path).expect("read settings after second zoom write");
+    assert_ne!(second_json, third_json);
+}
+
 // ═══════════════════════════════════════════════════════════
 // Settings: Multi-field round-trip (simulates user changing all tabs)
 // ═══════════════════════════════════════════════════════════

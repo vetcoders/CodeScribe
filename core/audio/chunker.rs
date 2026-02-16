@@ -34,6 +34,7 @@ use crate::vad;
 // ═══════════════════════════════════════════════════════════
 
 pub(crate) enum SpeechEvent {
+    #[allow(dead_code)]
     Chunk(Vec<f32>),
     /// Interim utterance slice emitted during long continuous speech to keep streaming responsive.
     Utterance(Vec<f32>),
@@ -44,6 +45,7 @@ pub(crate) enum SpeechEvent {
 }
 
 pub(crate) enum SpeechMode {
+    #[allow(dead_code)]
     Stream {
         chunk_limit: usize,
         overlap_size: usize,
@@ -125,6 +127,7 @@ pub(crate) struct SpeechSession {
 }
 
 impl SpeechSession {
+    #[allow(dead_code)]
     pub fn new_stream(sample_rate: u32, chunk_duration_sec: f32, overlap_sec: f32) -> Self {
         let config = hardcoded_gate_config();
         debug!("SpeechSession::new_stream gate_mode={:?}", config.mode);
@@ -969,6 +972,7 @@ fn utterance_silence_sec_override() -> Option<f32> {
 // Configuration helpers
 // ═══════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 pub(crate) fn hardcoded_gate_config() -> GateConfig {
     // Start from env-aware VadConfig::default() so CODESCRIBE_VAD_* env vars
     // are always respected. Then apply streaming-specific overrides only for

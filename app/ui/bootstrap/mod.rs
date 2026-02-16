@@ -71,9 +71,9 @@ struct VoiceLabFieldSpec {
 const VOICE_LAB_FIELDS: [VoiceLabFieldSpec; 7] = [
     VoiceLabFieldSpec {
         key: "CODESCRIBE_BUFFERED_STREAM",
-        label: "Buffered streaming",
+        label: "Buffered flag (compat)",
         default_value: "1",
-        description: "Smoother, correction-capable streaming mode.",
+        description: "Deprecated compatibility flag; runtime pipeline remains event-based.",
         kind: VoiceLabFieldKind::Bool,
     },
     VoiceLabFieldSpec {
@@ -665,7 +665,7 @@ unsafe fn build_settings_ui(
         );
         let _ = set_button_symbol(overlay_btn, "bubble.left.and.bubble.right");
         style_toolbar_icon_button(overlay_btn);
-        set_tooltip(overlay_btn, "Show agent");
+        set_tooltip(overlay_btn, "Show agent overlay");
         button_set_action(overlay_btn, action_handler, sel!(onShowOverlay:));
         add_subview(topbar_controls, overlay_btn);
 
@@ -847,7 +847,7 @@ unsafe fn build_settings_ui(
         // ── Quick-start steps ────────────────────────────────────────
         let step_defs: [(&str, objc::runtime::Sel, &str); 3] = [
             ("1) Test mic", sel!(onTestMic:), "Test"),
-            ("2) Show agent", sel!(onShowOverlay:), "Show"),
+            ("2) Show agent overlay", sel!(onShowOverlay:), "Show"),
             ("3) Press hotkey", sel!(onHotkeyDone:), "Done"),
         ];
         let mut step_status_labels: [Option<usize>; 3] = [None; 3];
@@ -2253,7 +2253,8 @@ pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime
         };
         info!("Settings: hold modifier -> {}", value);
         let config = Config::load();
-        hotkeys::set_hold_mods(mods);
+        let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
+        runtime_config.hold_mods = mods;
 
         // If DoubleCtrl toggle is enabled, Ctrl-only hold is unsafe → disable toggle.
         if mods == HoldMods::Ctrl && config.toggle_trigger == ToggleTrigger::DoubleCtrl {
@@ -2261,13 +2262,14 @@ pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime
                 ("HOLD_MODS", value),
                 ("TOGGLE_TRIGGER", ToggleTrigger::None.as_str()),
             ]);
-            hotkeys::set_toggle_trigger(ToggleTrigger::None);
+            runtime_config.toggle_trigger = ToggleTrigger::None;
 
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             set_keys_popup_index(state.keys_toggle_popup, 0);
         } else {
             let _ = config.save_to_env("HOLD_MODS", value);
         }
+        hotkeys::apply_hotkey_runtime_config(runtime_config);
         mark_keys_preset_custom();
         sync_runtime_config_via_ipc();
     }
@@ -2286,9 +2288,11 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
                     ("TOGGLE_TRIGGER", ToggleTrigger::DoubleOption.as_str()),
                     ("HOLD_EXCLUSIVE", "0"),
                 ]);
-                hotkeys::set_hold_mods(HoldMods::Fn);
-                hotkeys::set_toggle_trigger(ToggleTrigger::DoubleOption);
-                hotkeys::set_exclusive_mode(false);
+                let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
+                runtime_config.hold_mods = HoldMods::Fn;
+                runtime_config.toggle_trigger = ToggleTrigger::DoubleOption;
+                runtime_config.hold_exclusive = false;
+                hotkeys::apply_hotkey_runtime_config(runtime_config);
 
                 let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 set_keys_popup_index(state.keys_hold_popup, 0);
@@ -2305,9 +2309,11 @@ pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::
                     ("TOGGLE_TRIGGER", ToggleTrigger::None.as_str()),
                     ("HOLD_EXCLUSIVE", "1"),
                 ]);
-                hotkeys::set_hold_mods(HoldMods::Fn);
-                hotkeys::set_toggle_trigger(ToggleTrigger::None);
-                hotkeys::set_exclusive_mode(true);
+                let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
+                runtime_config.hold_mods = HoldMods::Fn;
+                runtime_config.toggle_trigger = ToggleTrigger::None;
+                runtime_config.hold_exclusive = true;
+                hotkeys::apply_hotkey_runtime_config(runtime_config);
 
                 let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
                 set_keys_popup_index(state.keys_hold_popup, 0);
@@ -2334,7 +2340,9 @@ pub(super) extern "C" fn on_hold_exclusive_changed(
         info!("Settings: hold exclusive -> {}", hold_exclusive);
         let config = Config::load();
         let _ = config.save_to_env("HOLD_EXCLUSIVE", if hold_exclusive { "1" } else { "0" });
-        hotkeys::set_exclusive_mode(hold_exclusive);
+        let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
+        runtime_config.hold_exclusive = hold_exclusive;
+        hotkeys::apply_hotkey_runtime_config(runtime_config);
         mark_keys_preset_custom();
         sync_runtime_config_via_ipc();
     }
@@ -2358,7 +2366,8 @@ pub(super) extern "C" fn on_toggle_trigger_changed(
         info!("Settings: toggle trigger -> {}", value);
         let config = Config::load();
         let _ = config.save_to_env("TOGGLE_TRIGGER", value);
-        hotkeys::set_toggle_trigger(trigger);
+        let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
+        runtime_config.toggle_trigger = trigger;
 
         // If enabling DoubleCtrl and hold is Ctrl-only, switch to Ctrl+Option and enable modes.
         if trigger == ToggleTrigger::DoubleCtrl && config.hold_mods == HoldMods::Ctrl {
@@ -2366,13 +2375,14 @@ pub(super) extern "C" fn on_toggle_trigger_changed(
                 ("HOLD_MODS", HoldMods::CtrlAlt.as_str()),
                 ("HOLD_EXCLUSIVE", "0"),
             ]);
-            hotkeys::set_hold_mods(HoldMods::CtrlAlt);
-            hotkeys::set_exclusive_mode(false);
+            runtime_config.hold_mods = HoldMods::CtrlAlt;
+            runtime_config.hold_exclusive = false;
 
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             set_keys_popup_index(state.keys_hold_popup, 2);
             set_keys_checkbox_state(state.keys_exclusive_checkbox, true);
         }
+        hotkeys::apply_hotkey_runtime_config(runtime_config);
 
         mark_keys_preset_custom();
         sync_runtime_config_via_ipc();
@@ -2549,6 +2559,9 @@ pub(super) extern "C" fn on_delay_changed(_this: &Object, _cmd: objc::runtime::S
         info!("Settings: hold delay -> {}ms", ms);
         let config = Config::load();
         let _ = config.save_to_env("HOLD_START_DELAY_MS", &ms.to_string());
+        let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
+        runtime_config.hold_start_delay_ms = ms;
+        hotkeys::apply_hotkey_runtime_config(runtime_config);
         let label_ptr = {
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.hold_delay_value_label
@@ -2571,7 +2584,9 @@ pub(super) extern "C" fn on_double_tap_interval_changed(
         info!("Settings: double-tap interval -> {}ms", ms);
         let config = Config::load();
         let _ = config.save_to_env("DOUBLE_TAP_INTERVAL_MS", &ms.to_string());
-        hotkeys::set_double_tap_interval_ms(ms);
+        let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
+        runtime_config.double_tap_interval_ms = ms;
+        hotkeys::apply_hotkey_runtime_config(runtime_config);
         let label_ptr = {
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.double_tap_value_label

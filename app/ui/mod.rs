@@ -39,7 +39,7 @@ unsafe extern "C" {
     fn AXUIElementCopyAttributeValue(element: AXId, attribute: AXId, value: *mut AXId) -> i32;
     fn AXUIElementCreateSystemWide() -> AXId;
     fn AXValueGetValue(value: AXId, type_: i32, value_ptr: *mut std::ffi::c_void) -> bool;
-    fn CFRelease(cf: AXId);
+    fn CFRelease(cf: *const std::ffi::c_void);
 }
 
 // AX constants

@@ -1524,8 +1524,10 @@ fn save_hotkey_mode() {
         );
     }
 
-    hotkeys::set_hold_mods(hold_mods_runtime);
-    hotkeys::set_toggle_trigger(toggle_trigger_runtime);
+    let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&Config::load());
+    runtime_config.hold_mods = hold_mods_runtime;
+    runtime_config.toggle_trigger = toggle_trigger_runtime;
+    hotkeys::apply_hotkey_runtime_config(runtime_config);
     unsafe {
         std::env::set_var("HOLD_MODS", hold_mods_raw);
         std::env::set_var("TOGGLE_TRIGGER", toggle_trigger_raw);

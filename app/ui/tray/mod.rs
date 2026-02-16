@@ -112,7 +112,7 @@ pub fn run() -> Result<()> {
 /// - Status channel is disconnected
 ///
 /// On exit, cleanup is performed:
-/// - Hotkey manager is dropped (unregisters hotkeys)
+/// - Hotkey runtime is explicitly shut down (event tap disabled, run loop stopped, thread joined)
 /// - Tray icon is removed
 /// - All channels are closed
 pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Result<()> {
@@ -160,6 +160,7 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
     // Poll interval for checking channels
     let poll_interval = Duration::from_millis(100);
     let mut last_menu_refresh = Instant::now();
+    let mut hotkey_manager = hotkey_manager;
 
     // Run the event loop
     event_loop.run(move |event, _, control_flow| {
@@ -176,12 +177,16 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
         // Check for programmatic shutdown request
         if is_shutdown_requested() {
             info!("Shutdown flag detected, performing cleanup...");
+            if let Some(hk_manager) = hotkey_manager.as_mut() {
+                hk_manager.shutdown();
+            }
+            hotkey_manager = None;
             *control_flow = ControlFlow::Exit;
             return;
         }
 
         // Process hotkey events (integrated with main event loop for macOS)
-        if let Some(ref hk_manager) = hotkey_manager {
+        if let Some(hk_manager) = hotkey_manager.as_ref() {
             hk_manager.process_events();
         }
 
@@ -217,6 +222,10 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 info!("Status channel closed, exiting");
+                if let Some(hk_manager) = hotkey_manager.as_mut() {
+                    hk_manager.shutdown();
+                }
+                hotkey_manager = None;
                 *control_flow = ControlFlow::Exit;
             }
         }
@@ -230,13 +239,17 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
             // Handle Quit specially to exit event loop
             if event.id == menu_ids.quit {
                 info!("Quit requested via menu, exiting...");
+                if let Some(hk_manager) = hotkey_manager.as_mut() {
+                    hk_manager.shutdown();
+                }
+                hotkey_manager = None;
                 *control_flow = ControlFlow::Exit;
             }
         }
     });
 
-    // Note: This code is unreachable because event_loop.run() never returns
-    // on macOS. Cleanup happens when the closures are dropped.
+    // Note: This code is unreachable because event_loop.run() never returns on macOS.
+    // Hotkeys are shut down in-loop before requesting exit.
 }
 
 // ============================================================================

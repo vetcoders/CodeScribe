@@ -59,6 +59,7 @@ pub(crate) fn transcribe_long(
 }
 
 /// Transcribe a single chunk (blocking lock on whichever engine is active).
+#[allow(dead_code)]
 pub(crate) fn transcribe_chunk(
     audio: &[f32],
     sample_rate: u32,

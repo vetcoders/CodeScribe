@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 /// Regular-user settings (JSON, GUI-managed).
 /// All fields are Option — None means "use default or .env override".
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(default)]
 pub struct UserSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -226,8 +226,51 @@ impl UserSettings {
         Ok(())
     }
 
+    fn save_if_changed(&self, before: &Self, setter: &str, key: &str) {
+        if self == before {
+            debug!("{setter}({key}) ignored; value unchanged");
+            return;
+        }
+        if let Err(e) = self.save() {
+            warn!("Failed to save after {setter}({key}): {e}");
+        }
+    }
+
+    /// Normalize zoom value into persisted representation.
+    ///
+    /// - Clamps to [0.75, 2.0]
+    /// - Rounds to 2 decimals (prevents float jitter rewrite spam)
+    /// - Stores `None` for effective default zoom (1.0)
+    pub fn normalized_chat_zoom(zoom: f64) -> Option<f64> {
+        let clamped = zoom.clamp(0.75, 2.0);
+        let rounded = (clamped * 100.0).round() / 100.0;
+        if (rounded - 1.0).abs() < 0.01 {
+            None
+        } else {
+            Some(rounded)
+        }
+    }
+
+    /// Set persisted chat zoom, saving only on effective value change.
+    ///
+    /// Returns `true` when a real setting change was applied.
+    pub fn set_chat_zoom(&mut self, zoom: f64) -> bool {
+        let normalized = Self::normalized_chat_zoom(zoom);
+        if self.chat_zoom == normalized {
+            debug!("set_chat_zoom ignored; value unchanged");
+            return false;
+        }
+
+        self.chat_zoom = normalized;
+        if let Err(e) = self.save() {
+            warn!("Failed to save after set_chat_zoom: {e}");
+        }
+        true
+    }
+
     /// Sets a string-valued setting by its .env key name and saves.
     pub fn set_string(&mut self, key: &str, value: &str) {
+        let before = self.clone();
         match key {
             "WHISPER_LANGUAGE" => self.whisper_language = Some(value.to_owned()),
             "HOLD_MODS" => self.hold_mods = Some(value.to_owned()),
@@ -250,13 +293,12 @@ impl UserSettings {
                 return;
             }
         }
-        if let Err(e) = self.save() {
-            warn!("Failed to save after set_string({key}): {e}");
-        }
+        self.save_if_changed(&before, "set_string", key);
     }
 
     /// Sets a boolean-valued setting by its .env key name and saves.
     pub fn set_bool(&mut self, key: &str, value: bool) {
+        let before = self.clone();
         match key {
             "AI_FORMATTING_ENABLED" => self.ai_formatting_enabled = Some(value),
             "CODESCRIBE_BUFFERED_STREAM" => self.buffered_stream = Some(value),
@@ -275,13 +317,12 @@ impl UserSettings {
                 return;
             }
         }
-        if let Err(e) = self.save() {
-            warn!("Failed to save after set_bool({key}): {e}");
-        }
+        self.save_if_changed(&before, "set_bool", key);
     }
 
     /// Sets a u64-valued setting by its .env key name and saves.
     pub fn set_u64(&mut self, key: &str, value: u64) {
+        let before = self.clone();
         match key {
             "HOLD_START_DELAY_MS" => self.hold_start_delay_ms = Some(value),
             "DOUBLE_TAP_INTERVAL_MS" => self.double_tap_interval_ms = Some(value),
@@ -293,13 +334,12 @@ impl UserSettings {
                 return;
             }
         }
-        if let Err(e) = self.save() {
-            warn!("Failed to save after set_u64({key}): {e}");
-        }
+        self.save_if_changed(&before, "set_u64", key);
     }
 
     /// Sets an f32-valued setting by its .env key name and saves.
     pub fn set_f32(&mut self, key: &str, value: f32) {
+        let before = self.clone();
         match key {
             "SOUND_VOLUME" => self.sound_volume = Some(value),
             "TOGGLE_SILENCE_SEC" => self.toggle_silence_sec = Some(value),
@@ -310,8 +350,55 @@ impl UserSettings {
                 return;
             }
         }
-        if let Err(e) = self.save() {
-            warn!("Failed to save after set_f32({key}): {e}");
+        self.save_if_changed(&before, "set_f32", key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UserSettings;
+    use serial_test::serial;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn setup_isolated_data_dir() -> TempDir {
+        let tmp = TempDir::new().expect("tempdir");
+        // SAFETY: tests are serial and intentionally override process env.
+        unsafe {
+            std::env::set_var("CODESCRIBE_DATA_DIR", tmp.path());
         }
+        tmp
+    }
+
+    #[test]
+    fn test_normalized_chat_zoom_rules() {
+        assert_eq!(UserSettings::normalized_chat_zoom(1.0), None);
+        assert_eq!(UserSettings::normalized_chat_zoom(1.004), None);
+        assert_eq!(UserSettings::normalized_chat_zoom(1.125), Some(1.13));
+        assert_eq!(UserSettings::normalized_chat_zoom(0.1), Some(0.75));
+        assert_eq!(UserSettings::normalized_chat_zoom(4.0), Some(2.0));
+    }
+
+    #[test]
+    #[serial]
+    fn test_set_chat_zoom_writes_only_on_effective_change() {
+        let _tmp = setup_isolated_data_dir();
+        let mut settings = UserSettings::default();
+        let path = UserSettings::settings_path();
+
+        // Default zoom is encoded as None, so this should be a no-op (no file write).
+        assert!(!settings.set_chat_zoom(1.0));
+        assert!(
+            !path.exists(),
+            "no-op zoom update should not create settings file"
+        );
+
+        assert!(settings.set_chat_zoom(1.125));
+        let first_contents = fs::read_to_string(&path).expect("read settings after first write");
+
+        // 1.129 rounds to the same persisted value (1.13), so no write.
+        assert!(!settings.set_chat_zoom(1.129));
+        let second_contents = fs::read_to_string(&path).expect("read settings after no-op write");
+        assert_eq!(first_contents, second_contents);
     }
 }

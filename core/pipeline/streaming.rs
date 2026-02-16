@@ -1030,6 +1030,7 @@ pub(crate) async fn transcription_session(
 // ── Legacy worker functions (deprecated) ────────────────────────────────────
 
 #[deprecated(note = "Use transcription_session with EventSink instead")]
+#[allow(dead_code)]
 pub(crate) async fn transcription_worker(
     mut chunk_receiver: mpsc::Receiver<Vec<f32>>,
     transcript_buffer: Arc<Mutex<String>>,
@@ -1494,6 +1495,7 @@ struct UtteranceWorkItem {
     max_speech_prob: f32,
 }
 
+#[allow(dead_code)]
 fn spawn_chunk_transcription(
     samples: Vec<f32>,
     sample_rate: u32,

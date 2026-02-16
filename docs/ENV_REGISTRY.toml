@@ -156,14 +156,14 @@ default = "1"
 type = "bool"
 reload = "hot"
 category = "streaming"
-description = "Use buffered streaming mode (smoother output)"
+description = "Deprecated compatibility flag. Runtime pipeline is always event-based; this no longer switches architecture."
 
 [vars.CODESCRIBE_EVENT_PIPELINE]
-default = "0"
+default = "1"
 type = "bool"
 reload = "hot"
 category = "streaming"
-description = "Use the new event-based transcription pipeline (experimental)"
+description = "Deprecated migration flag. Event pipeline is always active in app runtime."
 
 [vars.CODESCRIBE_BUFFER_DELAY_MS]
 default = "1800"
