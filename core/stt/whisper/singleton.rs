@@ -199,12 +199,27 @@ pub fn transcribe_streaming<'a>(
     engine.transcribe_long_streaming(samples, sample_rate, language, callback)
 }
 
-/// Transcribe a file
+/// Transcribe a file (VAD-filtered: only speech regions are sent to Whisper)
 pub fn transcribe_file(path: &std::path::Path, language: Option<&str>) -> Result<String> {
     let (samples, sample_rate) =
         crate::audio::load_audio_file(path).context("Failed to load audio file")?;
 
-    transcribe(&samples, sample_rate, language)
+    // Run Silero VAD to strip silence — without this, Whisper hallucinates on
+    // long recordings that are mostly silence (e.g. 4% speech / 96% silence).
+    let (speech_samples, stats) = crate::vad::extract_speech(&samples, sample_rate);
+    let total_sec = samples.len() as f32 / sample_rate as f32;
+    let speech_sec = speech_samples.len() as f32 / sample_rate as f32;
+    info!(
+        "transcribe_file VAD: {:.1}s speech / {:.1}s total ({:.0}% speech)",
+        speech_sec, total_sec, stats.speech_pct
+    );
+
+    if speech_samples.is_empty() {
+        info!("transcribe_file: no speech detected after VAD; returning empty transcript");
+        return Ok(String::new());
+    }
+
+    transcribe(&speech_samples, sample_rate, language)
 }
 
 /// Detect language from audio samples

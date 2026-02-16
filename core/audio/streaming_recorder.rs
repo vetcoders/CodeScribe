@@ -133,6 +133,10 @@ impl EventSink for RecorderCallbackEventSink {
                     cb(trimmed.to_string());
                 }
             }
+            EngineEvent::NoSpeech { .. } => {
+                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+                last.clear();
+            }
             _ => {}
         }
     }

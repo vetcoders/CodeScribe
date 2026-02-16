@@ -119,6 +119,10 @@ impl EventSink for DeltaSinkAdapter {
                 // Reset for next utterance.
                 *last = String::new();
             }
+            EngineEvent::NoSpeech { .. } => {
+                let mut last = self.last_text.lock().unwrap();
+                *last = String::new();
+            }
             _ => {}
         }
     }
@@ -322,6 +326,28 @@ mod tests {
         });
         let deltas = collector.collected();
         assert_eq!(deltas.last().unwrap(), "Second");
+    }
+
+    #[test]
+    fn test_delta_sink_adapter_no_speech_resets_preview_state() {
+        let collector = Arc::new(CollectorSink::new());
+        let adapter = DeltaSinkAdapter::new(collector.clone() as Arc<dyn DeltaSink>);
+
+        adapter.on_event(&EngineEvent::Preview {
+            rev: 1,
+            text: "First".to_string(),
+        });
+        adapter.on_event(&EngineEvent::NoSpeech {
+            reason: "vad_no_speech_detected".to_string(),
+        });
+        adapter.on_event(&EngineEvent::Preview {
+            rev: 2,
+            text: "Second".to_string(),
+        });
+
+        let deltas = collector.collected();
+        assert_eq!(deltas.first().map(String::as_str), Some("First"));
+        assert_eq!(deltas.last().map(String::as_str), Some("Second"));
     }
 
     #[test]

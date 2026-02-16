@@ -99,6 +99,9 @@ pub enum EngineEventWire {
         max_prob: f32,
         samples: usize,
     },
+    NoSpeech {
+        reason: String,
+    },
     Preview {
         rev: u64,
         text: String,
@@ -148,6 +151,9 @@ impl From<&EngineEvent> for EngineEventWire {
             EngineEvent::VadFallback { max_prob, samples } => Self::VadFallback {
                 max_prob: *max_prob,
                 samples: *samples,
+            },
+            EngineEvent::NoSpeech { reason } => Self::NoSpeech {
+                reason: reason.clone(),
             },
             EngineEvent::Preview { rev, text } => Self::Preview {
                 rev: *rev,
@@ -263,5 +269,20 @@ mod tests {
         let value = serde_json::to_value(payload).expect("serialize payload");
         let obj = must_object(value);
         assert_eq!(obj.get("event").and_then(Value::as_str), Some("engine"));
+    }
+
+    #[test]
+    fn no_speech_event_serializes_reason() {
+        let event = EngineEvent::NoSpeech {
+            reason: "vad_no_speech_detected".to_string(),
+        };
+        let wire = EngineEventWire::from(&event);
+        let json = serde_json::to_value(&wire).expect("serialize no_speech");
+        let obj = must_object(json);
+        assert_eq!(obj.get("type").and_then(Value::as_str), Some("no_speech"));
+        assert_eq!(
+            obj.get("reason").and_then(Value::as_str),
+            Some("vad_no_speech_detected")
+        );
     }
 }

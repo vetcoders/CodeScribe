@@ -342,6 +342,10 @@ impl LocalWhisperEngine {
         language: Option<&str>,
     ) -> Result<RawTranscript> {
         let samples = audio_loader::resample_to_16k(audio, sample_rate);
+        if samples.is_empty() {
+            tracing::debug!("Skipping transcription: empty audio after resampling");
+            return Ok(RawTranscript::default());
+        }
         let debug_tokens = env::var("CODESCRIBE_DEBUG_TOKENS")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
@@ -387,6 +391,10 @@ impl LocalWhisperEngine {
         language: Option<&str>,
     ) -> Result<RawTranscript> {
         let samples = audio_loader::resample_to_16k(audio, sample_rate);
+        if samples.is_empty() {
+            tracing::debug!("Skipping long transcription: empty audio after resampling");
+            return Ok(RawTranscript::default());
+        }
         let debug_tokens = env::var("CODESCRIBE_DEBUG_TOKENS")
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
@@ -851,48 +859,61 @@ impl LocalWhisperEngine {
         let text = text.trim().to_string();
 
         // 5. Logprob Threshold
-        if token_count > 0 {
-            let avg_logprob = sum_logprob / token_count as f32;
-            if avg_logprob < self.decoding_params.logprob_threshold {
-                tracing::warn!(
-                    "Low avg logprob ({:.2}) - possible hallucination",
-                    avg_logprob
-                );
+        let avg_logprob = if token_count > 0 {
+            let value = sum_logprob / token_count as f32;
+            if value < self.decoding_params.logprob_threshold {
+                tracing::warn!("Low avg logprob ({:.2}) - possible hallucination", value);
             }
-        }
+            Some(value)
+        } else {
+            None
+        };
 
         // 4. Compression Ratio Threshold - apply dedup if ratio too high
-        let ratio = compression_ratio(&text);
-        if ratio > self.decoding_params.compression_ratio_threshold {
+        let mut final_text = text;
+        let mut final_segments = segments;
+        let mut final_ratio = compression_ratio(&final_text);
+        if final_ratio > self.decoding_params.compression_ratio_threshold {
             tracing::warn!(
                 "High compression ratio ({:.2}) - applying dedup cleanup",
-                ratio
+                final_ratio
             );
 
             // Apply word/phrase deduplication to reduce repetitions
-            let cleaned = dedup_repetitions(&text);
+            let cleaned = dedup_repetitions(&final_text).trim().to_string();
             let new_ratio = compression_ratio(&cleaned);
 
             if new_ratio > self.decoding_params.compression_ratio_threshold {
-                tracing::warn!(
-                    "Still high after dedup ({:.2}) - returning cleaned text",
-                    new_ratio
-                );
+                tracing::warn!("Still high after dedup ({:.2})", new_ratio);
             } else {
                 tracing::debug!(
                     "Compression ratio improved: {:.2} -> {:.2}",
-                    ratio,
+                    final_ratio,
                     new_ratio
                 );
             }
-
-            return Ok(RawTranscript {
-                text: cleaned,
-                segments: Vec::new(),
-            });
+            final_text = cleaned;
+            final_segments = Vec::new();
+            final_ratio = new_ratio;
         }
 
-        Ok(RawTranscript { text, segments })
+        if should_drop_for_quality_gate(avg_logprob, final_ratio, &self.decoding_params) {
+            tracing::warn!(
+                "Quality gate dropped transcript (avg_logprob={:?}, compression_ratio={:.2})",
+                avg_logprob,
+                final_ratio
+            );
+            return Ok(RawTranscript::default());
+        }
+
+        if final_text.is_empty() {
+            return Ok(RawTranscript::default());
+        }
+
+        Ok(RawTranscript {
+            text: final_text,
+            segments: final_segments,
+        })
     }
 }
 
@@ -1121,6 +1142,16 @@ fn compression_ratio(text: &str) -> f32 {
     let compressed = encoder.finish().unwrap_or_default();
 
     original_len as f32 / compressed.len() as f32
+}
+
+fn should_drop_for_quality_gate(
+    avg_logprob: Option<f32>,
+    compression_ratio: f32,
+    params: &DecodingParams,
+) -> bool {
+    let low_logprob = avg_logprob.is_some_and(|avg| avg < params.logprob_threshold);
+    let high_compression = compression_ratio > params.compression_ratio_threshold;
+    low_logprob && high_compression
 }
 
 fn dequantize_q8(
@@ -1388,5 +1419,13 @@ mod dedup_tests {
         let input = "który zajmuje który zajmuje 56 GB. 56 GB. test test";
         let expected = "który zajmuje 56 GB. test";
         assert_eq!(dedup_repetitions(input), expected);
+    }
+
+    #[test]
+    fn quality_gate_requires_both_logprob_and_compression_signals() {
+        let params = DecodingParams::default();
+        assert!(!should_drop_for_quality_gate(Some(-0.2), 3.0, &params));
+        assert!(!should_drop_for_quality_gate(Some(-3.0), 1.4, &params));
+        assert!(should_drop_for_quality_gate(Some(-3.0), 3.0, &params));
     }
 }

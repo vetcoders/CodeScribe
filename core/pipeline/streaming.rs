@@ -9,6 +9,7 @@
 use crate::audio::chunker::{SpeechEvent, SpeechSession};
 use crate::pipeline::dedup::{dedup_chunk_overlap, strip_suffix_overlap};
 use crate::pipeline::stream_postprocess::StreamPostProcessor;
+use crate::stt::scheduler::{SttLane, SttScheduler, SttTaskHandle};
 use crate::stt::whisper::singleton::engine as get_engine;
 use anyhow::{Result, anyhow};
 use chrono::SecondsFormat;
@@ -124,6 +125,21 @@ fn text_words_per_second(text: &str, audio_samples: usize, sample_rate: u32) -> 
         return None;
     }
     Some(words as f32 / duration_s)
+}
+
+fn emit_vad_warning(event_sink: &Arc<dyn EventSink>, session: &mut SpeechSession) {
+    if let Some(stats) = session.take_vad_error_stats() {
+        event_sink.on_event(&EngineEvent::Warning {
+            code: "vad_degraded".to_string(),
+            message: format!(
+                "VAD degraded in current batch: predict_errors={} unavailable_frames={} (totals: predict_errors={} unavailable_frames={})",
+                stats.predict_errors,
+                stats.unavailable_frames,
+                stats.total_predict_errors,
+                stats.total_unavailable_frames
+            ),
+        });
+    }
 }
 
 fn should_drop_short_utterance(audio_samples: usize, sample_rate: u32, speech_prob: f32) -> bool {
@@ -554,6 +570,7 @@ pub(crate) async fn transcription_session(
         SpeechSession::new_utterance(sample_rate)
     };
     let output_sample_rate = session.output_sample_rate();
+    let stt_scheduler = SttScheduler::new();
 
     let mut pipeline = TranscriptionPipeline::new(language);
     let mut preview_rev: u64 = 0;
@@ -563,6 +580,7 @@ pub(crate) async fn transcription_session(
     let mut filtered_empty_drops: u64 = 0;
     let mut corrections_applied: u64 = 0;
     let mut vad_started = false;
+    let mut speech_activity_observed = false;
 
     // Accumulate text for the current "run" of utterances (between corrections).
     let mut accumulated_text = String::new();
@@ -587,19 +605,20 @@ pub(crate) async fn transcription_session(
     let mut dropped_utterances: u64 = 0;
     let mut audio_closed = false;
 
-    // Phase 1 (streaming preview) — one utterance transcription in flight.
-    let mut utterance_in_flight: Option<tokio::task::JoinHandle<Result<RawTranscript>>> = None;
+    // Phase 1 (streaming preview/commit) — one request tracked for event handling.
+    let mut utterance_in_flight: Option<SttTaskHandle> = None;
     let mut utterance_active: Option<UtteranceWorkItem> = None;
 
-    // Phase 2 (buffered correction) — re-transcription in flight.
-    let mut correction_in_flight: Option<tokio::task::JoinHandle<Result<RawTranscript>>> = None;
+    // Phase 2 (buffered correction) — request tracked for stale guards.
+    let mut correction_in_flight: Option<SttTaskHandle> = None;
     let mut correction_expected_preview_rev: Option<u64> = None;
     let mut correction_expected_text: Option<String> = None;
     let mut correction_suffix_snapshot: Option<String> = None;
 
     loop {
         // Start next utterance transcription as soon as possible.
-        // Correction runs in parallel and is guarded as best-effort/stale-safe.
+        // Inference itself is serialized by STT scheduler; this loop tracks the
+        // handles required for event semantics.
         if utterance_in_flight.is_none() {
             while let Some(item) = pending_utterances.pop_front() {
                 if should_drop_short_utterance(
@@ -621,11 +640,26 @@ pub(crate) async fn transcription_session(
                 }
 
                 let lang = pipeline.language.clone();
-                let handle =
-                    spawn_utterance_transcription(item.audio.clone(), output_sample_rate, lang);
-                utterance_in_flight = Some(handle);
-                utterance_active = Some(item);
-                break;
+                let lane = if item.is_final {
+                    SttLane::Commit
+                } else {
+                    SttLane::Live
+                };
+                match stt_scheduler.submit(lane, item.audio.clone(), output_sample_rate, lang) {
+                    Ok(handle) => {
+                        utterance_in_flight = Some(handle);
+                        utterance_active = Some(item);
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Failed to submit STT request to scheduler: {}", e);
+                        event_sink.on_event(&EngineEvent::Warning {
+                            code: "scheduler_submit_error".to_string(),
+                            message: format!("{}", e),
+                        });
+                        break;
+                    }
+                }
             }
         }
 
@@ -650,6 +684,7 @@ pub(crate) async fn transcription_session(
                                 }
                                 _ => continue,
                             };
+                            speech_activity_observed = true;
 
                             if !vad_started {
                                 event_sink.on_event(&EngineEvent::VadStart {
@@ -670,6 +705,7 @@ pub(crate) async fn transcription_session(
                                 max_speech_prob,
                             });
                         }
+                        emit_vad_warning(&event_sink, &mut session);
                     }
                     None => {
                         audio_closed = true;
@@ -685,6 +721,7 @@ pub(crate) async fn transcription_session(
                             };
 
                             if !utterance.is_empty() {
+                                speech_activity_observed = true;
                                 // Emit VadStart if this is the first speech (e.g. from flush).
                                 if !vad_started {
                                     event_sink.on_event(&EngineEvent::VadStart {
@@ -704,17 +741,18 @@ pub(crate) async fn transcription_session(
                                 }
                             }
                         }
+                        emit_vad_warning(&event_sink, &mut session);
                     }
                 }
             }
             result = async {
-                correction_in_flight.as_mut().unwrap().await
+                correction_in_flight.as_mut().unwrap().recv().await
             }, if correction_in_flight.is_some() => {
                 let expected_preview_rev = correction_expected_preview_rev.take().unwrap_or(preview_rev);
                 let expected_text = correction_expected_text.take().unwrap_or_default();
                 let suffix_snapshot = correction_suffix_snapshot.take().unwrap_or_default();
                 match result {
-                    Ok(Ok(raw)) => {
+                    Ok(raw) => {
                         if correction_is_stale(
                             expected_preview_rev,
                             preview_rev,
@@ -771,14 +809,20 @@ pub(crate) async fn transcription_session(
                             }
                         }
                     }
-                    _ => {
-                        warn!("Re-transcription failed; keeping Phase 1 draft");
+                    Err(e) => {
+                        if e.to_string().contains("superseded") {
+                            debug!("Skipping superseded correction request: {}", e);
+                        } else if e.to_string().contains("shutting down") {
+                            debug!("Ignoring correction during scheduler shutdown: {}", e);
+                        } else {
+                            warn!("Re-transcription failed; keeping Phase 1 draft: {}", e);
+                        }
                     }
                 }
                 correction_in_flight = None;
             }
             result = async {
-                utterance_in_flight.as_mut().unwrap().await
+                utterance_in_flight.as_mut().unwrap().recv().await
             }, if utterance_in_flight.is_some() => {
                 let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem {
                     audio: Vec::new(),
@@ -792,7 +836,7 @@ pub(crate) async fn transcription_session(
                     utterance_start_s + chunk_start_samples as f32 / output_sample_rate as f32;
 
                 match result {
-                    Ok(Ok(raw_transcript)) => {
+                    Ok(raw_transcript) => {
                         let raw_text = raw_transcript.text;
                         let mut raw_segments = raw_transcript.segments;
                         if !raw_segments.is_empty() {
@@ -931,15 +975,14 @@ pub(crate) async fn transcription_session(
                             if utterance_count >= correction_min_utterances || audio_duration_s >= correction_min_sec {
                                 let audio = std::mem::take(&mut correction_audio_buf);
                                 let lang = pipeline.language.clone();
-                                correction_expected_preview_rev = Some(preview_rev);
-                                correction_expected_text = Some(accumulated_text.clone());
-                                correction_suffix_snapshot = Some(suffix_snapshot.clone());
                                 utterance_count = 0;
 
-                                // Abort stale correction task to prevent task leak + suffix corruption.
                                 if let Some(old) = correction_in_flight.take() {
-                                    old.abort();
-                                    debug!("Aborted stale in-flight correction task");
+                                    debug!(
+                                        dropped_request_id = old.id(),
+                                        dropped_lane = ?old.lane(),
+                                        "Superseding tracked correction request"
+                                    );
                                 }
                                 debug!(
                                     expected_rev = preview_rev,
@@ -947,25 +990,33 @@ pub(crate) async fn transcription_session(
                                     audio_sec = audio_duration_s,
                                     "BOUNDARY correction_scheduled"
                                 );
-                                correction_in_flight = Some(spawn_utterance_transcription(
+                                match stt_scheduler.submit(
+                                    SttLane::Refine,
                                     audio,
                                     output_sample_rate,
                                     lang,
-                                ));
+                                ) {
+                                    Ok(handle) => {
+                                        correction_expected_preview_rev = Some(preview_rev);
+                                        correction_expected_text = Some(accumulated_text.clone());
+                                        correction_suffix_snapshot = Some(suffix_snapshot.clone());
+                                        correction_in_flight = Some(handle);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to submit correction request: {}", e);
+                                        event_sink.on_event(&EngineEvent::Warning {
+                                            code: "scheduler_submit_error".to_string(),
+                                            message: format!("{}", e),
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         error!("Transcription failed: {}", e);
                         event_sink.on_event(&EngineEvent::Warning {
                             code: "transcription_error".to_string(),
-                            message: format!("{}", e),
-                        });
-                    }
-                    Err(e) => {
-                        error!("Transcription task join error: {}", e);
-                        event_sink.on_event(&EngineEvent::Warning {
-                            code: "task_join_error".to_string(),
                             message: format!("{}", e),
                         });
                     }
@@ -974,6 +1025,14 @@ pub(crate) async fn transcription_session(
                 utterance_in_flight = None;
             }
         }
+    }
+
+    if let Err(e) = stt_scheduler.shutdown().await {
+        error!("Failed to shutdown STT scheduler: {}", e);
+        event_sink.on_event(&EngineEvent::Warning {
+            code: "scheduler_shutdown_error".to_string(),
+            message: format!("{}", e),
+        });
     }
 
     // Emit any remaining accumulated text as final utterance.
@@ -1001,6 +1060,27 @@ pub(crate) async fn transcription_session(
             start_ts: utterance_start_s,
             end_ts,
             segments,
+        });
+    }
+
+    if total_utterances == 0 {
+        if vad_started {
+            event_sink.on_event(&EngineEvent::VadEnd {
+                speech_prob: session.boundary_prob(),
+                ts_ms: session.session_elapsed_ms(),
+            });
+        }
+        let reason = if speech_activity_observed
+            || pipeline.hallucination_drops > 0
+            || filtered_empty_drops > 0
+            || dropped_utterances > 0
+        {
+            "all_speech_rejected_by_quality_gate"
+        } else {
+            "vad_no_speech_detected"
+        };
+        event_sink.on_event(&EngineEvent::NoSpeech {
+            reason: reason.to_string(),
         });
     }
 
@@ -1286,6 +1366,15 @@ pub(crate) async fn buffered_transcription_worker(
                                 max_speech_prob,
                             });
                         }
+                        if let Some(stats) = session.take_vad_error_stats() {
+                            warn!(
+                                "Buffered worker VAD degraded: predict_errors={} unavailable_frames={} (totals: predict_errors={} unavailable_frames={})",
+                                stats.predict_errors,
+                                stats.unavailable_frames,
+                                stats.total_predict_errors,
+                                stats.total_unavailable_frames
+                            );
+                        }
                     }
                     None => {
                         audio_closed = true;
@@ -1311,6 +1400,15 @@ pub(crate) async fn buffered_transcription_worker(
                                     dropped_utterances = dropped_utterances.saturating_add(1);
                                 }
                             }
+                        }
+                        if let Some(stats) = session.take_vad_error_stats() {
+                            warn!(
+                                "Buffered worker VAD degraded: predict_errors={} unavailable_frames={} (totals: predict_errors={} unavailable_frames={})",
+                                stats.predict_errors,
+                                stats.unavailable_frames,
+                                stats.total_predict_errors,
+                                stats.total_unavailable_frames
+                            );
                         }
                     }
                 }
@@ -1512,28 +1610,7 @@ fn spawn_utterance_transcription(
     language: Option<String>,
 ) -> tokio::task::JoinHandle<Result<RawTranscript>> {
     tokio::task::spawn_blocking(move || {
-        let correction_started_at = std::time::Instant::now();
-        // Use try_lock to avoid blocking-pool saturation when corrections
-        // pile up faster than the engine can process them.  If the engine
-        // is already busy (main transcription or a previous correction),
-        // we bail immediately — the next correction cycle will pick up
-        // the accumulated audio.
-        let result = crate::stt::try_transcribe_long_with_segments(
-            &samples,
-            sample_rate,
-            language.as_deref(),
-        );
-        if let Err(err) = &result
-            && err.to_string().contains("engine busy")
-        {
-            debug!(
-                sample_count = samples.len(),
-                sample_rate,
-                correction_elapsed_ms = correction_started_at.elapsed().as_millis(),
-                "Skipping correction pass because STT engine is busy"
-            );
-        }
-        result
+        crate::stt::transcribe_long_with_segments(&samples, sample_rate, language.as_deref())
     })
 }
 
@@ -1798,6 +1875,7 @@ pub(crate) fn stream_overlap_sec(chunk_duration_sec: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::sinks::CollectorEventSink;
 
     #[test]
     fn test_postprocess_components() {
@@ -1932,6 +2010,33 @@ mod tests {
     #[test]
     fn test_correction_stale_guard_detects_text_drift() {
         assert!(correction_is_stale(9, 9, "ala ma", "ala ma kota"));
+    }
+
+    #[tokio::test]
+    async fn transcription_session_emits_no_speech_event_for_empty_input() {
+        let (tx, rx) = mpsc::channel::<Vec<f32>>(1);
+        drop(tx);
+        let sink = Arc::new(CollectorEventSink::new());
+        transcription_session(
+            rx,
+            sink.clone(),
+            SessionConfig {
+                sample_rate: 16_000,
+                language: Some("pl".to_string()),
+                stream_log_path: None,
+                utterance_silence_sec: None,
+            },
+        )
+        .await;
+
+        let has_no_speech = sink
+            .events()
+            .iter()
+            .any(|event| matches!(event, EngineEvent::NoSpeech { .. }));
+        assert!(
+            has_no_speech,
+            "session should emit NoSpeech for empty input"
+        );
     }
 
     #[test]

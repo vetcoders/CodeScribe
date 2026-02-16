@@ -352,6 +352,13 @@ impl EventSink for ControllerEventRouter {
                     cb(trimmed.to_string());
                 }
             }
+            EngineEvent::NoSpeech { reason } => {
+                {
+                    let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+                    last.clear();
+                }
+                info!("Engine reported no speech: {}", reason);
+            }
             EngineEvent::Drop { kind, text, reason } => {
                 debug!(
                     "Engine dropped [{:?}]: {} (text: '{}')",

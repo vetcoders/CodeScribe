@@ -76,6 +76,14 @@ pub(crate) struct GateConfig {
     pub mode: VadGateMode,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VadErrorStats {
+    pub predict_errors: u64,
+    pub unavailable_frames: u64,
+    pub total_predict_errors: u64,
+    pub total_unavailable_frames: u64,
+}
+
 // ═══════════════════════════════════════════════════════════
 // SpeechSession
 // ═══════════════════════════════════════════════════════════
@@ -124,6 +132,16 @@ pub(crate) struct SpeechSession {
     last_boundary_prob: f32,
     /// Wall-clock instant when this session was created.
     session_start: Instant,
+    /// Total number of Silero predict() errors in this session.
+    vad_predict_errors_total: u64,
+    /// Predict errors since last telemetry drain.
+    vad_predict_errors_pending: u64,
+    /// Total VAD frames processed while model was unavailable.
+    vad_unavailable_frames_total: u64,
+    /// Unavailable frames since last telemetry drain.
+    vad_unavailable_frames_pending: u64,
+    /// Avoid flooding logs when VAD model is unavailable.
+    vad_unavailable_logged: bool,
 }
 
 impl SpeechSession {
@@ -211,6 +229,11 @@ impl SpeechSession {
             segment_peak_prob: 0.0,
             last_boundary_prob: 0.0,
             session_start: Instant::now(),
+            vad_predict_errors_total: 0,
+            vad_predict_errors_pending: 0,
+            vad_unavailable_frames_total: 0,
+            vad_unavailable_frames_pending: 0,
+            vad_unavailable_logged: false,
         }
     }
 
@@ -321,6 +344,11 @@ impl SpeechSession {
             segment_peak_prob: 0.0,
             last_boundary_prob: 0.0,
             session_start: Instant::now(),
+            vad_predict_errors_total: 0,
+            vad_predict_errors_pending: 0,
+            vad_unavailable_frames_total: 0,
+            vad_unavailable_frames_pending: 0,
+            vad_unavailable_logged: false,
         }
     }
 
@@ -343,16 +371,7 @@ impl SpeechSession {
 
         while self.vad_resample_buf.len() >= vad::CHUNK_SIZE {
             let frame: Vec<f32> = self.vad_resample_buf.drain(..vad::CHUNK_SIZE).collect();
-            let speech_prob = match self.vad.as_mut() {
-                Some(vad) => match vad.predict(&frame) {
-                    Ok(prob) => prob,
-                    Err(e) => {
-                        warn!("VAD predict error (assuming speech): {e}");
-                        1.0
-                    }
-                },
-                None => 1.0,
-            };
+            let speech_prob = self.predict_speech_prob(&frame, "gate");
             self.update_vad_heartbeat(speech_prob);
             let decision = match self.gate_mode {
                 VadGateMode::Simple => self.gate_with_prob(&frame, speech_prob),
@@ -417,16 +436,7 @@ impl SpeechSession {
 
         while self.vad_resample_buf.len() >= vad::CHUNK_SIZE {
             let frame: Vec<f32> = self.vad_resample_buf.drain(..vad::CHUNK_SIZE).collect();
-            let speech_prob = match self.vad.as_mut() {
-                Some(vad) => match vad.predict(&frame) {
-                    Ok(prob) => prob,
-                    Err(e) => {
-                        warn!("VAD predict error in supervisor (assuming speech): {e}");
-                        1.0
-                    }
-                },
-                None => 1.0,
-            };
+            let speech_prob = self.predict_speech_prob(&frame, "supervisor");
             self.update_vad_heartbeat(speech_prob);
 
             trace!(
@@ -662,6 +672,35 @@ impl SpeechSession {
         }
     }
 
+    fn predict_speech_prob(&mut self, frame: &[f32], gate: &str) -> f32 {
+        match self.vad.as_mut() {
+            Some(vad) => match vad.predict(frame) {
+                Ok(prob) => prob,
+                Err(e) => {
+                    self.vad_predict_errors_total = self.vad_predict_errors_total.saturating_add(1);
+                    self.vad_predict_errors_pending =
+                        self.vad_predict_errors_pending.saturating_add(1);
+                    warn!(
+                        "VAD predict error in {} gate; treating frame as non-speech: {}",
+                        gate, e
+                    );
+                    0.0
+                }
+            },
+            None => {
+                self.vad_unavailable_frames_total =
+                    self.vad_unavailable_frames_total.saturating_add(1);
+                self.vad_unavailable_frames_pending =
+                    self.vad_unavailable_frames_pending.saturating_add(1);
+                if !self.vad_unavailable_logged {
+                    warn!("Silero VAD unavailable; treating frames as non-speech");
+                    self.vad_unavailable_logged = true;
+                }
+                0.0
+            }
+        }
+    }
+
     fn gate_with_prob(&mut self, audio: &[f32], speech_prob: f32) -> GateDecision {
         let is_speech = speech_prob >= self.threshold;
 
@@ -832,6 +871,20 @@ impl SpeechSession {
         } else {
             self.max_speech_prob
         }
+    }
+
+    pub(crate) fn take_vad_error_stats(&mut self) -> Option<VadErrorStats> {
+        let predict_errors = std::mem::take(&mut self.vad_predict_errors_pending);
+        let unavailable_frames = std::mem::take(&mut self.vad_unavailable_frames_pending);
+        if predict_errors == 0 && unavailable_frames == 0 {
+            return None;
+        }
+        Some(VadErrorStats {
+            predict_errors,
+            unavailable_frames,
+            total_predict_errors: self.vad_predict_errors_total,
+            total_unavailable_frames: self.vad_unavailable_frames_total,
+        })
     }
 
     /// Override VAD threshold (test-only). Set impossibly high to prevent
@@ -1595,6 +1648,30 @@ mod tests {
         assert!(
             flush.is_none(),
             "flush() should not emit any extra event after a normal completed segment"
+        );
+    }
+
+    #[test]
+    fn test_vad_unavailable_is_measured_and_does_not_assume_speech() {
+        let sr = 16000u32;
+        let mut session = SpeechSession::new_utterance(sr);
+        session.vad = None;
+
+        let audio = vec![0.8; sr as usize / 2];
+        let events = session.feed(&audio, sr);
+        assert!(
+            events.is_empty(),
+            "VAD-unavailable path should not emit speech events by default"
+        );
+
+        let stats = session
+            .take_vad_error_stats()
+            .expect("expected VAD unavailable telemetry");
+        assert_eq!(stats.predict_errors, 0);
+        assert!(stats.unavailable_frames > 0);
+        assert_eq!(
+            stats.total_unavailable_frames, stats.unavailable_frames,
+            "single drain should match totals in this test"
         );
     }
 }

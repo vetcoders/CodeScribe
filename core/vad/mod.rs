@@ -67,22 +67,44 @@ const EXTRACT_WINDOW_MS: u32 = 500;
 /// speech probability >= threshold. Returns concatenated speech
 /// samples and stats.
 ///
-/// Falls back to returning the original audio if the model is
-/// unavailable (never silently drops audio).
+/// Returns an empty vector when no speech is detected or VAD is unavailable.
 pub fn extract_speech(samples: &[f32], sample_rate: u32) -> (Vec<f32>, VadExtractStats) {
+    if samples.is_empty() || sample_rate == 0 {
+        return (
+            Vec::new(),
+            VadExtractStats {
+                speech_pct: 0.0,
+                speech_windows: 0,
+                total_windows: 0,
+                sparkline: String::new(),
+            },
+        );
+    }
+
     let window_size = (sample_rate * EXTRACT_WINDOW_MS / 1000) as usize;
+    if window_size == 0 {
+        return (
+            Vec::new(),
+            VadExtractStats {
+                speech_pct: 0.0,
+                speech_windows: 0,
+                total_windows: 0,
+                sparkline: String::new(),
+            },
+        );
+    }
 
     let mut vad = match AccumulatingVad::new(sample_rate) {
         Ok(v) => v,
         Err(e) => {
             warn!(
-                "extract_speech: AccumulatingVad init failed at {} Hz, returning original audio: {}",
+                "extract_speech: AccumulatingVad init failed at {} Hz, returning no speech: {}",
                 sample_rate, e
             );
             return (
-                samples.to_vec(),
+                Vec::new(),
                 VadExtractStats {
-                    speech_pct: 100.0,
+                    speech_pct: 0.0,
                     speech_windows: 0,
                     total_windows: 0,
                     sparkline: String::new(),
@@ -96,11 +118,19 @@ pub fn extract_speech(samples: &[f32], sample_rate: u32) -> (Vec<f32>, VadExtrac
     let mut speech_windows = 0usize;
     let mut total_windows = 0usize;
     let mut sparkline = String::new();
+    let mut last_window_was_speech = false;
 
     for window in samples.chunks(window_size) {
         if window.len() < window_size / 2 {
-            // Trailing fragment — include it (don't lose tail audio)
-            speech_samples.extend_from_slice(window);
+            // Keep very short trailing tails only when they clearly continue speech.
+            if should_include_trailing_fragment(
+                window.len(),
+                window_size,
+                speech_windows > 0,
+                last_window_was_speech,
+            ) {
+                speech_samples.extend_from_slice(window);
+            }
             break;
         }
 
@@ -122,26 +152,16 @@ pub fn extract_speech(samples: &[f32], sample_rate: u32) -> (Vec<f32>, VadExtrac
         if prob >= threshold {
             speech_samples.extend_from_slice(window);
             speech_windows += 1;
+            last_window_was_speech = true;
+        } else {
+            last_window_was_speech = false;
         }
-    }
-
-    // Safety: never return empty — if VAD filtered everything, return original
-    if speech_samples.is_empty() {
-        return (
-            samples.to_vec(),
-            VadExtractStats {
-                speech_pct: 100.0,
-                speech_windows: total_windows,
-                total_windows,
-                sparkline,
-            },
-        );
     }
 
     let speech_pct = if total_windows > 0 {
         speech_windows as f32 / total_windows as f32 * 100.0
     } else {
-        100.0
+        0.0
     };
 
     (
@@ -153,4 +173,46 @@ pub fn extract_speech(samples: &[f32], sample_rate: u32) -> (Vec<f32>, VadExtrac
             sparkline,
         },
     )
+}
+
+fn should_include_trailing_fragment(
+    fragment_len: usize,
+    window_size: usize,
+    saw_any_speech: bool,
+    last_window_was_speech: bool,
+) -> bool {
+    if fragment_len == 0 || window_size == 0 {
+        return false;
+    }
+    if fragment_len >= window_size / 2 {
+        return true;
+    }
+    saw_any_speech && last_window_was_speech
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trailing_fragment_requires_speech_context() {
+        assert!(!should_include_trailing_fragment(1000, 8000, false, false));
+        assert!(!should_include_trailing_fragment(1000, 8000, true, false));
+        assert!(should_include_trailing_fragment(1000, 8000, true, true));
+    }
+
+    #[test]
+    fn very_small_or_empty_trailing_fragment_is_not_kept() {
+        assert!(!should_include_trailing_fragment(0, 8000, true, true));
+        assert!(!should_include_trailing_fragment(10, 0, true, true));
+    }
+
+    #[test]
+    fn empty_input_returns_no_speech_output() {
+        let (samples, stats) = extract_speech(&[], SAMPLE_RATE);
+        assert!(samples.is_empty());
+        assert_eq!(stats.speech_pct, 0.0);
+        assert_eq!(stats.speech_windows, 0);
+        assert_eq!(stats.total_windows, 0);
+    }
 }

@@ -313,6 +313,11 @@ async fn handle_transcribe_file(
         Cow::Owned(filtered_samples)
     };
 
+    if !no_vad && speech_samples.is_empty() {
+        eprintln!("No speech detected by Silero VAD. Skipping Whisper transcription.");
+        return Ok(());
+    }
+
     // Detect language if not specified
     let lang = if let Some(l) = language {
         l

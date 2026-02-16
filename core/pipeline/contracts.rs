@@ -221,6 +221,11 @@ pub enum EngineEvent {
     /// Legacy event kept for wire compatibility.
     /// Degraded VAD flush fallback is disabled by default and this event is not emitted.
     VadFallback { max_prob: f32, samples: usize },
+    /// Session or utterance completed without usable speech content.
+    ///
+    /// Emitted when VAD sees no speech at all, or when speech-like segments are
+    /// fully rejected by quality gates/hallucination filters.
+    NoSpeech { reason: String },
 
     /// Interim preview — latest transcription of the current utterance.
     ///
@@ -528,6 +533,19 @@ mod tests {
             assert_eq!(text, "Hello world");
         } else {
             panic!("Expected Preview variant");
+        }
+    }
+
+    #[test]
+    fn engine_event_no_speech_clone() {
+        let event = EngineEvent::NoSpeech {
+            reason: "vad_no_speech_detected".to_string(),
+        };
+        let cloned = event.clone();
+        if let EngineEvent::NoSpeech { reason } = cloned {
+            assert_eq!(reason, "vad_no_speech_detected");
+        } else {
+            panic!("Expected NoSpeech variant");
         }
     }
 
