@@ -8,9 +8,12 @@
 //!
 //! Created by M&K (c)2026 VetCoders
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use codescribe::audio::streaming_recorder::StreamingRecorder;
+use codescribe_core::pipeline::contracts::{EngineEvent, EventSink};
+use codescribe_core::pipeline::sinks::CollectorEventSink;
 
 #[tokio::test]
 async fn test_stream_postprocess_with_mic() {
@@ -35,16 +38,20 @@ async fn test_stream_postprocess_with_mic() {
     codescribe::whisper::init().expect("Failed to init Whisper");
 
     let mut recorder = StreamingRecorder::new().expect("Failed to init streaming recorder");
+    let sink = Arc::new(CollectorEventSink::new());
+    recorder.set_event_sink(Some(Arc::clone(&sink) as Arc<dyn EventSink>));
 
     eprintln!("Speak for ~6s. Suggested phrase: 'Docker GitHub API key'.");
     recorder
-        .start(language)
+        .start_event_session(language)
         .await
         .expect("Failed to start streaming recorder");
 
     tokio::time::sleep(Duration::from_secs(6)).await;
 
-    let (transcript, _audio_path) = recorder.stop().await.expect("Failed to stop recorder");
+    let (_legacy_transcript, _audio_path) = recorder.stop().await.expect("Failed to stop recorder");
+    let events = sink.events();
+    let transcript = transcript_from_events(&events);
 
     println!("Transcript: {}", transcript);
 
@@ -63,4 +70,35 @@ async fn test_stream_postprocess_with_mic() {
         "Expected at least one keyword (docker/github/api) in transcript. Got: {}",
         trimmed
     );
+}
+
+fn transcript_from_events(events: &[EngineEvent]) -> String {
+    let mut finalized = Vec::new();
+    let mut preview = String::new();
+
+    for event in events {
+        match event {
+            EngineEvent::Preview { text, .. } | EngineEvent::Correction { text, .. } => {
+                preview = text.clone();
+            }
+            EngineEvent::UtteranceFinal { text, .. } => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    finalized.push(trimmed.to_string());
+                }
+                preview.clear();
+            }
+            EngineEvent::NoSpeech { .. } => {
+                preview.clear();
+            }
+            _ => {}
+        }
+    }
+
+    let preview = preview.trim();
+    if !preview.is_empty() {
+        finalized.push(preview.to_string());
+    }
+
+    finalized.join(" ")
 }

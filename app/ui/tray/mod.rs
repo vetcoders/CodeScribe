@@ -95,9 +95,15 @@ pub fn is_shutdown_requested() -> bool {
 /// Run the tray application (blocking)
 ///
 /// Uses tao event loop for proper macOS integration.
-/// Optionally accepts a HotkeyManager to process hotkey events in the same loop.
 pub fn run() -> Result<()> {
     run_with_hotkeys(None)
+}
+
+fn shutdown_hotkeys(hotkey_manager: &mut Option<hotkeys::HotkeyManager>) {
+    if let Some(hk_manager) = hotkey_manager.as_mut() {
+        hk_manager.shutdown();
+    }
+    *hotkey_manager = None;
 }
 
 /// Run the tray application with optional hotkey manager
@@ -177,17 +183,9 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
         // Check for programmatic shutdown request
         if is_shutdown_requested() {
             info!("Shutdown flag detected, performing cleanup...");
-            if let Some(hk_manager) = hotkey_manager.as_mut() {
-                hk_manager.shutdown();
-            }
-            hotkey_manager = None;
+            shutdown_hotkeys(&mut hotkey_manager);
             *control_flow = ControlFlow::Exit;
             return;
-        }
-
-        // Process hotkey events (integrated with main event loop for macOS)
-        if let Some(hk_manager) = hotkey_manager.as_ref() {
-            hk_manager.process_events();
         }
 
         // Periodic menu label refresh (must run on main thread)
@@ -222,10 +220,7 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 info!("Status channel closed, exiting");
-                if let Some(hk_manager) = hotkey_manager.as_mut() {
-                    hk_manager.shutdown();
-                }
-                hotkey_manager = None;
+                shutdown_hotkeys(&mut hotkey_manager);
                 *control_flow = ControlFlow::Exit;
             }
         }
@@ -239,10 +234,7 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
             // Handle Quit specially to exit event loop
             if event.id == menu_ids.quit {
                 info!("Quit requested via menu, exiting...");
-                if let Some(hk_manager) = hotkey_manager.as_mut() {
-                    hk_manager.shutdown();
-                }
-                hotkey_manager = None;
+                shutdown_hotkeys(&mut hotkey_manager);
                 *control_flow = ControlFlow::Exit;
             }
         }

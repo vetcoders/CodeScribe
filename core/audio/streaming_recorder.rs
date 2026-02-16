@@ -1,5 +1,5 @@
 use crate::audio::recorder::{Recorder, RecorderConfig};
-use crate::pipeline::contracts::{DeltaSink, EngineEvent, EventSink, TranscriptDelta};
+use crate::pipeline::contracts::EventSink;
 use crate::pipeline::streaming::{SessionConfig, stream_log_path, transcription_session};
 use anyhow::{Context, Result, anyhow};
 use std::sync::Arc;
@@ -8,138 +8,17 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-// Re-export public API that was moved to pipeline::streaming
-pub use crate::pipeline::streaming::transcribe_streaming_samples;
-
 pub struct StreamingRecorder {
     pub recorder: Recorder,
     transcript_buffer: Arc<Mutex<String>>,
     transcription_handle: Option<JoinHandle<()>>,
     sample_rate: u32,
-    delta_callback: Option<Arc<dyn DeltaSink>>,
     utterance_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
     utterance_silence_sec: Option<f32>,
     /// Counter for audio chunks dropped due to channel backpressure.
     dropped_chunks: Arc<AtomicU64>,
-    /// New event-based pipeline sink (when set, `start_event_session` uses this).
+    /// Sink used by `start_event_session`. Caller must configure it explicitly.
     event_sink: Option<Arc<dyn EventSink>>,
-}
-
-/// Backward-compatibility sink that preserves delta + utterance callbacks while
-/// running on the unified event pipeline.
-struct RecorderCallbackEventSink {
-    transcript_buffer: Arc<Mutex<String>>,
-    delta_callback: Option<Arc<dyn DeltaSink>>,
-    utterance_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    last_preview: std::sync::Mutex<String>,
-    finalized_prefix: std::sync::Mutex<String>,
-}
-
-impl RecorderCallbackEventSink {
-    fn new(
-        transcript_buffer: Arc<Mutex<String>>,
-        delta_callback: Option<Arc<dyn DeltaSink>>,
-        utterance_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    ) -> Self {
-        Self {
-            transcript_buffer,
-            delta_callback,
-            utterance_callback,
-            last_preview: std::sync::Mutex::new(String::new()),
-            finalized_prefix: std::sync::Mutex::new(String::new()),
-        }
-    }
-
-    fn write_preview_buffer(&self, text: &str) {
-        let prefix = self
-            .finalized_prefix
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let full = if prefix.is_empty() {
-            text.to_string()
-        } else if text.trim().is_empty() {
-            prefix
-        } else {
-            format!("{prefix} {text}")
-        };
-        if let Ok(mut guard) = self.transcript_buffer.try_lock() {
-            *guard = full;
-        }
-    }
-
-    fn emit_delta(&self, before: &str, after: &str) {
-        if let Some(delta) = TranscriptDelta::from_diff(before, after)
-            && let Some(sink) = &self.delta_callback
-        {
-            sink.apply(&delta);
-        }
-    }
-}
-
-impl EventSink for RecorderCallbackEventSink {
-    fn on_event(&self, event: &EngineEvent) {
-        match event {
-            EngineEvent::Preview { text, .. } => {
-                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                self.emit_delta(&last, text);
-                *last = text.clone();
-                self.write_preview_buffer(text);
-            }
-            EngineEvent::Correction {
-                text,
-                previous_text,
-                ..
-            } => {
-                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                if last.is_empty() {
-                    debug!("Ignoring Correction with empty last_preview (post-final)");
-                    return;
-                }
-                if *last != *previous_text {
-                    debug!("Ignoring stale Correction (baseline mismatch)");
-                    return;
-                }
-                self.emit_delta(&last, text);
-                *last = text.clone();
-                self.write_preview_buffer(text);
-            }
-            EngineEvent::UtteranceFinal { text, .. } => {
-                {
-                    let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                    last.clear();
-                }
-                let trimmed = text.trim();
-                if trimmed.is_empty() {
-                    return;
-                }
-                let full_text = {
-                    let mut prefix = self
-                        .finalized_prefix
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if prefix.is_empty() {
-                        *prefix = trimmed.to_string();
-                    } else {
-                        prefix.push(' ');
-                        prefix.push_str(trimmed);
-                    }
-                    prefix.clone()
-                };
-                if let Ok(mut guard) = self.transcript_buffer.try_lock() {
-                    *guard = full_text;
-                }
-                if let Some(cb) = &self.utterance_callback {
-                    cb(trimmed.to_string());
-                }
-            }
-            EngineEvent::NoSpeech { .. } => {
-                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                last.clear();
-            }
-            _ => {}
-        }
-    }
 }
 
 impl StreamingRecorder {
@@ -152,7 +31,6 @@ impl StreamingRecorder {
             transcript_buffer: Arc::new(Mutex::new(String::new())),
             transcription_handle: None,
             sample_rate,
-            delta_callback: None,
             utterance_callback: None,
             utterance_silence_sec: None,
             dropped_chunks: Arc::new(AtomicU64::new(0)),
@@ -169,16 +47,11 @@ impl StreamingRecorder {
             transcript_buffer: Arc::new(Mutex::new(String::new())),
             transcription_handle: None,
             sample_rate,
-            delta_callback: None,
             utterance_callback: None,
             utterance_silence_sec: None,
             dropped_chunks: Arc::new(AtomicU64::new(0)),
             event_sink: None,
         })
-    }
-
-    pub fn set_delta_callback(&mut self, callback: Option<Arc<dyn DeltaSink>>) {
-        self.delta_callback = callback;
     }
 
     pub fn set_utterance_callback(&mut self, callback: Option<Arc<dyn Fn(String) + Send + Sync>>) {
@@ -269,31 +142,6 @@ impl StreamingRecorder {
         Ok(())
     }
 
-    pub async fn start(&mut self, language: Option<String>) -> Result<()> {
-        if self.event_sink.is_none() {
-            self.event_sink = Some(Arc::new(RecorderCallbackEventSink::new(
-                self.transcript_buffer.clone(),
-                self.delta_callback.clone(),
-                self.utterance_callback.clone(),
-            )));
-        }
-        self.start_event_session(language).await
-    }
-
-    #[deprecated(note = "Legacy worker split removed; use start_event_session or start")]
-    pub async fn start_with_buffered(
-        &mut self,
-        language: Option<String>,
-        use_buffered_stream: bool,
-    ) -> Result<()> {
-        if !use_buffered_stream {
-            warn!(
-                "start_with_buffered(use_buffered_stream=false) ignored; unified event pipeline is always used"
-            );
-        }
-        self.start(language).await
-    }
-
     pub async fn stop(&mut self) -> Result<(String, Option<std::path::PathBuf>)> {
         info!("Stopping streaming recorder...");
 
@@ -311,8 +159,8 @@ impl StreamingRecorder {
 
         // 2. Wait for worker to finish processing remaining chunks
         if let Some(handle) = self.transcription_handle.take() {
-            debug!("Waiting for transcription worker to finish...");
-            handle.await.context("Transcription worker failed")?;
+            debug!("Waiting for transcription session task to finish...");
+            handle.await.context("Transcription session task failed")?;
         }
         // Drop event sink after session shutdown so per-session resources
         // (e.g. PresentationEmitter task handles) can be released promptly.
@@ -340,8 +188,8 @@ impl StreamingRecorder {
 
         // 2. Wait for worker to finish processing remaining chunks
         if let Some(handle) = self.transcription_handle.take() {
-            debug!("Waiting for transcription worker to finish...");
-            handle.await.context("Transcription worker failed")?;
+            debug!("Waiting for transcription session task to finish...");
+            handle.await.context("Transcription session task failed")?;
         }
         // Drop event sink after session shutdown so per-session resources
         // (e.g. PresentationEmitter task handles) can be released promptly.
@@ -358,103 +206,25 @@ mod tests {
     use super::*;
     use crate::audio::chunker::{SpeechEvent, SpeechSession};
     use crate::audio::load_audio_file;
-    use crate::pipeline::sinks::CollectorSink;
+    use crate::pipeline::streaming::transcribe_streaming_samples;
     use crate::stt::whisper;
     use crate::vad;
     use serial_test::serial;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex as StdMutex;
     use tokio::time::Duration;
 
     #[tokio::test]
-    async fn recorder_callback_sink_keeps_preview_correction_final_contract() {
-        let transcript_buffer = Arc::new(Mutex::new(String::new()));
-        let deltas = Arc::new(CollectorSink::new());
-        let utterances = Arc::new(StdMutex::new(Vec::<String>::new()));
-        let utterances_ref = Arc::clone(&utterances);
-        let sink = RecorderCallbackEventSink::new(
-            Arc::clone(&transcript_buffer),
-            Some(deltas.clone() as Arc<dyn DeltaSink>),
-            Some(Arc::new(move |text: String| {
-                utterances_ref
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(text);
-            })),
+    async fn start_event_session_requires_event_sink() {
+        let mut recorder = StreamingRecorder::new().expect("Failed to create recorder");
+        let err = recorder
+            .start_event_session(Some("en".to_string()))
+            .await
+            .expect_err("start_event_session should fail when event sink is missing");
+        assert!(
+            err.to_string().contains("requires event_sink"),
+            "unexpected error: {err:?}"
         );
-
-        sink.on_event(&EngineEvent::Preview {
-            rev: 1,
-            text: "ala ma".to_string(),
-        });
-        sink.on_event(&EngineEvent::Correction {
-            rev: 2,
-            text: "ala ma kota".to_string(),
-            previous_text: "ala ma".to_string(),
-        });
-        sink.on_event(&EngineEvent::UtteranceFinal {
-            utterance_id: 1,
-            text: "ala ma kota".to_string(),
-            raw_text: "ala ma kota".to_string(),
-            start_ts: 0.0,
-            end_ts: 1.0,
-            segments: Vec::new(),
-        });
-        sink.on_event(&EngineEvent::Preview {
-            rev: 3,
-            text: "i psa".to_string(),
-        });
-        sink.on_event(&EngineEvent::Stats {
-            dropped_audio_chunks: 0,
-            hallucination_drops: 0,
-            semantic_gate_drops: 0,
-            filtered_empty_drops: 0,
-            corrections_applied: 1,
-            total_utterances: 1,
-        });
-
-        assert_eq!(
-            transcript_buffer.lock().await.clone(),
-            "ala ma kota i psa".to_string()
-        );
-        assert_eq!(
-            utterances.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            vec!["ala ma kota".to_string()]
-        );
-        assert_eq!(deltas.collected().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn recorder_callback_sink_ignores_stale_correction_after_final() {
-        let transcript_buffer = Arc::new(Mutex::new(String::new()));
-        let deltas = Arc::new(CollectorSink::new());
-        let sink = RecorderCallbackEventSink::new(
-            Arc::clone(&transcript_buffer),
-            Some(deltas.clone() as Arc<dyn DeltaSink>),
-            None,
-        );
-
-        sink.on_event(&EngineEvent::Preview {
-            rev: 1,
-            text: "draft".to_string(),
-        });
-        sink.on_event(&EngineEvent::UtteranceFinal {
-            utterance_id: 1,
-            text: "draft".to_string(),
-            raw_text: "draft".to_string(),
-            start_ts: 0.0,
-            end_ts: 0.8,
-            segments: Vec::new(),
-        });
-        sink.on_event(&EngineEvent::Correction {
-            rev: 2,
-            text: "draft corrected".to_string(),
-            previous_text: "draft".to_string(),
-        });
-
-        assert_eq!(transcript_buffer.lock().await.clone(), "draft".to_string());
-        assert_eq!(deltas.collected(), vec!["draft".to_string()]);
     }
 
     #[test]

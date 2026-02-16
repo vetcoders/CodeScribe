@@ -9,6 +9,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use codescribe::os::hotkeys;
 use codescribe::{ai_formatting, audio, whisper};
+use codescribe_core::pipeline::contracts::{EngineEvent, EventSink, TranscriptDelta};
 use codescribe_core::vad;
 use std::borrow::Cow;
 use std::env;
@@ -427,16 +428,10 @@ async fn handle_transcribe_live(language: Option<String>) -> Result<()> {
     });
 
     let emitter = StreamEmitter::new();
-    recorder.set_delta_callback(Some(Arc::new(
-        codescribe_core::pipeline::sinks::CallbackSink::new(Arc::new({
-            let emitter = Arc::clone(&emitter);
-            move |delta: &str| {
-                emitter.emit_raw(delta);
-            }
-        })),
-    )));
-
-    recorder.start(language).await?;
+    recorder.set_event_sink(Some(
+        Arc::new(LiveCliEventSink::new(Arc::clone(&emitter))) as Arc<dyn EventSink>
+    ));
+    recorder.start_event_session(language).await?;
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
@@ -852,6 +847,65 @@ impl StreamEmitter {
     fn finish(&self) {
         if self.had_output.load(Ordering::SeqCst) {
             let _ = emit_stdout("\n");
+        }
+    }
+}
+
+struct LiveCliEventSink {
+    emitter: Arc<StreamEmitter>,
+    last_preview: Mutex<String>,
+}
+
+impl LiveCliEventSink {
+    fn new(emitter: Arc<StreamEmitter>) -> Self {
+        Self {
+            emitter,
+            last_preview: Mutex::new(String::new()),
+        }
+    }
+
+    fn emit_diff_from_last(&self, next: &str) {
+        let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(delta) = TranscriptDelta::from_diff(&last, next) {
+            self.emitter.emit_raw(&delta.delta);
+        }
+        *last = next.to_string();
+    }
+
+    fn clear_preview(&self) {
+        let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+        last.clear();
+    }
+}
+
+impl EventSink for LiveCliEventSink {
+    fn on_event(&self, event: &EngineEvent) {
+        match event {
+            EngineEvent::Preview { text, .. } => {
+                self.emit_diff_from_last(text);
+            }
+            EngineEvent::Correction {
+                text,
+                previous_text,
+                ..
+            } => {
+                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
+                if last.is_empty() || *last != *previous_text {
+                    return;
+                }
+                if let Some(delta) = TranscriptDelta::from_diff(&last, text) {
+                    self.emitter.emit_raw(&delta.delta);
+                }
+                *last = text.clone();
+            }
+            EngineEvent::UtteranceFinal { text, .. } => {
+                self.emit_diff_from_last(text);
+                self.clear_preview();
+            }
+            EngineEvent::NoSpeech { .. } => {
+                self.clear_preview();
+            }
+            _ => {}
         }
     }
 }

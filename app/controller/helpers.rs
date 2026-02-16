@@ -3,6 +3,7 @@
 //! Session state management and utility functions.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 
@@ -138,9 +139,54 @@ pub fn raw_save_enabled() -> bool {
 
 use chrono::SecondsFormat;
 use codescribe_core::ipc::{EngineEventWire, IpcEvent, IpcEventPayload};
-use codescribe_core::pipeline::contracts::{EngineEvent, EventSink, TranscriptDelta};
+use codescribe_core::pipeline::contracts::{EngineEvent, EventSink};
 use tokio::sync::broadcast;
-use tracing::{debug, info, warn};
+
+/// Session-level engine stats snapshot used by controller decisions.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionEngineStats {
+    pub hallucination_drops: u64,
+    pub semantic_gate_drops: u64,
+    pub filtered_empty_drops: u64,
+    pub corrections_applied: u64,
+    pub total_utterances: u64,
+    pub dropped_audio_chunks: u64,
+}
+
+/// Session telemetry captured from `EngineEvent`s.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionTelemetrySnapshot {
+    pub no_speech_reason: Option<String>,
+    pub stats: Option<SessionEngineStats>,
+}
+
+pub(crate) type SharedSessionTelemetry = Arc<StdMutex<SessionTelemetrySnapshot>>;
+
+pub(crate) fn new_session_telemetry() -> SharedSessionTelemetry {
+    Arc::new(StdMutex::new(SessionTelemetrySnapshot::default()))
+}
+
+pub(crate) fn reset_session_telemetry(shared: &SharedSessionTelemetry) {
+    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = SessionTelemetrySnapshot::default();
+}
+
+pub(crate) fn snapshot_session_telemetry(
+    shared: &SharedSessionTelemetry,
+) -> SessionTelemetrySnapshot {
+    shared.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Captures `NoSpeech`/`Stats` telemetry for controller-level routing decisions.
+pub(crate) struct SessionTelemetrySink {
+    shared: SharedSessionTelemetry,
+}
+
+impl SessionTelemetrySink {
+    pub(crate) fn new(shared: SharedSessionTelemetry) -> Self {
+        Self { shared }
+    }
+}
 
 /// Broadcasts sanitized engine events to IPC subscribers.
 pub(crate) struct IpcBroadcastSink {
@@ -163,209 +209,12 @@ impl EventSink for IpcBroadcastSink {
     }
 }
 
-/// Routes `EngineEvent`s to the appropriate UI based on session state.
-///
-/// This is the app-layer `EventSink` that replaces `route_transcription_delta`
-/// and the scattered `utterance_callback` / `delta_callback` setup.
-///
-/// Hold mode: buffers previews, emits final on stop.
-/// Toggle mode: routes utterances immediately.
-#[allow(dead_code)]
-pub struct ControllerEventRouter {
-    /// Optional callback for completed utterances (Toggle mode sends immediately).
-    utterance_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    /// Optional callback when VAD first detects speech.
-    vad_start_callback: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Last preview text — used to compute deltas for append_*_delta functions.
-    last_preview: std::sync::Mutex<String>,
-    /// Handle to StreamingRecorder's transcript_buffer — updated on Preview/UtteranceFinal
-    /// so that `stop()` returns accumulated text instead of empty string.
-    transcript_buffer: Option<Arc<tokio::sync::Mutex<String>>>,
-    /// Accumulated finalized text from previous utterances (multi-utterance sessions).
-    finalized_prefix: std::sync::Mutex<String>,
-}
-
-#[allow(dead_code)]
-impl ControllerEventRouter {
-    pub fn new() -> Self {
-        Self {
-            utterance_callback: None,
-            vad_start_callback: None,
-            last_preview: std::sync::Mutex::new(String::new()),
-            transcript_buffer: None,
-            finalized_prefix: std::sync::Mutex::new(String::new()),
-        }
-    }
-
-    pub fn with_utterance_callback(mut self, cb: Arc<dyn Fn(String) + Send + Sync>) -> Self {
-        self.utterance_callback = Some(cb);
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn with_vad_start_callback(mut self, cb: Arc<dyn Fn() + Send + Sync>) -> Self {
-        self.vad_start_callback = Some(cb);
-        self
-    }
-
-    pub fn with_transcript_buffer(mut self, buf: Arc<tokio::sync::Mutex<String>>) -> Self {
-        self.transcript_buffer = Some(buf);
-        self
-    }
-}
-
-impl EventSink for ControllerEventRouter {
+impl EventSink for SessionTelemetrySink {
     fn on_event(&self, event: &EngineEvent) {
+        let mut guard = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         match event {
-            EngineEvent::VadStart { .. } => {
-                if let Some(cb) = &self.vad_start_callback {
-                    cb();
-                }
-            }
-            EngineEvent::Preview { rev, text } => {
-                // Compute minimal BACKSPACE-encoded delta from full preview text.
-                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(td) = TranscriptDelta::from_diff(&last, text) {
-                    debug!(
-                        rev = *rev,
-                        delta_len = td.delta.chars().count(),
-                        text_len = text.chars().count(),
-                        "BOUNDARY preview_delta"
-                    );
-                    if is_assistive_session() {
-                        crate::voice_chat_ui::append_voice_chat_user_delta(&td.delta);
-                    } else {
-                        crate::transcription_overlay::append_transcription_delta(&td.delta);
-                    }
-                    *last = text.clone();
-                }
-                // Update transcript_buffer so stop() returns accumulated text.
-                if let Some(buf) = &self.transcript_buffer {
-                    let prefix = self
-                        .finalized_prefix
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    let full = if prefix.is_empty() {
-                        text.clone()
-                    } else {
-                        format!("{} {}", prefix, text)
-                    };
-                    if let Ok(mut guard) = buf.try_lock() {
-                        *guard = full;
-                    }
-                }
-            }
-            EngineEvent::Correction {
-                rev,
-                text,
-                previous_text,
-            } => {
-                // Compute delta from last_preview and apply — keeps is_streaming=true
-                // in assistive mode (set_voice_chat_user_text would finalize the bubble).
-                let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                // Ignore stale corrections that arrive after UtteranceFinal
-                // already reset last_preview. Without this, delta from "" → text
-                // would inject phantom content into the next utterance.
-                if last.is_empty() {
-                    debug!("Ignoring Correction with empty last_preview (post-final)");
-                    return;
-                }
-                if *last != *previous_text {
-                    debug!(
-                        rev = *rev,
-                        last_len = last.chars().count(),
-                        previous_len = previous_text.chars().count(),
-                        "Ignoring stale Correction (baseline mismatch)"
-                    );
-                    return;
-                }
-                if let Some(td) = TranscriptDelta::from_diff(&last, text) {
-                    debug!(
-                        rev = *rev,
-                        delta_len = td.delta.chars().count(),
-                        text_len = text.chars().count(),
-                        "BOUNDARY correction_delta"
-                    );
-                    if is_assistive_session() {
-                        crate::voice_chat_ui::append_voice_chat_user_delta(&td.delta);
-                    } else {
-                        // Non-assistive overlay: use delta to keep chain consistent.
-                        crate::transcription_overlay::append_transcription_delta(&td.delta);
-                    }
-                }
-                *last = text.clone();
-                // Update transcript_buffer with corrected text.
-                if let Some(buf) = &self.transcript_buffer {
-                    let prefix = self
-                        .finalized_prefix
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone();
-                    let full = if prefix.is_empty() {
-                        text.clone()
-                    } else {
-                        format!("{} {}", prefix, text)
-                    };
-                    if let Ok(mut guard) = buf.try_lock() {
-                        *guard = full;
-                    }
-                }
-            }
-            EngineEvent::UtteranceFinal {
-                utterance_id, text, ..
-            } => {
-                // Reset last_preview — engine clears accumulated_text on utterance boundary,
-                // so next Preview starts fresh.
-                {
-                    let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                    last.clear();
-                }
-                // Accumulate finalized text across utterance boundaries.
-                let trimmed = text.trim();
-                debug!(
-                    utterance_id = *utterance_id,
-                    text_len = trimmed.chars().count(),
-                    "BOUNDARY final"
-                );
-                if !trimmed.is_empty() {
-                    let mut prefix = self
-                        .finalized_prefix
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if prefix.is_empty() {
-                        *prefix = trimmed.to_string();
-                    } else {
-                        prefix.push(' ');
-                        prefix.push_str(trimmed);
-                    }
-                    // Write finalized text to transcript_buffer.
-                    if let Some(buf) = &self.transcript_buffer
-                        && let Ok(mut guard) = buf.try_lock()
-                    {
-                        *guard = prefix.clone();
-                    }
-                }
-                if let Some(cb) = &self.utterance_callback
-                    && !trimmed.is_empty()
-                {
-                    cb(trimmed.to_string());
-                }
-            }
             EngineEvent::NoSpeech { reason } => {
-                {
-                    let mut last = self.last_preview.lock().unwrap_or_else(|e| e.into_inner());
-                    last.clear();
-                }
-                info!("Engine reported no speech: {}", reason);
-            }
-            EngineEvent::Drop { kind, text, reason } => {
-                debug!(
-                    "Engine dropped [{:?}]: {} (text: '{}')",
-                    kind,
-                    reason,
-                    text.chars().take(50).collect::<String>()
-                );
+                guard.no_speech_reason = Some(reason.clone());
             }
             EngineEvent::Stats {
                 hallucination_drops,
@@ -375,20 +224,70 @@ impl EventSink for ControllerEventRouter {
                 total_utterances,
                 dropped_audio_chunks,
             } => {
-                info!(
-                    "Session stats: utterances={}, hallucinations={}, semantic_gate={}, filtered_empty={}, corrections={}, dropped_chunks={}",
-                    total_utterances,
-                    hallucination_drops,
-                    semantic_gate_drops,
-                    filtered_empty_drops,
-                    corrections_applied,
-                    dropped_audio_chunks,
-                );
-            }
-            EngineEvent::Warning { code, message } => {
-                warn!("Engine warning [{}]: {}", code, message);
+                guard.stats = Some(SessionEngineStats {
+                    hallucination_drops: *hallucination_drops,
+                    semantic_gate_drops: *semantic_gate_drops,
+                    filtered_empty_drops: *filtered_empty_drops,
+                    corrections_applied: *corrections_applied,
+                    total_utterances: *total_utterances,
+                    dropped_audio_chunks: *dropped_audio_chunks,
+                });
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_telemetry_sink_tracks_no_speech_and_stats() {
+        let shared = new_session_telemetry();
+        let sink = SessionTelemetrySink::new(Arc::clone(&shared));
+
+        sink.on_event(&EngineEvent::NoSpeech {
+            reason: "vad_no_speech_detected".to_string(),
+        });
+        sink.on_event(&EngineEvent::Stats {
+            dropped_audio_chunks: 3,
+            hallucination_drops: 2,
+            semantic_gate_drops: 1,
+            filtered_empty_drops: 4,
+            corrections_applied: 5,
+            total_utterances: 0,
+        });
+
+        let snapshot = snapshot_session_telemetry(&shared);
+        assert_eq!(
+            snapshot.no_speech_reason.as_deref(),
+            Some("vad_no_speech_detected")
+        );
+        let stats = snapshot.stats.expect("stats should be captured");
+        assert_eq!(stats.hallucination_drops, 2);
+        assert_eq!(stats.semantic_gate_drops, 1);
+        assert_eq!(stats.filtered_empty_drops, 4);
+        assert_eq!(stats.corrections_applied, 5);
+        assert_eq!(stats.total_utterances, 0);
+        assert_eq!(stats.dropped_audio_chunks, 3);
+    }
+
+    #[test]
+    fn test_reset_session_telemetry_clears_snapshot() {
+        let shared = new_session_telemetry();
+        {
+            let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+            guard.no_speech_reason = Some("test".to_string());
+            guard.stats = Some(SessionEngineStats {
+                hallucination_drops: 1,
+                ..Default::default()
+            });
+        }
+        reset_session_telemetry(&shared);
+
+        let snapshot = snapshot_session_telemetry(&shared);
+        assert!(snapshot.no_speech_reason.is_none());
+        assert!(snapshot.stats.is_none());
     }
 }

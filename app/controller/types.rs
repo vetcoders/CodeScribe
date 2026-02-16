@@ -162,9 +162,20 @@ pub struct TranscriptPipelineParams {
     pub cloud_text_opt: Option<String>,
     pub cloud_handle: Option<tokio::task::JoinHandle<anyhow::Result<String>>>,
     pub append_mode: bool,
+    /// True when processing happens while an active stream is still running
+    /// (e.g., toggle-mode utterance callback). In this mode, prefer delta-only
+    /// updates and avoid full-text rewrites in overlays.
+    pub live_stream_session: bool,
     pub user_needs_separator: bool,
     pub assistant_needs_separator: bool,
     /// When true, skip writing to the user bubble in the commit path.
     /// Used by event pipeline where Preview already streams into the bubble.
     pub skip_user_bubble: bool,
+}
+
+/// Result metadata for transcript post-processing.
+#[derive(Debug, Clone, Default)]
+pub struct TranscriptProcessOutcome {
+    /// Why manual commit/decision mode should be shown (if required).
+    pub commit_trigger: Option<String>,
 }

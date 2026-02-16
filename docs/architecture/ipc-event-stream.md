@@ -1,6 +1,34 @@
 # IPC Event Stream Contract
 
-This document defines the CodeScribe IPC push stream used by Vista Desktop.
+This document defines the runtime and IPC event contract used by Vista Desktop.
+
+## Contract Authority
+
+- Wire schema authority: `core/ipc/types.rs` (`IpcEvent`, `IpcEventPayload`, `EngineEventWire`)
+- Runtime entrypoint authority: `core/audio/streaming_recorder.rs`
+- Engine event model authority: `core/pipeline/contracts.rs` (`EngineEvent`, `EventSink`)
+
+## Runtime Contract (Single Path)
+
+There is exactly one supported live runtime path:
+
+1. `StreamingRecorder::set_event_sink(Some(...))`
+2. `StreamingRecorder::start_event_session(...)`
+3. `pipeline::streaming::transcription_session(...)`
+4. `SttScheduler` serializes inference work
+5. `EventSink` fanout distributes `EngineEvent` to presentation, IPC and session telemetry sinks
+
+Controller wiring uses the same contract for hold/toggle sessions:
+
+- presentation sink (`PresentationEmitter`)
+- IPC sink (`IpcBroadcastSink`)
+- telemetry sink (`SessionTelemetrySink`)
+
+Legacy runtime paths are intentionally unsupported:
+
+- no `set_delta_callback` API on `StreamingRecorder`
+- no legacy worker-style symbols (`VadWorker`, `TranscriptionWorker`) in active runtime path
+- no legacy IPC wire variants such as `engine.type = "vad_fallback"`
 
 ## Transport
 
@@ -94,12 +122,34 @@ Engine events are tagged with `type`:
 
 ## Security and Sanitization
 
-- `raw_text` is internal engine data and is **never** emitted in IPC event payloads.
+- `raw_text` is internal engine data and is never emitted in IPC payloads.
 - IPC wire mapping is centralized in `core/ipc/types.rs` (`EngineEventWire`).
+
+## Guardrails
+
+Contract guard tests that block legacy regressions:
+
+- `core/ipc/types.rs`:
+  - `legacy_vad_fallback_wire_is_rejected`
+  - `removed_legacy_wire_variants_are_rejected`
+- `core/pipeline/tests/regressions.rs`:
+  - `runtime_contract_blocks_legacy_delta_callback_api`
+  - `runtime_contract_blocks_legacy_worker_symbols`
+- `tests/e2e_cli_commands.rs`:
+  - `test_cli_live_uses_event_sink_contract`
+
+## Migration Notes (CLI / Tooling)
+
+For old integrations that still depend on legacy callbacks or worker symbols:
+
+1. Replace `set_delta_callback(...)` wiring with `set_event_sink(Some(Arc<dyn EventSink>))`.
+2. Start sessions via `start_event_session(...)`.
+3. If you only consume text deltas, bridge explicitly with `DeltaSinkAdapter`.
+4. Consume `NoSpeech` and `Stats` from engine events (session telemetry sink), not from ad-hoc worker state.
+5. Treat `vad_fallback` and other removed wire variants as hard errors.
 
 ## Versioning
 
-- Contract authority: `core/ipc/types.rs`
 - Backward-compatible changes:
   - adding new optional fields
   - adding new `engine.type` variants

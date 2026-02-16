@@ -1,4 +1,6 @@
 use serial_test::serial;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::audio::chunker::SpeechSession;
 use crate::vad;
@@ -34,6 +36,19 @@ impl Drop for EnvGuard {
             unsafe { std::env::remove_var(self.key) };
         }
     }
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("core crate should be nested under workspace root")
+        .to_path_buf()
+}
+
+fn read_workspace_source(relative_path: &str) -> String {
+    let path = workspace_root().join(relative_path);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
 }
 
 #[test]
@@ -84,4 +99,43 @@ fn utterance_silence_override_env_regression() {
     // Utterance should respect the buffered/utterance-specific override.
     let utter_expected = (0.45 * vad::VAD_SAMPLE_RATE as f32).round().max(1.0) as usize;
     assert_eq!(utterance.min_silence_samples(), utter_expected);
+}
+
+#[test]
+fn runtime_contract_blocks_legacy_delta_callback_api() {
+    let source = read_workspace_source("core/audio/streaming_recorder.rs");
+
+    assert!(
+        !source.contains("set_delta_callback("),
+        "legacy set_delta_callback API must stay removed"
+    );
+    assert!(
+        source.contains("set_event_sink("),
+        "runtime contract requires set_event_sink API"
+    );
+    assert!(
+        source.contains("start_event_session("),
+        "runtime contract requires start_event_session entrypoint"
+    );
+}
+
+#[test]
+fn runtime_contract_blocks_legacy_worker_symbols() {
+    let guarded_files = [
+        "core/audio/streaming_recorder.rs",
+        "core/pipeline/streaming.rs",
+        "app/controller/mod.rs",
+        "bin/codescribe.rs",
+    ];
+    let banned_symbols = ["VadWorker", "LegacyVadWorker", "TranscriptionWorker"];
+
+    for relative_path in guarded_files {
+        let source = read_workspace_source(relative_path);
+        for banned in banned_symbols {
+            assert!(
+                !source.contains(banned),
+                "legacy worker symbol `{banned}` must not appear in {relative_path}"
+            );
+        }
+    }
 }

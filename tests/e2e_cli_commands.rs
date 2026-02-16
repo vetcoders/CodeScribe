@@ -54,6 +54,26 @@ fn ensure_cli_built() {
     }
 }
 
+/// Guard: live CLI must use EventSink contract (no legacy delta callback path).
+#[test]
+fn test_cli_live_uses_event_sink_contract() {
+    let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin/codescribe.rs");
+    let source = std::fs::read_to_string(&source_path).expect("Failed to read CLI source");
+
+    assert!(
+        !source.contains("set_delta_callback("),
+        "CLI live path should not depend on set_delta_callback"
+    );
+    assert!(
+        source.contains("set_event_sink(Some"),
+        "CLI live path should install an event sink"
+    );
+    assert!(
+        source.contains("start_event_session("),
+        "CLI live path should start via start_event_session"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════
 // CLI Help & Version Tests
 // ═══════════════════════════════════════════════════════════

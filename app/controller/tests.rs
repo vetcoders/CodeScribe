@@ -665,6 +665,77 @@ fn test_action_quality_probe_is_independent_from_action_routing() {
     assert!((save_probe.drop_ratio - augment_probe.drop_ratio).abs() < 1e-6);
 }
 
+#[test]
+fn test_quality_gate_triggers_commit_for_high_drop_ratio() {
+    let stats = crate::stream_postprocess::StreamPostProcessStats {
+        input_chunks: 10,
+        dropped_chunks: 5,
+        ..Default::default()
+    };
+    let probe = ActionQualityProbe::from_transcripts(
+        "to jest bardzo dlugi tekst surowy",
+        "to jest tekst",
+        &stats,
+    );
+    let trigger =
+        evaluate_quality_commit_trigger(false, &probe, crate::state::history::TranscriptKind::Raw);
+    assert_eq!(trigger, Some("high_drop_ratio"));
+}
+
+#[test]
+fn test_quality_gate_skips_commit_for_force_raw_mode() {
+    let stats = crate::stream_postprocess::StreamPostProcessStats {
+        input_chunks: 10,
+        dropped_chunks: 7,
+        ..Default::default()
+    };
+    let probe =
+        ActionQualityProbe::from_transcripts("to jest bardzo dlugi tekst surowy", "krótki", &stats);
+    let trigger =
+        evaluate_quality_commit_trigger(true, &probe, crate::state::history::TranscriptKind::Raw);
+    assert!(trigger.is_none());
+}
+
+#[test]
+fn test_quality_gate_triggers_commit_when_ai_failed() {
+    let stats = crate::stream_postprocess::StreamPostProcessStats {
+        input_chunks: 2,
+        dropped_chunks: 0,
+        ..Default::default()
+    };
+    let probe = ActionQualityProbe::from_transcripts("raw text", "raw text", &stats);
+    let trigger = evaluate_quality_commit_trigger(
+        false,
+        &probe,
+        crate::state::history::TranscriptKind::AiFailed,
+    );
+    assert_eq!(trigger, Some("ai_failed_fallback"));
+}
+
+#[test]
+fn test_delta_first_guards_block_full_rewrite_in_live_stream() {
+    assert!(!should_allow_full_user_bubble_rewrite(false, false, true));
+    assert!(!should_allow_full_assistant_rewrite(false, true));
+    assert!(!should_apply_transcription_action_contract(false, true));
+}
+
+#[test]
+fn test_delta_first_guards_allow_full_rewrite_offline() {
+    assert!(should_allow_full_user_bubble_rewrite(false, false, false));
+    assert!(should_allow_full_assistant_rewrite(false, false));
+    assert!(should_apply_transcription_action_contract(false, false));
+}
+
+#[test]
+fn test_process_recording_outcome_no_speech_is_soft() {
+    let outcome = ProcessRecordingOutcome::no_speech("vad_no_speech_detected");
+    assert_eq!(
+        outcome.no_speech_reason.as_deref(),
+        Some("vad_no_speech_detected")
+    );
+    assert!(outcome.commit_trigger.is_none());
+}
+
 #[tokio::test]
 #[serial]
 async fn test_rapid_hold_toggle_switch_recovers_to_idle_without_stuck_state() {

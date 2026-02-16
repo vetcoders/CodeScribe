@@ -58,7 +58,10 @@ use codescribe_core::tts::AudioPlayer;
 // UI state for conversation mode
 use crate::voice_chat_ui::ConversationModeState;
 
-use helpers::{raw_save_enabled, route_transcription_delta, setup_voice_chat_send_callback};
+use helpers::{
+    SharedSessionTelemetry, new_session_telemetry, raw_save_enabled, reset_session_telemetry,
+    setup_voice_chat_send_callback, snapshot_session_telemetry,
+};
 use types::ValidatedAudioPath;
 
 static OVERLAY_CONTROLLER: OnceLock<Arc<RecordingController>> = OnceLock::new();
@@ -113,6 +116,87 @@ impl ActionQualityProbe {
     }
 }
 
+const QUALITY_GATE_MIN_CHARS: usize = 24;
+const QUALITY_GATE_DROP_RATIO: f32 = 0.35;
+const QUALITY_GATE_DIFF_RATIO: f32 = 0.62;
+const QUALITY_GATE_CORRECTION_RATIO: f32 = 0.40;
+
+struct AtomicFlagGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl AtomicFlagGuard {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self { flag }
+    }
+}
+
+impl Drop for AtomicFlagGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProcessRecordingOutcome {
+    no_speech_reason: Option<String>,
+    commit_trigger: Option<String>,
+}
+
+impl ProcessRecordingOutcome {
+    fn no_speech(reason: impl Into<String>) -> Self {
+        Self {
+            no_speech_reason: Some(reason.into()),
+            commit_trigger: None,
+        }
+    }
+}
+
+fn should_allow_full_user_bubble_rewrite(
+    skip_user_bubble: bool,
+    append_mode: bool,
+    live_stream_session: bool,
+) -> bool {
+    !skip_user_bubble && !append_mode && !live_stream_session
+}
+
+fn should_allow_full_assistant_rewrite(append_mode: bool, live_stream_session: bool) -> bool {
+    !append_mode && !live_stream_session
+}
+
+fn should_apply_transcription_action_contract(assistive: bool, live_stream_session: bool) -> bool {
+    !assistive && !live_stream_session
+}
+
+fn evaluate_quality_commit_trigger(
+    force_raw: bool,
+    quality_probe: &ActionQualityProbe,
+    output_kind: crate::state::history::TranscriptKind,
+) -> Option<&'static str> {
+    if force_raw {
+        return None;
+    }
+    if output_kind == crate::state::history::TranscriptKind::AiFailed {
+        return Some("ai_failed_fallback");
+    }
+    if quality_probe.raw_chars < QUALITY_GATE_MIN_CHARS
+        && quality_probe.final_chars < QUALITY_GATE_MIN_CHARS
+    {
+        return None;
+    }
+    if quality_probe.drop_ratio >= QUALITY_GATE_DROP_RATIO {
+        return Some("high_drop_ratio");
+    }
+    if quality_probe.raw_final_diff_ratio >= QUALITY_GATE_DIFF_RATIO {
+        return Some("high_rewrite_ratio");
+    }
+    if quality_probe.correction_ratio >= QUALITY_GATE_CORRECTION_RATIO {
+        return Some("high_correction_ratio");
+    }
+    None
+}
+
 fn resolve_transcription_action_contract_mode(
     force_raw: bool,
     force_ai: bool,
@@ -135,7 +219,7 @@ pub fn register_overlay_controller(controller: Arc<RecordingController>) {
     }
 }
 
-/// Stop the current recording and enter decision mode without waiting for VAD.
+/// Stop the current recording and force the finish pipeline without waiting for VAD.
 pub fn request_recording_commit() {
     let Some(controller) = OVERLAY_CONTROLLER.get().cloned() else {
         warn!("Overlay controller not registered; cannot commit recording");
@@ -208,6 +292,8 @@ pub struct RecordingController {
     /// captured generation before/after critical awaits to avoid stale-start races.
     #[allow(dead_code)]
     hold_start_generation: Arc<AtomicU64>,
+    /// Guard flag used to prevent idle-recovery from killing a freshly-starting session.
+    start_transition_in_flight: Arc<AtomicBool>,
 
     /// Lock to serialize finish_recording calls
     serial_lock: Arc<Mutex<()>>,
@@ -256,6 +342,8 @@ pub struct RecordingController {
 
     /// Broadcast stream for IPC subscribers.
     event_broadcast: broadcast::Sender<IpcEvent>,
+    /// Per-session telemetry from engine events (`NoSpeech`, `Stats`).
+    session_telemetry: SharedSessionTelemetry,
 }
 
 impl RecordingController {
@@ -268,13 +356,7 @@ impl RecordingController {
             config.hold_start_delay_ms, config.beep_on_start, config.whisper_language
         );
 
-        let mut recorder =
-            StreamingRecorder::new().expect("Failed to initialize streaming recorder");
-        recorder.set_delta_callback(Some(Arc::new(
-            codescribe_core::pipeline::sinks::CallbackSink::new(Arc::new(|delta: &str| {
-                route_transcription_delta(delta);
-            })),
-        )));
+        let recorder = StreamingRecorder::new().expect("Failed to initialize streaming recorder");
 
         if !cfg!(test) {
             let model_manager = ModelManager::new().expect("Failed to initialize model manager");
@@ -295,6 +377,7 @@ impl RecordingController {
         let config = Arc::new(RwLock::new(config));
         setup_voice_chat_send_callback(Arc::clone(&config));
         let (event_broadcast, _) = broadcast::channel::<IpcEvent>(256);
+        let session_telemetry = new_session_telemetry();
 
         Self {
             config,
@@ -307,6 +390,7 @@ impl RecordingController {
             session_id: Arc::new(RwLock::new(None)),
             hold_start_task: Arc::new(Mutex::new(None)),
             hold_start_generation: Arc::new(AtomicU64::new(0)),
+            start_transition_in_flight: Arc::new(AtomicBool::new(false)),
             serial_lock: Arc::new(Mutex::new(())),
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
@@ -321,6 +405,7 @@ impl RecordingController {
             conversation_generation: Arc::new(AtomicU64::new(0)),
             conversation_task: Arc::new(Mutex::new(None)),
             event_broadcast,
+            session_telemetry,
         }
     }
 
@@ -335,13 +420,7 @@ impl RecordingController {
             cfg.hold_start_delay_ms, cfg.beep_on_start, cfg.whisper_language
         );
 
-        let mut recorder =
-            StreamingRecorder::new().expect("Failed to initialize streaming recorder");
-        recorder.set_delta_callback(Some(Arc::new(
-            codescribe_core::pipeline::sinks::CallbackSink::new(Arc::new(|delta: &str| {
-                route_transcription_delta(delta);
-            })),
-        )));
+        let recorder = StreamingRecorder::new().expect("Failed to initialize streaming recorder");
 
         if !cfg!(test) {
             let model_manager = ModelManager::new().expect("Failed to initialize model manager");
@@ -362,6 +441,7 @@ impl RecordingController {
 
         setup_voice_chat_send_callback(Arc::clone(&config));
         let (event_broadcast, _) = broadcast::channel::<IpcEvent>(256);
+        let session_telemetry = new_session_telemetry();
 
         Self {
             config,
@@ -374,6 +454,7 @@ impl RecordingController {
             session_id: Arc::new(RwLock::new(None)),
             hold_start_task: Arc::new(Mutex::new(None)),
             hold_start_generation: Arc::new(AtomicU64::new(0)),
+            start_transition_in_flight: Arc::new(AtomicBool::new(false)),
             serial_lock: Arc::new(Mutex::new(())),
             vad_triggered: Arc::new(AtomicBool::new(false)),
             assistive_loop_active: Arc::new(AtomicBool::new(false)),
@@ -388,6 +469,7 @@ impl RecordingController {
             conversation_generation: Arc::new(AtomicU64::new(0)),
             conversation_task: Arc::new(Mutex::new(None)),
             event_broadcast,
+            session_telemetry,
         }
     }
 
@@ -502,11 +584,14 @@ impl RecordingController {
         *self.force_ai_mode.write().await = false;
         *self.session_id.write().await = None;
         *self.assistive_context.write().await = None;
+        self.start_transition_in_flight
+            .store(false, Ordering::SeqCst);
         self.assistive_loop_active.store(false, Ordering::SeqCst);
         self.toggle_user_has_text.store(false, Ordering::SeqCst);
         self.toggle_assistant_has_text
             .store(false, Ordering::SeqCst);
         set_assistive_session(false);
+        reset_session_telemetry(&self.session_telemetry);
         hide_hold_badge();
         crate::voice_chat_ui::update_voice_chat_status("Ready");
     }
@@ -518,7 +603,19 @@ impl RecordingController {
     }
 
     async fn recover_stale_recorder_if_idle(&self) {
+        if self.start_transition_in_flight.load(Ordering::SeqCst) {
+            debug!("RECOVERY decision: skip idle-recovery while start transition is in-flight");
+            return;
+        }
+
         let _serial_guard = self.serial_lock.lock().await;
+
+        if self.start_transition_in_flight.load(Ordering::SeqCst) {
+            debug!(
+                "RECOVERY decision: skip idle-recovery after lock (start transition still active)"
+            );
+            return;
+        }
 
         if *self.state.read().await != State::Idle {
             return;
@@ -547,14 +644,16 @@ impl RecordingController {
         self.toggle_assistant_has_text
             .store(false, Ordering::SeqCst);
         set_assistive_session(false);
+        reset_session_telemetry(&self.session_telemetry);
         hide_hold_badge();
         crate::voice_chat_ui::update_voice_chat_status("Ready");
-        info!("Recorder recovery: stale active stream cleared, controller remains IDLE");
+        info!("RECOVERY decision: stale active stream cleared, controller remains IDLE");
     }
 
     fn configure_hold_event_sink(
         recorder: &mut StreamingRecorder,
         event_broadcast: broadcast::Sender<IpcEvent>,
+        session_telemetry: SharedSessionTelemetry,
     ) {
         let tb = recorder.transcript_buffer_handle();
         let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
@@ -563,9 +662,15 @@ impl RecordingController {
             Arc::new(PresentationEmitter::new(tb, Some(delta_sink), None));
         let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
             Arc::new(helpers::IpcBroadcastSink::new(event_broadcast));
-        recorder.set_event_sink(Some(
-            codescribe_core::pipeline::sinks::FanoutEventSink::pair(pe, ipc_sink),
-        ));
+        let telemetry_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
+            Arc::new(helpers::SessionTelemetrySink::new(session_telemetry));
+        recorder.set_event_sink(Some(Arc::new(
+            codescribe_core::pipeline::sinks::FanoutEventSink::new(vec![
+                pe,
+                ipc_sink,
+                telemetry_sink,
+            ]),
+        )));
     }
 
     fn configure_toggle_event_sink(
@@ -574,6 +679,7 @@ impl RecordingController {
         expected_session: String,
         is_assistive_session: bool,
         event_broadcast: broadcast::Sender<IpcEvent>,
+        session_telemetry: SharedSessionTelemetry,
     ) {
         let tb = recorder.transcript_buffer_handle();
         let delta_sink: Arc<dyn codescribe_core::pipeline::contracts::DeltaSink> =
@@ -607,9 +713,15 @@ impl RecordingController {
         let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> = Arc::new(pe);
         let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
             Arc::new(helpers::IpcBroadcastSink::new(event_broadcast));
-        recorder.set_event_sink(Some(
-            codescribe_core::pipeline::sinks::FanoutEventSink::pair(pe, ipc_sink),
-        ));
+        let telemetry_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
+            Arc::new(helpers::SessionTelemetrySink::new(session_telemetry));
+        recorder.set_event_sink(Some(Arc::new(
+            codescribe_core::pipeline::sinks::FanoutEventSink::new(vec![
+                pe,
+                ipc_sink,
+                telemetry_sink,
+            ]),
+        )));
     }
 
     /// Handle hotkey event - main entry point for state machine
@@ -1282,6 +1394,8 @@ impl RecordingController {
         let event_broadcast = self.event_broadcast.clone();
         let serial_lock = Arc::clone(&self.serial_lock);
         let hold_start_generation = Arc::clone(&self.hold_start_generation);
+        let start_transition_in_flight = Arc::clone(&self.start_transition_in_flight);
+        let session_telemetry = Arc::clone(&self.session_telemetry);
         let opened_overlay_for_transcription =
             Arc::clone(&self.opened_voice_chat_overlay_for_transcription);
 
@@ -1308,6 +1422,7 @@ impl RecordingController {
                 debug!("Hold-start cancelled: state changed to {}", current_state);
                 return;
             }
+            let _start_guard = AtomicFlagGuard::new(Arc::clone(&start_transition_in_flight));
 
             // Generate session ID
             let new_session_id = Uuid::new_v4().to_string();
@@ -1339,10 +1454,15 @@ impl RecordingController {
             // Set session mode for delta routing BEFORE starting the pipeline,
             // so the very first deltas route to the correct overlay.
             set_assistive_session(is_assistive);
+            reset_session_telemetry(&session_telemetry);
 
             // Runtime pipeline is always event-based. Hold mode has no utterance callback;
             // text is finalized on key-up in `finish_recording`.
-            Self::configure_hold_event_sink(&mut rec, event_broadcast.clone());
+            Self::configure_hold_event_sink(
+                &mut rec,
+                event_broadcast.clone(),
+                Arc::clone(&session_telemetry),
+            );
             if !cfg!(test) {
                 let start_result = rec
                     .start_event_session(Some(language.as_str().to_string()))
@@ -1354,7 +1474,11 @@ impl RecordingController {
                             warn!("Hold-start stale-recorder recovery failed: {stop_err}");
                         }
                         Self::clear_recorder_callbacks(&mut rec);
-                        Self::configure_hold_event_sink(&mut rec, event_broadcast.clone());
+                        Self::configure_hold_event_sink(
+                            &mut rec,
+                            event_broadcast.clone(),
+                            Arc::clone(&session_telemetry),
+                        );
                         let retry_result = rec
                             .start_event_session(Some(language.as_str().to_string()))
                             .await;
@@ -1493,6 +1617,7 @@ impl RecordingController {
             );
             return Ok(());
         }
+        let _start_guard = AtomicFlagGuard::new(Arc::clone(&self.start_transition_in_flight));
 
         // Generate session ID
         let new_session_id = Uuid::new_v4().to_string();
@@ -1535,6 +1660,7 @@ impl RecordingController {
         // Set session mode for delta routing BEFORE starting the pipeline,
         // so the very first deltas route to the correct overlay.
         set_assistive_session(is_assistive);
+        reset_session_telemetry(&self.session_telemetry);
 
         // Runtime pipeline is always event-based.
         Self::configure_toggle_event_sink(
@@ -1543,6 +1669,7 @@ impl RecordingController {
             new_session_id.clone(),
             is_assistive,
             self.event_broadcast.clone(),
+            Arc::clone(&self.session_telemetry),
         );
 
         // Skip actual audio stream in tests (no CoreAudio device needed)
@@ -1563,6 +1690,7 @@ impl RecordingController {
                     new_session_id.clone(),
                     is_assistive,
                     self.event_broadcast.clone(),
+                    Arc::clone(&self.session_telemetry),
                 );
                 if let Err(retry_err) = recorder
                     .start_event_session(Some(language.as_str().to_string()))
@@ -1717,11 +1845,13 @@ impl RecordingController {
                 cloud_text_opt: None,
                 cloud_handle: None,
                 append_mode: false,
+                live_stream_session: true,
                 user_needs_separator,
                 assistant_needs_separator,
                 skip_user_bubble,
             })
-            .await;
+            .await
+            .map(|_| ());
 
         if *self.state.read().await == State::RecToggle && is_assistive {
             crate::voice_chat_ui::set_voice_chat_sending(false);
@@ -1758,6 +1888,8 @@ impl RecordingController {
         *self.force_raw_mode.write().await = false;
         *self.force_ai_mode.write().await = false;
         *self.session_id.write().await = None;
+        self.start_transition_in_flight
+            .store(false, Ordering::SeqCst);
         self.assistive_loop_active.store(false, Ordering::SeqCst);
         if self.toggle_user_has_text.load(Ordering::SeqCst) {
             crate::voice_chat_ui::finalize_voice_chat_user_message();
@@ -1838,6 +1970,8 @@ impl RecordingController {
         *self.force_ai_mode.write().await = false;
         *self.session_id.write().await = None;
         *self.assistive_context.write().await = None;
+        self.start_transition_in_flight
+            .store(false, Ordering::SeqCst);
         self.assistive_loop_active.store(false, Ordering::SeqCst);
         // Keep event-router sink selection in sync with controller state after finish.
         set_assistive_session(false);
@@ -1847,50 +1981,49 @@ impl RecordingController {
 
         // Update tray icon based on result
         match &result {
-            Ok(_) => {
+            Ok(outcome) => {
                 crate::voice_chat_ui::update_voice_chat_status("Ready");
                 info!("Processing finished successfully. State reset to IDLE.");
 
-                // Overlay policy (POC):
-                // - Assistive: keep chat overlay alive (bubbles persist).
-                // - Raw: auto-paste only, hide overlay.
-                // - AI formatting: no auto-paste, show decision overlay.
-                if !assistive {
+                if let Some(reason) = outcome.no_speech_reason.as_deref() {
+                    info!("NoSpeech outcome in finish_recording: reason={reason}");
+                    if !assistive {
+                        let opened = self
+                            .opened_voice_chat_overlay_for_transcription
+                            .swap(false, Ordering::SeqCst);
+                        if opened {
+                            crate::voice_chat_ui::hide_voice_chat_overlay();
+                        }
+                        crate::hide_transcription_overlay();
+                    }
+                } else if !assistive {
                     let cfg = self.config.read().await.clone();
-                    let show_decision_overlay = if force_ai {
-                        true
-                    } else if force_raw {
-                        false
-                    } else if cfg.quick_notes_enabled && cfg.quick_notes_save_only {
-                        // In save-only flow, avoid decision overlays.
-                        false
-                    } else {
-                        // Toggle mode: decision overlay only when AI formatting is ON.
-                        cfg.ai_formatting_enabled && crate::ai_formatting::has_api_key()
-                    };
+                    let show_decision_overlay = outcome.commit_trigger.is_some()
+                        && !(cfg.quick_notes_enabled && cfg.quick_notes_save_only);
+
+                    let opened = self
+                        .opened_voice_chat_overlay_for_transcription
+                        .swap(false, Ordering::SeqCst);
+                    if opened {
+                        crate::voice_chat_ui::hide_voice_chat_overlay();
+                    }
 
                     if show_decision_overlay {
-                        let opened = self
-                            .opened_voice_chat_overlay_for_transcription
-                            .swap(false, Ordering::SeqCst);
-                        if opened {
-                            crate::voice_chat_ui::hide_voice_chat_overlay();
-                        }
+                        let reason = outcome
+                            .commit_trigger
+                            .as_deref()
+                            .unwrap_or("quality_gate_required");
+                        info!(
+                            "COMMIT decision: trigger={reason} force_ai={force_ai} force_raw={force_raw}"
+                        );
                         crate::enter_decision_mode();
                         crate::schedule_auto_hide();
+                    } else if cfg.quick_notes_enabled && cfg.quick_notes_save_only {
+                        info!("COMMIT decision: skipped (quick_notes_save_only)");
+                        crate::hide_transcription_overlay();
                     } else {
-                        let opened = self
-                            .opened_voice_chat_overlay_for_transcription
-                            .swap(false, Ordering::SeqCst);
-                        if opened {
-                            crate::voice_chat_ui::hide_voice_chat_overlay();
-                        }
-                        if cfg.quick_notes_enabled && cfg.quick_notes_save_only {
-                            crate::hide_transcription_overlay();
-                        } else {
-                            crate::enter_decision_mode();
-                            crate::schedule_auto_hide();
-                        }
+                        info!("COMMIT decision: skipped (quality gate clean)");
+                        crate::hide_transcription_overlay();
                     }
                 }
             }
@@ -1909,7 +2042,7 @@ impl RecordingController {
             }
         }
 
-        result
+        result.map(|_| ())
     }
 
     /// Process the recording: stop, transcribe, format, paste
@@ -1926,13 +2059,13 @@ impl RecordingController {
         hold_mode: HoldMode,
         force_raw: bool,
         force_ai: bool,
-    ) -> Result<()> {
+    ) -> Result<ProcessRecordingOutcome> {
         if cfg!(test) {
             info!(
                 "process_recording: skipped in tests (assistive={}, hold_mode={:?}, force_raw={}, force_ai={})",
                 assistive, hold_mode, force_raw, force_ai
             );
-            return Ok(());
+            return Ok(ProcessRecordingOutcome::default());
         }
 
         // Stop the recorder and get audio file path
@@ -2080,50 +2213,75 @@ impl RecordingController {
                 warn!("Cloud fallback unavailable (cloud disabled or missing credentials)");
             }
         }
+        let session_telemetry = snapshot_session_telemetry(&self.session_telemetry);
 
         let raw_text = match raw_text_opt {
             Some(text) if !text.trim().is_empty() => text,
             Some(_) | None => {
+                let reason = session_telemetry
+                    .no_speech_reason
+                    .clone()
+                    .unwrap_or_else(|| "empty_transcript_without_no_speech_event".to_string());
+                if let Some(stats) = session_telemetry.stats.as_ref() {
+                    info!(
+                        "NoSpeech outcome: reason={} utterances={} hallu_drops={} semantic_drops={} filtered_empty={} corrections={} dropped_chunks={}",
+                        reason,
+                        stats.total_utterances,
+                        stats.hallucination_drops,
+                        stats.semantic_gate_drops,
+                        stats.filtered_empty_drops,
+                        stats.corrections_applied,
+                        stats.dropped_audio_chunks
+                    );
+                } else {
+                    info!("NoSpeech outcome: reason={} stats=unavailable", reason);
+                }
                 if assistive_loop {
                     if chat_active {
                         crate::voice_chat_ui::set_voice_chat_sending(false);
                         crate::voice_chat_ui::update_voice_chat_status("Listening...");
                     }
-                    warn!("Empty transcript in assistive loop; skipping");
-                    return Ok(());
+                    warn!("NoSpeech in assistive loop; continuing hands-off listening");
                 }
-                return Err(anyhow::anyhow!("Empty transcript"));
+                return Ok(ProcessRecordingOutcome::no_speech(reason));
             }
         };
 
         info!("Raw transcript captured ({} chars)", raw_text.len());
 
         let language_opt = Some(language.as_str().to_string());
-        self.process_transcript_text_pipeline(types::TranscriptPipelineParams {
-            raw_text,
-            recording_timestamp,
-            assistive,
-            hold_mode,
-            force_raw,
-            force_ai,
-            config,
-            language_opt,
-            raw_save_enabled,
-            audio_path,
-            cloud_text_opt,
-            cloud_handle,
-            append_mode: false,
-            user_needs_separator: false,
-            assistant_needs_separator: false,
-            skip_user_bubble: false,
+        let pipeline_outcome = self
+            .process_transcript_text_pipeline(types::TranscriptPipelineParams {
+                raw_text,
+                recording_timestamp,
+                assistive,
+                hold_mode,
+                force_raw,
+                force_ai,
+                config,
+                language_opt,
+                raw_save_enabled,
+                audio_path,
+                cloud_text_opt,
+                cloud_handle,
+                append_mode: false,
+                live_stream_session: false,
+                user_needs_separator: false,
+                assistant_needs_separator: false,
+                skip_user_bubble: false,
+            })
+            .await?;
+
+        Ok(ProcessRecordingOutcome {
+            no_speech_reason: None,
+            commit_trigger: pipeline_outcome.commit_trigger,
         })
-        .await
     }
 
     async fn process_transcript_text_pipeline(
         &self,
         p: types::TranscriptPipelineParams,
-    ) -> Result<()> {
+    ) -> Result<types::TranscriptProcessOutcome> {
         let types::TranscriptPipelineParams {
             raw_text,
             recording_timestamp,
@@ -2138,6 +2296,7 @@ impl RecordingController {
             cloud_text_opt,
             cloud_handle,
             append_mode,
+            live_stream_session,
             user_needs_separator,
             assistant_needs_separator,
             skip_user_bubble,
@@ -2220,7 +2379,12 @@ impl RecordingController {
                     // without re-writing the text.
                     crate::voice_chat_ui::finalize_voice_chat_user_message();
                     self.toggle_user_has_text.store(true, Ordering::SeqCst);
-                } else if append_mode {
+                } else if !should_allow_full_user_bubble_rewrite(
+                    skip_user_bubble,
+                    append_mode,
+                    live_stream_session,
+                ) {
+                    // Delta-first path: avoid full rewrites while stream is active.
                     if user_needs_separator {
                         crate::voice_chat_ui::append_voice_chat_user_delta("\n\n");
                     }
@@ -2344,7 +2508,10 @@ impl RecordingController {
                         crate::voice_chat_ui::update_voice_chat_status("AI Response (100%)");
                         if streamed {
                             crate::voice_chat_ui::finalize_voice_chat_assistant_message();
-                        } else if append_mode {
+                        } else if !should_allow_full_assistant_rewrite(
+                            append_mode,
+                            live_stream_session,
+                        ) {
                             if assistant_needs_separator {
                                 crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
                             }
@@ -2523,7 +2690,26 @@ impl RecordingController {
             quality_probe.correction_ratio,
             quality_probe.drop_ratio
         );
-        if !assistive {
+        let commit_trigger = if !assistive && !live_stream_session {
+            evaluate_quality_commit_trigger(force_raw, &quality_probe, output_kind)
+                .map(str::to_string)
+        } else {
+            None
+        };
+        if let Some(reason) = commit_trigger.as_deref() {
+            info!(
+                "COMMIT decision: trigger={} mode={} diff_raw_final={:.3} correction_ratio={:.3} drop_ratio={:.3}",
+                reason,
+                mode_label,
+                quality_probe.raw_final_diff_ratio,
+                quality_probe.correction_ratio,
+                quality_probe.drop_ratio
+            );
+        } else if !assistive && !live_stream_session {
+            info!("COMMIT decision: not required by quality gate (mode={mode_label})");
+        }
+
+        if should_apply_transcription_action_contract(assistive, live_stream_session) {
             let action_contract_mode = resolve_transcription_action_contract_mode(
                 force_raw,
                 force_ai,
@@ -2536,6 +2722,10 @@ impl RecordingController {
                 &raw_text,
                 &formatted_text,
                 action_contract_mode,
+            );
+        } else if !assistive {
+            debug!(
+                "Skipping transcription action contract rewrite during live stream (mode={mode_label})"
             );
         }
 
@@ -2640,7 +2830,7 @@ impl RecordingController {
             });
         }
 
-        Ok(())
+        Ok(types::TranscriptProcessOutcome { commit_trigger })
     }
 
     /// Force reset to IDLE state without stopping recorder.

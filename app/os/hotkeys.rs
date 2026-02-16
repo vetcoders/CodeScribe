@@ -1461,9 +1461,10 @@ pub fn are_hotkeys_enabled() -> bool {
     macos::is_enabled()
 }
 
-/// Manages global hotkey runtime ownership and event handling.
+/// Manages global hotkey runtime ownership.
 ///
 /// Owns the macOS event tap worker thread and tears it down on `shutdown()`/`Drop`.
+/// Runtime starts in `new`; there is no separate `start`/`process` lifecycle.
 pub struct HotkeyManager {
     /// Kept for future use (e.g., manual event injection)
     _tx: Sender<HotkeyEvent>,
@@ -1484,15 +1485,6 @@ impl HotkeyManager {
         })
     }
 
-    /// Process pending hotkey events
-    ///
-    /// Note: Events are sent directly from the CGEventTap callback to the channel.
-    /// This method is kept for API compatibility but does nothing.
-    pub fn process_events(&self) {
-        // Events are processed in the background thread
-        // This is a no-op for API compatibility
-    }
-
     /// Stop global hotkeys and wait for runtime teardown.
     ///
     /// Safe to call multiple times.
@@ -1508,21 +1500,6 @@ impl Drop for HotkeyManager {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-// --- Legacy API (for compatibility) ---
-
-/// Start the global hotkey listener (legacy API - now just returns success)
-///
-/// The actual hotkey handling is now done through HotkeyManager integrated
-/// with CGEventTap.
-pub fn start(
-    _tx: Sender<HotkeyEvent>,
-    _required_modifiers: ModifierFlags,
-    _exclusive_mode: bool,
-) -> Result<(), String> {
-    // This is now a no-op - hotkeys are integrated with HotkeyManager
-    Ok(())
 }
 
 #[cfg(test)]

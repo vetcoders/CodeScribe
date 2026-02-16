@@ -95,10 +95,6 @@ pub enum EngineEventWire {
         speech_prob: f32,
         ts_ms: u64,
     },
-    VadFallback {
-        max_prob: f32,
-        samples: usize,
-    },
     NoSpeech {
         reason: String,
     },
@@ -147,10 +143,6 @@ impl From<&EngineEvent> for EngineEventWire {
             EngineEvent::VadEnd { speech_prob, ts_ms } => Self::VadEnd {
                 speech_prob: *speech_prob,
                 ts_ms: *ts_ms,
-            },
-            EngineEvent::VadFallback { max_prob, samples } => Self::VadFallback {
-                max_prob: *max_prob,
-                samples: *samples,
             },
             EngineEvent::NoSpeech { reason } => Self::NoSpeech {
                 reason: reason.clone(),
@@ -284,5 +276,58 @@ mod tests {
             obj.get("reason").and_then(Value::as_str),
             Some("vad_no_speech_detected")
         );
+    }
+
+    #[test]
+    fn legacy_vad_fallback_wire_is_rejected() {
+        let legacy_json = serde_json::json!({
+            "type": "vad_fallback",
+            "max_prob": 0.9,
+            "samples": 128
+        });
+
+        let parsed = serde_json::from_value::<EngineEventWire>(legacy_json);
+        assert!(
+            parsed.is_err(),
+            "legacy vad_fallback variant should not deserialize"
+        );
+    }
+
+    #[test]
+    fn removed_legacy_wire_variants_are_rejected() {
+        let legacy_payloads = [
+            (
+                "vad_fallback",
+                serde_json::json!({
+                    "type": "vad_fallback",
+                    "max_prob": 0.9,
+                    "samples": 128
+                }),
+            ),
+            (
+                "delta",
+                serde_json::json!({
+                    "type": "delta",
+                    "delta": "hello"
+                }),
+            ),
+            (
+                "worker_status",
+                serde_json::json!({
+                    "type": "worker_status",
+                    "state": "running"
+                }),
+            ),
+        ];
+
+        for (variant, payload) in legacy_payloads {
+            let err = serde_json::from_value::<EngineEventWire>(payload)
+                .expect_err("legacy variant must not deserialize");
+            let err_text = err.to_string();
+            assert!(
+                err_text.contains(variant),
+                "expected error to mention rejected variant `{variant}`, got: {err_text}"
+            );
+        }
     }
 }

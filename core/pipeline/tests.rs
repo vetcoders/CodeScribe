@@ -218,7 +218,7 @@ mod pipeline_integration {
         let raw = transcribe_streaming_samples(&samples, sample_rate, None, None)
             .expect("raw streaming transcribe");
 
-        // Overlay-style buffered pipeline (VAD → utterances → buffered emitter)
+        // Event-session pipeline (VAD → utterances → UtteranceFinal collector)
         let overlay = transcribe_buffered_samples(&samples, sample_rate, None)
             .await
             .expect("overlay buffered transcribe");

@@ -7,9 +7,12 @@
 //! Created by M&K (c)2026 VetCoders
 
 use crate::audio::chunker::{SpeechEvent, SpeechSession};
-use crate::pipeline::dedup::{dedup_chunk_overlap, strip_suffix_overlap};
+#[cfg(any(test, feature = "offline_eval"))]
+use crate::pipeline::dedup::dedup_chunk_overlap;
+use crate::pipeline::dedup::strip_suffix_overlap;
 use crate::pipeline::stream_postprocess::StreamPostProcessor;
 use crate::stt::scheduler::{SttLane, SttScheduler, SttTaskHandle};
+#[cfg(any(test, feature = "offline_eval"))]
 use crate::stt::whisper::singleton::engine as get_engine;
 use anyhow::{Result, anyhow};
 use chrono::SecondsFormat;
@@ -24,7 +27,9 @@ use tracing::{debug, error, info, warn};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
+#[cfg(any(test, feature = "offline_eval"))]
 const DEFAULT_CHUNK_DURATION_SEC: f32 = 4.0;
+#[cfg(any(test, feature = "offline_eval"))]
 const DEFAULT_OVERLAP_RATIO: f32 = 0.25; // 25% overlap for stronger context continuity
 const DEFAULT_BUFFER_DELAY_MS: u64 = 1800;
 const DEFAULT_TYPING_CPS: f32 = 36.0;
@@ -34,30 +39,11 @@ lazy_static! {
     static ref TOKEN_RE: Regex = Regex::new(r"\s+|\S+\s*").expect("token regex");
 }
 
-// ── Public type alias ────────────────────────────────────────────────────────
+// ── Pipeline contracts ───────────────────────────────────────────────────────
 
 use crate::pipeline::contracts::{
-    DeltaSink, DropKind, EngineEvent, EventSink, RawTranscript, TranscriptDelta, TranscriptSegment,
+    DeltaSink, DropKind, EngineEvent, EventSink, TranscriptDelta, TranscriptSegment,
 };
-
-/// Legacy alias — now backed by `DeltaSink` trait instead of bare `Fn(&str)`.
-/// Consumers should migrate to `Arc<dyn DeltaSink>` directly.
-#[deprecated(note = "Use Arc<dyn DeltaSink> directly")]
-pub type StreamDeltaCallback = Arc<dyn DeltaSink>;
-
-// ── Buffered worker parameters ───────────────────────────────────────────────
-
-/// Groups optional configuration for [`buffered_transcription_worker`]
-/// so the function signature stays under clippy's argument limit.
-pub(crate) struct BufferedWorkerConfig {
-    pub sample_rate: u32,
-    pub language: Option<String>,
-    pub delta_callback: Option<Arc<dyn DeltaSink>>,
-    pub utterance_callback: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    pub utterance_silence_sec: Option<f32>,
-    pub vad_start_callback: Option<Arc<dyn Fn() + Send + Sync>>,
-    pub stream_log_path: Option<std::path::PathBuf>,
-}
 
 // ── Unified session config ───────────────────────────────────────────────────
 
@@ -205,27 +191,7 @@ impl TranscriptionPipeline {
         strip_suffix_overlap(&self.last_suffix, text)
     }
 
-    pub(crate) fn postprocess(&mut self, text: &str) -> Option<String> {
-        if is_hallucination(text, self.language.as_deref()) {
-            self.hallucination_drops += 1;
-            return None;
-        }
-
-        let stripped = self.strip_overlap(text);
-        if stripped.is_empty() {
-            self.overlap_strips += 1;
-            return None;
-        }
-
-        // Utterance path must not apply the semantic gate; utterances are
-        // VAD-bounded by definition and should not be dropped for "novelty".
-        let processed = self.postprocessor.process_utterance(&stripped)?;
-
-        self.update_suffix(&processed);
-        Some(processed)
-    }
-
-    /// Like `postprocess`, but returns the drop reason on failure.
+    /// Postprocess an utterance and return the drop reason on failure.
     pub(crate) fn postprocess_with_reason(
         &mut self,
         text: &str,
@@ -298,8 +264,7 @@ fn correction_is_stale(
 /// Typing-animation emitter for transcript segments.
 ///
 /// Buffers incoming text and emits it character-by-character at a configurable
-/// typing speed via `DeltaSink`. Used by the deprecated `buffered_transcription_worker`
-/// and by `app::presentation::PresentationEmitter`.
+/// typing speed via `DeltaSink`. Used by `app::presentation::PresentationEmitter`.
 pub struct BufferedEmitter {
     queue: VecDeque<String>,
     initial_delay_ms: u64,
@@ -541,8 +506,7 @@ pub async fn emitter_tick_loop(emitter: Arc<Mutex<BufferedEmitter>>) {
 
 // ── Unified transcription session (event-based) ─────────────────────────────
 
-/// Unified transcription session — replaces both `transcription_worker` and
-/// `buffered_transcription_worker` with a single event-emitting pipeline.
+/// Unified transcription session exposed as a single event-emitting pipeline.
 ///
 /// The engine processes audio → VAD → Whisper → PostProcess and emits
 /// `EngineEvent`s. No presentation logic (typing animation, buffer delay,
@@ -604,6 +568,9 @@ pub(crate) async fn transcription_session(
     let mut pending_utterances: VecDeque<UtteranceWorkItem> = VecDeque::new();
     let mut dropped_utterances: u64 = 0;
     let mut audio_closed = false;
+    // Full utterance audio buffer used for per-utterance commit transcription.
+    // Live slices still drive preview; final commit re-transcribes the full utterance.
+    let mut current_utterance_audio: Vec<f32> = Vec::new();
 
     // Phase 1 (streaming preview/commit) — one request tracked for event handling.
     let mut utterance_in_flight: Option<SttTaskHandle> = None;
@@ -645,7 +612,12 @@ pub(crate) async fn transcription_session(
                 } else {
                     SttLane::Live
                 };
-                match stt_scheduler.submit(lane, item.audio.clone(), output_sample_rate, lang) {
+                match stt_scheduler.submit(
+                    lane,
+                    item.inference_audio.clone(),
+                    output_sample_rate,
+                    lang,
+                ) {
                     Ok(handle) => {
                         utterance_in_flight = Some(handle);
                         utterance_active = Some(item);
@@ -677,10 +649,15 @@ pub(crate) async fn transcription_session(
                 match maybe_data {
                     Some(data) => {
                         for event in session.feed(&data, sample_rate) {
-                            let (utterance, is_final, max_speech_prob) = match event {
-                                SpeechEvent::Utterance(u) => (u, false, session.segment_speech_prob()),
+                            let (utterance, inference_audio, is_final, max_speech_prob) = match event {
+                                SpeechEvent::Utterance(u) => {
+                                    current_utterance_audio.extend_from_slice(&u);
+                                    (u.clone(), u, false, session.segment_speech_prob())
+                                }
                                 SpeechEvent::UtteranceFinal(u) => {
-                                    (u, true, session.segment_speech_prob())
+                                    current_utterance_audio.extend_from_slice(&u);
+                                    let full = std::mem::take(&mut current_utterance_audio);
+                                    (u, full, true, session.segment_speech_prob())
                                 }
                                 _ => continue,
                             };
@@ -701,6 +678,7 @@ pub(crate) async fn transcription_session(
 
                             pending_utterances.push_back(UtteranceWorkItem {
                                 audio: utterance,
+                                inference_audio,
                                 is_final,
                                 max_speech_prob,
                             });
@@ -710,14 +688,17 @@ pub(crate) async fn transcription_session(
                     None => {
                         audio_closed = true;
                         if let Some(event) = session.flush() {
-                            let (utterance, is_final, max_speech_prob) = match event {
+                            let (utterance, inference_audio, is_final, max_speech_prob) = match event {
                                 SpeechEvent::Utterance(u) => {
-                                    (u, false, session.segment_speech_prob())
+                                    current_utterance_audio.extend_from_slice(&u);
+                                    (u.clone(), u, false, session.segment_speech_prob())
                                 }
                                 SpeechEvent::UtteranceFinal(u) => {
-                                    (u, true, session.segment_speech_prob())
+                                    current_utterance_audio.extend_from_slice(&u);
+                                    let full = std::mem::take(&mut current_utterance_audio);
+                                    (u, full, true, session.segment_speech_prob())
                                 }
-                                _ => (Vec::new(), false, 0.0),
+                                _ => (Vec::new(), Vec::new(), false, 0.0),
                             };
 
                             if !utterance.is_empty() {
@@ -733,6 +714,7 @@ pub(crate) async fn transcription_session(
                                 if pending_utterances.len() < MAX_PENDING_UTTERANCES {
                                     pending_utterances.push_back(UtteranceWorkItem {
                                         audio: utterance,
+                                        inference_audio,
                                         is_final,
                                         max_speech_prob,
                                     });
@@ -826,6 +808,7 @@ pub(crate) async fn transcription_session(
             }, if utterance_in_flight.is_some() => {
                 let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem {
                     audio: Vec::new(),
+                    inference_audio: Vec::new(),
                     is_final: false,
                     max_speech_prob: 0.0,
                 });
@@ -839,20 +822,38 @@ pub(crate) async fn transcription_session(
                     Ok(raw_transcript) => {
                         let raw_text = raw_transcript.text;
                         let mut raw_segments = raw_transcript.segments;
+                        let segment_offset_ts = if item.is_final {
+                            // Commit lane for final boundary transcribes full utterance audio.
+                            // Segment timestamps should be relative to utterance start.
+                            utterance_start_s
+                        } else {
+                            chunk_start_ts
+                        };
                         if !raw_segments.is_empty() {
                             for segment in &mut raw_segments {
-                                segment.start_ts += chunk_start_ts;
-                                segment.end_ts += chunk_start_ts;
+                                segment.start_ts += segment_offset_ts;
+                                segment.end_ts += segment_offset_ts;
                             }
                         }
                         last_raw_text = raw_text.clone();
                         last_segments = raw_segments.clone();
+                        if item.is_final {
+                            if !raw_segments.is_empty() {
+                                utterance_segments = raw_segments.clone();
+                            }
+                        } else {
+                            utterance_segments.extend(raw_segments.clone());
+                        }
                         if utterance_count == 0 && correction_audio_buf.is_empty() {
                             suffix_snapshot = pipeline.last_suffix.clone();
                         }
 
                         if let Some(words_per_sec) =
-                            text_words_per_second(&raw_text, item.audio.len(), output_sample_rate)
+                            text_words_per_second(
+                                &raw_text,
+                                item.inference_audio.len(),
+                                output_sample_rate,
+                            )
                                 .filter(|wps| *wps > MAX_WORDS_PER_SEC)
                         {
                             pipeline.hallucination_drops =
@@ -868,25 +869,29 @@ pub(crate) async fn transcription_session(
                         } else {
                             match pipeline.postprocess_with_reason(&raw_text) {
                                 Ok(cleaned) => {
-                                    preview_rev += 1;
-                                    if !accumulated_text.is_empty() {
-                                        accumulated_text.push(' ');
-                                    }
-                                    accumulated_text.push_str(cleaned.trim());
-                                    utterance_segments.extend(raw_segments.clone());
+                                    if item.is_final {
+                                        // Final boundary commit: use full-utterance cleaned text as source of truth.
+                                        accumulated_text = cleaned.trim().to_string();
+                                    } else {
+                                        preview_rev += 1;
+                                        if !accumulated_text.is_empty() {
+                                            accumulated_text.push(' ');
+                                        }
+                                        accumulated_text.push_str(cleaned.trim());
 
-                                    debug!(
-                                        rev = preview_rev,
-                                        text_len = accumulated_text.chars().count(),
-                                        "BOUNDARY preview"
-                                    );
-                                    event_sink.on_event(&EngineEvent::Preview {
-                                        rev: preview_rev,
-                                        text: accumulated_text.clone(),
-                                    });
+                                        debug!(
+                                            rev = preview_rev,
+                                            text_len = accumulated_text.chars().count(),
+                                            "BOUNDARY preview"
+                                        );
+                                        event_sink.on_event(&EngineEvent::Preview {
+                                            rev: preview_rev,
+                                            text: accumulated_text.clone(),
+                                        });
 
-                                    if let Some(path) = stream_log_path.as_deref() {
-                                        let _ = append_to_stream_log(path, cleaned.trim());
+                                        if let Some(path) = stream_log_path.as_deref() {
+                                            let _ = append_to_stream_log(path, cleaned.trim());
+                                        }
                                     }
                                 }
                                 Err(PostprocessDrop::Hallucination) => {
@@ -1107,515 +1112,20 @@ pub(crate) async fn transcription_session(
     );
 }
 
-// ── Legacy worker functions (deprecated) ────────────────────────────────────
-
-#[deprecated(note = "Use transcription_session with EventSink instead")]
-#[allow(dead_code)]
-pub(crate) async fn transcription_worker(
-    mut chunk_receiver: mpsc::Receiver<Vec<f32>>,
-    transcript_buffer: Arc<Mutex<String>>,
-    sample_rate: u32,
-    language: Option<String>,
-    mut postprocessor: Option<StreamPostProcessor>,
-    delta_callback: Option<Arc<dyn DeltaSink>>,
-    stream_log_path: Option<std::path::PathBuf>,
-) {
-    info!("Transcription worker started");
-
-    let chunk_duration_sec = stream_chunk_duration_sec();
-    let overlap_sec = stream_overlap_sec(chunk_duration_sec);
-    let mut session = SpeechSession::new_stream(sample_rate, chunk_duration_sec, overlap_sec);
-    let output_sample_rate = session.output_sample_rate();
-
-    // Decouple audio ingestion (chunk_receiver + VAD/session.feed) from Whisper inference.
-    // The key property: we never await inference while draining the audio channel.
-    const MAX_PENDING_CHUNKS: usize = 64;
-    let mut pending_chunks: VecDeque<Vec<f32>> = VecDeque::new();
-    let mut dropped_chunks: u64 = 0;
-    let mut audio_closed = false;
-    let mut in_flight: Option<tokio::task::JoinHandle<Result<String>>> = None;
-
-    loop {
-        // Kick off the next transcription job if nothing is running.
-        if in_flight.is_none() {
-            if let Some(samples) = pending_chunks.pop_front() {
-                let lang = language.clone();
-                let handle = spawn_chunk_transcription(samples, output_sample_rate, lang);
-                in_flight = Some(handle);
-            } else if audio_closed {
-                break;
-            }
-        }
-
-        tokio::select! {
-            maybe_data = chunk_receiver.recv(), if !audio_closed => {
-                match maybe_data {
-                    Some(data) => {
-                        for event in session.feed(&data, sample_rate) {
-                            if let SpeechEvent::Chunk(samples) = event {
-                                if pending_chunks.len() >= MAX_PENDING_CHUNKS {
-                                    dropped_chunks = dropped_chunks.saturating_add(1);
-                                    continue;
-                                }
-                                pending_chunks.push_back(samples);
-                            }
-                        }
-                    }
-                    None => {
-                        audio_closed = true;
-                        if let Some(SpeechEvent::Chunk(samples)) = session.flush() {
-                            if pending_chunks.len() < MAX_PENDING_CHUNKS {
-                                pending_chunks.push_back(samples);
-                            } else {
-                                dropped_chunks = dropped_chunks.saturating_add(1);
-                            }
-                        }
-                    }
-                }
-            }
-            result = async {
-                // Safe: guarded by `if in_flight.is_some()` below.
-                in_flight.as_mut().unwrap().await
-            }, if in_flight.is_some() => {
-                match result {
-                    Ok(Ok(text)) => {
-                        if !text.trim().is_empty() {
-                            debug!("Chunk transcribed: '{}'", text.trim());
-
-                            // Post-process (lexicon + cleanup + semantic gate).
-                            let cleaned = {
-                                if let Some(processor) = postprocessor.as_mut() {
-                                    processor.process(&text)
-                                } else {
-                                    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                                    if cleaned.trim().is_empty() { None } else { Some(cleaned) }
-                                }
-                            };
-
-                            if let Some(cleaned) = cleaned {
-                                // Update transcript buffer and compute delta while holding the lock,
-                                // but do not call sink/log under that lock.
-                                let delta = {
-                                    let mut buffer = transcript_buffer.lock().await;
-                                    let before = buffer.clone();
-                                    dedup_chunk_overlap(&mut buffer, &cleaned);
-                                    build_redacted_delta(&before, &buffer)
-                                };
-
-                                if let Some(delta) = delta {
-                                    let has_effect =
-                                        delta.chars().any(|c| c == '\u{0008}' || !c.is_whitespace());
-                                    if has_effect {
-                                        if let Some(sink) = delta_callback.as_ref() {
-                                            sink.apply(&TranscriptDelta::from_raw(&delta));
-                                        }
-                                        if let Some(path) = stream_log_path.as_deref() {
-                                            let _ = append_to_stream_log(path, &delta);
-                                        }
-                                    }
-                                }
-                            } else {
-                                debug!("Stream postprocessor dropped chunk");
-                            }
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        error!("Chunk transcription failed: {}", e);
-                    }
-                    Err(e) => {
-                        error!("Transcription task join error: {}", e);
-                    }
-                }
-                in_flight = None;
-            }
-        }
-    }
-
-    if dropped_chunks > 0 {
-        warn!(
-            "Streaming worker dropped {} transcription chunk(s) due to backpressure (audio was still ingested)",
-            dropped_chunks
-        );
-    }
-
-    info!("Transcription worker finished");
-}
-
-#[deprecated(note = "Use transcription_session with EventSink instead")]
-pub(crate) async fn buffered_transcription_worker(
-    mut chunk_receiver: mpsc::Receiver<Vec<f32>>,
-    transcript_buffer: Arc<Mutex<String>>,
-    config: BufferedWorkerConfig,
-) {
-    let BufferedWorkerConfig {
-        sample_rate,
-        language,
-        delta_callback,
-        utterance_callback,
-        utterance_silence_sec,
-        vad_start_callback,
-        stream_log_path,
-    } = config;
-    info!("Buffered transcription worker started");
-
-    let correction_min_utterances = buffered_correction_min_utterances();
-    let correction_min_sec = buffered_correction_min_sec();
-    let mut session = if let Some(sec) = utterance_silence_sec {
-        SpeechSession::new_utterance_with_silence(sample_rate, sec)
-    } else {
-        SpeechSession::new_utterance(sample_rate)
-    };
-    let output_sample_rate = session.output_sample_rate();
-    let mut vad_start_emitted = false;
-    let mut pipeline = TranscriptionPipeline::new(language);
-    let emitter = Arc::new(Mutex::new(BufferedEmitter::new(
-        transcript_buffer.clone(),
-        delta_callback,
-        stream_log_path,
-    )));
-
-    let emitter_handle = tokio::spawn(emitter_tick_loop(emitter.clone()));
-
-    let mut correction_audio_buf: Vec<f32> = Vec::new();
-    let mut utterance_count: usize = 0;
-    let mut suffix_snapshot = String::new();
-    // Accumulate interim segments into an utterance-sized payload for the caller.
-    // This avoids "sending" on every interim emit (which exists purely for UX),
-    // while still allowing frequent Whisper passes for streaming preview.
-    let mut pending_utterance_text = String::new();
-
-    // Decouple audio ingestion (chunk_receiver + VAD/session.feed) from Whisper inference.
-    const MAX_PENDING_UTTERANCES: usize = 64;
-    let mut pending_utterances: VecDeque<UtteranceWorkItem> = VecDeque::new();
-    let mut dropped_utterances: u64 = 0;
-    let mut audio_closed = false;
-
-    // Phase 1 (streaming preview) — one utterance transcription in flight.
-    let mut utterance_in_flight: Option<tokio::task::JoinHandle<Result<RawTranscript>>> = None;
-    let mut utterance_active: Option<UtteranceWorkItem> = None;
-
-    // Phase 2 (buffered correction) — re-transcription in flight.
-    let mut correction_in_flight: Option<tokio::task::JoinHandle<Result<RawTranscript>>> = None;
-    let mut correction_expected_text: Option<String> = None;
-    let mut correction_suffix_snapshot: Option<String> = None;
-
-    loop {
-        // Start next utterance transcription as soon as possible.
-        // Correction is best-effort and must not stall preview cadence.
-        if utterance_in_flight.is_none() {
-            while let Some(item) = pending_utterances.pop_front() {
-                if should_drop_short_utterance(
-                    item.audio.len(),
-                    output_sample_rate,
-                    item.max_speech_prob,
-                ) {
-                    pipeline.hallucination_drops = pipeline.hallucination_drops.saturating_add(1);
-                    debug!(
-                        "Dropping short utterance in buffered worker: {:.3}s (prob {:.2})",
-                        item.audio.len() as f32 / output_sample_rate as f32,
-                        item.max_speech_prob
-                    );
-                    continue;
-                }
-                let lang = pipeline.language.clone();
-                let handle =
-                    spawn_utterance_transcription(item.audio.clone(), output_sample_rate, lang);
-                utterance_in_flight = Some(handle);
-                utterance_active = Some(item);
-                break;
-            }
-        }
-
-        // If audio is closed and there is no work left, finish.
-        if audio_closed
-            && pending_utterances.is_empty()
-            && utterance_in_flight.is_none()
-            && correction_in_flight.is_none()
-        {
-            break;
-        }
-
-        tokio::select! {
-            maybe_data = chunk_receiver.recv(), if !audio_closed => {
-                match maybe_data {
-                    Some(data) => {
-                        for event in session.feed(&data, sample_rate) {
-                            let (utterance, is_final, max_speech_prob) = match event {
-                                SpeechEvent::Utterance(u) => (u, false, session.segment_speech_prob()),
-                                SpeechEvent::UtteranceFinal(u) => {
-                                    (u, true, session.segment_speech_prob())
-                                }
-                                _ => continue,
-                            };
-
-                            if !vad_start_emitted {
-                                if let Some(callback) = &vad_start_callback {
-                                    callback();
-                                }
-                                vad_start_emitted = true;
-                            }
-
-                            if pending_utterances.len() >= MAX_PENDING_UTTERANCES {
-                                dropped_utterances = dropped_utterances.saturating_add(1);
-                                continue;
-                            }
-
-                            pending_utterances.push_back(UtteranceWorkItem {
-                                audio: utterance,
-                                is_final,
-                                max_speech_prob,
-                            });
-                        }
-                        if let Some(stats) = session.take_vad_error_stats() {
-                            warn!(
-                                "Buffered worker VAD degraded: predict_errors={} unavailable_frames={} (totals: predict_errors={} unavailable_frames={})",
-                                stats.predict_errors,
-                                stats.unavailable_frames,
-                                stats.total_predict_errors,
-                                stats.total_unavailable_frames
-                            );
-                        }
-                    }
-                    None => {
-                        audio_closed = true;
-                        if let Some(event) = session.flush() {
-                            let (utterance, is_final, max_speech_prob) = match event {
-                                SpeechEvent::Utterance(u) => {
-                                    (u, false, session.segment_speech_prob())
-                                }
-                                SpeechEvent::UtteranceFinal(u) => {
-                                    (u, true, session.segment_speech_prob())
-                                }
-                                _ => (Vec::new(), false, 0.0),
-                            };
-
-                            if !utterance.is_empty() {
-                                if pending_utterances.len() < MAX_PENDING_UTTERANCES {
-                                    pending_utterances.push_back(UtteranceWorkItem {
-                                        audio: utterance,
-                                        is_final,
-                                        max_speech_prob,
-                                    });
-                                } else {
-                                    dropped_utterances = dropped_utterances.saturating_add(1);
-                                }
-                            }
-                        }
-                        if let Some(stats) = session.take_vad_error_stats() {
-                            warn!(
-                                "Buffered worker VAD degraded: predict_errors={} unavailable_frames={} (totals: predict_errors={} unavailable_frames={})",
-                                stats.predict_errors,
-                                stats.unavailable_frames,
-                                stats.total_predict_errors,
-                                stats.total_unavailable_frames
-                            );
-                        }
-                    }
-                }
-            }
-            result = async {
-                correction_in_flight.as_mut().unwrap().await
-            }, if correction_in_flight.is_some() => {
-                let expected_text = correction_expected_text.take().unwrap_or_default();
-                let suffix_snapshot = correction_suffix_snapshot.take().unwrap_or_default();
-                match result {
-                    Ok(Ok(raw)) => {
-                        if expected_text != pending_utterance_text {
-                            debug!(
-                                expected_len = expected_text.chars().count(),
-                                current_len = pending_utterance_text.chars().count(),
-                                "Suppressing stale buffered correction (text advanced)"
-                            );
-                        } else {
-                            match postprocess_correction_with_snapshot(
-                                &mut pipeline,
-                                &raw.text,
-                                &suffix_snapshot,
-                            ) {
-                                Ok(cleaned) => {
-                                    let mut guard = emitter.lock().await;
-                                    guard.push_correction(cleaned);
-                                }
-                                Err(PostprocessDrop::Hallucination) => {
-                                    // Already counted in postprocess_with_reason.
-                                    debug!("Buffered correction dropped as hallucination");
-                                }
-                                Err(PostprocessDrop::OverlapEmpty) => {
-                                    // Already counted in postprocess_with_reason.
-                                    debug!("Buffered correction dropped as overlap-empty");
-                                }
-                                Err(PostprocessDrop::FilteredEmpty) => {
-                                    debug!("Buffered correction dropped as filtered-empty");
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        warn!("Re-transcription failed; keeping Phase 1 draft");
-                    }
-                }
-                correction_in_flight = None;
-            }
-            result = async {
-                utterance_in_flight.as_mut().unwrap().await
-            }, if utterance_in_flight.is_some() => {
-                let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem {
-                    audio: Vec::new(),
-                    is_final: false,
-                    max_speech_prob: 0.0,
-                });
-                match result {
-                    Ok(Ok(raw_transcript)) => {
-                        let raw_text = raw_transcript.text;
-                        if utterance_count == 0 && correction_audio_buf.is_empty() {
-                            suffix_snapshot = pipeline.last_suffix.clone();
-                        }
-
-                        if let Some(words_per_sec) =
-                            text_words_per_second(&raw_text, item.audio.len(), output_sample_rate)
-                                .filter(|wps| *wps > MAX_WORDS_PER_SEC)
-                        {
-                            pipeline.hallucination_drops =
-                                pipeline.hallucination_drops.saturating_add(1);
-                            debug!(
-                                "Dropping buffered transcript due to word-rate anomaly: {:.1} words/s",
-                                words_per_sec
-                            );
-                        } else if let Some(cleaned) = pipeline.postprocess(&raw_text) {
-                            {
-                                let mut guard = emitter.lock().await;
-                                guard.push_segment(cleaned.clone());
-                            }
-
-                            if !pending_utterance_text.is_empty() {
-                                pending_utterance_text.push(' ');
-                            }
-                            pending_utterance_text.push_str(cleaned.trim());
-                        }
-
-                        if item.is_final {
-                            if let Some(callback) = &utterance_callback {
-                                let payload = pending_utterance_text.trim();
-                                if !payload.is_empty() {
-                                    callback(payload.to_string());
-                                }
-                            }
-                            pending_utterance_text.clear();
-
-                            // Reset Phase 2 correction state on utterance boundary.
-                            correction_audio_buf.clear();
-                            utterance_count = 0;
-                        } else {
-                            // Phase 2 correction accumulation — only for non-final items.
-                            correction_audio_buf.extend_from_slice(&item.audio);
-                            utterance_count += 1;
-
-                            let audio_duration_s =
-                                correction_audio_buf.len() as f32 / output_sample_rate as f32;
-                            if utterance_count >= correction_min_utterances || audio_duration_s >= correction_min_sec {
-                                let audio = std::mem::take(&mut correction_audio_buf);
-                                let lang = pipeline.language.clone();
-                                correction_expected_text = Some(pending_utterance_text.clone());
-                                correction_suffix_snapshot = Some(suffix_snapshot.clone());
-                                utterance_count = 0;
-
-                                // Abort stale correction task to prevent task leak.
-                                if let Some(old) = correction_in_flight.take() {
-                                    old.abort();
-                                    debug!("Aborted stale buffered correction task");
-                                }
-                                debug!(
-                                    baseline_len = pending_utterance_text.chars().count(),
-                                    audio_sec = audio_duration_s,
-                                    "BOUNDARY buffered_correction_scheduled"
-                                );
-                                correction_in_flight = Some(spawn_utterance_transcription(
-                                    audio,
-                                    output_sample_rate,
-                                    lang,
-                                ));
-                            }
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        error!("Buffered transcription failed: {}", e);
-                    }
-                    Err(e) => {
-                        error!("Buffered transcription task join error: {}", e);
-                    }
-                }
-
-                utterance_in_flight = None;
-            }
-        }
-    }
-
-    // On recorder stop, flush any accumulated utterance payload even if the last slice
-    // was fully deduplicated (common when we emitted frequent interim segments).
-    if let Some(callback) = &utterance_callback {
-        let payload = pending_utterance_text.trim();
-        if !payload.is_empty() {
-            callback(payload.to_string());
-        }
-    }
-
-    if !vad_start_emitted && let Some(callback) = &vad_start_callback {
-        callback();
-    }
-
-    {
-        let mut guard = emitter.lock().await;
-        guard.finish();
-        info!(
-            "Stream Session Stats: Hallucinations dropped: {}, Overlaps stripped: {}, Corrections applied: {}",
-            pipeline.hallucination_drops, pipeline.overlap_strips, guard.corrections_applied
-        );
-    }
-
-    if let Err(e) = emitter_handle.await {
-        error!("Buffered emitter task failed: {}", e);
-    }
-
-    if dropped_utterances > 0 {
-        warn!(
-            "Buffered worker dropped {} utterance(s) due to backpressure (audio was still ingested)",
-            dropped_utterances
-        );
-    }
-
-    info!("Buffered transcription worker finished");
-}
-
 #[derive(Clone, Debug)]
 struct UtteranceWorkItem {
     audio: Vec<f32>,
+    inference_audio: Vec<f32>,
     is_final: bool,
     max_speech_prob: f32,
 }
 
-#[allow(dead_code)]
-fn spawn_chunk_transcription(
-    samples: Vec<f32>,
-    sample_rate: u32,
-    language: Option<String>,
-) -> tokio::task::JoinHandle<Result<String>> {
-    tokio::task::spawn_blocking(move || {
-        crate::stt::transcribe_chunk(&samples, sample_rate, language.as_deref())
-    })
-}
+// ── Offline/test: batch streaming transcription ──────────────────────────────
 
-fn spawn_utterance_transcription(
-    samples: Vec<f32>,
-    sample_rate: u32,
-    language: Option<String>,
-) -> tokio::task::JoinHandle<Result<RawTranscript>> {
-    tokio::task::spawn_blocking(move || {
-        crate::stt::transcribe_long_with_segments(&samples, sample_rate, language.as_deref())
-    })
-}
-
-// ── Public: batch streaming transcription ────────────────────────────────────
-
+/// Batch helper for offline evaluation on in-memory samples.
+///
+/// Not part of the runtime session path.
+#[cfg(any(test, feature = "offline_eval"))]
 pub fn transcribe_streaming_samples(
     samples: &[f32],
     sample_rate: u32,
@@ -1701,7 +1211,7 @@ pub fn transcribe_streaming_samples(
     );
 
     // Optional: apply lexicon post-processing to streaming output.
-    // Disabled by default to preserve legacy behavior.
+    // Disabled by default; enable explicitly for offline-eval comparisons.
     if env_bool_default("CODESCRIBE_STREAM_LEXICON", false) && !out.trim().is_empty() {
         let mut lex = StreamPostProcessor::new();
         if let Some(cleaned) = lex.process(&out) {
@@ -1712,11 +1222,49 @@ pub fn transcribe_streaming_samples(
     Ok(out)
 }
 
-/// Public helper: run the buffered (overlay) pipeline on in-memory samples.
+struct SessionTranscriptCollector {
+    transcript: std::sync::Mutex<String>,
+}
+
+impl SessionTranscriptCollector {
+    fn new() -> Self {
+        Self {
+            transcript: std::sync::Mutex::new(String::new()),
+        }
+    }
+
+    fn append_utterance(&self, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let mut transcript = self.transcript.lock().unwrap_or_else(|e| e.into_inner());
+        if !transcript.is_empty() {
+            transcript.push(' ');
+        }
+        transcript.push_str(trimmed);
+    }
+
+    fn transcript(&self) -> String {
+        self.transcript
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+impl EventSink for SessionTranscriptCollector {
+    fn on_event(&self, event: &EngineEvent) {
+        if let EngineEvent::UtteranceFinal { text, .. } = event {
+            self.append_utterance(text);
+        }
+    }
+}
+
+/// Public helper: run the event session pipeline on in-memory samples.
 ///
-/// This mirrors the live overlay behavior (VAD → utterance → buffered emitter),
-/// but runs on a finite sample buffer for test/CLI comparisons.
-#[allow(deprecated)]
+/// Uses the same runtime path as live recording (`transcription_session`) and
+/// collects utterance finals into a session transcript for test/CLI comparisons.
 pub async fn transcribe_buffered_samples(
     samples: &[f32],
     sample_rate: u32,
@@ -1730,34 +1278,31 @@ pub async fn transcribe_buffered_samples(
     let chunk_size = ((sample_rate as f32) * 0.1).round().max(1.0) as usize;
 
     let (tx, rx) = mpsc::channel::<Vec<f32>>(8);
-    let transcript_buffer = Arc::new(Mutex::new(String::new()));
-
-    let worker = tokio::spawn(buffered_transcription_worker(
+    let collector = Arc::new(SessionTranscriptCollector::new());
+    let event_sink: Arc<dyn EventSink> = collector.clone();
+    let session = tokio::spawn(transcription_session(
         rx,
-        transcript_buffer.clone(),
-        BufferedWorkerConfig {
+        event_sink,
+        SessionConfig {
             sample_rate,
             language,
-            delta_callback: None,
-            utterance_callback: None,
-            utterance_silence_sec: None,
-            vad_start_callback: None,
             stream_log_path: None,
+            utterance_silence_sec: None,
         },
     ));
 
     for chunk in samples.chunks(chunk_size) {
         if tx.send(chunk.to_vec()).await.is_err() {
-            return Err(anyhow!("Buffered transcription worker dropped channel"));
+            return Err(anyhow!("Transcription session dropped channel"));
         }
     }
     drop(tx);
 
-    worker
+    session
         .await
-        .map_err(|e| anyhow!("Buffered transcription worker join error: {}", e))?;
+        .map_err(|e| anyhow!("Transcription session join error: {}", e))?;
 
-    Ok(transcript_buffer.lock().await.clone())
+    Ok(collector.transcript())
 }
 
 // ── Delta helpers ────────────────────────────────────────────────────────────
@@ -1821,6 +1366,7 @@ pub(crate) fn env_bool(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(any(test, feature = "offline_eval"))]
 pub(crate) fn env_bool_default(key: &str, default: bool) -> bool {
     std::env::var(key)
         .ok()
@@ -1861,10 +1407,12 @@ fn buffered_correction_prefix_ratio() -> f64 {
     env_f32("CODESCRIBE_BUFFERED_CORRECTION_PREFIX", 0.60).clamp(0.4, 0.9) as f64
 }
 
+#[cfg(any(test, feature = "offline_eval"))]
 pub(crate) fn stream_chunk_duration_sec() -> f32 {
     env_f32("CODESCRIBE_STREAM_CHUNK_SEC", DEFAULT_CHUNK_DURATION_SEC).clamp(0.5, 30.0)
 }
 
+#[cfg(any(test, feature = "offline_eval"))]
 pub(crate) fn stream_overlap_sec(chunk_duration_sec: f32) -> f32 {
     let ratio = env_f32("CODESCRIBE_STREAM_OVERLAP_RATIO", DEFAULT_OVERLAP_RATIO).clamp(0.05, 0.8);
     (chunk_duration_sec * ratio).min(chunk_duration_sec * 0.8)
@@ -1931,14 +1479,14 @@ mod tests {
 
     #[test]
     fn test_suffix_preserved_when_postprocess_filters() {
-        // Simulates the re-transcription scenario: if postprocess returns None
+        // Simulates the re-transcription scenario: if postprocess drops content
         // (e.g. hallucination), last_suffix must stay at the pre-snapshot value.
         let mut pipeline = TranscriptionPipeline::new(None);
         pipeline.last_suffix = "original suffix".to_string();
 
-        // "Thank you" is a hallucination — postprocess returns None
-        let result = pipeline.postprocess("Thank you");
-        assert!(result.is_none());
+        // "Thank you" is a hallucination — postprocess returns a drop reason.
+        let result = pipeline.postprocess_with_reason("Thank you");
+        assert!(matches!(result, Err(PostprocessDrop::Hallucination)));
         // last_suffix unchanged (strip_overlap was never reached)
         assert_eq!(pipeline.last_suffix, "original suffix");
     }
@@ -1948,8 +1496,8 @@ mod tests {
         let mut pipeline = TranscriptionPipeline::new(None);
         pipeline.last_suffix = "old tail".to_string();
 
-        let result = pipeline.postprocess("This is a brand new sentence.");
-        assert!(result.is_some());
+        let result = pipeline.postprocess_with_reason("This is a brand new sentence.");
+        assert!(result.is_ok());
         // last_suffix should now reflect the new text's suffix
         assert_ne!(pipeline.last_suffix, "old tail");
         assert!(pipeline.last_suffix.contains("sentence"));

@@ -37,6 +37,7 @@ const SIDEBAR_WIDTH: f64 = 204.0;
 const SETTINGS_WINDOW_WIDTH: f64 = 760.0;
 const SETTINGS_WINDOW_HEIGHT: f64 = 660.0;
 const SETTINGS_TOPBAR_HEIGHT: f64 = 54.0;
+const SETTINGS_MAX_OPACITY: f64 = 0.80;
 const SETTINGS_CONTENT_INSET_X: f64 = 20.0;
 const SETTINGS_CONTENT_INSET_Y: f64 = 12.0;
 const TAB_SETUP: usize = 0;
@@ -343,6 +344,8 @@ fn show_bootstrap_overlay_impl() {
         // fullscreen transition crashes with our custom content setup.
         let window = create_floating_window(frame, "Settings", true, false);
         let _: () = msg_send![window, setOpaque: false];
+        // Keep Settings less translucent than overlay windows for better observability.
+        let _: () = msg_send![window, setAlphaValue: SETTINGS_MAX_OPACITY];
         let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
         // Disallow fullscreen/zoom to avoid triggering AppKit fullscreen snapshots that can crash.
         let _: () =
@@ -607,10 +610,11 @@ unsafe fn build_settings_ui(
         );
         let topbar_bg = create_glass_effect_view_with(
             topbar_frame,
-            NSVisualEffectMaterial::Titlebar,
+            NSVisualEffectMaterial::HUDWindow,
             objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
             objc2_app_kit::NSVisualEffectState::Active,
         );
+        let _: () = msg_send![topbar_bg, setAlphaValue: SETTINGS_MAX_OPACITY];
         let _: () = msg_send![
             topbar_bg,
             setAutoresizingMask: 2_isize | 8_isize // Width | MinYMargin
@@ -704,6 +708,7 @@ unsafe fn build_settings_ui(
             objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
             objc2_app_kit::NSVisualEffectState::Active,
         );
+        let _: () = msg_send![sidebar_bg, setAlphaValue: SETTINGS_MAX_OPACITY];
         let _: () = msg_send![
             sidebar_bg,
             setAutoresizingMask: 16_isize | 2_isize // Height | MinXMargin (fixed left)
@@ -721,6 +726,7 @@ unsafe fn build_settings_ui(
             objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
             objc2_app_kit::NSVisualEffectState::Active,
         );
+        let _: () = msg_send![content_bg, setAlphaValue: SETTINGS_MAX_OPACITY];
         let _: () = msg_send![
             content_bg,
             setAutoresizingMask: 16_isize | 2_isize // Height | Width

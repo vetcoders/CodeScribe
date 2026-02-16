@@ -2,7 +2,7 @@
 //!
 //! These tests are ignored by default because they require the Silero VAD model.
 
-use codescribe_core::audio::streaming_recorder::transcribe_streaming_samples;
+use codescribe_core::pipeline::streaming::transcribe_streaming_samples;
 use codescribe_core::vad;
 
 fn generate_silence(duration_sec: f32, sample_rate: u32) -> Vec<f32> {
