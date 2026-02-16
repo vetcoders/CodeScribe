@@ -1247,6 +1247,15 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    fn markdown_table_detection_handles_common_patterns() {
+        let table = "| Name | Value |\n| ---- | ----- |\n| A | 1 |";
+        assert!(looks_like_markdown_table(table));
+
+        let plain = "line one\nline two\nline three";
+        assert!(!looks_like_markdown_table(plain));
+    }
+
+    #[test]
     fn clamp_overlay_position_keeps_window_inside_frame() {
         let visible = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(100.0, 100.0));
         let (x, y) = clamp_overlay_position(visible, 60.0, 60.0, 10.0, 1000.0, -1000.0);
@@ -1525,7 +1534,31 @@ pub enum BubbleRole {
     System,
 }
 
-fn markdown_options_with_base_font(font: Id) -> Option<Id> {
+fn is_markdown_table_separator_line(line: &str) -> bool {
+    let trimmed = line.trim().trim_matches('|').trim();
+    if trimmed.is_empty() || !trimmed.contains('-') {
+        return false;
+    }
+    trimmed.split('|').all(|cell| {
+        let cell = cell.trim();
+        !cell.is_empty() && cell.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
+    })
+}
+
+fn looks_like_markdown_table(text: &str) -> bool {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines.windows(2).any(|pair| {
+        let header = pair[0];
+        let sep = pair[1];
+        header.contains('|') && is_markdown_table_separator_line(sep)
+    })
+}
+
+fn markdown_options_with_base_font(text: &str, font: Id) -> Option<Id> {
     unsafe {
         let options_cls = Class::get("NSAttributedStringMarkdownParsingOptions")?;
         let options: Id = msg_send![options_cls, alloc];
@@ -1537,15 +1570,18 @@ fn markdown_options_with_base_font(font: Id) -> Option<Id> {
         if responds_base && !font.is_null() {
             let _: () = msg_send![options, setBaseFont: font];
         }
-        // Use inlineOnlyPreservingWhitespace so that newline characters are kept
-        // as literal line breaks instead of being collapsed into spaces by the
-        // full CommonMark parser.  Inline formatting (**bold**, `code`, etc.) is
-        // still applied.
+        // Use full markdown mode when table syntax is detected; otherwise keep the
+        // inline-preserving mode to avoid whitespace regressions in regular bubbles.
         let responds_syntax: bool =
             msg_send![options, respondsToSelector: sel!(setInterpretedSyntax:)];
         if responds_syntax {
             // 0 = .full, 1 = .inlineOnly, 2 = .inlineOnlyPreservingWhitespace
-            let _: () = msg_send![options, setInterpretedSyntax: 2_isize];
+            let syntax: isize = if looks_like_markdown_table(text) {
+                0
+            } else {
+                2
+            };
+            let _: () = msg_send![options, setInterpretedSyntax: syntax];
         }
         Some(options)
     }
@@ -1670,7 +1706,8 @@ unsafe fn normalize_attributed_string_fonts(attr: Id, base_font: Id) -> Id {
 unsafe fn markdown_attributed_string(text: &str, font: Id) -> Option<Id> {
     let ns_attr = Class::get("NSAttributedString")?;
     let text_ns = ns_string(text);
-    let options = markdown_options_with_base_font(font).unwrap_or(std::ptr::null_mut::<Object>());
+    let options =
+        markdown_options_with_base_font(text, font).unwrap_or(std::ptr::null_mut::<Object>());
 
     // initWithMarkdown: expects NSData, not NSString
     let utf8_encoding: usize = 4; // NSUTF8StringEncoding

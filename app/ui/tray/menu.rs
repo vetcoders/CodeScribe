@@ -2,7 +2,7 @@
 //!
 //! Menu structure (flat):
 //! - Status line (dynamic)
-//! - Show Chat Overlay / Open history / Copy last
+//! - Show Agent / Open history / Copy last
 //! - Hotkeys ▸
 //! - Prompts ▸ / Notes ▸ / Diagnostics ▸
 //! - Quick Start / Help / About
@@ -44,8 +44,8 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
         *cell.borrow_mut() = Some(status_item);
     });
 
-    // 2. Show Chat Overlay
-    let show_overlay_item = MenuItem::new("Show Chat Overlay", true, None);
+    // 2. Show Agent
+    let show_overlay_item = MenuItem::new("Show Agent", true, None);
     let show_overlay_id = show_overlay_item.id().clone();
     menu.append(&show_overlay_item)?;
 
@@ -277,7 +277,7 @@ mod tests {
     fn menu_labels_for_test() -> Vec<String> {
         vec![
             "Status: Idle".to_string(),
-            "Show Chat Overlay".to_string(),
+            "Show Agent".to_string(),
             "Open history...".to_string(),
             "Copy last transcript".to_string(),
             "Settings".to_string(),
@@ -289,9 +289,9 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn tray_menu_includes_show_chat_overlay() {
+    fn tray_menu_includes_show_agent() {
         let labels = menu_labels_for_test();
-        let found = labels.iter().any(|label| label == "Show Chat Overlay");
-        assert!(found, "Show Chat Overlay menu item missing");
+        let found = labels.iter().any(|label| label == "Show Agent");
+        assert!(found, "Show Agent menu item missing");
     }
 }

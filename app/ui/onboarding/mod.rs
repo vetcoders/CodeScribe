@@ -33,9 +33,11 @@ pub type Id = *mut Object;
 const WINDOW_WIDTH: f64 = 720.0;
 const WINDOW_HEIGHT: f64 = 540.0;
 const FULL_DISK_STEP_INDEX: usize = 5;
-const STATUS_NOT_DETERMINED: &str = "\u{25CB} Not Determined";
+const STATUS_NOT_DETERMINED: &str = "\u{25CB} Not Enabled Yet";
 const STATUS_GRANTED: &str = "\u{25CF} Granted";
 const STATUS_DENIED: &str = "\u{2715} Denied";
+const STATUS_RECHECK_READY: &str = "\u{25CB} Ready To Recheck";
+const STATUS_RECHECK_PENDING: &str = "\u{2715} Not Granted Yet";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LanguageChoice {
@@ -936,7 +938,16 @@ fn build_onboarding_ui(root: Id, action_handler: Id) -> UiRefs {
 }
 
 fn render_current_step() {
-    let (step_index, step, language, hotkey_mode, api_key_configured, permissions, ui) = {
+    let (
+        step_index,
+        step,
+        language,
+        hotkey_mode,
+        api_key_configured,
+        permissions,
+        requested_permissions,
+        ui,
+    ) = {
         let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let step = step_for_index(state.step_index);
         match step {
@@ -958,6 +969,7 @@ fn render_current_step() {
             state.hotkey_mode,
             state.api_key_configured,
             state.permission_states,
+            state.requested_permissions,
             state.ui,
         )
     };
@@ -992,33 +1004,36 @@ fn render_current_step() {
             set_button_title_if_present(ui.primary_button, "Get Started");
         }
         WizardStep::Permission(kind) => {
-            let status = permissions[kind.index()];
+            let idx = kind.index();
+            let status = permissions[idx];
+            let requested = requested_permissions[idx];
             set_text_if_present(ui.icon_label, kind.icon());
             set_text_if_present(ui.title_label, kind.title());
             set_text_if_present(ui.description_label, kind.reason());
 
             set_hidden_if_present(ui.status_label, false);
-            set_text_if_present(ui.status_label, permission_status_text(status));
+            set_text_if_present(
+                ui.status_label,
+                permission_status_text(kind, status, requested),
+            );
             set_label_color_if_present(ui.status_label, permission_status_color(status));
 
             if status == PermissionUiStatus::Granted {
                 set_button_title_if_present(ui.primary_button, "Continue");
                 maybe_schedule_auto_advance(step_index);
             } else if kind == PermissionKind::FullDiskAccess {
-                set_button_title_if_present(ui.primary_button, "Open Settings");
+                set_button_title_if_present(
+                    ui.primary_button,
+                    if requested {
+                        "Recheck"
+                    } else {
+                        "Open Settings"
+                    },
+                );
                 set_hidden_if_present(ui.skip_button, false);
                 set_button_title_if_present(
                     ui.skip_button,
-                    if status == PermissionUiStatus::Denied {
-                        "Continue Anyway"
-                    } else {
-                        "Skip"
-                    },
-                );
-                set_hidden_if_present(ui.instruction_label, false);
-                set_text_if_present(
-                    ui.instruction_label,
-                    "Find CodeScribe in the list and toggle it ON. This step is optional.",
+                    if requested { "Continue Anyway" } else { "Skip" },
                 );
             } else {
                 set_button_title_if_present(
@@ -1029,13 +1044,11 @@ fn render_current_step() {
                         "Grant Access"
                     },
                 );
-                if status == PermissionUiStatus::Denied {
-                    set_hidden_if_present(ui.instruction_label, false);
-                    set_text_if_present(
-                        ui.instruction_label,
-                        "This permission is required to continue onboarding. If status does not refresh after enabling it in System Settings, restart CodeScribe.",
-                    );
-                }
+            }
+
+            if let Some(text) = permission_instruction_text(kind, status, requested) {
+                set_hidden_if_present(ui.instruction_label, false);
+                set_text_if_present(ui.instruction_label, text);
             }
         }
         WizardStep::Language => {
@@ -1138,6 +1151,7 @@ fn handle_skip_action() {
 fn handle_permission_primary(kind: PermissionKind) {
     let idx = kind.index();
     let step_to_persist;
+    let already_requested;
 
     {
         let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1147,8 +1161,22 @@ fn handle_permission_primary(kind: PermissionKind) {
             return;
         }
 
+        already_requested = state.requested_permissions[idx];
         state.requested_permissions[idx] = true;
         step_to_persist = state.step_index;
+    }
+
+    if kind == PermissionKind::FullDiskAccess && already_requested {
+        start_full_disk_polling();
+
+        {
+            let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let requested = state.requested_permissions[idx];
+            state.permission_states[idx] = check_permission_state(kind, requested);
+        }
+
+        render_current_step();
+        return;
     }
 
     // Persist checkpoint before asking TCC in case macOS forces an app restart.
@@ -1601,29 +1629,33 @@ fn refresh_all_permission_states_locked(state: &mut OnboardingState) {
 fn check_permission_state(kind: PermissionKind, requested: bool) -> PermissionUiStatus {
     match kind {
         PermissionKind::Microphone => {
-            map_permission_status(permissions::check_microphone(), requested)
+            map_permission_status(kind, permissions::check_microphone(), requested)
         }
         PermissionKind::Accessibility => {
-            map_permission_status(permissions::check_accessibility(), requested)
+            map_permission_status(kind, permissions::check_accessibility(), requested)
         }
         PermissionKind::InputMonitoring => {
-            map_permission_status(permissions::check_input_monitoring(), requested)
+            map_permission_status(kind, permissions::check_input_monitoring(), requested)
         }
         PermissionKind::ScreenRecording => {
-            map_permission_status(permissions::check_screen_recording(), requested)
+            map_permission_status(kind, permissions::check_screen_recording(), requested)
         }
         PermissionKind::FullDiskAccess => {
-            map_permission_status(permissions::check_full_disk_access(), requested)
+            map_permission_status(kind, permissions::check_full_disk_access(), requested)
         }
     }
 }
 
-fn map_permission_status(status: PermissionStatus, requested: bool) -> PermissionUiStatus {
+fn map_permission_status(
+    kind: PermissionKind,
+    status: PermissionStatus,
+    requested: bool,
+) -> PermissionUiStatus {
     match status {
         PermissionStatus::Granted => PermissionUiStatus::Granted,
         PermissionStatus::Denied => PermissionUiStatus::Denied,
         PermissionStatus::NotDetermined => {
-            if requested {
+            if requested && kind != PermissionKind::FullDiskAccess {
                 PermissionUiStatus::Denied
             } else {
                 PermissionUiStatus::NotDetermined
@@ -1838,11 +1870,52 @@ fn update_summary_view(
     );
 }
 
-fn permission_status_text(status: PermissionUiStatus) -> &'static str {
-    match status {
-        PermissionUiStatus::NotDetermined => STATUS_NOT_DETERMINED,
-        PermissionUiStatus::Granted => STATUS_GRANTED,
-        PermissionUiStatus::Denied => STATUS_DENIED,
+fn permission_instruction_text(
+    kind: PermissionKind,
+    status: PermissionUiStatus,
+    requested: bool,
+) -> Option<&'static str> {
+    match kind {
+        PermissionKind::FullDiskAccess => {
+            if status == PermissionUiStatus::Granted {
+                None
+            } else if requested {
+                Some(
+                    "After enabling CodeScribe in System Settings > Privacy & Security > Full Disk Access, return here and click Recheck. Status also refreshes automatically every few seconds.",
+                )
+            } else {
+                Some(
+                    "Click Open Settings, enable CodeScribe in Full Disk Access, then return here.",
+                )
+            }
+        }
+        _ => {
+            if status == PermissionUiStatus::Denied {
+                Some(
+                    "This permission is required to continue onboarding. Enable it in System Settings, then click Try Again.",
+                )
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn permission_status_text(
+    kind: PermissionKind,
+    status: PermissionUiStatus,
+    requested: bool,
+) -> &'static str {
+    match (kind, status, requested) {
+        (PermissionKind::FullDiskAccess, PermissionUiStatus::NotDetermined, true) => {
+            STATUS_RECHECK_READY
+        }
+        (PermissionKind::FullDiskAccess, PermissionUiStatus::Denied, true) => {
+            STATUS_RECHECK_PENDING
+        }
+        (_, PermissionUiStatus::NotDetermined, _) => STATUS_NOT_DETERMINED,
+        (_, PermissionUiStatus::Granted, _) => STATUS_GRANTED,
+        (_, PermissionUiStatus::Denied, _) => STATUS_DENIED,
     }
 }
 

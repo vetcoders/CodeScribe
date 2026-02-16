@@ -665,7 +665,7 @@ unsafe fn build_settings_ui(
         );
         let _ = set_button_symbol(overlay_btn, "bubble.left.and.bubble.right");
         style_toolbar_icon_button(overlay_btn);
-        set_tooltip(overlay_btn, "Show chat overlay");
+        set_tooltip(overlay_btn, "Show agent");
         button_set_action(overlay_btn, action_handler, sel!(onShowOverlay:));
         add_subview(topbar_controls, overlay_btn);
 
@@ -847,7 +847,7 @@ unsafe fn build_settings_ui(
         // ── Quick-start steps ────────────────────────────────────────
         let step_defs: [(&str, objc::runtime::Sel, &str); 3] = [
             ("1) Test mic", sel!(onTestMic:), "Test"),
-            ("2) Show chat overlay", sel!(onShowOverlay:), "Show"),
+            ("2) Show agent", sel!(onShowOverlay:), "Show"),
             ("3) Press hotkey", sel!(onHotkeyDone:), "Done"),
         ];
         let mut step_status_labels: [Option<usize>; 3] = [None; 3];

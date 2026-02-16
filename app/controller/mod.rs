@@ -1999,15 +1999,14 @@ impl RecordingController {
         }
 
         // Optional "final pass" local STT:
-        // Streaming can be great for live UX, but it can also produce duplicates/truncations
-        // depending on chunking/VAD. For final output (paste/save), prefer transcribing the
-        // full recorded audio file when available.
+        // Streaming is the source of truth for live UX and final output by default.
+        // Enable this only when explicitly requested for diagnostics/experiments.
         //
-        // Default: enabled (set CODESCRIBE_LOCAL_STT_FINAL_PASS=0 to disable).
+        // Default: disabled (set CODESCRIBE_LOCAL_STT_FINAL_PASS=1 to enable).
         let local_final_pass_enabled = std::env::var("CODESCRIBE_LOCAL_STT_FINAL_PASS")
             .ok()
-            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"))
-            .unwrap_or(true);
+            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
 
         if use_local_stt && local_final_pass_enabled {
             if let Some(path) = &audio_path {
@@ -2015,7 +2014,7 @@ impl RecordingController {
                 let lang = language_opt.map(str::to_string);
 
                 if chat_active {
-                    crate::voice_chat_ui::update_voice_chat_status("Finalizing…");
+                    crate::voice_chat_ui::update_voice_chat_status("Finalizing… (20%)");
                 }
 
                 info!(
@@ -2223,7 +2222,7 @@ impl RecordingController {
                 }
                 crate::voice_chat_ui::show_agent_tab();
                 crate::voice_chat_ui::set_voice_chat_sending(true);
-                crate::voice_chat_ui::update_voice_chat_status("Thinking...");
+                crate::voice_chat_ui::update_voice_chat_status("Thinking… (35%)");
             }
 
             let mut ctx = self
@@ -2284,18 +2283,36 @@ impl RecordingController {
 
             // Callback for streaming AI response to overlay (assistant channel only).
             let streamed_any_delta = Arc::new(AtomicBool::new(false));
+            let reasoning_stage_seen = Arc::new(AtomicBool::new(false));
+            let response_stage_seen = Arc::new(AtomicBool::new(false));
             let delta_callback = if use_streaming && chat_active {
                 let needs_prefix = append_mode && assistant_needs_separator;
                 let prefix_sent = Arc::new(AtomicBool::new(false));
                 let assistant_has_text = self.toggle_assistant_has_text.clone();
                 let streamed_any_delta = Arc::clone(&streamed_any_delta);
+                let response_stage_seen = Arc::clone(&response_stage_seen);
                 Some(Arc::new(move |text: &str| {
                     if needs_prefix && !prefix_sent.swap(true, Ordering::SeqCst) {
                         crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
                     }
+                    if !text.trim().is_empty() && !response_stage_seen.swap(true, Ordering::SeqCst)
+                    {
+                        crate::voice_chat_ui::update_voice_chat_status("Answering… (80%)");
+                    }
                     streamed_any_delta.store(true, Ordering::SeqCst);
                     crate::voice_chat_ui::append_voice_chat_assistant_delta(text);
                     assistant_has_text.store(true, Ordering::SeqCst);
+                }) as Arc<dyn Fn(&str) + Send + Sync>)
+            } else {
+                None
+            };
+            let reasoning_callback = if use_streaming && chat_active {
+                let reasoning_stage_seen = Arc::clone(&reasoning_stage_seen);
+                Some(Arc::new(move |text: &str| {
+                    if !text.trim().is_empty() && !reasoning_stage_seen.swap(true, Ordering::SeqCst)
+                    {
+                        crate::voice_chat_ui::update_voice_chat_status("Reasoning… (60%)");
+                    }
                 }) as Arc<dyn Fn(&str) + Send + Sync>)
             } else {
                 None
@@ -2306,7 +2323,7 @@ impl RecordingController {
                 lang_str.as_deref(),
                 true,
                 delta_callback,
-                None,
+                reasoning_callback,
             )
             .await;
             let kind = match result.status {
@@ -2315,7 +2332,7 @@ impl RecordingController {
                         let streamed = use_streaming && streamed_any_delta.load(Ordering::SeqCst);
                         // Display AI response in overlay
                         crate::show_voice_chat_overlay();
-                        crate::voice_chat_ui::update_voice_chat_status("AI Response:");
+                        crate::voice_chat_ui::update_voice_chat_status("AI Response (100%)");
                         if streamed {
                             crate::voice_chat_ui::finalize_voice_chat_assistant_message();
                         } else if append_mode {

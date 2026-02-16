@@ -267,7 +267,11 @@ extern "C" fn on_mouse_entered(_this: &Object, _cmd: Sel, _sender: Id) {
 extern "C" fn on_mouse_exited(_this: &Object, _cmd: Sel, _sender: Id) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.hover_active = false;
-    set_action_buttons_visible(&state, false);
+    if state.decision_mode {
+        set_action_buttons_visible(&state, true);
+    } else {
+        set_action_buttons_visible(&state, false);
+    }
 }
 
 fn set_action_buttons_visible(state: &TranscriptionOverlayState, visible: bool) {
@@ -1231,8 +1235,7 @@ pub fn enter_decision_mode() {
     Queue::main().exec_async(|| {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.decision_mode = true;
-        let show = state.hover_active;
-        set_action_buttons_visible(&state, show);
+        set_action_buttons_visible(&state, true);
         set_recording_button_visible(&state, false);
         // Clear recording indicator, restore white text color
         set_recording_status(&state, false);
