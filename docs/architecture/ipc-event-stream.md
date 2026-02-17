@@ -35,6 +35,7 @@ Legacy runtime paths are intentionally unsupported:
 - Socket: Unix domain socket at `~/.codescribe/ipc/codescribe.sock`
 - Framing: NDJSON (`\n`-delimited JSON objects)
 - Subscription lifecycle:
+
 1. Client sends `IpcCommand::Subscribe`
 2. Server responds with `IpcResponse::Ok`
 3. Server pushes `IpcResponse::Event(...)` lines live
@@ -109,10 +110,10 @@ Engine events are tagged with `type`:
     "utterance_id": 12,
     "text": "hello world again",
     "start_ts": 3.24,
-    "end_ts": 5.10,
+    "end_ts": 5.1,
     "segments": [
-      { "text": "hello world", "start_ts": 3.24, "end_ts": 4.30 },
-      { "text": "again", "start_ts": 4.30, "end_ts": 5.10 }
+      { "text": "hello world", "start_ts": 3.24, "end_ts": 4.3 },
+      { "text": "again", "start_ts": 4.3, "end_ts": 5.1 }
     ]
   }
 }

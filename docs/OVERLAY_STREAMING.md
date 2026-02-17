@@ -132,11 +132,11 @@ When recording stops but VAD never fired `Start` (e.g. speech was too quiet or s
 
 ## Stage 3: Whisper Transcription
 
-| Component                  | File                           | Details                           |
-| -------------------------- | ------------------------------ | --------------------------------- |
-| **WhisperEngine**          | `core/stt/whisper/engine.rs`   | Candle + Metal GPU, singleton     |
-| **transcription_session**  | `core/pipeline/streaming.rs`   | Unified pipeline (event-based)    |
-| **StreamPostProcessor**    | `core/pipeline/stream_postprocess.rs`   | Lexicon + semantic gate + cleanup |
+| Component                 | File                                  | Details                           |
+| ------------------------- | ------------------------------------- | --------------------------------- |
+| **WhisperEngine**         | `core/stt/whisper/engine.rs`          | Candle + Metal GPU, singleton     |
+| **transcription_session** | `core/pipeline/streaming.rs`          | Unified pipeline (event-based)    |
+| **StreamPostProcessor**   | `core/pipeline/stream_postprocess.rs` | Lexicon + semantic gate + cleanup |
 
 ### Streaming transcription
 
@@ -156,28 +156,28 @@ Whisper uses `no_repeat_ngram_size = 5` to suppress the model's tendency to repe
 
 ## Stage 4: Engine Events (Intent, not Presentation)
 
-| Component              | File                         | Details                    |
-| ---------------------- | ---------------------------- | -------------------------- |
-| **EngineEvent**        | `core/pipeline/contracts.rs` | Semantic event enum        |
-| **EventSink**          | `core/pipeline/contracts.rs` | Trait for event consumers  |
-| **DeltaSinkAdapter**   | `core/pipeline/sinks.rs`     | EventSink → DeltaSink bridge |
-| **TranscriptDelta**    | `core/pipeline/contracts.rs` | Backspace-encoded delta    |
+| Component            | File                         | Details                      |
+| -------------------- | ---------------------------- | ---------------------------- |
+| **EngineEvent**      | `core/pipeline/contracts.rs` | Semantic event enum          |
+| **EventSink**        | `core/pipeline/contracts.rs` | Trait for event consumers    |
+| **DeltaSinkAdapter** | `core/pipeline/sinks.rs`     | EventSink → DeltaSink bridge |
+| **TranscriptDelta**  | `core/pipeline/contracts.rs` | Backspace-encoded delta      |
 
 ### Event types
 
 The engine emits **semantic events** — it communicates what happened, not how to display it:
 
-| Event              | Meaning                                                    |
-| ------------------ | ---------------------------------------------------------- |
-| `VadStart`         | VAD detected speech start (with `speech_prob` and `ts_ms`) |
-| `VadEnd`           | VAD detected speech end                                    |
-| `VadFallback`      | Flush path used (VAD never fired Start but speech detected)|
-| `Preview`          | Latest transcription of current utterance (full text)      |
-| `Correction`       | Re-transcription improved previous output                  |
-| `UtteranceFinal`   | Complete utterance — VAD-bounded or flush                  |
-| `Drop`             | Content dropped (hallucination, semantic gate)             |
-| `Stats`            | Session-level statistics (emitted on stop/flush)           |
-| `Warning`          | Recoverable error — engine continues                       |
+| Event            | Meaning                                                     |
+| ---------------- | ----------------------------------------------------------- |
+| `VadStart`       | VAD detected speech start (with `speech_prob` and `ts_ms`)  |
+| `VadEnd`         | VAD detected speech end                                     |
+| `VadFallback`    | Flush path used (VAD never fired Start but speech detected) |
+| `Preview`        | Latest transcription of current utterance (full text)       |
+| `Correction`     | Re-transcription improved previous output                   |
+| `UtteranceFinal` | Complete utterance — VAD-bounded or flush                   |
+| `Drop`           | Content dropped (hallucination, semantic gate)              |
+| `Stats`          | Session-level statistics (emitted on stop/flush)            |
+| `Warning`        | Recoverable error — engine continues                        |
 
 ### Preview semantics (contract)
 
@@ -206,15 +206,16 @@ The `\u{0008}` character is ASCII backspace. The UI applies it character-by-char
 
 ## Stage 5: UI Routing
 
-| Component                     | File                           | Details                          |
-| ----------------------------- | ------------------------------ | -------------------------------- |
-| **ControllerEventRouter**     | `app/controller/helpers.rs`    | Event pipeline: routes by mode   |
-| **PresentationEmitter**       | `app/presentation/emitter.rs`  | Typing animation via BufferedEmitter |
-| **route_transcription_delta** | `app/controller/helpers.rs`    | Legacy: routes delta by mode     |
+| Component                     | File                          | Details                              |
+| ----------------------------- | ----------------------------- | ------------------------------------ |
+| **ControllerEventRouter**     | `app/controller/helpers.rs`   | Event pipeline: routes by mode       |
+| **PresentationEmitter**       | `app/presentation/emitter.rs` | Typing animation via BufferedEmitter |
+| **route_transcription_delta** | `app/controller/helpers.rs`   | Legacy: routes delta by mode         |
 
 ### Runtime pipeline path
 
 App runtime uses a single path:
+
 - `start_event_session` → `transcription_session` (event pipeline only).
 - Preview → computes delta via `TranscriptDelta::from_diff` → `append_*_delta`.
 - Correction → delta diff (keeps `is_streaming = true`).
@@ -308,22 +309,22 @@ Displayed text (String, visible in overlay/bubble)
 
 ## Key Source Files
 
-| File                               | Role                                                        |
-| ---------------------------------- | ----------------------------------------------------------- |
-| `core/audio/recorder.rs`          | cpal audio capture, device management                       |
-| `core/audio/streaming_recorder.rs`| Pipeline orchestrator, connects recorder to engine          |
-| `core/audio/chunker.rs`           | SpeechSession, VAD gate, Supervisor mode, flush fallback    |
-| `core/vad/silero_ort.rs`          | Silero VAD v6 (ONNX), worker thread, resampler              |
-| `core/stt/whisper/engine.rs`      | Whisper singleton, Metal GPU inference                      |
-| `core/pipeline/contracts.rs`      | EngineEvent, EventSink, DeltaSink, TranscriptDelta          |
-| `core/pipeline/streaming.rs`      | transcription_session (unified), BufferedEmitter             |
-| `core/pipeline/sinks.rs`          | DeltaSinkAdapter, CallbackSink, CollectorEventSink          |
-| `core/pipeline/stream_postprocess.rs`      | Lexicon correction, semantic gate, hallucination filter      |
-| `app/controller/mod.rs`           | Recording state machine, Hold/Toggle orchestration          |
-| `app/controller/helpers.rs`       | ControllerEventRouter, session mode routing                 |
-| `app/presentation/emitter.rs`     | PresentationEmitter (typing animation via BufferedEmitter)  |
-| `app/ui/overlay/mod.rs`           | Floating overlay window (Cocoa/AppKit)                      |
-| `app/ui/voice_chat/api.rs`        | Voice chat panel API (drawer/agent/settings)                |
+| File                                  | Role                                                       |
+| ------------------------------------- | ---------------------------------------------------------- |
+| `core/audio/recorder.rs`              | cpal audio capture, device management                      |
+| `core/audio/streaming_recorder.rs`    | Pipeline orchestrator, connects recorder to engine         |
+| `core/audio/chunker.rs`               | SpeechSession, VAD gate, Supervisor mode, flush fallback   |
+| `core/vad/silero_ort.rs`              | Silero VAD v6 (ONNX), worker thread, resampler             |
+| `core/stt/whisper/engine.rs`          | Whisper singleton, Metal GPU inference                     |
+| `core/pipeline/contracts.rs`          | EngineEvent, EventSink, DeltaSink, TranscriptDelta         |
+| `core/pipeline/streaming.rs`          | transcription_session (unified), BufferedEmitter           |
+| `core/pipeline/sinks.rs`              | DeltaSinkAdapter, CallbackSink, CollectorEventSink         |
+| `core/pipeline/stream_postprocess.rs` | Lexicon correction, semantic gate, hallucination filter    |
+| `app/controller/mod.rs`               | Recording state machine, Hold/Toggle orchestration         |
+| `app/controller/helpers.rs`           | ControllerEventRouter, session mode routing                |
+| `app/presentation/emitter.rs`         | PresentationEmitter (typing animation via BufferedEmitter) |
+| `app/ui/overlay/mod.rs`               | Floating overlay window (Cocoa/AppKit)                     |
+| `app/ui/voice_chat/api.rs`            | Voice chat panel API (drawer/agent/settings)               |
 
 ---
 

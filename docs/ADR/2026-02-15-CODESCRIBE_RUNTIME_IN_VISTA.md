@@ -11,11 +11,13 @@ CodeScribe is a standalone product with proven value (STT + lexicon + quality lo
 Vista also needs this capability as a built-in system agent (VistaScribe), using shared runtime behavior.
 
 This ADR defines:
+
 1. Responsibility split between repositories.
 2. Final IPC boundaries (`audio_in`, `engine_events`, `feedback`).
 3. 3-stage migration from loose integration to stable dual-product operation.
 
 Contract identity:
+
 - `VistaScribe = codescribe-core + codescribe-loop + codescribe-quality`.
 - `VistaScribe` branding applies only to Vista UI/agent surface; runtime modules remain CodeScribe-owned.
 
@@ -23,14 +25,14 @@ Contract identity:
 
 ### 1) Responsibility split (final)
 
-| Area | CodeScribe repo owns | Vista repo owns |
-|---|---|---|
-| Runtime engine | STT/VAD pipeline, lexicon, postprocess, quality loop, IPC server | Process lifecycle host (start/stop/restart/supervisor), relay to frontend |
-| IPC contract | Command and event schema source of truth | Typed client adapter + compatibility layer |
-| Audio capture | Runtime-side recorder and hot path | UX control over when recording starts/stops |
-| UX | Full standalone UX and optional debug/runtime UX | Product UI: tray, always-on-top overlay, workflow UX |
-| Feedback learning | Validation + persistence + quality artifacts | Feedback collection UX and delivery/retry |
-| Packaging | Standalone app + runtime binary + contract docs | Vista packaging for embedded/sidecar runtime option |
+| Area              | CodeScribe repo owns                                             | Vista repo owns                                                           |
+| ----------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Runtime engine    | STT/VAD pipeline, lexicon, postprocess, quality loop, IPC server | Process lifecycle host (start/stop/restart/supervisor), relay to frontend |
+| IPC contract      | Command and event schema source of truth                         | Typed client adapter + compatibility layer                                |
+| Audio capture     | Runtime-side recorder and hot path                               | UX control over when recording starts/stops                               |
+| UX                | Full standalone UX and optional debug/runtime UX                 | Product UI: tray, always-on-top overlay, workflow UX                      |
+| Feedback learning | Validation + persistence + quality artifacts                     | Feedback collection UX and delivery/retry                                 |
+| Packaging         | Standalone app + runtime binary + contract docs                  | Vista packaging for embedded/sidecar runtime option                       |
 
 Boundary rule: CodeScribe remains a standalone product and runtime authority. Vista consumes it as an agent/runtime dependency, with UI-level branding only.
 
@@ -48,21 +50,25 @@ Contract authority remains in `core/ipc/types.rs` and `app/ipc/server.rs`.
 - `GetStatus` (state visibility)
 
 Notes:
+
 - Raw audio chunk streaming over IPC is explicitly out of scope for v1.
 - Runtime owns microphone device details and recorder lifetime safety.
 
 #### B. `engine_events` boundary (push lane)
 
 Connection-level subscription:
+
 - `Subscribe`
 - `Unsubscribe`
 
 Server push envelope:
+
 - `IpcResponse::Event(IpcEvent)`
 - `IpcEventPayload::StateChange { from, to }`
 - `IpcEventPayload::Engine(EngineEventWire)`
 
 Guaranteed wire properties:
+
 - `timestamp` is RFC3339 UTC wall-clock.
 - `utterance_final.segments[]` are Whisper-native timestamps.
 - `raw_text` never leaves runtime over IPC.
@@ -70,14 +76,17 @@ Guaranteed wire properties:
 #### C. `feedback` boundary (learning lane)
 
 Final target command (runtime side):
+
 - `SubmitFeedback { transcript, corrected_text?, accepted?, quality_score?, tags?, utterance_id?, metadata? }`
 
 Delivery semantics:
+
 - At-least-once from Vista host.
 - Idempotency keyed by `utterance_id + metadata.client_feedback_id` (or equivalent).
 - Runtime validates and persists feedback into quality/lexicon loop artifacts.
 
 Compatibility note:
+
 - If runtime lacks `SubmitFeedback`, host queues NDJSON feedback locally and retries later.
 
 ### 3) Migration plan (3 stages)
@@ -92,11 +101,13 @@ Goal: Vista controls existing CodeScribe daemon as external process while CodeSc
 - Feedback may fall back to local queue when `SubmitFeedback` is unavailable.
 
 Exit criteria:
+
 - Stable start/stop/restart + heartbeat.
 - Stable `Subscribe` event relay.
 - No regression in transcript quality path.
 
 Rollback:
+
 - Disable auto-subscribe and keep command-only mode.
 
 #### Stage 2: Contract hardening + managed runtime options
@@ -109,11 +120,13 @@ Goal: stabilize one runtime contract for both products, with optional Vista-mana
 - Vista may ship managed runtime artifact, while CodeScribe standalone distribution remains unchanged.
 
 Exit criteria:
+
 - Contract tests pass on both repos.
 - Feedback delivery acknowledged by runtime.
 - Both deployment modes (external runtime or managed runtime) are supported by Vista host.
 
 Rollback:
+
 - Keep previous runtime artifact/protocol compatibility adapter.
 
 #### Stage 3: Dual-product steady state
@@ -125,21 +138,25 @@ Goal: keep CodeScribe standalone strong, and keep Vista agent integration first-
 - Shared runtime improvements benefit both products without code fork.
 
 Exit criteria:
+
 - Feature parity targets for shared runtime path are defined and monitored.
 - Independent release trains are operational (CodeScribe standalone + Vista).
 - Support runbooks exist for both standalone and embedded-agent scenarios.
 
 Rollback:
+
 - Revert Vista to Stage-2 bridge/managed runtime mode without affecting standalone CodeScribe.
 
 ## Consequences
 
 Positive:
+
 - Preserves CodeScribe product identity and velocity.
 - Vista gains mature speech agent capabilities quickly.
 - Shared runtime contract minimizes duplicated speech logic.
 
 Trade-offs:
+
 - Requires strict contract governance between repos.
 - Two product surfaces must remain compatibility-tested.
 

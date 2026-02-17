@@ -2224,14 +2224,21 @@ impl RecordingController {
                     .unwrap_or_else(|| "empty_transcript_without_no_speech_event".to_string());
                 if let Some(stats) = session_telemetry.stats.as_ref() {
                     info!(
-                        "NoSpeech outcome: reason={} utterances={} hallu_drops={} semantic_drops={} filtered_empty={} corrections={} dropped_chunks={}",
+                        "NoSpeech outcome: reason={} utterances={} hallu_drops={} semantic_drops={} filtered_empty={} corrections={} dropped_chunks={} partial_runs={} partial_trigger_utt={} partial_trigger_speech={} partial_trigger_watchdog={} partial_stale={} partial_coalesced={} partial_dropped={}",
                         reason,
                         stats.total_utterances,
                         stats.hallucination_drops,
                         stats.semantic_gate_drops,
                         stats.filtered_empty_drops,
                         stats.corrections_applied,
-                        stats.dropped_audio_chunks
+                        stats.dropped_audio_chunks,
+                        stats.partial_runs_total,
+                        stats.trigger_utterance_count,
+                        stats.trigger_speech_count,
+                        stats.trigger_watchdog_count,
+                        stats.partial_stale_count,
+                        stats.partial_coalesced_count,
+                        stats.partial_dropped_count
                     );
                 } else {
                     info!("NoSpeech outcome: reason={} stats=unavailable", reason);
