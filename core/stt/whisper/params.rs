@@ -43,7 +43,10 @@ impl Default for DecodingParams {
             compression_ratio_threshold: 2.2,
             logprob_threshold: -1.0, // mlx_whisper default
             initial_prompt: None,    // no prompt by default
-            emit_timestamps: true,
+            // Disabled until A/B WER test confirms no degradation on turbo-v3.
+            // Timestamp decoding mode changes decoder attention and may hurt
+            // quality on short VAD-bounded utterances with the 2-layer distilled decoder.
+            emit_timestamps: false,
         }
     }
 }

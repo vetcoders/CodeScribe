@@ -16,6 +16,8 @@ use crate::stt::scheduler::{SttLane, SttScheduler, SttTaskHandle};
 use crate::stt::whisper::singleton::engine as get_engine;
 use anyhow::{Result, anyhow};
 use chrono::SecondsFormat;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesOrdered;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::VecDeque;
@@ -565,16 +567,23 @@ pub(crate) async fn transcription_session(
 
     // Decouple audio ingestion from Whisper inference.
     const MAX_PENDING_UTTERANCES: usize = 64;
-    let mut pending_utterances: VecDeque<UtteranceWorkItem> = VecDeque::new();
+    let mut pending_utterances: VecDeque<PendingUtteranceWorkItem> = VecDeque::new();
     let mut dropped_utterances: u64 = 0;
     let mut audio_closed = false;
     // Full utterance audio buffer used for per-utterance commit transcription.
     // Live slices still drive preview; final commit re-transcribes the full utterance.
     let mut current_utterance_audio: Vec<f32> = Vec::new();
 
-    // Phase 1 (streaming preview/commit) — one request tracked for event handling.
-    let mut utterance_in_flight: Option<SttTaskHandle> = None;
-    let mut utterance_active: Option<UtteranceWorkItem> = None;
+    // Phase 1 (streaming preview/commit) — Pipelined execution using FuturesOrdered.
+    // This allows submitting multiple chunks to the Scheduler (up to concurrency limit)
+    // to utilize the worker queue and avoid backpressure on the VAD/Audio thread.
+    // Results are guaranteed to be returned in submission order.
+    let max_inference_concurrency = inference_max_concurrency();
+    debug!(
+        max_inference_concurrency,
+        "Phase 1 inference pipeline configured"
+    );
+    let mut inference_pipeline = FuturesOrdered::new();
 
     // Phase 2 (buffered correction) — request tracked for stale guards.
     let mut correction_in_flight: Option<SttTaskHandle> = None;
@@ -583,54 +592,64 @@ pub(crate) async fn transcription_session(
     let mut correction_suffix_snapshot: Option<String> = None;
 
     loop {
-        // Start next utterance transcription as soon as possible.
-        // Inference itself is serialized by STT scheduler; this loop tracks the
-        // handles required for event semantics.
-        if utterance_in_flight.is_none() {
-            while let Some(item) = pending_utterances.pop_front() {
-                if should_drop_short_utterance(
-                    item.audio.len(),
-                    output_sample_rate,
-                    item.max_speech_prob,
-                ) {
-                    pipeline.hallucination_drops = pipeline.hallucination_drops.saturating_add(1);
-                    event_sink.on_event(&EngineEvent::Drop {
-                        kind: DropKind::Hallucination,
-                        text: String::new(),
-                        reason: format!(
-                            "Short utterance dropped: {:.3}s with low VAD prob {:.2}",
-                            item.audio.len() as f32 / output_sample_rate as f32,
-                            item.max_speech_prob
-                        ),
-                    });
-                    continue;
-                }
+        // ── Fill the Pipe ────────────────────────────────────────────────────
+        // Drain pending utterances into the scheduler up to the concurrency limit.
+        // This decouples ingestion (Supervisor) from inference (Whisper).
+        while inference_pipeline.len() < max_inference_concurrency {
+            let Some(item) = pending_utterances.pop_front() else {
+                break;
+            };
+            let PendingUtteranceWorkItem {
+                audio,
+                inference_audio,
+                is_final,
+                max_speech_prob,
+            } = item;
 
-                let lang = pipeline.language.clone();
-                let lane = if item.is_final {
-                    SttLane::Commit
-                } else {
-                    SttLane::Live
-                };
-                match stt_scheduler.submit(
-                    lane,
-                    item.inference_audio.clone(),
-                    output_sample_rate,
-                    lang,
-                ) {
-                    Ok(handle) => {
-                        utterance_in_flight = Some(handle);
-                        utterance_active = Some(item);
-                        break;
-                    }
-                    Err(e) => {
-                        error!("Failed to submit STT request to scheduler: {}", e);
-                        event_sink.on_event(&EngineEvent::Warning {
-                            code: "scheduler_submit_error".to_string(),
-                            message: format!("{}", e),
-                        });
-                        break;
-                    }
+            if should_drop_short_utterance(audio.len(), output_sample_rate, max_speech_prob) {
+                pipeline.hallucination_drops = pipeline.hallucination_drops.saturating_add(1);
+                event_sink.on_event(&EngineEvent::Drop {
+                    kind: DropKind::Hallucination,
+                    text: String::new(),
+                    reason: format!(
+                        "Short utterance dropped: {:.3}s with low VAD prob {:.2}",
+                        audio.len() as f32 / output_sample_rate as f32,
+                        max_speech_prob
+                    ),
+                });
+                continue;
+            }
+
+            let lang = pipeline.language.clone();
+            let lane = if is_final {
+                SttLane::Commit
+            } else {
+                SttLane::Live
+            };
+            let item = UtteranceWorkItem {
+                audio,
+                inference_audio_len: inference_audio.len(),
+                is_final,
+            };
+
+            match stt_scheduler.submit(lane, inference_audio, output_sample_rate, lang) {
+                Ok(mut handle) => {
+                    // Wrap the handle and item into a future for FuturesOrdered.
+                    // This preserves the item context (is_final, audio len) for the result.
+                    inference_pipeline.push_back(async move {
+                        let res = handle.recv().await;
+                        (res, item)
+                    });
+                }
+                Err(e) => {
+                    error!("Failed to submit STT request to scheduler: {}", e);
+                    event_sink.on_event(&EngineEvent::Warning {
+                        code: "scheduler_submit_error".to_string(),
+                        message: format!("{}", e),
+                    });
+                    // If submission fails, we break the fill loop.
+                    // The item is lost (popped), but if the scheduler is broken, we have bigger problems.
+                    break;
                 }
             }
         }
@@ -638,7 +657,7 @@ pub(crate) async fn transcription_session(
         // If audio is closed and there is no work left, finish.
         if audio_closed
             && pending_utterances.is_empty()
-            && utterance_in_flight.is_none()
+            && inference_pipeline.is_empty()
             && correction_in_flight.is_none()
         {
             break;
@@ -676,7 +695,7 @@ pub(crate) async fn transcription_session(
                                 continue;
                             }
 
-                            pending_utterances.push_back(UtteranceWorkItem {
+                            pending_utterances.push_back(PendingUtteranceWorkItem {
                                 audio: utterance,
                                 inference_audio,
                                 is_final,
@@ -712,7 +731,7 @@ pub(crate) async fn transcription_session(
                                     vad_started = true;
                                 }
                                 if pending_utterances.len() < MAX_PENDING_UTTERANCES {
-                                    pending_utterances.push_back(UtteranceWorkItem {
+                                    pending_utterances.push_back(PendingUtteranceWorkItem {
                                         audio: utterance,
                                         inference_audio,
                                         is_final,
@@ -803,15 +822,9 @@ pub(crate) async fn transcription_session(
                 }
                 correction_in_flight = None;
             }
-            result = async {
-                utterance_in_flight.as_mut().unwrap().recv().await
-            }, if utterance_in_flight.is_some() => {
-                let item = utterance_active.take().unwrap_or_else(|| UtteranceWorkItem {
-                    audio: Vec::new(),
-                    inference_audio: Vec::new(),
-                    is_final: false,
-                    max_speech_prob: 0.0,
-                });
+            // Drain the pipeline. FuturesOrdered guarantees results arrive in the order submitted.
+            // This is critical for timestamp calculation and text accumulation.
+            Some((result, item)) = inference_pipeline.next() => {
                 // Track audio duration for timestamp computation.
                 let chunk_start_samples = utterance_audio_samples;
                 utterance_audio_samples += item.audio.len();
@@ -849,11 +862,7 @@ pub(crate) async fn transcription_session(
                         }
 
                         if let Some(words_per_sec) =
-                            text_words_per_second(
-                                &raw_text,
-                                item.inference_audio.len(),
-                                output_sample_rate,
-                            )
+                            text_words_per_second(&raw_text, item.inference_audio_len, output_sample_rate)
                                 .filter(|wps| *wps > MAX_WORDS_PER_SEC)
                         {
                             pipeline.hallucination_drops =
@@ -1026,8 +1035,21 @@ pub(crate) async fn transcription_session(
                         });
                     }
                 }
-
-                utterance_in_flight = None;
+            }
+            else => {
+                if audio_closed
+                    && !pending_utterances.is_empty()
+                    && inference_pipeline.is_empty()
+                    && correction_in_flight.is_none()
+                {
+                    let abandoned = pending_utterances.len() as u64;
+                    dropped_utterances = dropped_utterances.saturating_add(abandoned);
+                    pending_utterances.clear();
+                    warn!(
+                        abandoned,
+                        "Dropping pending utterances after audio closed because inference pipeline is idle"
+                    );
+                }
             }
         }
     }
@@ -1101,7 +1123,7 @@ pub(crate) async fn transcription_session(
 
     if dropped_utterances > 0 {
         warn!(
-            "Session dropped {} utterance(s) due to backpressure",
+            "Session dropped {} utterance(s) due to backpressure or scheduler stalls",
             dropped_utterances
         );
     }
@@ -1112,12 +1134,19 @@ pub(crate) async fn transcription_session(
     );
 }
 
-#[derive(Clone, Debug)]
-struct UtteranceWorkItem {
+#[derive(Debug)]
+struct PendingUtteranceWorkItem {
     audio: Vec<f32>,
     inference_audio: Vec<f32>,
     is_final: bool,
     max_speech_prob: f32,
+}
+
+#[derive(Debug)]
+struct UtteranceWorkItem {
+    audio: Vec<f32>,
+    inference_audio_len: usize,
+    is_final: bool,
 }
 
 // ── Offline/test: batch streaming transcription ──────────────────────────────
@@ -1395,6 +1424,16 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn inference_max_concurrency() -> usize {
+    const DEFAULT_MAX_INFERENCE_CONCURRENCY: usize = 4;
+    const HARD_MAX_INFERENCE_CONCURRENCY: usize = 8;
+    env_usize(
+        "CODESCRIBE_MAX_INFERENCE_CONCURRENCY",
+        DEFAULT_MAX_INFERENCE_CONCURRENCY,
+    )
+    .clamp(1, HARD_MAX_INFERENCE_CONCURRENCY)
+}
+
 fn buffered_correction_min_utterances() -> usize {
     env_usize("CODESCRIBE_BUFFERED_CORRECTION_UTTERANCES", 1).clamp(1, 10)
 }
@@ -1450,6 +1489,27 @@ mod tests {
 
         let res = pipeline.strip_overlap("Hello world");
         assert_eq!(res, "Hello world");
+    }
+
+    #[test]
+    fn test_strip_overlap_word_fallback_handles_punctuation_drift() {
+        let mut pipeline = TranscriptionPipeline::new(None);
+        pipeline.last_suffix = "Thank you.".to_string();
+
+        let res = pipeline.strip_overlap("Thank you very much");
+        assert_eq!(res, "very much");
+    }
+
+    #[test]
+    fn test_postprocess_with_reason_uses_fuzzy_overlap_dedup() {
+        let mut pipeline = TranscriptionPipeline::new(None);
+        pipeline.last_suffix = "the patient is feeling much better".to_string();
+
+        let result = pipeline.postprocess_with_reason("the patient is feelingg much better today");
+        assert_eq!(
+            result.expect("postprocess should keep non-overlap tail"),
+            "today"
+        );
     }
 
     #[test]
@@ -1561,7 +1621,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transcription_session_emits_no_speech_event_for_empty_input() {
+    async fn transcription_session_emits_no_speech_and_stats_for_empty_input() {
         let (tx, rx) = mpsc::channel::<Vec<f32>>(1);
         drop(tx);
         let sink = Arc::new(CollectorEventSink::new());
@@ -1577,14 +1637,54 @@ mod tests {
         )
         .await;
 
-        let has_no_speech = sink
-            .events()
+        let events = sink.events();
+
+        let no_speech_pos = events
             .iter()
-            .any(|event| matches!(event, EngineEvent::NoSpeech { .. }));
+            .position(|event| matches!(event, EngineEvent::NoSpeech { .. }))
+            .expect("session should emit NoSpeech for empty input");
+        let stats_pos = events
+            .iter()
+            .position(|event| matches!(event, EngineEvent::Stats { .. }))
+            .expect("session should emit Stats for empty input");
         assert!(
-            has_no_speech,
-            "session should emit NoSpeech for empty input"
+            no_speech_pos < stats_pos,
+            "NoSpeech should be emitted before final Stats"
         );
+
+        let mut no_speech_reason = None;
+        let mut stats_count = 0u32;
+        for event in &events {
+            match event {
+                EngineEvent::NoSpeech { reason } => {
+                    no_speech_reason = Some(reason.clone());
+                }
+                EngineEvent::Stats {
+                    dropped_audio_chunks,
+                    hallucination_drops,
+                    semantic_gate_drops,
+                    filtered_empty_drops,
+                    corrections_applied,
+                    total_utterances,
+                } => {
+                    stats_count += 1;
+                    assert_eq!(*dropped_audio_chunks, 0);
+                    assert_eq!(*hallucination_drops, 0);
+                    assert_eq!(*semantic_gate_drops, 0);
+                    assert_eq!(*filtered_empty_drops, 0);
+                    assert_eq!(*corrections_applied, 0);
+                    assert_eq!(*total_utterances, 0);
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            no_speech_reason.as_deref(),
+            Some("vad_no_speech_detected"),
+            "empty session should report VAD no-speech reason"
+        );
+        assert_eq!(stats_count, 1, "expected exactly one Stats event");
     }
 
     #[test]

@@ -162,11 +162,27 @@ impl StreamingRecorder {
             debug!("Waiting for transcription session task to finish...");
             handle.await.context("Transcription session task failed")?;
         }
-        // Drop event sink after session shutdown so per-session resources
-        // (e.g. PresentationEmitter task handles) can be released promptly.
+
+        // 3. Drain presentation layer.
+        // PresentationEmitter's BufferedEmitter tick loop runs in a separate
+        // tokio task. After transcription_session sends Finish, the tick loop
+        // needs time to drain queued text into transcript_buffer before we
+        // drop the event sink (which aborts the tick loop via Drop).
+        if self.event_sink.is_some() {
+            let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let snapshot = self.transcript_buffer.lock().await.len();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if self.transcript_buffer.lock().await.len() == snapshot
+                    || tokio::time::Instant::now() >= drain_deadline
+                {
+                    break;
+                }
+            }
+        }
         self.event_sink = None;
 
-        // 3. Return collected transcript
+        // 4. Return collected transcript
         let transcript = self.transcript_buffer.lock().await.clone();
         Ok((transcript, audio_path))
     }
@@ -191,11 +207,23 @@ impl StreamingRecorder {
             debug!("Waiting for transcription session task to finish...");
             handle.await.context("Transcription session task failed")?;
         }
-        // Drop event sink after session shutdown so per-session resources
-        // (e.g. PresentationEmitter task handles) can be released promptly.
+
+        // 3. Drain presentation layer (same as stop() — see comment there).
+        if self.event_sink.is_some() {
+            let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let snapshot = self.transcript_buffer.lock().await.len();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if self.transcript_buffer.lock().await.len() == snapshot
+                    || tokio::time::Instant::now() >= drain_deadline
+                {
+                    break;
+                }
+            }
+        }
         self.event_sink = None;
 
-        // 3. Return collected transcript
+        // 4. Return collected transcript
         let transcript = self.transcript_buffer.lock().await.clone();
         Ok(transcript)
     }
