@@ -32,6 +32,7 @@ static TOOLBAR_DELEGATE_INIT: Once = Once::new();
 static mut TOOLBAR_DELEGATE_CLASS: *const Class = std::ptr::null();
 
 const SETTINGS_TOOLBAR_ITEM_SHOW_AGENT: &str = "codescribe.toolbar.show-agent";
+const NSTOOLBAR_FLEXIBLE_SPACE_ITEM_IDENTIFIER: &str = "NSToolbarFlexibleSpaceItem";
 
 pub fn action_handler_class() -> *const Class {
     unsafe {
@@ -317,8 +318,8 @@ extern "C" fn toolbar_allowed_item_identifiers(_this: &Object, _sel: Sel, _toolb
     unsafe {
         let ns_mutable_array = Class::get("NSMutableArray").unwrap();
         let ids: Id = msg_send![ns_mutable_array, array];
-        let ns_toolbar_item = Class::get("NSToolbarItem").unwrap();
-        let flexible_space: Id = msg_send![ns_toolbar_item, flexibleSpaceItemIdentifier];
+        // AppKit exposes flexible-space as a global identifier constant, not a class selector.
+        let flexible_space: Id = ns_string(NSTOOLBAR_FLEXIBLE_SPACE_ITEM_IDENTIFIER);
         let _: () = msg_send![ids, addObject: flexible_space];
         let _: () = msg_send![ids, addObject: ns_string(SETTINGS_TOOLBAR_ITEM_SHOW_AGENT)];
         ids
@@ -329,8 +330,7 @@ extern "C" fn toolbar_default_item_identifiers(_this: &Object, _sel: Sel, _toolb
     unsafe {
         let ns_mutable_array = Class::get("NSMutableArray").unwrap();
         let ids: Id = msg_send![ns_mutable_array, array];
-        let ns_toolbar_item = Class::get("NSToolbarItem").unwrap();
-        let flexible_space: Id = msg_send![ns_toolbar_item, flexibleSpaceItemIdentifier];
+        let flexible_space: Id = ns_string(NSTOOLBAR_FLEXIBLE_SPACE_ITEM_IDENTIFIER);
         let _: () = msg_send![ids, addObject: flexible_space];
         let _: () = msg_send![ids, addObject: ns_string(SETTINGS_TOOLBAR_ITEM_SHOW_AGENT)];
         ids
