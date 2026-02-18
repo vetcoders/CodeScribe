@@ -10,10 +10,14 @@ const REFINE_SUPERSEDED_ERR: &str = "STT refine request superseded by a newer pe
 const SHUTDOWN_ERR: &str = "STT scheduler is shutting down";
 
 type InferFn = Arc<dyn Fn(Vec<f32>, u32, Option<String>) -> Result<RawTranscript> + Send + Sync>;
+type CommitPrefilterFn = Arc<dyn Fn(&[f32], u32) -> Vec<f32> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SttLane {
     Live,
+    /// Final utterance path. Scheduler always applies VAD prefilter first;
+    /// empty speech extraction returns an empty transcript without inference.
+    /// This path is unconditional: no env/runtime kill-switch.
     Commit,
     Refine,
 }
@@ -54,7 +58,7 @@ pub(crate) struct SttScheduler {
 
 impl SttScheduler {
     pub(crate) fn new() -> Self {
-        Self::with_infer_fn(Arc::new(default_infer))
+        Self::with_runtime_fns(Arc::new(default_infer), Arc::new(default_commit_prefilter))
     }
 
     pub(crate) fn submit(
@@ -100,19 +104,21 @@ impl SttScheduler {
 
     #[cfg(test)]
     pub(crate) fn with_infer_fn(infer_fn: InferFn) -> Self {
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let worker_handle = tokio::spawn(scheduler_worker(command_rx, infer_fn));
-        Self {
-            command_tx,
-            worker_handle: Some(worker_handle),
-            next_request_id: AtomicU64::new(0),
-        }
+        Self::with_runtime_fns(infer_fn, Arc::new(default_commit_prefilter))
     }
 
-    #[cfg(not(test))]
-    fn with_infer_fn(infer_fn: InferFn) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_infer_and_commit_prefilter(
+        infer_fn: InferFn,
+        commit_prefilter_fn: CommitPrefilterFn,
+    ) -> Self {
+        Self::with_runtime_fns(infer_fn, commit_prefilter_fn)
+    }
+
+    fn with_runtime_fns(infer_fn: InferFn, commit_prefilter_fn: CommitPrefilterFn) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let worker_handle = tokio::spawn(scheduler_worker(command_rx, infer_fn));
+        let worker_handle =
+            tokio::spawn(scheduler_worker(command_rx, infer_fn, commit_prefilter_fn));
         Self {
             command_tx,
             worker_handle: Some(worker_handle),
@@ -127,6 +133,11 @@ fn default_infer(
     language: Option<String>,
 ) -> Result<RawTranscript> {
     crate::stt::transcribe_long_with_segments(&samples, sample_rate, language.as_deref())
+}
+
+fn default_commit_prefilter(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    let (speech, _) = crate::vad::extract_speech(samples, sample_rate);
+    speech
 }
 
 struct SttRequest {
@@ -145,6 +156,7 @@ enum SchedulerCommand {
 async fn scheduler_worker(
     mut command_rx: mpsc::UnboundedReceiver<SchedulerCommand>,
     infer_fn: InferFn,
+    commit_prefilter_fn: CommitPrefilterFn,
 ) {
     let mut live_queue: VecDeque<SttRequest> = VecDeque::new();
     let mut commit_queue: VecDeque<SttRequest> = VecDeque::new();
@@ -185,35 +197,31 @@ async fn scheduler_worker(
         if let Some(req) = pop_next_request(&mut live_queue, &mut commit_queue, &mut refine_pending)
         {
             let infer = Arc::clone(&infer_fn);
+            let commit_prefilter = Arc::clone(&commit_prefilter_fn);
             let lane = req.lane;
             let result = tokio::task::spawn_blocking(move || {
                 let samples = if lane == SttLane::Commit {
-                    // Commit lane: apply batch VAD to get clean speech-only audio.
-                    // Skip VAD for buffers shorter than one Silero chunk (512 = 32ms @ 16kHz).
-                    // Silero needs at least one complete chunk to produce a probability.
-                    if req.samples.len() < crate::vad::CHUNK_SIZE {
-                        req.samples
-                    } else {
-                        let (speech, stats) =
-                            crate::vad::extract_speech(&req.samples, req.sample_rate);
-                        if speech.is_empty() {
-                            tracing::info!(
-                                "Commit VAD: no speech in {:.1}s utterance — returning empty",
-                                req.samples.len() as f32 / req.sample_rate as f32
-                            );
-                            return Ok(RawTranscript {
-                                text: String::new(),
-                                segments: Vec::new(),
-                            });
-                        }
-                        tracing::debug!(
-                            "Commit VAD: {:.1}s speech / {:.1}s total ({:.0}% speech)",
-                            speech.len() as f32 / req.sample_rate as f32,
-                            req.samples.len() as f32 / req.sample_rate as f32,
-                            stats.speech_pct,
+                    // Commit contract (hard): always VAD-prefilter before inference.
+                    // Never add env/runtime bypasses that allow raw commit passthrough.
+                    // The Commit lane must remain deterministic and VAD-first.
+                    let speech = (commit_prefilter)(&req.samples, req.sample_rate);
+                    if speech.is_empty() {
+                        tracing::info!(
+                            "Commit VAD: no speech in {:.1}s utterance — returning empty",
+                            req.samples.len() as f32 / req.sample_rate as f32
                         );
-                        speech
+                        return Ok(RawTranscript {
+                            text: String::new(),
+                            segments: Vec::new(),
+                        });
                     }
+                    tracing::debug!(
+                        "Commit VAD: {:.1}s speech / {:.1}s total ({:.0}% speech)",
+                        speech.len() as f32 / req.sample_rate as f32,
+                        req.samples.len() as f32 / req.sample_rate as f32,
+                        (speech.len() as f32 / req.samples.len().max(1) as f32) * 100.0,
+                    );
+                    speech
                 } else {
                     req.samples
                 };
@@ -340,6 +348,10 @@ mod tests {
         }
     }
 
+    fn passthrough_commit_prefilter(samples: &[f32], _sample_rate: u32) -> Vec<f32> {
+        samples.to_vec()
+    }
+
     #[tokio::test]
     async fn scheduler_prioritizes_live_then_commit_then_refine() {
         let started = Arc::new(StdMutex::new(Vec::<u32>::new()));
@@ -370,7 +382,10 @@ mod tests {
             },
         );
 
-        let scheduler = SttScheduler::with_infer_fn(infer);
+        let scheduler = SttScheduler::with_infer_and_commit_prefilter(
+            infer,
+            Arc::new(passthrough_commit_prefilter),
+        );
         let mut block = scheduler
             .submit(SttLane::Live, vec![100.0], 16_000, None)
             .expect("submit blocker");
@@ -473,6 +488,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_commit_returns_empty_when_prefilter_finds_no_speech() {
+        let started = Arc::new(StdMutex::new(Vec::<Vec<f32>>::new()));
+        let started_ref = Arc::clone(&started);
+        let infer = Arc::new(
+            move |samples: Vec<f32>,
+                  _sample_rate: u32,
+                  _language: Option<String>|
+                  -> Result<RawTranscript> {
+                started_ref
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(samples);
+                Ok(RawTranscript {
+                    text: "should-not-run".to_string(),
+                    segments: Vec::new(),
+                })
+            },
+        );
+
+        let scheduler = SttScheduler::with_infer_and_commit_prefilter(
+            infer,
+            Arc::new(|_samples, _sample_rate| Vec::new()),
+        );
+        let mut commit = scheduler
+            .submit(SttLane::Commit, vec![0.0, 0.0, 0.0], 16_000, None)
+            .expect("submit commit");
+
+        let result = commit
+            .recv()
+            .await
+            .expect("commit should return empty transcript");
+        assert!(
+            result.text.is_empty(),
+            "commit no-speech should return empty text"
+        );
+        assert!(
+            result.segments.is_empty(),
+            "commit no-speech should return empty segments"
+        );
+        assert!(
+            started.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "infer should be skipped when commit prefilter returns no speech"
+        );
+
+        scheduler.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn scheduler_commit_always_prefilters_short_buffers() {
+        let captured = Arc::new(StdMutex::new(Vec::<Vec<f32>>::new()));
+        let captured_ref = Arc::clone(&captured);
+        let infer = Arc::new(
+            move |samples: Vec<f32>,
+                  _sample_rate: u32,
+                  _language: Option<String>|
+                  -> Result<RawTranscript> {
+                captured_ref
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(samples.clone());
+                Ok(RawTranscript {
+                    text: format!("len-{}", samples.len()),
+                    segments: Vec::new(),
+                })
+            },
+        );
+        let prefilter_inputs = Arc::new(StdMutex::new(Vec::<(Vec<f32>, u32)>::new()));
+        let prefilter_inputs_ref = Arc::clone(&prefilter_inputs);
+
+        let scheduler = SttScheduler::with_infer_and_commit_prefilter(
+            infer,
+            Arc::new(move |samples, sample_rate| {
+                prefilter_inputs_ref
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((samples.to_vec(), sample_rate));
+                vec![42.0]
+            }),
+        );
+        let mut commit = scheduler
+            .submit(SttLane::Commit, vec![1.0], 16_000, None)
+            .expect("submit commit");
+
+        let result = commit.recv().await.expect("commit should run infer");
+        assert_eq!(result.text, "len-1");
+        assert_eq!(
+            prefilter_inputs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &[(vec![1.0], 16_000)],
+            "short commit buffers must still flow through commit prefilter"
+        );
+        assert_eq!(
+            captured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &[vec![42.0]],
+            "commit infer should receive prefiltered audio for short buffers too"
+        );
+
+        scheduler.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn scheduler_commit_infers_only_prefiltered_speech_audio() {
+        let captured = Arc::new(StdMutex::new(Vec::<Vec<f32>>::new()));
+        let captured_ref = Arc::clone(&captured);
+        let infer = Arc::new(
+            move |samples: Vec<f32>,
+                  _sample_rate: u32,
+                  _language: Option<String>|
+                  -> Result<RawTranscript> {
+                captured_ref
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(samples.clone());
+                Ok(RawTranscript {
+                    text: format!("len-{}", samples.len()),
+                    segments: Vec::new(),
+                })
+            },
+        );
+
+        let scheduler = SttScheduler::with_infer_and_commit_prefilter(
+            infer,
+            Arc::new(|samples, _sample_rate| {
+                samples
+                    .iter()
+                    .copied()
+                    .filter(|sample| *sample > 0.5)
+                    .collect()
+            }),
+        );
+        let mut commit = scheduler
+            .submit(SttLane::Commit, vec![0.0, 0.8, 0.1, 0.9], 16_000, None)
+            .expect("submit commit");
+
+        let result = commit.recv().await.expect("commit should run infer");
+        assert_eq!(result.text, "len-2");
+        assert!(
+            result.segments.is_empty(),
+            "mock infer returns no segments for this deterministic contract test"
+        );
+        assert_eq!(
+            captured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
+            &[vec![0.8, 0.9]],
+            "commit infer should receive speech-only samples from prefilter"
+        );
+
+        scheduler.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
     async fn scheduler_shutdown_drains_pending_work() {
         let started = Arc::new(StdMutex::new(Vec::<u32>::new()));
         let started_ref = Arc::clone(&started);
@@ -491,7 +664,10 @@ mod tests {
             },
         );
 
-        let scheduler = SttScheduler::with_infer_fn(infer);
+        let scheduler = SttScheduler::with_infer_and_commit_prefilter(
+            infer,
+            Arc::new(passthrough_commit_prefilter),
+        );
         let mut first = scheduler
             .submit(SttLane::Live, vec![1.0], 16_000, None)
             .expect("submit first");

@@ -9,7 +9,7 @@
 use crate::audio::chunker::{SpeechEvent, SpeechSession};
 #[cfg(any(test, feature = "offline_eval"))]
 use crate::pipeline::dedup::dedup_chunk_overlap;
-use crate::pipeline::dedup::strip_suffix_overlap_live;
+use crate::pipeline::dedup::{strip_segment_overlap, strip_suffix_overlap_live};
 use crate::pipeline::stream_postprocess::StreamPostProcessor;
 use crate::stt::scheduler::{SttLane, SttScheduler, SttTaskHandle};
 #[cfg(any(test, feature = "offline_eval"))]
@@ -304,6 +304,7 @@ pub(crate) struct TranscriptionPipeline {
     pub(crate) language: Option<String>,
     pub(crate) postprocessor: StreamPostProcessor,
     pub(crate) last_suffix: String,
+    pub(crate) last_segment_end_ts: Option<f32>,
     pub(crate) hallucination_drops: u64,
     pub(crate) overlap_strips: u64,
 }
@@ -324,13 +325,27 @@ impl TranscriptionPipeline {
             language,
             postprocessor: StreamPostProcessor::new(),
             last_suffix: String::new(),
+            last_segment_end_ts: None,
             hallucination_drops: 0,
             overlap_strips: 0,
         }
     }
 
-    pub(crate) fn strip_overlap(&mut self, text: &str) -> String {
+    pub(crate) fn strip_overlap(&self, text: &str) -> String {
         strip_suffix_overlap_live(&self.last_suffix, text)
+    }
+
+    fn strip_overlap_with_segments(
+        &self,
+        text: &str,
+        segments: &[TranscriptSegment],
+    ) -> (String, Option<f32>) {
+        if let Some((stripped, newest_end_ts)) =
+            strip_segment_overlap(self.last_segment_end_ts, segments)
+        {
+            return (stripped, newest_end_ts);
+        }
+        (self.strip_overlap(text), None)
     }
 
     /// Postprocess an utterance and return the drop reason on failure.
@@ -338,12 +353,22 @@ impl TranscriptionPipeline {
         &mut self,
         text: &str,
     ) -> Result<String, PostprocessDrop> {
+        self.postprocess_with_reason_and_segments(text, &[])
+    }
+
+    /// Segment-aware postprocess: uses timestamp overlap dedup where segment
+    /// metadata is present, otherwise falls back to text-only suffix dedup.
+    pub(crate) fn postprocess_with_reason_and_segments(
+        &mut self,
+        text: &str,
+        segments: &[TranscriptSegment],
+    ) -> Result<String, PostprocessDrop> {
         if is_hallucination(text, self.language.as_deref()) {
             self.hallucination_drops += 1;
             return Err(PostprocessDrop::Hallucination);
         }
 
-        let stripped = self.strip_overlap(text);
+        let (stripped, newest_segment_end_ts) = self.strip_overlap_with_segments(text, segments);
         if stripped.is_empty() {
             self.overlap_strips += 1;
             return Err(PostprocessDrop::OverlapEmpty);
@@ -352,6 +377,9 @@ impl TranscriptionPipeline {
         match self.postprocessor.process_utterance(&stripped) {
             Some(processed) => {
                 self.update_suffix(&processed);
+                if let Some(end_ts) = newest_segment_end_ts {
+                    self.last_segment_end_ts = Some(end_ts);
+                }
                 Ok(processed)
             }
             None => Err(PostprocessDrop::FilteredEmpty),
@@ -833,8 +861,9 @@ pub(crate) async fn transcription_session(
     let mut pending_utterances: VecDeque<PendingUtteranceWorkItem> = VecDeque::new();
     let mut dropped_utterances: u64 = 0;
     let mut audio_closed = false;
-    // Full utterance audio buffer used for per-utterance commit transcription.
-    // Live slices still drive preview; final commit re-transcribes the full utterance.
+    // Full utterance audio buffer used for per-utterance commit requests.
+    // Live slices still drive preview; final commit re-transcribes the utterance.
+    // Scheduler enforces unconditional Commit-lane VAD prefilter before inference.
     let mut current_utterance_audio: Vec<f32> = Vec::new();
 
     // Phase 1 (streaming preview/commit) — Pipelined execution using FuturesOrdered.
@@ -1243,8 +1272,8 @@ pub(crate) async fn transcription_session(
                         let raw_text = raw_transcript.text;
                         let mut raw_segments = raw_transcript.segments;
                         let segment_offset_ts = if item.is_final {
-                            // Commit lane for final boundary transcribes full utterance audio.
-                            // Segment timestamps should be relative to utterance start.
+                            // Commit lane for final boundary is always VAD-prefiltered by scheduler.
+                            // Segment timestamps are still utterance-relative.
                             utterance_start_s
                         } else {
                             chunk_start_ts
@@ -1286,7 +1315,10 @@ pub(crate) async fn transcription_session(
                                 ),
                             });
                         } else {
-                            match pipeline.postprocess_with_reason(&raw_text) {
+                            match pipeline.postprocess_with_reason_and_segments(
+                                &raw_text,
+                                &raw_segments,
+                            ) {
                                 Ok(cleaned) => {
                                     if item.is_final {
                                         // Final boundary commit: use full-utterance cleaned text as source of truth.
@@ -1870,7 +1902,7 @@ pub(crate) fn stream_overlap_sec(chunk_duration_sec: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::contracts::RawTranscript;
+    use crate::pipeline::contracts::{RawTranscript, TranscriptSegment};
     use crate::pipeline::sinks::CollectorEventSink;
     use std::sync::{Condvar, Mutex as StdMutex};
 
@@ -1942,6 +1974,49 @@ mod tests {
         assert_eq!(
             result.expect("postprocess should keep non-overlap tail"),
             "today"
+        );
+    }
+
+    #[test]
+    fn test_postprocess_prefers_timestamp_overlap_when_segments_exist() {
+        let mut pipeline = TranscriptionPipeline::new(None);
+        pipeline.last_suffix = "unrelated suffix".to_string();
+        pipeline.last_segment_end_ts = Some(1.0);
+
+        let segments = vec![
+            TranscriptSegment {
+                text: "already emitted".to_string(),
+                start_ts: 0.0,
+                end_ts: 0.95,
+            },
+            TranscriptSegment {
+                text: "fresh words".to_string(),
+                start_ts: 1.0,
+                end_ts: 1.50,
+            },
+        ];
+
+        let cleaned = pipeline
+            .postprocess_with_reason_and_segments("this text should not win", &segments)
+            .expect("timestamp-aware strip should keep only fresh segment text");
+        assert_eq!(cleaned, "fresh words");
+        assert_eq!(pipeline.last_segment_end_ts, Some(1.50));
+    }
+
+    #[test]
+    fn test_postprocess_with_segments_falls_back_to_text_path() {
+        let mut pipeline = TranscriptionPipeline::new(None);
+        pipeline.last_suffix = "hello world".to_string();
+        pipeline.last_segment_end_ts = Some(7.0);
+
+        let cleaned = pipeline
+            .postprocess_with_reason_and_segments("world again", &[])
+            .expect("empty segments should use suffix overlap fallback");
+        assert_eq!(cleaned, "again");
+        assert_eq!(
+            pipeline.last_segment_end_ts,
+            Some(7.0),
+            "text fallback should not mutate timestamp overlap cursor"
         );
     }
 
@@ -3141,6 +3216,95 @@ mod tests {
         assert_eq!(stats_count, 1, "expected exactly one Stats event");
     }
 
+    #[tokio::test]
+    async fn transcription_session_silent_callbacks_keep_no_speech_stats_coherent() {
+        let (tx, rx) = mpsc::channel::<Vec<f32>>(1);
+        let sender = tokio::spawn(async move {
+            for i in 0..96usize {
+                let len = if i % 2 == 0 { 371 } else { 1024 };
+                tx.send(vec![0.0; len])
+                    .await
+                    .expect("silent callback send should succeed");
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let sink = Arc::new(CollectorEventSink::new());
+        transcription_session(
+            rx,
+            sink.clone(),
+            SessionConfig {
+                sample_rate: 48_000,
+                language: Some("pl".to_string()),
+                stream_log_path: None,
+                utterance_silence_sec: None,
+            },
+        )
+        .await;
+        sender
+            .await
+            .expect("silent callback sender task should finish");
+
+        let events = sink.events();
+        let no_speech_pos = events
+            .iter()
+            .position(|event| matches!(event, EngineEvent::NoSpeech { .. }))
+            .expect("session should emit NoSpeech for silence-only callbacks");
+        let stats_pos = events
+            .iter()
+            .position(|event| matches!(event, EngineEvent::Stats { .. }))
+            .expect("session should emit Stats for silence-only callbacks");
+        assert!(
+            no_speech_pos < stats_pos,
+            "NoSpeech should be emitted before final Stats"
+        );
+
+        let mut no_speech_count = 0u32;
+        let mut stats_count = 0u32;
+        for event in &events {
+            match event {
+                EngineEvent::NoSpeech { reason } => {
+                    no_speech_count = no_speech_count.saturating_add(1);
+                    assert_eq!(reason, "vad_no_speech_detected");
+                }
+                EngineEvent::Stats {
+                    dropped_audio_chunks,
+                    hallucination_drops,
+                    semantic_gate_drops,
+                    filtered_empty_drops,
+                    corrections_applied,
+                    total_utterances,
+                    partial_runs_total,
+                    trigger_utterance_count,
+                    trigger_speech_count,
+                    trigger_watchdog_count,
+                    partial_stale_count,
+                    partial_coalesced_count,
+                    partial_dropped_count,
+                } => {
+                    stats_count = stats_count.saturating_add(1);
+                    assert_eq!(*dropped_audio_chunks, 0);
+                    assert_eq!(*hallucination_drops, 0);
+                    assert_eq!(*semantic_gate_drops, 0);
+                    assert_eq!(*filtered_empty_drops, 0);
+                    assert_eq!(*corrections_applied, 0);
+                    assert_eq!(*total_utterances, 0);
+                    assert_eq!(*partial_runs_total, 0);
+                    assert_eq!(*trigger_utterance_count, 0);
+                    assert_eq!(*trigger_speech_count, 0);
+                    assert_eq!(*trigger_watchdog_count, 0);
+                    assert_eq!(*partial_stale_count, 0);
+                    assert_eq!(*partial_coalesced_count, 0);
+                    assert_eq!(*partial_dropped_count, 0);
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(no_speech_count, 1, "expected exactly one NoSpeech event");
+        assert_eq!(stats_count, 1, "expected exactly one Stats event");
+    }
+
     #[test]
     fn test_postprocess_correction_with_snapshot_restores_suffix_on_drop() {
         let mut pipeline = TranscriptionPipeline::new(None);
@@ -3165,6 +3329,23 @@ mod tests {
         .expect("correction should pass");
         assert!(!corrected.is_empty());
         assert_ne!(pipeline.last_suffix, "old-tail");
+    }
+
+    #[test]
+    fn test_correction_postprocess_remains_text_centric_with_timestamp_state() {
+        let mut pipeline = TranscriptionPipeline::new(None);
+        pipeline.last_suffix = "alpha beta".to_string();
+        pipeline.last_segment_end_ts = Some(42.0);
+
+        let corrected =
+            postprocess_correction_with_snapshot(&mut pipeline, "beta gamma", "alpha beta")
+                .expect("text-based correction path should remain active");
+        assert_eq!(corrected, "gamma");
+        assert_eq!(
+            pipeline.last_segment_end_ts,
+            Some(42.0),
+            "correction flow should not depend on or mutate timestamp overlap state"
+        );
     }
 
     // ── Fix A contract: FINAL must not inherit corrupted suffix from non-final ──

@@ -14,6 +14,8 @@
 //! the engine module. This is intentional: the batch path is self-contained
 //! and does not route through the pipeline.
 
+use crate::pipeline::contracts::TranscriptSegment;
+
 // ── helpers ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
@@ -58,6 +60,10 @@ const LIVE_SUFFIX_OVERLAP_PARAMS: OverlapParams = OverlapParams {
     min_fuzzy_overlap_words: 3,
     fuzzy_error_ratio_denominator: 3,
 };
+
+// Whisper timestamp tokens are quantized to 20ms. We keep a small tolerance
+// to avoid re-emitting jittery boundary segments from overlapping windows.
+const TIMESTAMP_OVERLAP_EPSILON_SEC: f32 = 0.04;
 
 fn normalize_token_for_overlap(token: &str) -> String {
     let mut out = String::new();
@@ -159,6 +165,50 @@ fn detect_word_overlap(left_words: &[&str], right_words: &[&str], params: Overla
 }
 
 // ── public API ───────────────────────────────────────────
+
+/// Deduplicate streaming overlap using absolute segment timestamps.
+///
+/// Returns:
+/// - `None` when no segment metadata is available (caller should use text fallback),
+/// - `Some((text, newest_end_ts))` when segment metadata exists.
+///   `text` can be empty when all segments are within already-emitted overlap.
+pub fn strip_segment_overlap(
+    last_emitted_end_ts: Option<f32>,
+    segments: &[TranscriptSegment],
+) -> Option<(String, Option<f32>)> {
+    if segments.is_empty() {
+        return None;
+    }
+
+    let overlap_cutoff = last_emitted_end_ts.map(|ts| ts + TIMESTAMP_OVERLAP_EPSILON_SEC);
+    let mut out = String::new();
+    let mut newest_end_ts: Option<f32> = None;
+
+    for segment in segments {
+        let segment_text = segment.text.trim();
+        if segment_text.is_empty() || !segment.end_ts.is_finite() {
+            continue;
+        }
+
+        if let Some(cutoff) = overlap_cutoff
+            && segment.end_ts <= cutoff
+        {
+            continue;
+        }
+
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(segment_text);
+        newest_end_ts = Some(
+            newest_end_ts
+                .map(|current| current.max(segment.end_ts))
+                .unwrap_or(segment.end_ts),
+        );
+    }
+
+    Some((out, newest_end_ts))
+}
 
 /// Append `segment` to `out`, deduplicating overlapping word sequences at the boundary.
 ///
@@ -336,6 +386,7 @@ fn strip_suffix_overlap_fuzzy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::contracts::TranscriptSegment;
 
     // ── chunk dedup ──────────────────────────────────────
 
@@ -431,5 +482,76 @@ mod tests {
         // 2-word span stays strict-only in live mode (min fuzzy overlap = 3).
         let result = strip_suffix_overlap_live("alpha beta", "alpaa betaa gamma");
         assert_eq!(result, "alpaa betaa gamma");
+    }
+
+    // ── timestamp overlap ────────────────────────────────
+
+    #[test]
+    fn test_timestamp_overlap_fallback_when_segments_absent() {
+        let result = strip_segment_overlap(Some(1.0), &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_timestamp_overlap_drops_already_emitted_segments() {
+        let segments = vec![
+            TranscriptSegment {
+                text: "old".to_string(),
+                start_ts: 0.0,
+                end_ts: 0.50,
+            },
+            TranscriptSegment {
+                text: "new content".to_string(),
+                start_ts: 0.50,
+                end_ts: 1.20,
+            },
+        ];
+
+        let result =
+            strip_segment_overlap(Some(0.50), &segments).expect("segments should select ts path");
+        assert_eq!(result.0, "new content");
+        assert_eq!(result.1, Some(1.20));
+    }
+
+    #[test]
+    fn test_timestamp_overlap_returns_empty_when_all_segments_overlap() {
+        let segments = vec![
+            TranscriptSegment {
+                text: "already said".to_string(),
+                start_ts: 0.0,
+                end_ts: 0.40,
+            },
+            TranscriptSegment {
+                text: "again".to_string(),
+                start_ts: 0.40,
+                end_ts: 0.80,
+            },
+        ];
+
+        let result =
+            strip_segment_overlap(Some(0.80), &segments).expect("segments should select ts path");
+        assert!(result.0.is_empty());
+        assert!(result.1.is_none());
+    }
+
+    #[test]
+    fn test_timestamp_overlap_handles_initial_emission() {
+        let segments = vec![
+            TranscriptSegment {
+                text: "hello".to_string(),
+                start_ts: 0.0,
+                end_ts: 0.40,
+            },
+            TranscriptSegment {
+                text: "world".to_string(),
+                start_ts: 0.40,
+                end_ts: 0.90,
+            },
+        ];
+
+        let result =
+            strip_segment_overlap(None, &segments).expect("segments should select ts path");
+        assert_eq!(result.0, "hello world");
+        assert_eq!(result.1, Some(0.90));
     }
 }

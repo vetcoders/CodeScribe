@@ -568,11 +568,11 @@ mod tests {
         let num_callbacks = 100usize;
 
         let mut session = SpeechSession::new_stream(input_sr, 15.0, 0.0);
-
-        if session.gate_mode() != crate::audio::chunker::VadGateMode::Supervisor {
-            eprintln!("Skipping: gate mode is not Supervisor");
-            return;
-        }
+        assert_eq!(
+            session.gate_mode(),
+            crate::audio::chunker::VadGateMode::Supervisor,
+            "drift guard must explicitly validate Supervisor mode"
+        );
 
         let freq = 440.0f32;
         let mut phase = 0.0f32;
@@ -624,10 +624,11 @@ mod tests {
         let num_callbacks = 210usize;
 
         let mut session = SpeechSession::new_utterance_with_silence(input_sr, 10.0);
-        if session.gate_mode() != VadGateMode::Supervisor {
-            eprintln!("Skipping: gate mode is not Supervisor");
-            return;
-        }
+        assert_eq!(
+            session.gate_mode(),
+            VadGateMode::Supervisor,
+            "busy flush guard must explicitly validate Supervisor mode"
+        );
 
         // Deterministic open segment even when VAD model is unavailable.
         session.set_vad_threshold_for_test(-1.0);

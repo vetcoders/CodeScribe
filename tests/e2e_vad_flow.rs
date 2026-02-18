@@ -63,6 +63,36 @@ fn create_vad(sample_rate: u32) -> Option<AccumulatingVad> {
     AccumulatingVad::new(sample_rate).ok()
 }
 
+#[test]
+fn test_extract_speech_silent_callbacks_keep_no_speech_stats_coherent() {
+    let sample_rate = 48_000u32;
+    let mut samples = Vec::new();
+    for i in 0..96usize {
+        let callback_len = if i % 2 == 0 { 371 } else { 1024 };
+        samples.extend(vec![0.0f32; callback_len]);
+    }
+
+    let (speech, stats) = vad::extract_speech(&samples, sample_rate);
+    assert!(
+        speech.is_empty(),
+        "silence-only callbacks should extract no speech"
+    );
+    assert_eq!(stats.speech_pct, 0.0);
+    assert_eq!(stats.speech_windows, 0);
+    if stats.total_windows > 0 {
+        assert_eq!(
+            stats.sparkline.trim(),
+            "",
+            "no-speech run should produce only blank sparkline buckets"
+        );
+    } else {
+        assert!(
+            stats.sparkline.is_empty(),
+            "model-unavailable fallback should keep sparkline empty"
+        );
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Integration Point 1: AccumulatingVad Creation
 // ═══════════════════════════════════════════════════════════════════════════

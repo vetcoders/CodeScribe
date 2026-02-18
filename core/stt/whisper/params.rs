@@ -43,10 +43,36 @@ impl Default for DecodingParams {
             compression_ratio_threshold: 2.2,
             logprob_threshold: -1.0, // mlx_whisper default
             initial_prompt: None,    // no prompt by default
-            // Disabled until A/B WER test confirms no degradation on turbo-v3.
-            // Timestamp decoding mode changes decoder attention and may hurt
-            // quality on short VAD-bounded utterances with the 2-layer distilled decoder.
-            emit_timestamps: false,
+            // Enabled so streaming can perform timestamp-aware overlap dedup where
+            // segment metadata is available. Callers without timestamp tokens keep
+            // the existing text-only fallback (`segments = []`).
+            emit_timestamps: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_enables_timestamp_emission_for_segment_aware_pipeline() {
+        let params = DecodingParams::default();
+        assert!(
+            params.emit_timestamps,
+            "default decode params should emit timestamps"
+        );
+    }
+
+    #[test]
+    fn default_core_decode_controls_remain_stable() {
+        let params = DecodingParams::default();
+        assert_eq!(params.temperature, 0.0);
+        assert_eq!(params.no_repeat_ngram_size, 5);
+        assert!(params.suppress_blank);
+        assert_eq!(params.no_speech_threshold, 0.72);
+        assert_eq!(params.compression_ratio_threshold, 2.2);
+        assert_eq!(params.logprob_threshold, -1.0);
+        assert!(params.initial_prompt.is_none());
     }
 }
