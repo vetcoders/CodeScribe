@@ -185,8 +185,32 @@ async fn scheduler_worker(
         if let Some(req) = pop_next_request(&mut live_queue, &mut commit_queue, &mut refine_pending)
         {
             let infer = Arc::clone(&infer_fn);
+            let lane = req.lane;
             let result = tokio::task::spawn_blocking(move || {
-                (infer)(req.samples, req.sample_rate, req.language)
+                let samples = if lane == SttLane::Commit {
+                    // Commit lane: apply batch VAD to get clean speech-only audio.
+                    let (speech, stats) = crate::vad::extract_speech(&req.samples, req.sample_rate);
+                    if speech.is_empty() {
+                        tracing::info!(
+                            "Commit VAD: no speech in {:.1}s utterance — returning empty",
+                            req.samples.len() as f32 / req.sample_rate as f32
+                        );
+                        return Ok(RawTranscript {
+                            text: String::new(),
+                            segments: Vec::new(),
+                        });
+                    }
+                    tracing::debug!(
+                        "Commit VAD: {:.1}s speech / {:.1}s total ({:.0}% speech)",
+                        speech.len() as f32 / req.sample_rate as f32,
+                        req.samples.len() as f32 / req.sample_rate as f32,
+                        stats.speech_pct,
+                    );
+                    speech
+                } else {
+                    req.samples
+                };
+                (infer)(samples, req.sample_rate, req.language)
             })
             .await
             .map_err(|e| anyhow!("STT blocking worker task failed: {}", e))
