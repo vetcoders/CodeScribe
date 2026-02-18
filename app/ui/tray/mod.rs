@@ -192,6 +192,7 @@ pub fn run_with_hotkeys(hotkey_manager: Option<hotkeys::HotkeyManager>) -> Resul
         if last_menu_refresh.elapsed() >= Duration::from_secs(2) {
             menu::update_quality_label();
             menu::update_silero_vad_label();
+            menu::update_complete_setup_item();
             last_menu_refresh = Instant::now();
         }
 

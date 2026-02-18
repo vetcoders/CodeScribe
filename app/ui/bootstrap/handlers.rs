@@ -10,10 +10,10 @@ use super::{
     on_beep_toggled, on_clear_assistive_key, on_clear_llm_key, on_delay_changed,
     on_double_tap_interval_changed, on_enter_send_toggled, on_formatting_level_changed,
     on_formatting_toggled, on_hold_exclusive_changed, on_hold_mod_changed, on_language_changed,
-    on_llm_endpoint_changed, on_llm_key_changed, on_llm_model_changed, on_preset_changed,
-    on_quality_daemon_toggled, on_refresh_permissions, on_save_api_settings,
-    on_toggle_trigger_changed, on_voice_lab_field_changed, on_voice_lab_toggle_changed,
-    on_volume_changed, switch_tab,
+    on_llm_endpoint_changed, on_llm_key_changed, on_llm_model_changed, on_open_system_settings,
+    on_permission_action, on_preset_changed, on_quality_daemon_toggled, on_refresh_permissions,
+    on_save_api_settings, on_toggle_trigger_changed, on_voice_lab_field_changed,
+    on_voice_lab_toggle_changed, on_volume_changed, switch_tab,
 };
 
 pub type Id = *mut Object;
@@ -184,6 +184,14 @@ pub fn action_handler_class() -> *const Class {
             decl.add_method(
                 sel!(onRefreshPermissions:),
                 on_refresh_permissions as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onPermissionAction:),
+                on_permission_action as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onOpenSystemSettings:),
+                on_open_system_settings as extern "C" fn(&Object, Sel, Id),
             );
 
             ACTION_HANDLER_CLASS = decl.register();

@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use anyhow::Result;
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tracing::debug;
 
 use codescribe_core::vad;
 
@@ -24,9 +25,11 @@ use crate::tray::types::{MenuIds, NotesMenuItems};
 
 // Thread-local storage for menu items that need dynamic updates
 thread_local! {
+    pub static ROOT_MENU: RefCell<Option<Menu>> = const { RefCell::new(None) };
     pub static STATUS_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
     pub static QUALITY_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
     pub static SILERO_VAD_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
+    pub static COMPLETE_SETUP_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
 }
 
 /// Build the tray menu
@@ -34,6 +37,9 @@ thread_local! {
 /// Note: Settings moved to Settings tab in Chat Overlay
 pub fn build_menu() -> Result<(Menu, MenuIds)> {
     let menu = Menu::new();
+    ROOT_MENU.with(|cell| {
+        *cell.borrow_mut() = Some(menu.clone());
+    });
 
     // 1. Status line (disabled, dynamic text)
     let status_item = MenuItem::new("Status: Idle", false, None);
@@ -171,7 +177,23 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
 
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 8. Onboarding
+    let show_complete_setup = crate::should_show_onboarding() || crate::should_show_bootstrap();
+    let complete_setup_id = if show_complete_setup {
+        let complete_setup_item = MenuItem::new("Complete Setup...", true, None);
+        let id = complete_setup_item.id().clone();
+        menu.append(&complete_setup_item)?;
+        COMPLETE_SETUP_MENU_ITEM.with(|cell| {
+            *cell.borrow_mut() = Some(complete_setup_item);
+        });
+        Some(id)
+    } else {
+        COMPLETE_SETUP_MENU_ITEM.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+        None
+    };
+
+    // 8. Settings
     let onboarding_item = MenuItem::new("Settings", true, None);
     let onboarding_id = onboarding_item.id().clone();
     menu.append(&onboarding_item)?;
@@ -201,6 +223,7 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
             copy_last: copy_last_id,
             show_overlay: show_overlay_id,
             run_onboarding: onboarding_id,
+            complete_setup: complete_setup_id,
             open_history: open_history_id,
             copy_diagnostics: copy_diag_id,
             open_accessibility_settings: open_accessibility_id,
@@ -270,6 +293,23 @@ pub fn update_silero_vad_label() {
             item.set_text(&label);
         }
     });
+}
+
+pub fn update_complete_setup_item() {
+    if crate::should_show_setup() {
+        return;
+    }
+
+    let menu = ROOT_MENU.with(|cell| cell.borrow().clone());
+    let complete_setup_item = COMPLETE_SETUP_MENU_ITEM.with(|cell| cell.borrow_mut().take());
+    if let (Some(menu), Some(item)) = (menu, complete_setup_item)
+        && let Err(err) = menu.remove(&item)
+    {
+        debug!("Failed to remove Complete Setup menu item: {}", err);
+        COMPLETE_SETUP_MENU_ITEM.with(|cell| {
+            *cell.borrow_mut() = Some(item);
+        });
+    }
 }
 
 #[cfg(test)]

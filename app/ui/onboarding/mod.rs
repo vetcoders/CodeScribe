@@ -1,6 +1,7 @@
 mod steps;
 
-use self::steps::{PermissionKind, TOTAL_STEPS, WizardStep, step_for_index};
+pub(crate) use self::steps::PermissionKind;
+use self::steps::{TOTAL_STEPS, WizardStep, step_for_index};
 use crate::config::{Config, HoldMods, ToggleTrigger, UserSettings, keychain};
 use crate::os::hotkeys;
 use crate::os::permissions::{self, PermissionStatus};
@@ -126,6 +127,7 @@ struct OnboardingState {
     permission_states: [PermissionUiStatus; 5],
     scheduled_auto_advance_step: Option<usize>,
     full_disk_polling: bool,
+    closing_via_finish: bool,
     api_key_configured: bool,
     ui: UiRefs,
 }
@@ -143,6 +145,7 @@ impl Default for OnboardingState {
             permission_states: [PermissionUiStatus::NotDetermined; 5],
             scheduled_auto_advance_step: None,
             full_disk_polling: false,
+            closing_via_finish: false,
             api_key_configured: false,
             ui: UiRefs::default(),
         }
@@ -155,7 +158,7 @@ static ONBOARDING_STATE: LazyLock<Mutex<OnboardingState>> =
 static ACTION_HANDLER_CLASS: OnceLock<&'static Class> = OnceLock::new();
 static WINDOW_DELEGATE_CLASS: OnceLock<&'static Class> = OnceLock::new();
 
-const PERMISSION_ORDER: [PermissionKind; 5] = [
+pub(crate) const PERMISSION_ORDER: [PermissionKind; 5] = [
     PermissionKind::Microphone,
     PermissionKind::Accessibility,
     PermissionKind::InputMonitoring,
@@ -265,16 +268,8 @@ fn release_onboarding_lock() {
     let _ = fs::remove_file(onboarding_lock_path());
 }
 
-struct OnboardingLockGuard;
-
-impl Drop for OnboardingLockGuard {
-    fn drop(&mut self) {
-        release_onboarding_lock();
-    }
-}
-
 pub fn should_show_onboarding() -> bool {
-    !onboarding_done_path().exists()
+    crate::ui::bootstrap::should_show_setup()
 }
 
 fn mark_onboarding_done() {
@@ -293,24 +288,26 @@ pub fn show_onboarding_wizard() {
     if !acquire_onboarding_lock() {
         return;
     }
-    let _lock_guard = OnboardingLockGuard;
 
     if is_main_thread() {
-        show_onboarding_wizard_impl();
+        launch_onboarding_window();
     } else {
-        let (tx, rx) = std::sync::mpsc::channel::<bool>();
         Queue::main().exec_async(move || {
-            let completed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                show_onboarding_wizard_impl();
-            }))
-            .is_ok();
-            let _ = tx.send(completed);
+            launch_onboarding_window();
         });
-        // This intentionally blocks the caller thread until modal onboarding finishes.
-        match rx.recv() {
-            Ok(true) => {}
-            Ok(false) => warn!("Onboarding wizard terminated with panic"),
-            Err(e) => warn!("Onboarding wizard completion signal failed: {e}"),
+    }
+}
+
+fn launch_onboarding_window() {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(show_onboarding_wizard_impl)) {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!("Onboarding wizard did not open");
+            release_onboarding_lock();
+        }
+        Err(_) => {
+            warn!("Onboarding wizard terminated with panic");
+            release_onboarding_lock();
         }
     }
 }
@@ -359,6 +356,10 @@ fn window_delegate_class() -> &'static Class {
         let mut decl = ClassDecl::new("CodeScribeOnboardingWindowDelegate", superclass)
             .expect("Failed to create onboarding window delegate class");
         decl.add_method(
+            sel!(windowShouldClose:),
+            on_window_should_close as extern "C" fn(&Object, Sel, Id) -> bool,
+        );
+        decl.add_method(
             sel!(windowWillClose:),
             on_window_will_close as extern "C" fn(&Object, Sel, Id),
         );
@@ -404,6 +405,20 @@ extern "C" fn on_hotkey_selected(_this: &Object, _sel: Sel, sender: Id) {
     render_current_step();
 }
 
+extern "C" fn on_window_should_close(_this: &Object, _sel: Sel, _sender: Id) -> bool {
+    let closing_via_finish = {
+        let state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.closing_via_finish
+    };
+
+    if closing_via_finish {
+        return true;
+    }
+
+    finish_onboarding(false);
+    false
+}
+
 extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, notification: Id) {
     let window_ptr = unsafe {
         if notification.is_null() {
@@ -425,7 +440,10 @@ extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, notification: Id) 
     state.ui = UiRefs::default();
     state.full_disk_polling = false;
     state.scheduled_auto_advance_step = None;
+    state.closing_via_finish = false;
     drop(state);
+
+    release_onboarding_lock();
 
     unsafe {
         if let Some(ptr) = delegate_ptr {
@@ -438,11 +456,9 @@ extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, notification: Id) 
             let _: () = msg_send![ptr as Id, release];
         }
     }
-
-    stop_modal();
 }
 
-fn show_onboarding_wizard_impl() {
+fn show_onboarding_wizard_impl() -> bool {
     unsafe {
         let existing = {
             let state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -454,19 +470,18 @@ fn show_onboarding_wizard_impl() {
             let valid: bool = msg_send![window, isKindOfClass: ns_window];
             if valid {
                 window_show(window);
-                run_modal_for_window(window);
-                return;
+                return true;
             }
         }
 
         let Some(screen_class) = Class::get("NSScreen") else {
             warn!("Onboarding: NSScreen class missing");
-            return;
+            return false;
         };
         let screen: Id = msg_send![screen_class, mainScreen];
         if screen.is_null() {
             warn!("Onboarding: No main screen");
-            return;
+            return false;
         }
 
         let visible: CGRect = msg_send![screen, visibleFrame];
@@ -503,15 +518,15 @@ fn show_onboarding_wizard_impl() {
 
         let close_btn: Id = msg_send![window, standardWindowButton: NSWindowButton::CloseButton];
         if !close_btn.is_null() {
-            let _: () = msg_send![close_btn, setHidden: true];
-            let _: () = msg_send![close_btn, setEnabled: false];
+            let _: () = msg_send![close_btn, setHidden: false];
+            let _: () = msg_send![close_btn, setEnabled: true];
         }
 
         let mini_btn: Id =
             msg_send![window, standardWindowButton: NSWindowButton::MiniaturizeButton];
         if !mini_btn.is_null() {
-            let _: () = msg_send![mini_btn, setHidden: true];
-            let _: () = msg_send![mini_btn, setEnabled: false];
+            let _: () = msg_send![mini_btn, setHidden: false];
+            let _: () = msg_send![mini_btn, setEnabled: true];
         }
 
         let zoom_btn: Id = msg_send![window, standardWindowButton: NSWindowButton::ZoomButton];
@@ -555,6 +570,7 @@ fn show_onboarding_wizard_impl() {
                 permission_states: [PermissionUiStatus::NotDetermined; 5],
                 scheduled_auto_advance_step: None,
                 full_disk_polling: false,
+                closing_via_finish: false,
                 api_key_configured: keychain::load_key("LLM_API_KEY")
                     .map(|k| !k.trim().is_empty())
                     .unwrap_or(false),
@@ -566,11 +582,7 @@ fn show_onboarding_wizard_impl() {
 
         render_current_step();
         window_show(window);
-        run_modal_for_window(window);
-
-        let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.full_disk_polling = false;
-        state.scheduled_auto_advance_step = None;
+        true
     }
 }
 
@@ -985,7 +997,10 @@ fn render_current_step() {
     set_hidden_if_present(ui.api_view, true);
     set_hidden_if_present(ui.hotkey_view, true);
     set_hidden_if_present(ui.summary_view, true);
-    set_hidden_if_present(ui.skip_button, true);
+    set_hidden_if_present(ui.skip_button, matches!(step, WizardStep::Done));
+    if step != WizardStep::Done {
+        set_button_title_if_present(ui.skip_button, "Not Now");
+    }
 
     set_hidden_if_present(ui.back_button, step_index == 0);
 
@@ -1091,6 +1106,7 @@ fn render_current_step() {
                 "Review your setup. You can always adjust these settings later.",
             );
             set_hidden_if_present(ui.summary_view, false);
+            set_hidden_if_present(ui.skip_button, true);
             update_summary_view(ui, permissions, language, api_key_configured, hotkey_mode);
             set_button_title_if_present(ui.primary_button, "Start CodeScribe");
         }
@@ -1144,7 +1160,7 @@ fn handle_skip_action() {
             mark_api_key_skipped();
             advance_step();
         }
-        _ => {}
+        _ => finish_onboarding(false),
     }
 }
 
@@ -1553,30 +1569,17 @@ fn finish_onboarding(completed: bool) {
         let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.full_disk_polling = false;
         state.scheduled_auto_advance_step = None;
+        state.closing_via_finish = true;
         state.window.take()
     };
 
-    stop_modal();
-
     if let Some(ptr) = window_ptr {
         unsafe { window_close(ptr as Id) };
-    }
-}
-
-fn stop_modal() {
-    unsafe {
-        let ns_app = Class::get("NSApplication").unwrap();
-        let app: Id = msg_send![ns_app, sharedApplication];
-        let _: () = msg_send![app, stopModal];
-    }
-}
-
-fn run_modal_for_window(window: Id) {
-    unsafe {
-        let ns_app = Class::get("NSApplication").unwrap();
-        let app: Id = msg_send![ns_app, sharedApplication];
-        let _: () = msg_send![app, activateIgnoringOtherApps: true];
-        let _: isize = msg_send![app, runModalForWindow: window];
+    } else {
+        let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.closing_via_finish = false;
+        drop(state);
+        release_onboarding_lock();
     }
 }
 
@@ -1628,24 +1631,18 @@ fn refresh_all_permission_states_locked(state: &mut OnboardingState) {
     }
 }
 
-fn check_permission_state(kind: PermissionKind, requested: bool) -> PermissionUiStatus {
+pub(crate) fn permission_status(kind: PermissionKind) -> PermissionStatus {
     match kind {
-        PermissionKind::Microphone => {
-            map_permission_status(kind, permissions::check_microphone(), requested)
-        }
-        PermissionKind::Accessibility => {
-            map_permission_status(kind, permissions::check_accessibility(), requested)
-        }
-        PermissionKind::InputMonitoring => {
-            map_permission_status(kind, permissions::check_input_monitoring(), requested)
-        }
-        PermissionKind::ScreenRecording => {
-            map_permission_status(kind, permissions::check_screen_recording(), requested)
-        }
-        PermissionKind::FullDiskAccess => {
-            map_permission_status(kind, permissions::check_full_disk_access(), requested)
-        }
+        PermissionKind::Microphone => permissions::check_microphone(),
+        PermissionKind::Accessibility => permissions::check_accessibility(),
+        PermissionKind::InputMonitoring => permissions::check_input_monitoring(),
+        PermissionKind::ScreenRecording => permissions::check_screen_recording(),
+        PermissionKind::FullDiskAccess => permissions::check_full_disk_access(),
     }
+}
+
+fn check_permission_state(kind: PermissionKind, requested: bool) -> PermissionUiStatus {
+    map_permission_status(kind, permission_status(kind), requested)
 }
 
 fn map_permission_status(
@@ -1666,12 +1663,26 @@ fn map_permission_status(
     }
 }
 
-fn request_permission(kind: PermissionKind) -> bool {
+pub(crate) fn permission_settings_deeplink(kind: PermissionKind) -> &'static str {
+    match kind {
+        PermissionKind::Microphone => "Privacy_Microphone",
+        PermissionKind::Accessibility => "Privacy_Accessibility",
+        PermissionKind::InputMonitoring => "Privacy_ListenEvent",
+        PermissionKind::ScreenRecording => "Privacy_ScreenCapture",
+        PermissionKind::FullDiskAccess => "Privacy_AllFiles",
+    }
+}
+
+pub(crate) fn open_permission_settings(kind: PermissionKind) {
+    permissions::open_privacy_settings(permission_settings_deeplink(kind));
+}
+
+pub(crate) fn request_permission(kind: PermissionKind) -> bool {
     match kind {
         PermissionKind::Microphone => {
             let result = permissions::request_microphone();
             if !result {
-                permissions::open_privacy_settings("Privacy_Microphone");
+                open_permission_settings(kind);
             }
             result
         }
@@ -1680,7 +1691,7 @@ fn request_permission(kind: PermissionKind) -> bool {
         PermissionKind::ScreenRecording => {
             let result = permissions::request_screen_recording();
             if !result {
-                permissions::open_privacy_settings("Privacy_ScreenCapture");
+                open_permission_settings(kind);
             }
             result
         }

@@ -19,7 +19,12 @@ use tracing::{info, warn};
 use crate::config::{Config, HoldMods, ToggleTrigger, keychain};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::hotkeys;
+use crate::os::permissions::PermissionStatus;
 use crate::ui::bootstrap::handlers::{action_handler_class, window_delegate_class};
+use crate::ui::onboarding::{
+    PERMISSION_ORDER, PermissionKind, open_permission_settings, permission_status,
+    request_permission,
+};
 use crate::ui_helpers::{
     LabelConfig, add_subview, button, button_set_action, button_style, create_button,
     create_checkbox, create_floating_window, create_glass_effect_view_with, create_label,
@@ -227,7 +232,10 @@ struct BootstrapState {
     double_tap_value_label: Option<usize>,
     config_cache: Option<Config>,
     // Onboarding additions
-    permission_labels: [Option<usize>; 3], // Mic, Accessibility, Input Monitoring
+    permission_labels: [Option<usize>; 5],
+    permission_action_buttons: [Option<usize>; 5],
+    permission_requested: [bool; 5],
+    permission_polling: bool,
     quality_daemon_checkbox: Option<usize>,
     completion_view: Option<usize>,
     llm_endpoint_field: Option<usize>,
@@ -244,16 +252,43 @@ lazy_static! {
     static ref BOOTSTRAP_STATE: Mutex<BootstrapState> = Mutex::new(BootstrapState::default());
 }
 
+fn setup_done_path() -> PathBuf {
+    Config::config_dir().join("setup_done")
+}
+
+fn onboarding_done_path() -> PathBuf {
+    Config::config_dir().join("onboarding_done")
+}
+
 fn bootstrap_done_path() -> PathBuf {
     Config::config_dir().join("bootstrap_done")
 }
 
-pub fn should_show_bootstrap() -> bool {
-    !bootstrap_done_path().exists()
+fn migrate_legacy_setup_sentinel() {
+    let setup_done = setup_done_path();
+    if setup_done.exists() {
+        return;
+    }
+
+    if onboarding_done_path().exists() && bootstrap_done_path().exists() {
+        if let Some(parent) = setup_done.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(setup_done, "done");
+    }
 }
 
-fn mark_bootstrap_done() {
-    let path = bootstrap_done_path();
+pub fn should_show_setup() -> bool {
+    migrate_legacy_setup_sentinel();
+    !setup_done_path().exists()
+}
+
+pub fn should_show_bootstrap() -> bool {
+    should_show_setup()
+}
+
+fn mark_setup_done() {
+    let path = setup_done_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -261,13 +296,13 @@ fn mark_bootstrap_done() {
 }
 
 pub fn schedule_bootstrap() {
-    if !should_show_bootstrap() {
+    if !should_show_setup() {
         return;
     }
 
     thread::spawn(|| {
         thread::sleep(Duration::from_millis(800));
-        show_bootstrap_overlay();
+        show_settings_setup_tab();
     });
 }
 
@@ -282,6 +317,8 @@ pub fn show_bootstrap_overlay() {
             Queue::main().exec_async(move || unsafe {
                 let window = ptr as Id;
                 window_show(window);
+                refresh_permission_indicators();
+                start_permission_polling();
             });
             return;
         }
@@ -331,6 +368,8 @@ fn show_bootstrap_overlay_impl() {
         }; // Release lock before AppKit call.
         if let Some(window) = reuse_window {
             window_show(window);
+            refresh_permission_indicators();
+            start_permission_polling();
             return;
         }
 
@@ -382,6 +421,8 @@ fn show_bootstrap_overlay_impl() {
         } // Release lock before AppKit call to avoid nested-runloop deadlock.
 
         window_show(window);
+        refresh_permission_indicators();
+        start_permission_polling();
     }
 }
 
@@ -409,6 +450,8 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
             if superview.is_null() {
                 add_subview(parent, root);
             }
+            refresh_permission_indicators();
+            start_permission_polling();
             return Some(root);
         }
 
@@ -452,6 +495,9 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         state.keys_exclusive_checkbox = built_state.keys_exclusive_checkbox;
         state.config_cache = built_state.config_cache;
         state.permission_labels = built_state.permission_labels;
+        state.permission_action_buttons = built_state.permission_action_buttons;
+        state.permission_requested = built_state.permission_requested;
+        state.permission_polling = built_state.permission_polling;
         state.quality_daemon_checkbox = built_state.quality_daemon_checkbox;
         state.completion_view = built_state.completion_view;
         state.llm_endpoint_field = built_state.llm_endpoint_field;
@@ -461,39 +507,20 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         state.assistive_model_field = built_state.assistive_model_field;
         state.assistive_key_field = built_state.assistive_key_field;
 
+        refresh_permission_indicators();
+        start_permission_polling();
         Some(root)
     }
 }
 
 // ============================================================================
-// Permission checks (macOS system APIs)
+// Permission checks / setup readiness
 // ============================================================================
 
-fn check_permissions() -> [bool; 3] {
-    unsafe {
-        // Mic: AVCaptureDevice authorizationStatusForMediaType:
-        let mic_ok = if let Some(av_class) = Class::get("AVCaptureDevice") {
-            let audio_type = ns_string("soun"); // AVMediaTypeAudio fourcc
-            let status: isize = msg_send![av_class, authorizationStatusForMediaType: audio_type];
-            status == 3 // AVAuthorizationStatusAuthorized
-        } else {
-            false
-        };
-
-        // Accessibility: AXIsProcessTrusted()
-        unsafe extern "C" {
-            fn AXIsProcessTrusted() -> bool;
-        }
-        let ax_ok = AXIsProcessTrusted();
-
-        // Input Monitoring: CGPreflightListenEventAccess() (macOS 10.15+)
-        unsafe extern "C" {
-            fn CGPreflightListenEventAccess() -> bool;
-        }
-        let input_ok = CGPreflightListenEventAccess();
-
-        [mic_ok, ax_ok, input_ok]
-    }
+fn permissions_all_granted() -> bool {
+    PERMISSION_ORDER
+        .iter()
+        .all(|kind| permission_status(*kind) == PermissionStatus::Granted)
 }
 
 fn permission_color(granted: bool) -> Id {
@@ -510,6 +537,74 @@ fn permission_color(granted: bool) -> Id {
             msg_send![ns_color, systemRedColor]
         }
     }
+}
+
+fn permission_row_label(kind: PermissionKind) -> &'static str {
+    kind.title()
+}
+
+fn permission_action_title(
+    kind: PermissionKind,
+    status: PermissionStatus,
+    requested: bool,
+) -> Option<&'static str> {
+    if status == PermissionStatus::Granted {
+        None
+    } else if kind == PermissionKind::FullDiskAccess || requested {
+        Some("Open Settings")
+    } else {
+        Some("Grant")
+    }
+}
+
+fn permission_kind_from_tag(tag: isize) -> Option<PermissionKind> {
+    if tag < 0 {
+        return None;
+    }
+    PERMISSION_ORDER.get(tag as usize).copied()
+}
+
+fn open_system_settings_security() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security")
+        .spawn();
+}
+
+fn handle_permission_action(kind: PermissionKind) {
+    let idx = kind.index();
+    let already_requested = {
+        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let was_requested = state.permission_requested[idx];
+        state.permission_requested[idx] = true;
+        was_requested
+    };
+
+    if kind == PermissionKind::FullDiskAccess || already_requested {
+        open_permission_settings(kind);
+        refresh_permission_indicators();
+        return;
+    }
+
+    if kind == PermissionKind::Microphone {
+        thread::spawn(move || {
+            let _ = request_permission(kind);
+            refresh_permission_indicators();
+        });
+        refresh_permission_indicators();
+        return;
+    }
+
+    let granted = request_permission(kind);
+    if !granted
+        && matches!(
+            kind,
+            PermissionKind::Accessibility | PermissionKind::InputMonitoring
+        )
+    {
+        open_permission_settings(kind);
+    }
+
+    refresh_permission_indicators();
 }
 
 fn keychain_key_is_set(account: &str) -> bool {
@@ -572,23 +667,69 @@ fn clear_keychain_entry(account: &str, field_ptr: Option<usize>) {
     update_keychain_status_labels();
 }
 
-pub(super) fn refresh_permission_indicators() {
-    let perms = check_permissions();
-    let names = ["Mic", "Accessibility", "Input"];
+fn start_permission_polling() {
+    let should_start = {
+        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if state.permission_polling {
+            false
+        } else {
+            state.permission_polling = true;
+            true
+        }
+    };
 
+    if !should_start {
+        return;
+    }
+
+    thread::spawn(|| {
+        loop {
+            thread::sleep(Duration::from_secs(2));
+            let keep_running = {
+                let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.permission_polling
+            };
+            if !keep_running {
+                break;
+            }
+            refresh_permission_indicators();
+        }
+    });
+}
+
+pub(super) fn refresh_permission_indicators() {
     Queue::main().exec_async(move || unsafe {
-        let labels = {
+        let (labels, action_buttons, requested) = {
             let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            state.permission_labels
+            (
+                state.permission_labels,
+                state.permission_action_buttons,
+                state.permission_requested,
+            )
         };
-        for (i, granted) in perms.iter().enumerate() {
-            if let Some(label_ptr) = labels[i] {
+
+        for kind in PERMISSION_ORDER {
+            let idx = kind.index();
+            let status = permission_status(kind);
+            let granted = status == PermissionStatus::Granted;
+            let marker = if granted { "\u{2713}" } else { "\u{2715}" };
+            let text = format!("{marker} {}", permission_row_label(kind));
+
+            if let Some(label_ptr) = labels[idx] {
                 let label = label_ptr as Id;
-                let dot = if *granted { "\u{25CF}" } else { "\u{25CB}" }; // ● vs ○
-                let text = format!("{} {}", dot, names[i]);
                 set_text_field_string(label, &text);
-                let color = permission_color(*granted);
+                let color = permission_color(granted);
                 let _: () = msg_send![label, setTextColor: color];
+            }
+
+            if let Some(button_ptr) = action_buttons[idx] {
+                let action_button = button_ptr as Id;
+                if let Some(title) = permission_action_title(kind, status, requested[idx]) {
+                    let _: () = msg_send![action_button, setHidden: false];
+                    let _: () = msg_send![action_button, setTitle: ns_string(title)];
+                } else {
+                    let _: () = msg_send![action_button, setHidden: true];
+                }
             }
         }
     });
@@ -843,40 +984,99 @@ unsafe fn build_settings_ui(
         let mut y = content_h - 20.0;
         let mono_font_input = crate::ui_helpers::monospace_font(ui_tokens::BODY_FONT_SIZE);
 
-        // ── Permission indicators ────────────────────────────────────
-        let perms = check_permissions();
-        let perm_names = ["Mic", "Accessibility", "Input"];
-        let perm_w = 130.0;
-        let mut perm_labels: [Option<usize>; 3] = [None; 3];
+        // ── Permissions ───────────────────────────────────────────────
+        let mut perm_labels: [Option<usize>; 5] = [None; 5];
+        let mut perm_action_buttons: [Option<usize>; 5] = [None; 5];
 
-        for (i, (name, granted)) in perm_names.iter().zip(perms.iter()).enumerate() {
-            let dot = if *granted { "\u{25CF}" } else { "\u{25CB}" };
-            let text = format!("{} {}", dot, name);
-            let lbl = create_label(LabelConfig {
+        let permissions_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 20.0)),
+            text: "Permissions".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(setup_view, permissions_header);
+        y -= 26.0;
+
+        let permission_button_w = 118.0;
+        let permission_label_w = (field_w - permission_button_w - 12.0).max(180.0);
+
+        for kind in PERMISSION_ORDER {
+            let idx = kind.index();
+            let status = permission_status(kind);
+            let granted = status == PermissionStatus::Granted;
+            let marker = if granted { "\u{2713}" } else { "\u{2715}" };
+            let text = format!("{marker} {}", permission_row_label(kind));
+
+            let label = create_label(LabelConfig {
                 frame: CGRect::new(
-                    &CGPoint::new(pad + perm_w * i as f64, y),
-                    &CGSize::new(perm_w, 18.0),
+                    &CGPoint::new(pad, y),
+                    &CGSize::new(permission_label_w, 20.0),
                 ),
                 text,
-                font_size: ui_tokens::SMALL_FONT_SIZE,
+                font_size: ui_tokens::BODY_FONT_SIZE,
                 bold: true,
-                text_color: permission_color(*granted),
+                text_color: permission_color(granted),
                 ..Default::default()
             });
-            add_subview(setup_view, lbl);
-            perm_labels[i] = Some(lbl as usize);
+            add_subview(setup_view, label);
+            perm_labels[idx] = Some(label as usize);
+
+            let initial_button_title =
+                permission_action_title(kind, status, false).unwrap_or("Grant");
+            let action_btn = button(
+                CGRect::new(
+                    &CGPoint::new(content_width - pad - permission_button_w, y - 2.0),
+                    &CGSize::new(permission_button_w, 24.0),
+                ),
+                initial_button_title,
+            );
+            let _: () = msg_send![action_btn, setTag: idx as isize];
+            button_set_action(action_btn, action_handler, sel!(onPermissionAction:));
+            if permission_action_title(kind, status, false).is_none() {
+                let _: () = msg_send![action_btn, setHidden: true];
+            }
+            add_subview(setup_view, action_btn);
+            perm_action_buttons[idx] = Some(action_btn as usize);
+            y -= 28.0;
         }
 
-        let refresh_btn = button(
+        let open_settings_btn = button(
             CGRect::new(
-                &CGPoint::new(content_width - 100.0, y - 2.0),
-                &CGSize::new(80.0, 22.0),
+                &CGPoint::new(content_width - pad - 172.0, y),
+                &CGSize::new(172.0, 24.0),
             ),
-            "Refresh",
+            "Open System Settings",
         );
-        button_set_action(refresh_btn, action_handler, sel!(onRefreshPermissions:));
-        add_subview(setup_view, refresh_btn);
-        y -= 32.0;
+        button_set_action(
+            open_settings_btn,
+            action_handler,
+            sel!(onOpenSystemSettings:),
+        );
+        add_subview(setup_view, open_settings_btn);
+        y -= 26.0;
+
+        let permissions_divider = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 1.0)),
+            text: String::new(),
+            background_color: Some(ui_colors::separator()),
+            ..Default::default()
+        });
+        let _: () = msg_send![permissions_divider, setAlphaValue: 0.55f64];
+        add_subview(setup_view, permissions_divider);
+        y -= 22.0;
+
+        let quick_start_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 20.0)),
+            text: "Quick Start".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(setup_view, quick_start_header);
+        y -= 26.0;
 
         // ── Quick-start steps ────────────────────────────────────────
         let step_defs: [(&str, objc::runtime::Sel, &str); 3] = [
@@ -1160,6 +1360,9 @@ unsafe fn build_settings_ui(
         ];
         state.active_tab = TAB_SETUP;
         state.permission_labels = perm_labels;
+        state.permission_action_buttons = perm_action_buttons;
+        state.permission_requested = [false; 5];
+        state.permission_polling = false;
         state.quality_daemon_checkbox = Some(quality_check as usize);
         state.completion_view = Some(completion as usize);
         state.config_cache = Some(config.clone());
@@ -1362,7 +1565,13 @@ pub(super) fn handle_finish() {
 
     thread::spawn(|| {
         thread::sleep(Duration::from_millis(1200));
-        mark_bootstrap_done();
+        if permissions_all_granted() {
+            mark_setup_done();
+        } else {
+            warn!(
+                "Setup finish requested but not all permissions are granted yet; keeping setup incomplete."
+            );
+        }
         crate::voice_chat_ui::show_agent_tab();
         hide_bootstrap_overlay();
     });
@@ -1382,7 +1591,10 @@ pub(super) fn handle_bootstrap_window_closed() {
     state.keys_exclusive_checkbox = None;
     state.hold_delay_value_label = None;
     state.double_tap_value_label = None;
-    state.permission_labels = [None, None, None];
+    state.permission_labels = [None, None, None, None, None];
+    state.permission_action_buttons = [None, None, None, None, None];
+    state.permission_requested = [false; 5];
+    state.permission_polling = false;
     state.quality_daemon_checkbox = None;
     state.completion_view = None;
     state.llm_endpoint_field = None;
@@ -1400,6 +1612,7 @@ pub fn hide_bootstrap_overlay() {
     Queue::main().exec_async(|| unsafe {
         let (window_ptr, root_ptr) = {
             let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.permission_polling = false;
             let window_ptr = state.window.take();
             if window_ptr.is_some() {
                 state.window_delegate = None;
@@ -1413,7 +1626,10 @@ pub fn hide_bootstrap_overlay() {
                 state.keys_exclusive_checkbox = None;
                 state.hold_delay_value_label = None;
                 state.double_tap_value_label = None;
-                state.permission_labels = [None, None, None];
+                state.permission_labels = [None, None, None, None, None];
+                state.permission_action_buttons = [None, None, None, None, None];
+                state.permission_requested = [false; 5];
+                state.permission_polling = false;
                 state.quality_daemon_checkbox = None;
                 state.completion_view = None;
                 state.llm_endpoint_field = None;
@@ -1451,9 +1667,15 @@ pub fn schedule_settings_window() {
     schedule_bootstrap();
 }
 
+/// Show Settings and force-focus the Setup tab.
+pub fn show_settings_setup_tab() {
+    show_bootstrap_overlay();
+    switch_tab(TAB_SETUP);
+}
+
 /// Alias: should show Settings onboarding window.
 pub fn should_show_settings_onboarding() -> bool {
-    should_show_bootstrap()
+    should_show_setup()
 }
 
 /// Reset embedded Settings view state when the overlay is destroyed.
@@ -1474,7 +1696,10 @@ pub fn reset_embedded_bootstrap_state() {
     state.keys_exclusive_checkbox = None;
     state.hold_delay_value_label = None;
     state.double_tap_value_label = None;
-    state.permission_labels = [None, None, None];
+    state.permission_labels = [None, None, None, None, None];
+    state.permission_action_buttons = [None, None, None, None, None];
+    state.permission_requested = [false; 5];
+    state.permission_polling = false;
     state.quality_daemon_checkbox = None;
     state.completion_view = None;
     state.llm_endpoint_field = None;
@@ -2802,6 +3027,29 @@ pub(super) extern "C" fn on_quality_daemon_toggled(
             if enabled { "1" } else { "0" },
         );
     }
+}
+
+pub(super) extern "C" fn on_permission_action(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    unsafe {
+        let tag: isize = msg_send![sender, tag];
+        if let Some(kind) = permission_kind_from_tag(tag) {
+            info!("Settings: permission action for {:?}", kind);
+            handle_permission_action(kind);
+        }
+    }
+}
+
+pub(super) extern "C" fn on_open_system_settings(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    _sender: Id,
+) {
+    info!("Settings: opening System Settings");
+    open_system_settings_security();
 }
 
 pub(super) extern "C" fn on_refresh_permissions(

@@ -189,24 +189,31 @@ async fn scheduler_worker(
             let result = tokio::task::spawn_blocking(move || {
                 let samples = if lane == SttLane::Commit {
                     // Commit lane: apply batch VAD to get clean speech-only audio.
-                    let (speech, stats) = crate::vad::extract_speech(&req.samples, req.sample_rate);
-                    if speech.is_empty() {
-                        tracing::info!(
-                            "Commit VAD: no speech in {:.1}s utterance — returning empty",
-                            req.samples.len() as f32 / req.sample_rate as f32
+                    // Skip VAD for buffers shorter than one Silero chunk (512 = 32ms @ 16kHz).
+                    // Silero needs at least one complete chunk to produce a probability.
+                    if req.samples.len() < crate::vad::CHUNK_SIZE {
+                        req.samples
+                    } else {
+                        let (speech, stats) =
+                            crate::vad::extract_speech(&req.samples, req.sample_rate);
+                        if speech.is_empty() {
+                            tracing::info!(
+                                "Commit VAD: no speech in {:.1}s utterance — returning empty",
+                                req.samples.len() as f32 / req.sample_rate as f32
+                            );
+                            return Ok(RawTranscript {
+                                text: String::new(),
+                                segments: Vec::new(),
+                            });
+                        }
+                        tracing::debug!(
+                            "Commit VAD: {:.1}s speech / {:.1}s total ({:.0}% speech)",
+                            speech.len() as f32 / req.sample_rate as f32,
+                            req.samples.len() as f32 / req.sample_rate as f32,
+                            stats.speech_pct,
                         );
-                        return Ok(RawTranscript {
-                            text: String::new(),
-                            segments: Vec::new(),
-                        });
+                        speech
                     }
-                    tracing::debug!(
-                        "Commit VAD: {:.1}s speech / {:.1}s total ({:.0}% speech)",
-                        speech.len() as f32 / req.sample_rate as f32,
-                        req.samples.len() as f32 / req.sample_rate as f32,
-                        stats.speech_pct,
-                    );
-                    speech
                 } else {
                     req.samples
                 };

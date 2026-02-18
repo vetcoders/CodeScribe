@@ -1,7 +1,7 @@
 //! E2E tests for Bootstrap lifecycle & Settings window persistence
 //!
 //! Tests:
-//! - Bootstrap sentinel file creation/detection (`should_show_bootstrap`)
+//! - Setup sentinel creation/detection (`should_show_setup`)
 //! - Settings persistence via `Config::save_to_env()` for keys added by Settings tabs
 //!
 //! Run with:
@@ -34,56 +34,84 @@ fn setup_test_env() -> TempDir {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Bootstrap Lifecycle
+// Setup Lifecycle
 // ═══════════════════════════════════════════════════════════
 
 #[test]
 #[serial]
-fn test_bootstrap_should_show_when_no_sentinel() {
+fn test_setup_should_show_when_no_sentinel() {
     let _tmp = setup_test_env();
 
-    // Fresh config dir — no bootstrap_done file
+    // Fresh config dir — no setup sentinel file
     assert!(
-        codescribe::should_show_bootstrap(),
-        "should_show_bootstrap must be true on fresh install"
+        codescribe::should_show_setup(),
+        "should_show_setup must be true on fresh install"
     );
 }
 
 #[test]
 #[serial]
-fn test_bootstrap_should_not_show_after_done() {
+fn test_setup_should_not_show_after_done() {
     let _tmp = setup_test_env();
 
-    // Simulate mark_bootstrap_done() — it writes "done" to bootstrap_done
-    let sentinel = Config::config_dir().join("bootstrap_done");
+    let sentinel = Config::config_dir().join("setup_done");
     fs::create_dir_all(sentinel.parent().unwrap()).expect("create config dir");
     fs::write(&sentinel, "done").expect("write sentinel");
 
     assert!(
-        !codescribe::should_show_bootstrap(),
-        "should_show_bootstrap must be false after bootstrap_done exists"
+        !codescribe::should_show_setup(),
+        "should_show_setup must be false after setup_done exists"
     );
 }
 
 #[test]
 #[serial]
-fn test_bootstrap_sentinel_survives_reload() {
+fn test_setup_migrates_when_both_legacy_sentinels_exist() {
     let _tmp = setup_test_env();
 
-    assert!(codescribe::should_show_bootstrap(), "initially true");
+    let onboarding = Config::config_dir().join("onboarding_done");
+    let bootstrap = Config::config_dir().join("bootstrap_done");
+    fs::create_dir_all(onboarding.parent().unwrap()).unwrap();
+    fs::write(&onboarding, "done").unwrap();
+    fs::write(&bootstrap, "done").unwrap();
 
-    // Mark done
-    let sentinel = Config::config_dir().join("bootstrap_done");
-    fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
-    fs::write(&sentinel, "done").unwrap();
-
-    assert!(!codescribe::should_show_bootstrap(), "false after mark");
-
-    // "Restart" — reload config (sentinel is file-based, not in-memory)
-    let _ = Config::load();
     assert!(
-        !codescribe::should_show_bootstrap(),
-        "still false after config reload"
+        !codescribe::should_show_setup(),
+        "both legacy sentinels should migrate to setup_done and mark setup complete"
+    );
+
+    let setup = Config::config_dir().join("setup_done");
+    assert!(
+        setup.exists(),
+        "setup_done should be written during migration"
+    );
+}
+
+#[test]
+#[serial]
+fn test_setup_remains_incomplete_with_only_legacy_onboarding() {
+    let _tmp = setup_test_env();
+    let onboarding = Config::config_dir().join("onboarding_done");
+    fs::create_dir_all(onboarding.parent().unwrap()).unwrap();
+    fs::write(&onboarding, "done").unwrap();
+
+    assert!(
+        codescribe::should_show_setup(),
+        "legacy onboarding_done alone means permissions were done, but setup is still pending"
+    );
+}
+
+#[test]
+#[serial]
+fn test_setup_remains_incomplete_with_only_legacy_bootstrap() {
+    let _tmp = setup_test_env();
+    let bootstrap = Config::config_dir().join("bootstrap_done");
+    fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+    fs::write(&bootstrap, "done").unwrap();
+
+    assert!(
+        codescribe::should_show_setup(),
+        "legacy bootstrap_done alone means settings were opened before, but setup is still pending"
     );
 }
 

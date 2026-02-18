@@ -2201,6 +2201,87 @@ mod tests {
         assert_eq!(final_evictions, 1);
     }
 
+    #[tokio::test]
+    async fn test_enqueue_pending_utterance_async_backpressure_recovers_after_drain() {
+        let mut pending = VecDeque::new();
+        let mut outcomes = Vec::new();
+        let mut drained_marker = None;
+
+        let (tx, mut rx) = mpsc::channel::<PendingUtteranceWorkItem>(16);
+        let producer = tokio::spawn(async move {
+            let sequence = [
+                (true, 1.0),
+                (true, 2.0),
+                (true, 3.0),
+                (false, 4.0),
+                (true, 5.0),
+                (false, 6.0),
+                (true, 7.0),
+            ];
+            for (is_final, marker) in sequence {
+                tx.send(pending_item_with_marker(is_final, marker))
+                    .await
+                    .expect("async queue-recovery sequence send should succeed");
+                tokio::task::yield_now().await;
+            }
+        });
+
+        while let Some(item) = rx.recv().await {
+            let marker = item.audio[0] as u32;
+            let outcome = enqueue_pending_utterance(&mut pending, item, 3);
+            outcomes.push((
+                marker,
+                outcome.enqueued,
+                outcome.dropped,
+                outcome.evicted_final,
+            ));
+
+            // Simulate one inference slot freeing after the queue saturated with finals.
+            if marker == 5 {
+                let drained = pending
+                    .pop_front()
+                    .expect("simulated inference drain should pop one queued item");
+                drained_marker = Some(drained.audio[0] as u32);
+            }
+
+            tokio::task::yield_now().await;
+        }
+        producer
+            .await
+            .expect("async queue-recovery producer should finish");
+
+        assert_eq!(
+            outcomes,
+            vec![
+                (1, true, 0, false),
+                (2, true, 0, false),
+                (3, true, 0, false),
+                (4, false, 1, false),
+                (5, true, 1, true),
+                (6, true, 0, false),
+                (7, true, 1, false),
+            ],
+            "backpressure policy should drop non-finals when saturated, recover after drain, and keep final precedence"
+        );
+        assert_eq!(
+            drained_marker,
+            Some(2),
+            "drain should remove the current oldest final after a final-only eviction cycle"
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .map(|item| item.audio[0] as u32)
+                .collect::<Vec<u32>>(),
+            vec![3, 5, 7],
+            "final enqueue after recovery should evict queued non-final first"
+        );
+        assert!(
+            pending.iter().all(|item| item.is_final),
+            "final boundaries should remain intact at the tail of async pressure+drain sequence"
+        );
+    }
+
     #[test]
     fn test_partial_trigger_contract_utterance_path() {
         let now = Instant::now();
@@ -2308,6 +2389,32 @@ mod tests {
     }
 
     #[test]
+    fn test_partial_trigger_precedence_matrix_covers_all_flag_combinations() {
+        let cases = [
+            (false, false, false, None),
+            (false, false, true, Some(PartialPassTrigger::Watchdog)),
+            (false, true, false, Some(PartialPassTrigger::Speech)),
+            (false, true, true, Some(PartialPassTrigger::Speech)),
+            (true, false, false, Some(PartialPassTrigger::Utterance)),
+            (true, false, true, Some(PartialPassTrigger::Utterance)),
+            (true, true, false, Some(PartialPassTrigger::Utterance)),
+            (true, true, true, Some(PartialPassTrigger::Utterance)),
+        ];
+
+        for (utterance_finals, silero_speech, watchdog, expected) in cases {
+            assert_eq!(
+                classify_partial_trigger(PartialPassTriggerFlags {
+                    utterance_finals,
+                    silero_speech,
+                    watchdog,
+                }),
+                expected,
+                "trigger precedence mismatch for flags: utterance_finals={utterance_finals}, silero_speech={silero_speech}, watchdog={watchdog}"
+            );
+        }
+    }
+
+    #[test]
     fn test_partial_trigger_coalesces_and_reset_clears_watchdog_baseline() {
         let now = Instant::now();
         let mut state = PartialPassTriggerState::new(now);
@@ -2365,6 +2472,152 @@ mod tests {
             None,
             "post-reset counters should require fresh accumulation before triggering again"
         );
+    }
+
+    #[tokio::test]
+    async fn test_partial_trigger_paths_stay_stable_under_async_interleaving() {
+        #[derive(Clone, Copy)]
+        enum TriggerStep {
+            Observe {
+                is_final: bool,
+                speech_samples: u64,
+                advance_ms: u64,
+            },
+            Evaluate {
+                advance_ms: u64,
+                expected: Option<PartialPassTrigger>,
+                reset_after_success: bool,
+            },
+        }
+
+        let one_second = u64::from(vad::VAD_SAMPLE_RATE);
+        let sequence = [
+            TriggerStep::Observe {
+                is_final: true,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Observe {
+                is_final: true,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Observe {
+                is_final: true,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Evaluate {
+                advance_ms: 100,
+                expected: Some(PartialPassTrigger::Utterance),
+                reset_after_success: true,
+            },
+            TriggerStep::Observe {
+                is_final: false,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Observe {
+                is_final: false,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Observe {
+                is_final: false,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Observe {
+                is_final: false,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Observe {
+                is_final: false,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Observe {
+                is_final: false,
+                speech_samples: one_second,
+                advance_ms: 100,
+            },
+            TriggerStep::Evaluate {
+                advance_ms: 100,
+                expected: Some(PartialPassTrigger::Speech),
+                reset_after_success: true,
+            },
+            TriggerStep::Evaluate {
+                advance_ms: PARTIAL_PASS_TRIGGER_WATCHDOG_MS - 1,
+                expected: None,
+                reset_after_success: false,
+            },
+            TriggerStep::Evaluate {
+                advance_ms: 1,
+                expected: Some(PartialPassTrigger::Watchdog),
+                reset_after_success: true,
+            },
+            TriggerStep::Evaluate {
+                advance_ms: 1,
+                expected: None,
+                reset_after_success: false,
+            },
+        ];
+
+        let (tx, mut rx) = mpsc::channel::<TriggerStep>(sequence.len());
+        let producer = tokio::spawn(async move {
+            for step in sequence {
+                tx.send(step)
+                    .await
+                    .expect("trigger-step sequence send should succeed");
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let start = Instant::now();
+        let mut now = start;
+        let mut state = PartialPassTriggerState::new(start);
+        let mut telemetry = PartialPassTelemetry::default();
+
+        while let Some(step) = rx.recv().await {
+            match step {
+                TriggerStep::Observe {
+                    is_final,
+                    speech_samples,
+                    advance_ms,
+                } => {
+                    now += Duration::from_millis(advance_ms);
+                    state.observe_speech_event(is_final, speech_samples);
+                }
+                TriggerStep::Evaluate {
+                    advance_ms,
+                    expected,
+                    reset_after_success,
+                } => {
+                    now += Duration::from_millis(advance_ms);
+                    let observed = classify_partial_trigger(state.evaluate(now));
+                    assert_eq!(
+                        observed, expected,
+                        "trigger classification drifted under async interleaving"
+                    );
+                    if let Some(trigger) = observed {
+                        telemetry.record_run(trigger);
+                        if reset_after_success {
+                            state.reset_after_success(now);
+                        }
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        producer
+            .await
+            .expect("async trigger-step producer should finish");
+
+        assert_eq!(telemetry.runs_total, 3);
+        assert_eq!(telemetry.trigger_utterance_count, 1);
+        assert_eq!(telemetry.trigger_speech_count, 1);
+        assert_eq!(telemetry.trigger_watchdog_count, 1);
     }
 
     #[test]

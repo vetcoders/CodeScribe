@@ -502,19 +502,10 @@ async fn run_daemon() -> Result<()> {
     codescribe::controller::register_overlay_controller(Arc::clone(&controller));
     #[cfg(target_os = "macos")]
     {
-        if codescribe::should_show_onboarding() {
-            codescribe::show_onboarding_wizard();
-            if codescribe::should_show_onboarding() {
-                eprintln!("Onboarding did not complete; aborting daemon startup.");
-                return Ok(());
-            }
-        }
-
-        // Onboarding owns permission request timing. Do not trigger prompts on startup.
         codescribe::os::permissions::check_all_permissions();
 
-        if codescribe::should_show_bootstrap() {
-            codescribe::schedule_bootstrap();
+        if codescribe::should_show_setup() {
+            codescribe::schedule_settings_window();
         }
     }
 

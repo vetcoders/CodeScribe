@@ -116,6 +116,7 @@ pub struct MenuIds {
     pub copy_last: MenuId,
     pub show_overlay: MenuId,
     pub run_onboarding: MenuId,
+    pub complete_setup: Option<MenuId>,
     pub open_history: MenuId,
     pub copy_diagnostics: MenuId,
     pub open_accessibility_settings: MenuId,
