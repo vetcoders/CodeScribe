@@ -20,17 +20,18 @@ use crate::config::{Config, HoldMods, ToggleTrigger, keychain};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::hotkeys;
 use crate::os::permissions::PermissionStatus;
-use crate::ui::bootstrap::handlers::{action_handler_class, window_delegate_class};
+use crate::ui::bootstrap::handlers::{
+    action_handler_class, toolbar_delegate_class, window_delegate_class,
+};
 use crate::ui::onboarding::{
     PERMISSION_ORDER, PermissionKind, open_permission_settings, permission_status,
     request_permission,
 };
 use crate::ui_helpers::{
-    LabelConfig, add_subview, button, button_set_action, button_style, create_button,
-    create_checkbox, create_floating_window, create_glass_effect_view_with, create_label,
-    create_secure_text_input, create_slider, create_text_input, ns_string, set_button_symbol,
-    set_text_field_string, set_tooltip, style_toolbar_icon_button, ui_colors, ui_tokens,
-    window_close, window_content_view, window_show,
+    LabelConfig, add_subview, button, button_set_action, create_checkbox, create_floating_window,
+    create_glass_effect_view_with, create_label, create_secure_text_input, create_slider,
+    create_text_input, ns_string, set_text_field_string, ui_colors, ui_tokens, window_close,
+    window_content_view, window_show,
 };
 
 mod handlers;
@@ -41,13 +42,25 @@ type Id = *mut Object;
 const SIDEBAR_WIDTH: f64 = 204.0;
 const SETTINGS_WINDOW_WIDTH: f64 = 760.0;
 const SETTINGS_WINDOW_HEIGHT: f64 = 660.0;
-const SETTINGS_TOPBAR_HEIGHT: f64 = 54.0;
 // Match chat/transcription overlays: full-opacity window + full-opacity glass layers.
 // In AppKit vibrancy, there is no direct blur-radius knob on NSVisualEffectView,
 // so opacity is the safest lever to increase perceived glass strength.
 const SETTINGS_MAX_OPACITY: f64 = 1.00;
 const SETTINGS_CONTENT_INSET_X: f64 = 20.0;
 const SETTINGS_CONTENT_INSET_Y: f64 = 12.0;
+const TAB_BUTTON_HEIGHT: f64 = 38.0;
+const TAB_BUTTON_GAP: f64 = 6.0;
+const SIDEBAR_INSET: f64 = 10.0;
+const PERMISSION_ROW_HEIGHT: f64 = 28.0;
+const PERMISSION_BUTTON_WIDTH: f64 = 118.0;
+const STEP_ROW_HEIGHT: f64 = 34.0;
+const SECTION_GAP: f64 = 22.0;
+const SECTION_HEADER_GAP: f64 = 26.0;
+const SETUP_TOP_OFFSET: f64 = 20.0;
+const SETUP_POST_STEPS_GAP: f64 = 8.0;
+const SETUP_SUBSECTION_GAP: f64 = 24.0;
+const SETUP_SAVE_MIN_ANCHOR_Y: f64 = 52.0;
+const SETUP_HINT_MIN_Y: f64 = 52.0;
 const TAB_SETUP: usize = 0;
 const TAB_KEYS: usize = 1;
 const TAB_AUDIO: usize = 2;
@@ -166,6 +179,111 @@ fn toggle_row_step(has_description: bool) -> f64 {
     } else {
         TOGGLE_ROW_STEP
     }
+}
+
+fn setup_content_height(min_visible_height: f64) -> f64 {
+    let permission_rows = PERMISSION_ORDER.len() as f64;
+    let quick_start_steps = (STEP_PRESS_HOTKEY + 1) as f64;
+    let flow_before_save = SECTION_HEADER_GAP
+        + permission_rows * PERMISSION_ROW_HEIGHT
+        + SECTION_GAP
+        + SECTION_HEADER_GAP
+        + quick_start_steps * STEP_ROW_HEIGHT
+        + SETUP_POST_STEPS_GAP
+        + SECTION_GAP * 3.0
+        + SETUP_SUBSECTION_GAP
+        + PERMISSION_ROW_HEIGHT * 2.0
+        + SECTION_GAP * 2.0
+        + SETUP_SUBSECTION_GAP
+        + PERMISSION_ROW_HEIGHT * 2.0
+        + SECTION_GAP
+        + SECTION_HEADER_GAP;
+    min_visible_height.max((SETUP_TOP_OFFSET + flow_before_save + SETUP_SAVE_MIN_ANCHOR_Y).ceil())
+}
+
+unsafe fn autosize_tab_document_view(document_view: Id, minimum_height: f64) -> f64 {
+    let subviews: Id = msg_send![document_view, subviews];
+    if subviews.is_null() {
+        let mut doc_frame: CGRect = msg_send![document_view, frame];
+        doc_frame.origin = CGPoint::new(0.0, 0.0);
+        doc_frame.size.height = minimum_height.max(doc_frame.size.height);
+        let _: () = msg_send![document_view, setFrame: doc_frame];
+        return doc_frame.size.height;
+    }
+
+    let count: usize = msg_send![subviews, count];
+    if count == 0 {
+        let mut doc_frame: CGRect = msg_send![document_view, frame];
+        doc_frame.origin = CGPoint::new(0.0, 0.0);
+        doc_frame.size.height = minimum_height.max(doc_frame.size.height);
+        let _: () = msg_send![document_view, setFrame: doc_frame];
+        return doc_frame.size.height;
+    }
+
+    let mut min_y = f64::INFINITY;
+    let mut max_y = 0.0_f64;
+    for idx in 0..count {
+        let subview: Id = msg_send![subviews, objectAtIndex: idx];
+        if subview.is_null() {
+            continue;
+        }
+        let frame: CGRect = msg_send![subview, frame];
+        min_y = min_y.min(frame.origin.y);
+        max_y = max_y.max(frame.origin.y + frame.size.height);
+    }
+
+    let shift_y = if min_y.is_finite() && min_y < SETTINGS_CONTENT_INSET_Y {
+        SETTINGS_CONTENT_INSET_Y - min_y
+    } else {
+        0.0
+    };
+
+    if shift_y > 0.0 {
+        for idx in 0..count {
+            let subview: Id = msg_send![subviews, objectAtIndex: idx];
+            if subview.is_null() {
+                continue;
+            }
+            let mut frame: CGRect = msg_send![subview, frame];
+            frame.origin.y += shift_y;
+            let _: () = msg_send![subview, setFrame: frame];
+        }
+        max_y += shift_y;
+    }
+
+    let mut doc_frame: CGRect = msg_send![document_view, frame];
+    doc_frame.origin = CGPoint::new(0.0, 0.0);
+    doc_frame.size.height = minimum_height.max(max_y.ceil());
+    let _: () = msg_send![document_view, setFrame: doc_frame];
+    doc_frame.size.height
+}
+
+unsafe fn wrap_tab_content_in_scroll_view(frame: CGRect, document_view: Id) -> Id {
+    let ns_scroll_view = Class::get("NSScrollView").unwrap();
+    let scroll: Id = msg_send![ns_scroll_view, alloc];
+    let scroll: Id = msg_send![scroll, initWithFrame: frame];
+    let _: () = msg_send![scroll, setHasVerticalScroller: true];
+    let _: () = msg_send![scroll, setHasHorizontalScroller: false];
+    let _: () = msg_send![scroll, setAutohidesScrollers: true];
+    let _: () = msg_send![scroll, setBorderType: 0_isize]; // NSNoBorder
+    let _: () = msg_send![scroll, setDrawsBackground: false];
+    let _: () = msg_send![
+        scroll,
+        setAutoresizingMask: 2_isize | 16_isize // width + height
+    ];
+
+    let doc_h = unsafe { autosize_tab_document_view(document_view, frame.size.height) };
+    let _: () = msg_send![scroll, setDocumentView: document_view];
+    let _: () = msg_send![scroll, setHasVerticalScroller: doc_h > frame.size.height + 1.0];
+
+    let clip_view: Id = msg_send![scroll, contentView];
+    if !clip_view.is_null() {
+        let top_point = CGPoint::new(0.0, (doc_h - frame.size.height).max(0.0));
+        let _: () = msg_send![clip_view, scrollToPoint: top_point];
+        let _: () = msg_send![scroll, reflectScrolledClipView: clip_view];
+    }
+
+    scroll
 }
 
 unsafe fn add_toggle_row(
@@ -462,11 +580,40 @@ fn show_bootstrap_overlay_impl() {
 
         // Settings window should be fixed-size (no resize / fullscreen), to avoid AppKit
         // fullscreen transition crashes with our custom content setup.
-        let window = create_floating_window(frame, "Settings", true, false);
-        let _: () = msg_send![window, setOpaque: false];
+        let window = create_floating_window(frame, "CodeScribe Settings", false, false);
         // Keep Settings glass/opacity aligned with chat + transcription overlays.
         let _: () = msg_send![window, setAlphaValue: SETTINGS_MAX_OPACITY];
         let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
+        let _: () = msg_send![window, setTitleVisibility: 0_isize]; // NSWindowTitleVisible
+        let _: () = msg_send![window, setTitlebarAppearsTransparent: false];
+        let _: () = msg_send![window, setTitle: ns_string("CodeScribe Settings")];
+        let supports_subtitle: bool = msg_send![window, respondsToSelector: sel!(setSubtitle:)];
+        if supports_subtitle {
+            let _: () = msg_send![
+                window,
+                setSubtitle: ns_string("Native macOS speech-to-text setup and runtime tuning")
+            ];
+        }
+        let toolbar_delegate_class = toolbar_delegate_class();
+        let toolbar_delegate: Id = msg_send![toolbar_delegate_class, new];
+        let ns_toolbar = Class::get("NSToolbar").unwrap();
+        let toolbar: Id = msg_send![ns_toolbar, alloc];
+        let toolbar: Id = msg_send![toolbar, initWithIdentifier: ns_string("settings-toolbar")];
+        let _: () = msg_send![toolbar, setDelegate: toolbar_delegate];
+        let _: () = msg_send![toolbar, setDisplayMode: 2_isize]; // NSToolbarDisplayModeIconOnly
+        let _: () = msg_send![toolbar, setAllowsUserCustomization: false];
+        let _: () = msg_send![toolbar, setAutosavesConfiguration: false];
+        let _: () = msg_send![window, setToolbar: toolbar];
+        let supports_toolbar_style: bool =
+            msg_send![window, respondsToSelector: sel!(setToolbarStyle:)];
+        if supports_toolbar_style {
+            let _: () = msg_send![window, setToolbarStyle: 3_isize]; // NSWindowToolbarStyleUnified
+        }
+        let supports_toolbar_button: bool =
+            msg_send![window, respondsToSelector: sel!(setShowsToolbarButton:)];
+        if supports_toolbar_button {
+            let _: () = msg_send![window, setShowsToolbarButton: false];
+        }
         // Disallow fullscreen/zoom to avoid triggering AppKit fullscreen snapshots that can crash.
         let _: () =
             msg_send![window, setCollectionBehavior: NSWindowCollectionBehavior::FullScreenNone];
@@ -601,17 +748,9 @@ fn permissions_all_granted() -> bool {
 
 fn permission_color(granted: bool) -> Id {
     if granted {
-        // System green
-        unsafe {
-            let ns_color = Class::get("NSColor").unwrap();
-            msg_send![ns_color, systemGreenColor]
-        }
+        ui_colors::status_granted()
     } else {
-        // System red
-        unsafe {
-            let ns_color = Class::get("NSColor").unwrap();
-            msg_send![ns_color, systemRedColor]
-        }
+        ui_colors::status_denied()
     }
 }
 
@@ -699,13 +838,10 @@ fn key_status_text(is_set: bool) -> &'static str {
 }
 
 fn key_status_color(is_set: bool) -> Id {
-    unsafe {
-        let ns_color = Class::get("NSColor").unwrap();
-        if is_set {
-            msg_send![ns_color, systemGreenColor]
-        } else {
-            msg_send![ns_color, secondaryLabelColor]
-        }
+    if is_set {
+        ui_colors::status_granted()
+    } else {
+        ui_colors::secondary_label()
     }
 }
 
@@ -825,158 +961,67 @@ unsafe fn build_settings_ui(
 
         let settings_width = settings_width.max(SIDEBAR_WIDTH + 240.0);
         let settings_height = settings_height.max(280.0);
+        let body_h = settings_height;
 
-        // ── Unified top toolbar (Vista-style: traffic spacer + center title + right actions) ──
-        let topbar_h = SETTINGS_TOPBAR_HEIGHT
-            .min(settings_height - 160.0)
-            .max(44.0);
-        let body_h = (settings_height - topbar_h).max(220.0);
-        let topbar_frame = CGRect::new(
-            &CGPoint::new(0.0, body_h),
-            &CGSize::new(settings_width, topbar_h),
-        );
-        let topbar_bg = create_glass_effect_view_with(
-            topbar_frame,
+        // Single root glass panel to avoid seam artifacts between split sections.
+        let root_glass = create_glass_effect_view_with(
+            CGRect::new(
+                &CGPoint::new(0.0, 0.0),
+                &CGSize::new(settings_width, settings_height),
+            ),
             NSVisualEffectMaterial::FullScreenUI,
             objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
             objc2_app_kit::NSVisualEffectState::Active,
         );
-        let _: () = msg_send![topbar_bg, setAlphaValue: SETTINGS_MAX_OPACITY];
-        intensify_settings_glass(topbar_bg);
+        let _: () = msg_send![root_glass, setAlphaValue: SETTINGS_MAX_OPACITY];
+        intensify_settings_glass(root_glass);
         let _: () = msg_send![
-            topbar_bg,
-            setAutoresizingMask: 2_isize | 8_isize // Width | MinYMargin
-        ];
-        let topbar_layer: Id = msg_send![topbar_bg, layer];
-        if !topbar_layer.is_null() {
-            // Root view owns outer window rounding; keep section junctions flush.
-            let _: () = msg_send![topbar_layer, setCornerRadius: 0.0f64];
-            let _: () = msg_send![topbar_layer, setMasksToBounds: true];
-            let _: () = msg_send![topbar_layer, setBorderWidth: 0.0f64];
-        }
-        add_subview(root_view, topbar_bg);
-
-        let topbar_divider = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(settings_width, 1.0)),
-            text: String::new(),
-            background_color: Some(ui_colors::separator()),
-            ..Default::default()
-        });
-        let _: () = msg_send![topbar_divider, setAlphaValue: 0.44f64];
-        let _: () = msg_send![
-            topbar_divider,
-            setAutoresizingMask: 2_isize | 8_isize // Width | MinYMargin
-        ];
-        add_subview(topbar_bg, topbar_divider);
-
-        let topbar_controls: Id = msg_send![ns_view, alloc];
-        let topbar_controls: Id = msg_send![
-            topbar_controls,
-            initWithFrame: CGRect::new(
-                &CGPoint::new(0.0, 0.0),
-                &CGSize::new(settings_width, topbar_h),
-            )
-        ];
-        let _: () = msg_send![topbar_controls, setWantsLayer: true];
-        let _: () = msg_send![
-            topbar_controls,
+            root_glass,
             setAutoresizingMask: 2_isize | 16_isize // Width | Height
         ];
-        add_subview(topbar_bg, topbar_controls);
+        add_subview(root_view, root_glass);
 
-        let btn_w = ui_tokens::HEADER_BUTTON_SIZE;
-        let btn_h = ui_tokens::HEADER_BUTTON_SIZE;
-        let right_pad = ui_tokens::EDGE_PADDING_TIGHT;
-        let btn_y = ((topbar_h - btn_h) * 0.5).max(0.0);
-
-        let overlay_btn_x = settings_width - right_pad - btn_w;
-        let overlay_btn = create_button(
-            CGRect::new(
-                &CGPoint::new(overlay_btn_x, btn_y),
-                &CGSize::new(btn_w, btn_h),
-            ),
-            "",
-            button_style::INLINE,
-        );
-        let _ = set_button_symbol(overlay_btn, "bubble.left.and.bubble.right");
-        style_toolbar_icon_button(overlay_btn);
-        set_tooltip(overlay_btn, "Show agent overlay");
-        button_set_action(overlay_btn, action_handler, sel!(onShowOverlay:));
-        add_subview(topbar_controls, overlay_btn);
-
-        let title_x = ui_tokens::TRAFFIC_LIGHTS_SPACER_WIDTH + 6.0;
-        let title_label = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(title_x, topbar_h - 30.0),
-                &CGSize::new(280.0, 20.0),
-            ),
-            text: "CodeScribe Settings".to_string(),
-            font_size: 15.0,
-            bold: true,
-            text_color: crate::ui_helpers::color_label(),
-            ..Default::default()
-        });
-        add_subview(topbar_controls, title_label);
-
-        let subtitle_w = (overlay_btn_x - title_x - 14.0).max(200.0);
-        let subtitle_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(title_x, 8.0), &CGSize::new(subtitle_w, 16.0)),
-            text: "Native macOS speech-to-text setup and runtime tuning".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: false,
-            text_color: crate::ui_helpers::color_secondary_label(),
-            ..Default::default()
-        });
-        add_subview(topbar_controls, subtitle_label);
-
-        // ── Glass Split Structure ────────────────────────────────────
-        // Left: Sidebar (stronger frosted panel material)
+        // ── Section containers on top of root glass ─────────────────
+        // Left: Sidebar
         let sidebar_frame =
             CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(SIDEBAR_WIDTH, body_h));
-        let sidebar_bg = create_glass_effect_view_with(
-            sidebar_frame,
-            NSVisualEffectMaterial::UnderWindowBackground,
-            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
-            objc2_app_kit::NSVisualEffectState::Active,
-        );
-        let _: () = msg_send![sidebar_bg, setAlphaValue: SETTINGS_MAX_OPACITY];
-        intensify_settings_glass(sidebar_bg);
+        let sidebar_container: Id = msg_send![ns_view, alloc];
+        let sidebar_container: Id = msg_send![sidebar_container, initWithFrame: sidebar_frame];
+        let _: () = msg_send![sidebar_container, setWantsLayer: true];
         let _: () = msg_send![
-            sidebar_bg,
+            sidebar_container,
             setAutoresizingMask: 16_isize | 2_isize // Height | MinXMargin (fixed left)
         ];
-        let sidebar_layer: Id = msg_send![sidebar_bg, layer];
-        if !sidebar_layer.is_null() {
-            // Prevent inner panel corner rounding between topbar/sidebar/content.
-            let _: () = msg_send![sidebar_layer, setCornerRadius: 0.0f64];
-            let _: () = msg_send![sidebar_layer, setMasksToBounds: true];
-        }
-        add_subview(root_view, sidebar_bg);
+        add_subview(root_view, sidebar_container);
 
-        // Right: Content (stronger frosted panel material)
+        let sidebar_tint: Id = msg_send![ns_view, alloc];
+        let sidebar_tint: Id = msg_send![sidebar_tint, initWithFrame: sidebar_frame];
+        let _: () = msg_send![sidebar_tint, setWantsLayer: true];
+        let _: () = msg_send![
+            sidebar_tint,
+            setAutoresizingMask: 2_isize | 16_isize // Width | Height
+        ];
+        let sidebar_tint_layer: Id = msg_send![sidebar_tint, layer];
+        if !sidebar_tint_layer.is_null() {
+            let tint_color = ui_colors::control_bg_tint(0.08);
+            let tint_cg: Id = msg_send![tint_color, CGColor];
+            let _: () = msg_send![sidebar_tint_layer, setBackgroundColor: tint_cg];
+        }
+        add_subview(sidebar_container, sidebar_tint);
+
+        // Right: Content
         let content_bg_frame = CGRect::new(
             &CGPoint::new(SIDEBAR_WIDTH, 0.0),
             &CGSize::new(settings_width - SIDEBAR_WIDTH, body_h),
         );
-        let content_bg = create_glass_effect_view_with(
-            content_bg_frame,
-            NSVisualEffectMaterial::FullScreenUI,
-            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
-            objc2_app_kit::NSVisualEffectState::Active,
-        );
-        let _: () = msg_send![content_bg, setAlphaValue: SETTINGS_MAX_OPACITY];
-        intensify_settings_glass(content_bg);
+        let content_container: Id = msg_send![ns_view, alloc];
+        let content_container: Id = msg_send![content_container, initWithFrame: content_bg_frame];
+        let _: () = msg_send![content_container, setWantsLayer: true];
         let _: () = msg_send![
-            content_bg,
+            content_container,
             setAutoresizingMask: 16_isize | 2_isize // Height | Width
         ];
-        let content_layer: Id = msg_send![content_bg, layer];
-        if !content_layer.is_null() {
-            // Prevent inner panel corner rounding between topbar/sidebar/content.
-            let _: () = msg_send![content_layer, setCornerRadius: 0.0f64];
-            let _: () = msg_send![content_layer, setMasksToBounds: true];
-        }
-        add_subview(root_view, content_bg);
+        add_subview(root_view, content_container);
 
         let split_divider = create_label(LabelConfig {
             frame: CGRect::new(
@@ -1004,9 +1049,9 @@ unsafe fn build_settings_ui(
             text_color: crate::ui_helpers::color_label(),
             ..Default::default()
         });
-        add_subview(sidebar_bg, sidebar_title);
+        add_subview(sidebar_container, sidebar_title);
 
-        // Sidebar tab buttons (inside sidebar_bg)
+        // Sidebar tab buttons (inside sidebar container)
         let tab_start_y = body_h - 86.0;
         let tab_names = ["Setup", "Keys", "Audio", "Voice Lab", "Engine", "User"];
         let tab_sels = [
@@ -1020,24 +1065,22 @@ unsafe fn build_settings_ui(
         let mut tab_buttons: [Option<usize>; TAB_COUNT] = [None; TAB_COUNT];
 
         for (i, (name, sel)) in tab_names.iter().zip(tab_sels.iter()).enumerate() {
-            let btn_height = 38.0;
-            let gap = 6.0;
-            let btn_y = tab_start_y - (btn_height + gap) * (i as f64);
+            let btn_y = tab_start_y - (TAB_BUTTON_HEIGHT + TAB_BUTTON_GAP) * (i as f64);
             let btn_frame = CGRect::new(
-                &CGPoint::new(10.0, btn_y),
-                &CGSize::new(SIDEBAR_WIDTH - 20.0, btn_height),
+                &CGPoint::new(SIDEBAR_INSET, btn_y),
+                &CGSize::new(SIDEBAR_WIDTH - SIDEBAR_INSET * 2.0, TAB_BUTTON_HEIGHT),
             );
 
             let tab_btn = create_sidebar_tab_button(btn_frame, name, i == TAB_SETUP);
             button_set_action(tab_btn, action_handler, *sel);
-            add_subview(sidebar_bg, tab_btn);
+            add_subview(sidebar_container, tab_btn);
             tab_buttons[i] = Some(tab_btn as usize);
         }
 
         // ====================================================================
-        // Content area views (one per tab, inside content_bg)
+        // Content area views (one per tab, inside content container)
         // ====================================================================
-        // Relative to content_bg: origin is (0,0)
+        // Relative to content container: origin is (0,0)
         let tab_content_frame = CGRect::new(
             &CGPoint::new(SETTINGS_CONTENT_INSET_X, SETTINGS_CONTENT_INSET_Y),
             &CGSize::new(
@@ -1048,18 +1091,27 @@ unsafe fn build_settings_ui(
 
         // --- Setup tab (index 0) ---
         let content_width = tab_content_frame.size.width;
-        let content_h = tab_content_frame.size.height;
+        let tab_document_frame = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(tab_content_frame.size.width, tab_content_frame.size.height),
+        );
+        let content_h = setup_content_height(tab_content_frame.size.height);
+        let setup_document_frame = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(content_width, content_h),
+        );
 
         let setup_view: Id = msg_send![ns_view, alloc];
-        let setup_view: Id = msg_send![setup_view, initWithFrame: tab_content_frame];
-        add_subview(content_bg, setup_view);
+        let setup_view: Id = msg_send![setup_view, initWithFrame: setup_document_frame];
+        let setup_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, setup_view);
+        add_subview(content_container, setup_scroll);
 
         let pad = ui_tokens::EDGE_PADDING;
         let field_w = content_width - pad * 2.0;
         let primary = crate::ui_helpers::color_label();
         let secondary = crate::ui_helpers::color_secondary_label();
         let mono_font_input = crate::ui_helpers::monospace_font(ui_tokens::BODY_FONT_SIZE);
-        let mut y = content_h - 20.0;
+        let mut y = content_h - SETUP_TOP_OFFSET;
 
         // ── Permissions ───────────────────────────────────────────────
         let mut perm_labels: [Option<usize>; 5] = [None; 5];
@@ -1074,9 +1126,9 @@ unsafe fn build_settings_ui(
             ..Default::default()
         });
         add_subview(setup_view, permissions_header);
-        y -= 26.0;
+        y -= SECTION_HEADER_GAP;
 
-        let permission_button_w = 118.0;
+        let permission_button_w = PERMISSION_BUTTON_WIDTH;
         let permission_label_w = (field_w - permission_button_w - 12.0).max(180.0);
 
         for kind in PERMISSION_ORDER {
@@ -1116,7 +1168,7 @@ unsafe fn build_settings_ui(
             }
             add_subview(setup_view, action_btn);
             perm_action_buttons[idx] = Some(action_btn as usize);
-            y -= 28.0;
+            y -= PERMISSION_ROW_HEIGHT;
         }
 
         let permissions_divider = create_label(LabelConfig {
@@ -1127,7 +1179,7 @@ unsafe fn build_settings_ui(
         });
         let _: () = msg_send![permissions_divider, setAlphaValue: 0.55f64];
         add_subview(setup_view, permissions_divider);
-        y -= 22.0;
+        y -= SECTION_GAP;
 
         let quick_start_header = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 20.0)),
@@ -1138,7 +1190,7 @@ unsafe fn build_settings_ui(
             ..Default::default()
         });
         add_subview(setup_view, quick_start_header);
-        y -= 26.0;
+        y -= SECTION_HEADER_GAP;
 
         // ── Quick-start steps ────────────────────────────────────────
         let step_defs: [(&str, objc::runtime::Sel, &str); 3] = [
@@ -1178,9 +1230,9 @@ unsafe fn build_settings_ui(
             );
             button_set_action(step_btn, action_handler, *sel);
             add_subview(setup_view, step_btn);
-            y -= 34.0;
+            y -= STEP_ROW_HEIGHT;
         }
-        y -= 8.0;
+        y -= SETUP_POST_STEPS_GAP;
 
         let assistant_divider = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 1.0)),
@@ -1190,7 +1242,7 @@ unsafe fn build_settings_ui(
         });
         let _: () = msg_send![assistant_divider, setAlphaValue: 0.55f64];
         add_subview(setup_view, assistant_divider);
-        y -= 22.0;
+        y -= SECTION_GAP;
 
         let assistant_header = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 18.0)),
@@ -1201,7 +1253,7 @@ unsafe fn build_settings_ui(
             ..Default::default()
         });
         add_subview(setup_view, assistant_header);
-        y -= 22.0;
+        y -= SECTION_GAP;
 
         let assistant_subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 16.0)),
@@ -1211,7 +1263,7 @@ unsafe fn build_settings_ui(
             ..Default::default()
         });
         add_subview(setup_view, assistant_subtitle);
-        y -= 22.0;
+        y -= SECTION_GAP;
 
         let fmt_header = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 18.0)),
@@ -1222,7 +1274,7 @@ unsafe fn build_settings_ui(
             ..Default::default()
         });
         add_subview(setup_view, fmt_header);
-        y -= 24.0;
+        y -= SETUP_SUBSECTION_GAP;
 
         let llm_endpoint_val = config
             .llm_endpoint
@@ -1241,7 +1293,7 @@ unsafe fn build_settings_ui(
         );
         add_subview(setup_view, llm_endpoint_field);
         state.llm_endpoint_field = Some(llm_endpoint_field as usize);
-        y -= 28.0;
+        y -= PERMISSION_ROW_HEIGHT;
 
         let llm_model_val = std::env::var("LLM_MODEL").unwrap_or_default();
         let llm_model_field = create_text_input(
@@ -1253,7 +1305,7 @@ unsafe fn build_settings_ui(
         button_set_action(llm_model_field, action_handler, sel!(onLlmModelChanged:));
         add_subview(setup_view, llm_model_field);
         state.llm_model_field = Some(llm_model_field as usize);
-        y -= 28.0;
+        y -= PERMISSION_ROW_HEIGHT;
 
         let llm_key_field = create_secure_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
@@ -1263,7 +1315,7 @@ unsafe fn build_settings_ui(
         button_set_action(llm_key_field, action_handler, sel!(onLlmKeyChanged:));
         add_subview(setup_view, llm_key_field);
         state.llm_key_field = Some(llm_key_field as usize);
-        y -= 22.0;
+        y -= SECTION_GAP;
 
         let llm_key_status = keychain_key_is_set("LLM_API_KEY");
         let llm_status_label = create_label(LabelConfig {
@@ -1275,7 +1327,7 @@ unsafe fn build_settings_ui(
         });
         add_subview(setup_view, llm_status_label);
         state.llm_key_status_label = Some(llm_status_label as usize);
-        y -= 22.0;
+        y -= SECTION_GAP;
 
         let assist_header = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 18.0)),
@@ -1286,7 +1338,7 @@ unsafe fn build_settings_ui(
             ..Default::default()
         });
         add_subview(setup_view, assist_header);
-        y -= 24.0;
+        y -= SETUP_SUBSECTION_GAP;
 
         let assist_endpoint_val = std::env::var("LLM_ASSISTIVE_ENDPOINT").unwrap_or_default();
         let assist_endpoint_field = create_text_input(
@@ -1302,7 +1354,7 @@ unsafe fn build_settings_ui(
         );
         add_subview(setup_view, assist_endpoint_field);
         state.assistive_endpoint_field = Some(assist_endpoint_field as usize);
-        y -= 28.0;
+        y -= PERMISSION_ROW_HEIGHT;
 
         let assist_model_val = std::env::var("LLM_ASSISTIVE_MODEL").unwrap_or_default();
         let assist_model_field = create_text_input(
@@ -1318,7 +1370,7 @@ unsafe fn build_settings_ui(
         );
         add_subview(setup_view, assist_model_field);
         state.assistive_model_field = Some(assist_model_field as usize);
-        y -= 28.0;
+        y -= PERMISSION_ROW_HEIGHT;
 
         let assist_key_field = create_secure_text_input(
             CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 22.0)),
@@ -1332,7 +1384,7 @@ unsafe fn build_settings_ui(
         );
         add_subview(setup_view, assist_key_field);
         state.assistive_key_field = Some(assist_key_field as usize);
-        y -= 22.0;
+        y -= SECTION_GAP;
 
         let assist_key_status = keychain_key_is_set("LLM_ASSISTIVE_API_KEY");
         let assist_status_label = create_label(LabelConfig {
@@ -1344,7 +1396,7 @@ unsafe fn build_settings_ui(
         });
         add_subview(setup_view, assist_status_label);
         state.assistive_key_status_label = Some(assist_status_label as usize);
-        y -= 26.0;
+        y -= SECTION_HEADER_GAP;
 
         let save_btn = button(
             CGRect::new(
@@ -1355,11 +1407,11 @@ unsafe fn build_settings_ui(
         );
         button_set_action(save_btn, action_handler, sel!(onSaveApiSettings:));
         add_subview(setup_view, save_btn);
-        y -= 34.0;
+        y -= STEP_ROW_HEIGHT;
 
         let setup_hint = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(pad, (y - 6.0).max(52.0)),
+                &CGPoint::new(pad, (y - 6.0).max(SETUP_HINT_MIN_Y)),
                 &CGSize::new(field_w, 16.0),
             ),
             text: "Personalization and quality controls live in User tab.".to_string(),
@@ -1393,7 +1445,7 @@ unsafe fn build_settings_ui(
         let _: () = msg_send![completion, setHidden: true];
         let done_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(0.0, content_h * 0.5 - 20.0),
+                &CGPoint::new(0.0, tab_content_frame.size.height * 0.5 - 20.0),
                 &CGSize::new(content_width, 40.0),
             ),
             text: "All set!".to_string(),
@@ -1404,32 +1456,37 @@ unsafe fn build_settings_ui(
         });
         let _: () = msg_send![done_label, setAlignment: 1_isize]; // NSTextAlignmentCenter
         add_subview(completion, done_label);
-        add_subview(content_bg, completion);
+        add_subview(content_container, completion);
 
         // --- Keys tab (index 1) ---
-        let keys_view = build_keys_tab(action_handler, tab_content_frame, config, &mut state);
-        let _: () = msg_send![keys_view, setHidden: true];
-        add_subview(content_bg, keys_view);
+        let keys_view = build_keys_tab(action_handler, tab_document_frame, config, &mut state);
+        let keys_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, keys_view);
+        let _: () = msg_send![keys_scroll, setHidden: true];
+        add_subview(content_container, keys_scroll);
 
         // --- Audio tab (index 2) ---
-        let audio_view = build_audio_tab(action_handler, tab_content_frame, config);
-        let _: () = msg_send![audio_view, setHidden: true];
-        add_subview(content_bg, audio_view);
+        let audio_view = build_audio_tab(action_handler, tab_document_frame, config);
+        let audio_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, audio_view);
+        let _: () = msg_send![audio_scroll, setHidden: true];
+        add_subview(content_container, audio_scroll);
 
         // --- Voice Lab tab (index 3) ---
-        let voice_lab_view = build_voice_lab_tab(action_handler, tab_content_frame);
-        let _: () = msg_send![voice_lab_view, setHidden: true];
-        add_subview(content_bg, voice_lab_view);
+        let voice_lab_view = build_voice_lab_tab(action_handler, tab_document_frame);
+        let voice_lab_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, voice_lab_view);
+        let _: () = msg_send![voice_lab_scroll, setHidden: true];
+        add_subview(content_container, voice_lab_scroll);
 
         // --- Engine tab (index 4) ---
-        let engine_view = build_engine_tab(tab_content_frame);
-        let _: () = msg_send![engine_view, setHidden: true];
-        add_subview(content_bg, engine_view);
+        let engine_view = build_engine_tab(tab_document_frame);
+        let engine_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, engine_view);
+        let _: () = msg_send![engine_scroll, setHidden: true];
+        add_subview(content_container, engine_scroll);
 
         // --- User tab (index 5) ---
-        let user_view = build_user_tab(action_handler, tab_content_frame, config, &mut state);
-        let _: () = msg_send![user_view, setHidden: true];
-        add_subview(content_bg, user_view);
+        let user_view = build_user_tab(action_handler, tab_document_frame, config, &mut state);
+        let user_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, user_view);
+        let _: () = msg_send![user_scroll, setHidden: true];
+        add_subview(content_container, user_scroll);
 
         // ====================================================================
         // Store state
@@ -1437,12 +1494,12 @@ unsafe fn build_settings_ui(
         state.step_labels = step_status_labels;
         state.tab_buttons = tab_buttons;
         state.content_views = [
-            Some(setup_view as usize),
-            Some(keys_view as usize),
-            Some(audio_view as usize),
-            Some(voice_lab_view as usize),
-            Some(engine_view as usize),
-            Some(user_view as usize),
+            Some(setup_scroll as usize),
+            Some(keys_scroll as usize),
+            Some(audio_scroll as usize),
+            Some(voice_lab_scroll as usize),
+            Some(engine_scroll as usize),
+            Some(user_scroll as usize),
         ];
         state.active_tab = TAB_SETUP;
         state.permission_labels = perm_labels;
@@ -1493,27 +1550,22 @@ unsafe fn create_sidebar_tab_button(
         // NSImageLeft = 2
         let _: () = msg_send![btn, setImagePosition: 2_isize];
 
-        let font: Id = msg_send![ns_font, systemFontOfSize: 13.5f64];
+        let font: Id = msg_send![ns_font, systemFontOfSize: ui_tokens::BODY_FONT_SIZE];
         let _: () = msg_send![btn, setFont: font];
 
         let _: () = msg_send![btn, setWantsLayer: true];
         let layer: Id = msg_send![btn, layer];
         if !layer.is_null() {
             let bg = if active {
-                let ns_color = Class::get("NSColor").unwrap();
-                let accent: Id = msg_send![ns_color, controlAccentColor];
-                let semi: Id = msg_send![accent, colorWithAlphaComponent: 0.16f64];
-                semi
+                ui_colors::accent_tint(0.16)
             } else {
                 crate::ui_helpers::color_clear()
             };
             let cg_color: Id = msg_send![bg, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg_color];
-            let _: () = msg_send![layer, setCornerRadius: 10.0f64];
+            let _: () = msg_send![layer, setCornerRadius: ui_tokens::CORNER_RADIUS_SM];
             if active {
-                let ns_color = Class::get("NSColor").unwrap();
-                let accent: Id = msg_send![ns_color, controlAccentColor];
-                let border: Id = msg_send![accent, colorWithAlphaComponent: 0.40f64];
+                let border = ui_colors::accent_tint(0.40);
                 let cg_border: Id = msg_send![border, CGColor];
                 let _: () = msg_send![layer, setBorderColor: cg_border];
                 let _: () = msg_send![layer, setBorderWidth: 1.0f64];
@@ -1523,10 +1575,9 @@ unsafe fn create_sidebar_tab_button(
         }
 
         let tint = if active {
-            let ns_color = Class::get("NSColor").unwrap();
-            msg_send![ns_color, controlAccentColor]
+            ui_colors::accent()
         } else {
-            crate::ui_helpers::color_secondary_label()
+            ui_colors::secondary_label()
         };
         let _: () = msg_send![btn, setContentTintColor: tint];
 
@@ -1565,19 +1616,15 @@ pub(super) fn switch_tab(index: usize) {
                 let layer: Id = msg_send![btn, layer];
                 if !layer.is_null() {
                     let bg: Id = if active {
-                        let ns_color = Class::get("NSColor").unwrap();
-                        let accent: Id = msg_send![ns_color, controlAccentColor];
-                        msg_send![accent, colorWithAlphaComponent: 0.16f64]
+                        ui_colors::accent_tint(0.16)
                     } else {
                         crate::ui_helpers::color_clear()
                     };
                     let cg_color: Id = msg_send![bg, CGColor];
                     let _: () = msg_send![layer, setBackgroundColor: cg_color];
-                    let _: () = msg_send![layer, setCornerRadius: 10.0f64];
+                    let _: () = msg_send![layer, setCornerRadius: ui_tokens::CORNER_RADIUS_SM];
                     if active {
-                        let ns_color = Class::get("NSColor").unwrap();
-                        let accent: Id = msg_send![ns_color, controlAccentColor];
-                        let border: Id = msg_send![accent, colorWithAlphaComponent: 0.40f64];
+                        let border: Id = ui_colors::accent_tint(0.40);
                         let cg_border: Id = msg_send![border, CGColor];
                         let _: () = msg_send![layer, setBorderColor: cg_border];
                         let _: () = msg_send![layer, setBorderWidth: 1.0f64];
@@ -1587,11 +1634,9 @@ pub(super) fn switch_tab(index: usize) {
                 }
 
                 let tint = if active {
-                    let ns_color = Class::get("NSColor").unwrap();
-                    let accent: Id = msg_send![ns_color, controlAccentColor];
-                    accent
+                    ui_colors::accent()
                 } else {
-                    crate::ui_helpers::color_secondary_label()
+                    ui_colors::secondary_label()
                 };
                 let _: () = msg_send![btn, setContentTintColor: tint];
             }
@@ -2417,7 +2462,6 @@ unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
         let ns_view = Class::get("NSView").unwrap();
-        let ns_color = Class::get("NSColor").unwrap();
 
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
@@ -2455,9 +2499,9 @@ unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect) -> Id {
         let mut add_row = |label_text: &str, value_text: &str, ok: bool| {
             let dot = if ok { "\u{25CF}" } else { "\u{25CB}" };
             let dot_color: Id = if ok {
-                msg_send![ns_color, systemGreenColor]
+                ui_colors::status_granted()
             } else {
-                msg_send![ns_color, systemOrangeColor]
+                ui_colors::status_warning()
             };
 
             let dot_lbl = create_label(LabelConfig {
@@ -2569,7 +2613,7 @@ unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect) -> Id {
         let _: () = msg_send![sep, setWantsLayer: true];
         let layer: Id = msg_send![sep, layer];
         if !layer.is_null() {
-            let bg: Id = msg_send![ns_color, separatorColor];
+            let bg = ui_colors::separator();
             let cg: Id = msg_send![bg, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg];
         }
@@ -2642,27 +2686,23 @@ unsafe fn build_user_tab(
         add_subview(container, app_header);
         y -= 26.0;
 
-        let dock_check = create_checkbox(
-            CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 20.0)),
-            "Show dock icon",
-            config.show_dock_icon,
+        let _dock_check = add_toggle_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            field_w,
+            secondary,
+            ToggleRowSpec {
+                title: "Show dock icon",
+                checked: config.show_dock_icon,
+                action: sel!(onShowDockIconToggled:),
+                description: Some(
+                    "Best effort at runtime; some launch modes keep current behavior.",
+                ),
+                tag: None,
+            },
         );
-        button_set_action(dock_check, action_handler, sel!(onShowDockIconToggled:));
-        add_subview(container, dock_check);
-        y -= 18.0;
-
-        let dock_desc = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(pad + 22.0, y),
-                &CGSize::new(field_w - 22.0, 16.0),
-            ),
-            text: "Best effort at runtime; some launch modes keep current behavior.".to_string(),
-            font_size: ui_tokens::MICRO_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, dock_desc);
-        y -= 24.0;
 
         let app_divider = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 1.0)),

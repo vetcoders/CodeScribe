@@ -165,6 +165,53 @@ pub mod ui_colors {
         }
     }
 
+    pub fn secondary_label() -> Id {
+        unsafe {
+            let ns_color = Class::get("NSColor").unwrap();
+            msg_send![ns_color, secondaryLabelColor]
+        }
+    }
+
+    pub fn control_bg_tint(alpha: f64) -> Id {
+        unsafe {
+            let ns_color = Class::get("NSColor").unwrap();
+            let base: Id = msg_send![ns_color, controlBackgroundColor];
+            with_alpha(base, alpha)
+        }
+    }
+
+    pub fn accent() -> Id {
+        unsafe {
+            let ns_color = Class::get("NSColor").unwrap();
+            msg_send![ns_color, controlAccentColor]
+        }
+    }
+
+    pub fn accent_tint(alpha: f64) -> Id {
+        with_alpha(accent(), alpha)
+    }
+
+    pub fn status_granted() -> Id {
+        unsafe {
+            let ns_color = Class::get("NSColor").unwrap();
+            msg_send![ns_color, systemGreenColor]
+        }
+    }
+
+    pub fn status_denied() -> Id {
+        unsafe {
+            let ns_color = Class::get("NSColor").unwrap();
+            msg_send![ns_color, systemRedColor]
+        }
+    }
+
+    pub fn status_warning() -> Id {
+        unsafe {
+            let ns_color = Class::get("NSColor").unwrap();
+            msg_send![ns_color, systemOrangeColor]
+        }
+    }
+
     pub fn card_bg() -> Id {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
@@ -182,19 +229,11 @@ pub mod ui_colors {
     }
 
     pub fn bubble_user_bg() -> Id {
-        unsafe {
-            let ns_color = Class::get("NSColor").unwrap();
-            let base: Id = msg_send![ns_color, controlAccentColor];
-            with_alpha(base, 0.18)
-        }
+        accent_tint(0.18)
     }
 
     pub fn bubble_user_border() -> Id {
-        unsafe {
-            let ns_color = Class::get("NSColor").unwrap();
-            let base: Id = msg_send![ns_color, controlAccentColor];
-            with_alpha(base, 0.35)
-        }
+        accent_tint(0.35)
     }
 
     pub fn bubble_assistant_bg() -> Id {

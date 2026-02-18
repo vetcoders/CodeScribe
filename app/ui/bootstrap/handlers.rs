@@ -1,7 +1,12 @@
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
-use objc::{sel, sel_impl};
+use objc::{msg_send, sel, sel_impl};
 use std::sync::Once;
+
+use crate::ui_helpers::{
+    ns_string, set_button_symbol, set_tooltip, style_toolbar_icon_button, ui_tokens,
+};
 
 use super::{
     TAB_AUDIO, TAB_ENGINE, TAB_KEYS, TAB_SETUP, TAB_USER, TAB_VOICE_LAB,
@@ -23,6 +28,10 @@ static ACTION_HANDLER_INIT: Once = Once::new();
 static mut ACTION_HANDLER_CLASS: *const Class = std::ptr::null();
 static WINDOW_DELEGATE_INIT: Once = Once::new();
 static mut WINDOW_DELEGATE_CLASS: *const Class = std::ptr::null();
+static TOOLBAR_DELEGATE_INIT: Once = Once::new();
+static mut TOOLBAR_DELEGATE_CLASS: *const Class = std::ptr::null();
+
+const SETTINGS_TOOLBAR_ITEM_SHOW_AGENT: &str = "codescribe.toolbar.show-agent";
 
 pub fn action_handler_class() -> *const Class {
     unsafe {
@@ -231,6 +240,35 @@ pub fn window_delegate_class() -> *const Class {
     }
 }
 
+pub fn toolbar_delegate_class() -> *const Class {
+    unsafe {
+        TOOLBAR_DELEGATE_INIT.call_once(|| {
+            let superclass = Class::get("NSObject").expect("NSObject not found");
+            let mut decl = ClassDecl::new("BootstrapToolbarDelegate", superclass)
+                .expect("Failed to declare toolbar delegate class");
+            decl.add_method(
+                sel!(toolbarAllowedItemIdentifiers:),
+                toolbar_allowed_item_identifiers as extern "C" fn(&Object, Sel, Id) -> Id,
+            );
+            decl.add_method(
+                sel!(toolbarDefaultItemIdentifiers:),
+                toolbar_default_item_identifiers as extern "C" fn(&Object, Sel, Id) -> Id,
+            );
+            decl.add_method(
+                sel!(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:),
+                toolbar_item_for_identifier as extern "C" fn(&Object, Sel, Id, Id, bool) -> Id,
+            );
+            decl.add_method(
+                sel!(onToolbarShowOverlay:),
+                on_toolbar_show_overlay as extern "C" fn(&Object, Sel, Id),
+            );
+            TOOLBAR_DELEGATE_CLASS = decl.register();
+        });
+
+        TOOLBAR_DELEGATE_CLASS
+    }
+}
+
 extern "C" fn on_test_mic(_this: &Object, _sel: Sel, _sender: Id) {
     handle_test_mic();
 }
@@ -273,4 +311,83 @@ extern "C" fn on_tab_user(_this: &Object, _sel: Sel, _sender: Id) {
 
 extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, _notification: Id) {
     handle_bootstrap_window_closed();
+}
+
+extern "C" fn toolbar_allowed_item_identifiers(_this: &Object, _sel: Sel, _toolbar: Id) -> Id {
+    unsafe {
+        let ns_mutable_array = Class::get("NSMutableArray").unwrap();
+        let ids: Id = msg_send![ns_mutable_array, array];
+        let ns_toolbar_item = Class::get("NSToolbarItem").unwrap();
+        let flexible_space: Id = msg_send![ns_toolbar_item, flexibleSpaceItemIdentifier];
+        let _: () = msg_send![ids, addObject: flexible_space];
+        let _: () = msg_send![ids, addObject: ns_string(SETTINGS_TOOLBAR_ITEM_SHOW_AGENT)];
+        ids
+    }
+}
+
+extern "C" fn toolbar_default_item_identifiers(_this: &Object, _sel: Sel, _toolbar: Id) -> Id {
+    unsafe {
+        let ns_mutable_array = Class::get("NSMutableArray").unwrap();
+        let ids: Id = msg_send![ns_mutable_array, array];
+        let ns_toolbar_item = Class::get("NSToolbarItem").unwrap();
+        let flexible_space: Id = msg_send![ns_toolbar_item, flexibleSpaceItemIdentifier];
+        let _: () = msg_send![ids, addObject: flexible_space];
+        let _: () = msg_send![ids, addObject: ns_string(SETTINGS_TOOLBAR_ITEM_SHOW_AGENT)];
+        ids
+    }
+}
+
+extern "C" fn toolbar_item_for_identifier(
+    this: &Object,
+    _sel: Sel,
+    _toolbar: Id,
+    item_identifier: Id,
+    _will_be_inserted: bool,
+) -> Id {
+    unsafe {
+        let show_agent_identifier = ns_string(SETTINGS_TOOLBAR_ITEM_SHOW_AGENT);
+        let is_show_agent: bool =
+            msg_send![item_identifier, isEqualToString: show_agent_identifier];
+        if !is_show_agent {
+            return std::ptr::null_mut();
+        }
+
+        let ns_toolbar_item = Class::get("NSToolbarItem").unwrap();
+        let item: Id = msg_send![ns_toolbar_item, alloc];
+        let item: Id = msg_send![item, initWithItemIdentifier: item_identifier];
+        let _: () = msg_send![item, setLabel: ns_string("Show Agent")];
+        let _: () = msg_send![item, setPaletteLabel: ns_string("Show Agent")];
+        let _: () = msg_send![item, setToolTip: ns_string("Show agent overlay")];
+
+        let ns_button = Class::get("NSButton").unwrap();
+        let button: Id = msg_send![ns_button, alloc];
+        let button: Id = msg_send![
+            button,
+            initWithFrame: CGRect::new(
+                &CGPoint::new(0.0, 0.0),
+                &CGSize::new(ui_tokens::HEADER_BUTTON_SIZE, ui_tokens::HEADER_BUTTON_SIZE),
+            )
+        ];
+        let _: () = msg_send![button, setTitle: ns_string("")];
+        let target: Id = this as *const Object as *mut Object;
+        let _: () = msg_send![button, setTarget: target];
+        let _: () = msg_send![button, setAction: sel!(onToolbarShowOverlay:)];
+        let _ = set_button_symbol(button, "bubble.left.and.bubble.right");
+        style_toolbar_icon_button(button);
+        set_tooltip(button, "Show agent overlay");
+        let _: () = msg_send![item, setView: button];
+        let _: () = msg_send![
+            item,
+            setMinSize: CGSize::new(ui_tokens::HEADER_BUTTON_SIZE, ui_tokens::HEADER_BUTTON_SIZE)
+        ];
+        let _: () = msg_send![
+            item,
+            setMaxSize: CGSize::new(ui_tokens::HEADER_BUTTON_SIZE, ui_tokens::HEADER_BUTTON_SIZE)
+        ];
+        item
+    }
+}
+
+extern "C" fn on_toolbar_show_overlay(_this: &Object, _sel: Sel, _sender: Id) {
+    handle_show_overlay();
 }
