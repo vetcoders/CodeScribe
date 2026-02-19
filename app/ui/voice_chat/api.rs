@@ -534,7 +534,7 @@ fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
             let _: () = msg_send![field, setFrame: frame];
         }
 
-        let header_height = ui_tokens::HEADER_HEIGHT;
+        let header_height = ui_tokens::HEADER_HEIGHT_COMPACT;
         let content_gap = ui_tokens::CONTENT_GAP;
         let content_frame = CGRect::new(
             &CGPoint::new(
@@ -581,10 +581,10 @@ fn apply_status_pill(state: &VoiceChatOverlayState) {
         let pill = pill_ptr as Id;
         let layer: Id = msg_send![pill, layer];
         if !layer.is_null() {
-            let bg = ui_colors::surface_paper_cool();
+            let bg = ui_colors::panel_bg();
             let cg: Id = msg_send![bg, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg];
-            let border = ui_colors::surface_border();
+            let border = ui_colors::header_border();
             let cg_border: Id = msg_send![border, CGColor];
             let _: () = msg_send![layer, setBorderColor: cg_border];
             let _: () = msg_send![layer, setBorderWidth: ui_tokens::SURFACE_BORDER_WIDTH];
@@ -2885,11 +2885,16 @@ fn create_drawer_card(
             let button = crate::ui_helpers::create_button(
                 core_graphics::geometry::CGRect::new(
                     &CGPoint::new((idx as f64) * 70.0, 0.0),
-                    &core_graphics::geometry::CGSize::new(64.0, 18.0),
+                    &core_graphics::geometry::CGSize::new(64.0, 20.0),
                 ),
                 title,
-                crate::ui_helpers::button_style::SMALL_SQUARE,
+                crate::ui_helpers::button_style::ROUNDED,
             );
+            let supports_control_size: bool =
+                msg_send![button, respondsToSelector: sel!(setControlSize:)];
+            if supports_control_size {
+                let _: () = msg_send![button, setControlSize: 1_isize]; // NSSmallControlSize
+            }
             if let Some(handler) = handler {
                 crate::ui_helpers::button_set_action(button, handler as Id, button_actions[idx]);
             }
@@ -2900,14 +2905,27 @@ fn create_drawer_card(
         let favorite = crate::ui_helpers::create_button(
             core_graphics::geometry::CGRect::new(
                 &CGPoint::new(230.0, 0.0),
-                &core_graphics::geometry::CGSize::new(28.0, 18.0),
+                &core_graphics::geometry::CGSize::new(28.0, 20.0),
             ),
-            if entry.is_favorite { "♥" } else { "♡" },
-            crate::ui_helpers::button_style::SMALL_SQUARE,
+            "",
+            crate::ui_helpers::button_style::INLINE,
         );
+        let fav_symbol = if entry.is_favorite {
+            "heart.fill"
+        } else {
+            "heart"
+        };
+        let _ = set_button_symbol(favorite, fav_symbol);
+        crate::ui_helpers::style_toolbar_icon_button(favorite);
+        let supports_control_size: bool =
+            msg_send![favorite, respondsToSelector: sel!(setControlSize:)];
+        if supports_control_size {
+            let _: () = msg_send![favorite, setControlSize: 1_isize];
+        }
         if let Some(handler) = handler {
             crate::ui_helpers::button_set_action(favorite, handler as Id, sel!(onCardFavorite:));
         }
+        set_tooltip(favorite, "Favorite");
         let _: () = msg_send![favorite, setTag: index as isize];
         let _: () = msg_send![actions_container, addSubview: favorite];
 

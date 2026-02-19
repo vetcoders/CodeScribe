@@ -75,8 +75,8 @@ pub mod ui_tokens {
     pub const CORNER_RADIUS_MD: f64 = 12.0;
     pub const CORNER_RADIUS_SM: f64 = 8.0;
 
-    pub const STATUS_PILL_HEIGHT: f64 = 20.0;
-    pub const STATUS_PILL_WIDTH: f64 = 104.0;
+    pub const STATUS_PILL_HEIGHT: f64 = 18.0;
+    pub const STATUS_PILL_WIDTH: f64 = 96.0;
     pub const STATUS_DOT_SIZE: f64 = 5.0;
     pub const BUBBLE_MAX_WIDTH: f64 = 560.0;
 
@@ -103,16 +103,16 @@ pub mod ui_tokens {
     pub const GLASS_FALLBACK_ALPHA: f64 = 0.30;
 
     /// Paper warm tint (content areas: bubbles, transcription, inputs).
-    pub const PAPER_WARM_R: f64 = 1.0;
-    pub const PAPER_WARM_G: f64 = 0.992;
-    pub const PAPER_WARM_B: f64 = 0.973;
-    pub const PAPER_WARM_ALPHA: f64 = 0.85;
+    pub const PAPER_WARM_R: f64 = 0.15;
+    pub const PAPER_WARM_G: f64 = 0.16;
+    pub const PAPER_WARM_B: f64 = 0.19;
+    pub const PAPER_WARM_ALPHA: f64 = 0.80;
     /// Paper cool tint (system/meta areas).
-    pub const PAPER_COOL_R: f64 = 0.973;
-    pub const PAPER_COOL_G: f64 = 0.980;
-    pub const PAPER_COOL_B: f64 = 1.0;
-    pub const PAPER_COOL_ALPHA: f64 = 0.85;
-    pub const PAPER_BORDER_ALPHA: f64 = 0.12;
+    pub const PAPER_COOL_R: f64 = 0.13;
+    pub const PAPER_COOL_G: f64 = 0.17;
+    pub const PAPER_COOL_B: f64 = 0.24;
+    pub const PAPER_COOL_ALPHA: f64 = 0.78;
+    pub const PAPER_BORDER_ALPHA: f64 = 0.18;
 
     /// Compact header for Tafla windows.
     pub const HEADER_HEIGHT_COMPACT: f64 = 46.0;
@@ -146,19 +146,11 @@ pub mod ui_colors {
     }
 
     pub fn sidebar_bg() -> Id {
-        unsafe {
-            let ns_color = Class::get("NSColor").unwrap();
-            let base: Id = msg_send![ns_color, windowBackgroundColor];
-            with_alpha(base, 0.6)
-        }
+        control_bg_tint(adaptive_alpha(0.32, 0.42))
     }
 
     pub fn panel_bg() -> Id {
-        unsafe {
-            let ns_color = Class::get("NSColor").unwrap();
-            let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, adaptive_alpha(0.65, 0.74))
-        }
+        control_bg_tint(adaptive_alpha(0.44, 0.54))
     }
 
     pub fn input_bar_bg() -> Id {
@@ -240,7 +232,7 @@ pub mod ui_colors {
     }
 
     pub fn card_bg() -> Id {
-        surface_paper_warm()
+        surface_paper_cool()
     }
 
     pub fn empty_state_bg() -> Id {
@@ -252,11 +244,11 @@ pub mod ui_colors {
     }
 
     pub fn bubble_user_bg() -> Id {
-        accent_tint(0.12)
+        accent_tint(0.10)
     }
 
     pub fn bubble_user_border() -> Id {
-        accent_tint(0.25)
+        accent_tint(0.22)
     }
 
     pub fn bubble_assistant_bg() -> Id {
@@ -283,7 +275,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, secondaryLabelColor];
-            with_alpha(base, 0.85)
+            with_alpha(base, 0.82)
         }
     }
 
@@ -291,7 +283,7 @@ pub mod ui_colors {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, secondaryLabelColor];
-            with_alpha(base, 0.7)
+            with_alpha(base, 0.82)
         }
     }
 
@@ -780,10 +772,7 @@ impl Default for LabelConfig {
             text: String::new(),
             font_size: 13.0,
             bold: false,
-            text_color: unsafe {
-                let ns_color = Class::get("NSColor").unwrap();
-                msg_send![ns_color, whiteColor]
-            },
+            text_color: color_label(),
             background_color: None,
             selectable: false,
             editable: false,
@@ -994,6 +983,10 @@ pub unsafe fn style_toolbar_icon_button(button: Id) {
     if responds_tint {
         let tint = color_label();
         let _: () = msg_send![button, setContentTintColor: tint];
+    }
+    let responds_control_size: bool = msg_send![button, respondsToSelector: sel!(setControlSize:)];
+    if responds_control_size {
+        let _: () = msg_send![button, setControlSize: 1_isize]; // NSSmallControlSize
     }
 }
 
@@ -1991,13 +1984,13 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
 
         let _: () = msg_send![text_label, setBezeled: false];
         let _: () = msg_send![text_label, setEditable: false];
-        let _: () = msg_send![text_label, setSelectable: true];
+        let _: () = msg_send![text_label, setSelectable: false];
         let _: () = msg_send![text_label, setDrawsBackground: false];
         let _: () = msg_send![text_label, setUsesSingleLineMode: false];
         let responds_attr: bool =
             msg_send![text_label, respondsToSelector: sel!(setAllowsEditingTextAttributes:)];
         if responds_attr {
-            let _: () = msg_send![text_label, setAllowsEditingTextAttributes: true];
+            let _: () = msg_send![text_label, setAllowsEditingTextAttributes: false];
         }
 
         // Enable wrapping for multi-line messages.

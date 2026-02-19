@@ -42,14 +42,14 @@ type Id = *mut Object;
 const SIDEBAR_WIDTH: f64 = 204.0;
 const SETTINGS_WINDOW_WIDTH: f64 = 760.0;
 const SETTINGS_WINDOW_HEIGHT: f64 = 660.0;
-// Match chat/transcription overlays: full-opacity window + full-opacity glass layers.
-// In AppKit vibrancy, there is no direct blur-radius knob on NSVisualEffectView,
-// so opacity is the safest lever to increase perceived glass strength.
-const SETTINGS_MAX_OPACITY: f64 = 1.00;
+// Keep Settings readable while preserving Tafla glass feel.
+const SETTINGS_MAX_OPACITY: f64 = 0.94;
 const SETTINGS_CONTENT_INSET_X: f64 = 20.0;
 const SETTINGS_CONTENT_INSET_Y: f64 = 12.0;
 const TAB_BUTTON_HEIGHT: f64 = 38.0;
 const TAB_BUTTON_GAP: f64 = 6.0;
+const TAB_ACTIVE_BG_ALPHA: f64 = 0.14;
+const TAB_ACTIVE_BORDER_ALPHA: f64 = 0.30;
 const SIDEBAR_INSET: f64 = 10.0;
 const PERMISSION_ROW_HEIGHT: f64 = 24.0 + ui_tokens::DENSITY_COMFORTABLE;
 const PERMISSION_BUTTON_WIDTH: f64 = 118.0;
@@ -993,12 +993,13 @@ unsafe fn build_settings_ui(
         let body_h = settings_height;
 
         // Single root glass panel to avoid seam artifacts between split sections.
+        // Match onboarding material to keep visual language consistent.
         let root_glass = create_glass_effect_view_with(
             CGRect::new(
                 &CGPoint::new(0.0, 0.0),
                 &CGSize::new(settings_width, settings_height),
             ),
-            NSVisualEffectMaterial::FullScreenUI,
+            NSVisualEffectMaterial::HUDWindow,
             objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
             objc2_app_kit::NSVisualEffectState::Active,
         );
@@ -1010,7 +1011,7 @@ unsafe fn build_settings_ui(
         ];
         let root_glass_layer: Id = msg_send![root_glass, layer];
         if !root_glass_layer.is_null() {
-            let bg = ui_colors::surface_glass();
+            let bg = ui_colors::panel_bg();
             let cg_bg: Id = msg_send![bg, CGColor];
             let _: () = msg_send![root_glass_layer, setBackgroundColor: cg_bg];
             apply_tafla_surface(root_glass_layer, true);
@@ -1054,7 +1055,7 @@ unsafe fn build_settings_ui(
         ];
         let sidebar_tint_layer: Id = msg_send![sidebar_tint, layer];
         if !sidebar_tint_layer.is_null() {
-            let tint_color = ui_colors::control_bg_tint(0.08);
+            let tint_color = ui_colors::sidebar_bg();
             let tint_cg: Id = msg_send![tint_color, CGColor];
             let _: () = msg_send![sidebar_tint_layer, setBackgroundColor: tint_cg];
         }
@@ -1483,15 +1484,15 @@ unsafe fn create_sidebar_tab_button(
         let layer: Id = msg_send![btn, layer];
         if !layer.is_null() {
             let bg = if active {
-                ui_colors::accent_tint(0.16)
+                ui_colors::accent_tint(TAB_ACTIVE_BG_ALPHA)
             } else {
                 crate::ui_helpers::color_clear()
             };
             let cg_color: Id = msg_send![bg, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg_color];
-            let _: () = msg_send![layer, setCornerRadius: ui_tokens::CORNER_RADIUS_SM];
+            let _: () = msg_send![layer, setCornerRadius: ui_tokens::SURFACE_RADIUS];
             if active {
-                let border = ui_colors::accent_tint(0.40);
+                let border = ui_colors::accent_tint(TAB_ACTIVE_BORDER_ALPHA);
                 let cg_border: Id = msg_send![border, CGColor];
                 let _: () = msg_send![layer, setBorderColor: cg_border];
                 let _: () = msg_send![layer, setBorderWidth: 1.0f64];
@@ -1542,15 +1543,15 @@ pub(super) fn switch_tab(index: usize) {
                 let layer: Id = msg_send![btn, layer];
                 if !layer.is_null() {
                     let bg: Id = if active {
-                        ui_colors::accent_tint(0.16)
+                        ui_colors::accent_tint(TAB_ACTIVE_BG_ALPHA)
                     } else {
                         crate::ui_helpers::color_clear()
                     };
                     let cg_color: Id = msg_send![bg, CGColor];
                     let _: () = msg_send![layer, setBackgroundColor: cg_color];
-                    let _: () = msg_send![layer, setCornerRadius: ui_tokens::CORNER_RADIUS_SM];
+                    let _: () = msg_send![layer, setCornerRadius: ui_tokens::SURFACE_RADIUS];
                     if active {
-                        let border: Id = ui_colors::accent_tint(0.40);
+                        let border: Id = ui_colors::accent_tint(TAB_ACTIVE_BORDER_ALPHA);
                         let cg_border: Id = msg_send![border, CGColor];
                         let _: () = msg_send![layer, setBorderColor: cg_border];
                         let _: () = msg_send![layer, setBorderWidth: 1.0f64];

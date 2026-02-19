@@ -399,7 +399,7 @@ fn show_voice_chat_overlay_impl() {
             "",
             button_style::INLINE,
         );
-        let _ = set_button_symbol(tab_drawer_button, "tray");
+        let _ = set_button_symbol(tab_drawer_button, "archivebox");
         style_toolbar_icon_button(tab_drawer_button);
         button_set_action(tab_drawer_button, action_handler, sel!(onTabDrawer:));
         set_tooltip(tab_drawer_button, "Drawer");
@@ -457,10 +457,14 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![status_pill, setWantsLayer: true];
         let status_layer: Id = msg_send![status_pill, layer];
         if !status_layer.is_null() {
-            let bg = ui_colors::surface_paper_cool();
+            let bg = ui_colors::panel_bg();
             let cg_bg: Id = msg_send![bg, CGColor];
             let _: () = msg_send![status_layer, setBackgroundColor: cg_bg];
-            apply_tafla_surface(status_layer, true);
+            apply_tafla_surface(status_layer, false);
+            let border = ui_colors::header_border();
+            let cg_border: Id = msg_send![border, CGColor];
+            let _: () = msg_send![status_layer, setBorderColor: cg_border];
+            let _: () = msg_send![status_layer, setBorderWidth: ui_tokens::SURFACE_BORDER_WIDTH];
             let _: () = msg_send![status_layer, setMasksToBounds: true];
         }
         let _: () = msg_send![
@@ -473,7 +477,7 @@ fn show_voice_chat_overlay_impl() {
         let dot: Id = msg_send![
             dot,
             initWithFrame: CGRect::new(
-                &CGPoint::new(7.0, (status_pill_h - dot_size) / 2.0),
+                &CGPoint::new(6.0, (status_pill_h - dot_size) / 2.0),
                 &CGSize::new(dot_size, dot_size),
             )
         ];
@@ -487,8 +491,8 @@ fn show_voice_chat_overlay_impl() {
 
         let status_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(16.0, 2.0),
-                &CGSize::new(status_pill_w - 20.0, status_pill_h - 4.0),
+                &CGPoint::new(14.0, 1.0),
+                &CGSize::new(status_pill_w - 18.0, status_pill_h - 2.0),
             ),
             text: "Idle".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
@@ -513,7 +517,7 @@ fn show_voice_chat_overlay_impl() {
             "",
             button_style::INLINE,
         );
-        let has_symbol = set_button_symbol(record_button, "record.circle");
+        let has_symbol = set_button_symbol(record_button, "mic.fill");
         if !has_symbol {
             let _: () = msg_send![record_button, setTitle: ns_string("Rec")];
         }
@@ -535,7 +539,7 @@ fn show_voice_chat_overlay_impl() {
             "",
             button_style::INLINE,
         );
-        let _ = set_button_symbol(favorites_button, "heart");
+        let _ = set_button_symbol(favorites_button, "heart.circle");
         style_toolbar_icon_button(favorites_button);
         button_set_action(
             favorites_button,
@@ -578,7 +582,7 @@ fn show_voice_chat_overlay_impl() {
             "",
             button_style::INLINE,
         );
-        let has_symbol = set_button_symbol(more_button, "ellipsis");
+        let has_symbol = set_button_symbol(more_button, "ellipsis.circle");
         if !has_symbol {
             let _: () = msg_send![more_button, setTitle: ns_string("More")];
         }
@@ -650,8 +654,9 @@ fn show_voice_chat_overlay_impl() {
         ];
         let sidebar_layer: Id = msg_send![sidebar_view, layer];
         if !sidebar_layer.is_null() {
-            let clear_cg: Id = msg_send![color_clear(), CGColor];
-            let _: () = msg_send![sidebar_layer, setBackgroundColor: clear_cg];
+            let sidebar_bg = ui_colors::sidebar_bg();
+            let cg_sidebar_bg: Id = msg_send![sidebar_bg, CGColor];
+            let _: () = msg_send![sidebar_layer, setBackgroundColor: cg_sidebar_bg];
         }
         let _: () = msg_send![sidebar_controller, setView: sidebar_view];
 
@@ -668,8 +673,9 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![content_view, setWantsLayer: true];
         let content_layer: Id = msg_send![content_view, layer];
         if !content_layer.is_null() {
-            let clear_cg: Id = msg_send![color_clear(), CGColor];
-            let _: () = msg_send![content_layer, setBackgroundColor: clear_cg];
+            let content_bg = ui_colors::surface_glass();
+            let cg_content_bg: Id = msg_send![content_bg, CGColor];
+            let _: () = msg_send![content_layer, setBackgroundColor: cg_content_bg];
         }
         let _: () = msg_send![content_controller, setView: content_view];
 
@@ -1135,9 +1141,9 @@ fn create_scroll_edge_effect(frame: CGRect) -> Id {
             let base: Id = msg_send![ns_color, separatorColor];
             let top_color: Id = msg_send![base, colorWithAlphaComponent: 0.0f64];
             let edge_alpha = if crate::ui_helpers::glass_effect_supported() {
-                0.16f64
+                0.08f64
             } else {
-                0.28f64
+                0.14f64
             };
             let bottom_color: Id = msg_send![base, colorWithAlphaComponent: edge_alpha];
             let cg_top: Id = msg_send![top_color, CGColor];
