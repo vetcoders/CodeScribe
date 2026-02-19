@@ -61,9 +61,17 @@ pub mod ui_tokens {
     pub const EDGE_PADDING_TIGHT: f64 = 12.0;
 
     pub const TITLE_LABEL_WIDTH: f64 = 96.0;
+    pub const CHAT_TITLE_LABEL_WIDTH: f64 = 82.0;
     pub const TRAFFIC_LIGHTS_SPACER_WIDTH: f64 = 80.0;
     pub const HEADER_BUTTON_SIZE: f64 = 28.0;
     pub const HEADER_BUTTON_GAP: f64 = 8.0;
+    pub const CHAT_HEADER_BUTTON_SIZE: f64 = 26.0;
+    pub const CHAT_HEADER_BUTTON_GAP: f64 = 6.0;
+    pub const CHAT_HEADER_GROUP_GAP: f64 = 8.0;
+    pub const CHAT_TAB_BUTTON_MIN_WIDTH: f64 = 22.0;
+    pub const CHAT_TAB_BUTTON_MIN_GAP: f64 = 3.0;
+    pub const CHAT_TAB_BUTTON_GAP: f64 = 4.0;
+    pub const CHAT_TAB_BUTTON_COLLAPSED_WIDTH: f64 = 18.0;
     pub const HELP_PANEL_WIDTH: f64 = 150.0;
     pub const FOOTER_INSET: f64 = 4.0;
     pub const AGENT_INPUT_HEIGHT: f64 = 44.0;
@@ -77,6 +85,10 @@ pub mod ui_tokens {
 
     pub const STATUS_PILL_HEIGHT: f64 = 18.0;
     pub const STATUS_PILL_WIDTH: f64 = 96.0;
+    pub const STATUS_PILL_MIN_WIDTH: f64 = 68.0;
+    pub const STATUS_PILL_DOT_INSET_X: f64 = 6.0;
+    pub const STATUS_PILL_LABEL_INSET_X: f64 = 14.0;
+    pub const STATUS_PILL_LABEL_INSET_RIGHT: f64 = 4.0;
     pub const STATUS_DOT_SIZE: f64 = 5.0;
     pub const BUBBLE_MAX_WIDTH: f64 = 560.0;
 
@@ -95,10 +107,10 @@ pub mod ui_tokens {
     /// Canonical corner radius — use this everywhere instead of LG/MD/SM mix.
     pub const SURFACE_RADIUS: f64 = 12.0;
     pub const SURFACE_BORDER_WIDTH: f64 = 1.0;
-    pub const SURFACE_BORDER_ALPHA: f64 = 0.18;
+    pub const SURFACE_BORDER_ALPHA: f64 = 0.14;
 
     /// Glass background: alpha for vibrancy-backed views.
-    pub const GLASS_BG_ALPHA: f64 = 0.22;
+    pub const GLASS_BG_ALPHA: f64 = 0.20;
     /// Glass fallback: alpha when NSVisualEffectView is not available.
     pub const GLASS_FALLBACK_ALPHA: f64 = 0.30;
 
@@ -106,22 +118,33 @@ pub mod ui_tokens {
     pub const PAPER_WARM_R: f64 = 0.15;
     pub const PAPER_WARM_G: f64 = 0.16;
     pub const PAPER_WARM_B: f64 = 0.19;
-    pub const PAPER_WARM_ALPHA: f64 = 0.80;
+    pub const PAPER_WARM_ALPHA: f64 = 0.74;
     /// Paper cool tint (system/meta areas).
     pub const PAPER_COOL_R: f64 = 0.13;
     pub const PAPER_COOL_G: f64 = 0.17;
     pub const PAPER_COOL_B: f64 = 0.24;
-    pub const PAPER_COOL_ALPHA: f64 = 0.78;
-    pub const PAPER_BORDER_ALPHA: f64 = 0.18;
+    pub const PAPER_COOL_ALPHA: f64 = 0.70;
+    pub const PAPER_BORDER_ALPHA: f64 = 0.14;
 
     /// Compact header for Tafla windows.
     pub const HEADER_HEIGHT_COMPACT: f64 = 46.0;
-    pub const HEADER_BORDER_ALPHA: f64 = 0.12;
+    pub const HEADER_BORDER_ALPHA: f64 = 0.10;
+    pub const SETTINGS_WINDOW_OPACITY: f64 = 0.91;
 
     /// Tafla density tiers (vertical gap between controls per tab density).
     pub const DENSITY_COMFORTABLE: f64 = 12.0;
     pub const DENSITY_MEDIUM: f64 = 8.0;
     pub const DENSITY_COMPACT: f64 = 6.0;
+
+    /// Dictation overlay tuning: lighter sheet + compact action row.
+    pub const OVERLAY_GLASS_BG_ALPHA: f64 = 0.16;
+    pub const OVERLAY_GLASS_FALLBACK_ALPHA: f64 = 0.24;
+    pub const OVERLAY_BORDER_ALPHA: f64 = 0.10;
+    pub const OVERLAY_TEXT_PANEL_ALPHA: f64 = 0.74;
+    pub const OVERLAY_ACTION_BG_ALPHA: f64 = 0.70;
+    pub const OVERLAY_ACTION_BORDER_ALPHA: f64 = 0.12;
+    pub const OVERLAY_ACTION_BUTTON_WIDTH: f64 = 84.0;
+    pub const OVERLAY_ACTION_BUTTON_HEIGHT: f64 = 24.0;
 }
 
 // ============================================================================
@@ -146,19 +169,23 @@ pub mod ui_colors {
     }
 
     pub fn sidebar_bg() -> Id {
-        control_bg_tint(adaptive_alpha(0.32, 0.42))
+        control_bg_tint(adaptive_alpha(0.27, 0.38))
     }
 
     pub fn panel_bg() -> Id {
-        control_bg_tint(adaptive_alpha(0.44, 0.54))
+        control_bg_tint(adaptive_alpha(0.35, 0.46))
+    }
+
+    pub fn settings_glass_bg() -> Id {
+        control_bg_tint(adaptive_alpha(0.30, 0.40))
     }
 
     pub fn input_bar_bg() -> Id {
-        surface_glass()
+        control_bg_tint(adaptive_alpha(0.24, 0.34))
     }
 
     pub fn input_bar_border() -> Id {
-        surface_border()
+        header_border()
     }
 
     pub fn overlay_text() -> Id {
@@ -175,6 +202,34 @@ pub mod ui_colors {
             let base: Id = msg_send![ns_color, secondaryLabelColor];
             with_alpha(base, 0.7)
         }
+    }
+
+    pub fn overlay_sheet_bg() -> Id {
+        use super::ui_tokens::{OVERLAY_GLASS_BG_ALPHA, OVERLAY_GLASS_FALLBACK_ALPHA};
+        control_bg_tint(adaptive_alpha(
+            OVERLAY_GLASS_BG_ALPHA,
+            OVERLAY_GLASS_FALLBACK_ALPHA,
+        ))
+    }
+
+    pub fn overlay_sheet_border() -> Id {
+        use super::ui_tokens::OVERLAY_BORDER_ALPHA;
+        with_alpha(separator(), OVERLAY_BORDER_ALPHA)
+    }
+
+    pub fn overlay_text_panel_bg() -> Id {
+        use super::ui_tokens::OVERLAY_TEXT_PANEL_ALPHA;
+        with_alpha(surface_paper_warm(), OVERLAY_TEXT_PANEL_ALPHA)
+    }
+
+    pub fn overlay_action_bg() -> Id {
+        use super::ui_tokens::OVERLAY_ACTION_BG_ALPHA;
+        with_alpha(surface_paper_warm(), OVERLAY_ACTION_BG_ALPHA)
+    }
+
+    pub fn overlay_action_border() -> Id {
+        use super::ui_tokens::OVERLAY_ACTION_BORDER_ALPHA;
+        with_alpha(separator(), OVERLAY_ACTION_BORDER_ALPHA)
     }
 
     pub fn separator() -> Id {
@@ -232,15 +287,19 @@ pub mod ui_colors {
     }
 
     pub fn card_bg() -> Id {
-        surface_paper_cool()
+        control_bg_tint(adaptive_alpha(0.24, 0.34))
     }
 
     pub fn empty_state_bg() -> Id {
         unsafe {
             let ns_color = Class::get("NSColor").unwrap();
             let base: Id = msg_send![ns_color, controlBackgroundColor];
-            with_alpha(base, adaptive_alpha(0.56, 0.7))
+            with_alpha(base, adaptive_alpha(0.26, 0.36))
         }
+    }
+
+    pub fn search_highlight_bg() -> Id {
+        accent_tint(0.20)
     }
 
     pub fn bubble_user_bg() -> Id {
@@ -332,6 +391,92 @@ pub mod ui_colors {
     pub fn header_border() -> Id {
         use super::ui_tokens::HEADER_BORDER_ALPHA;
         with_alpha(separator(), HEADER_BORDER_ALPHA)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChatHeaderLayout {
+    pub tab_cluster_x: f64,
+    pub tab_button_width: f64,
+    pub tab_button_gap: f64,
+    pub status_pill_x: f64,
+    pub status_pill_width: f64,
+    pub show_status_pill: bool,
+}
+
+pub fn chat_header_layout(
+    title_x: f64,
+    title_width: f64,
+    right_cluster_start_x: f64,
+) -> ChatHeaderLayout {
+    use ui_tokens::{
+        CHAT_HEADER_BUTTON_SIZE, CHAT_HEADER_GROUP_GAP, CHAT_TAB_BUTTON_COLLAPSED_WIDTH,
+        CHAT_TAB_BUTTON_GAP, CHAT_TAB_BUTTON_MIN_GAP, CHAT_TAB_BUTTON_MIN_WIDTH,
+        STATUS_PILL_MIN_WIDTH, STATUS_PILL_WIDTH,
+    };
+
+    let left_anchor = (title_x + title_width + CHAT_HEADER_GROUP_GAP).max(0.0);
+    let right_anchor = (right_cluster_start_x - CHAT_HEADER_GROUP_GAP).max(left_anchor);
+    let available = (right_anchor - left_anchor).max(0.0);
+
+    let tab_target_width = (CHAT_HEADER_BUTTON_SIZE - 2.0).max(CHAT_TAB_BUTTON_MIN_WIDTH);
+    let tab_target_gap = CHAT_TAB_BUTTON_GAP.max(CHAT_TAB_BUTTON_MIN_GAP);
+    let min_tab_total = CHAT_TAB_BUTTON_MIN_WIDTH * 3.0 + CHAT_TAB_BUTTON_MIN_GAP * 2.0;
+
+    let mut show_status =
+        available >= (min_tab_total + CHAT_HEADER_GROUP_GAP + STATUS_PILL_MIN_WIDTH);
+    let mut status_width = if show_status {
+        (available - CHAT_HEADER_GROUP_GAP - min_tab_total)
+            .clamp(STATUS_PILL_MIN_WIDTH, STATUS_PILL_WIDTH)
+    } else {
+        0.0
+    };
+
+    let mut tab_space = if show_status {
+        (available - CHAT_HEADER_GROUP_GAP - status_width).max(0.0)
+    } else {
+        available
+    };
+
+    let mut tab_gap = tab_target_gap;
+    let mut tab_width = ((tab_space - tab_gap * 2.0) / 3.0).min(tab_target_width);
+
+    if tab_width < CHAT_TAB_BUTTON_MIN_WIDTH {
+        tab_width = CHAT_TAB_BUTTON_MIN_WIDTH;
+        tab_gap =
+            ((tab_space - tab_width * 3.0) / 2.0).clamp(CHAT_TAB_BUTTON_MIN_GAP, tab_target_gap);
+    }
+
+    let min_gap_fit_width = CHAT_TAB_BUTTON_MIN_GAP * 2.0 + CHAT_TAB_BUTTON_COLLAPSED_WIDTH * 3.0;
+    if tab_space < min_gap_fit_width {
+        show_status = false;
+        status_width = 0.0;
+        tab_space = available;
+        tab_gap = CHAT_TAB_BUTTON_MIN_GAP;
+        tab_width = ((tab_space - tab_gap * 2.0) / 3.0).min(tab_target_width);
+    }
+
+    let tab_space = tab_space.max(0.0);
+    let max_gap = (tab_space / 2.0).max(0.0);
+    tab_gap = tab_gap.min(max_gap);
+    let max_width_for_space = ((tab_space - tab_gap * 2.0) / 3.0).max(0.0);
+    tab_width = tab_width.min(max_width_for_space);
+
+    let tab_total = (tab_width * 3.0 + tab_gap * 2.0).max(0.0);
+    let status_x = if show_status {
+        let min_status_x = left_anchor + tab_total + CHAT_HEADER_GROUP_GAP;
+        (right_anchor - status_width).max(min_status_x)
+    } else {
+        right_anchor
+    };
+
+    ChatHeaderLayout {
+        tab_cluster_x: left_anchor,
+        tab_button_width: tab_width.max(0.0),
+        tab_button_gap: tab_gap.max(0.0),
+        status_pill_x: status_x,
+        status_pill_width: status_width,
+        show_status_pill: show_status,
     }
 }
 
@@ -1351,6 +1496,38 @@ mod tests {
     }
 
     #[test]
+    fn chat_header_layout_avoids_cluster_collisions() {
+        let header_w = 450.0;
+        let right_pad = ui_tokens::EDGE_PADDING_TIGHT;
+        let cluster_w =
+            ui_tokens::CHAT_HEADER_BUTTON_SIZE * 5.0 + ui_tokens::CHAT_HEADER_BUTTON_GAP * 4.0;
+        let right_cluster_start_x = header_w - right_pad - cluster_w;
+        let title_x = ui_tokens::EDGE_PADDING_TIGHT;
+        let title_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH;
+
+        let layout = chat_header_layout(title_x, title_w, right_cluster_start_x);
+        let tabs_right =
+            layout.tab_cluster_x + layout.tab_button_width * 3.0 + layout.tab_button_gap * 2.0;
+        assert!(tabs_right <= right_cluster_start_x - ui_tokens::CHAT_HEADER_GROUP_GAP + 0.001);
+        if layout.show_status_pill {
+            assert!(layout.status_pill_x >= tabs_right + ui_tokens::CHAT_HEADER_GROUP_GAP - 0.001);
+            assert!(
+                layout.status_pill_x + layout.status_pill_width
+                    <= right_cluster_start_x - ui_tokens::CHAT_HEADER_GROUP_GAP + 0.001
+            );
+        }
+    }
+
+    #[test]
+    fn chat_header_layout_hides_status_when_space_is_tight() {
+        let layout = chat_header_layout(12.0, ui_tokens::CHAT_TITLE_LABEL_WIDTH, 142.0);
+        assert!(!layout.show_status_pill);
+        let tabs_right =
+            layout.tab_cluster_x + layout.tab_button_width * 3.0 + layout.tab_button_gap * 2.0;
+        assert!(tabs_right <= 142.0 - ui_tokens::CHAT_HEADER_GROUP_GAP + 0.001);
+    }
+
+    #[test]
     #[serial]
     #[cfg(target_os = "macos")]
     fn layout_insets_default_are_non_negative() {
@@ -1987,6 +2164,7 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         let _: () = msg_send![text_label, setSelectable: false];
         let _: () = msg_send![text_label, setDrawsBackground: false];
         let _: () = msg_send![text_label, setUsesSingleLineMode: false];
+        let _: () = msg_send![text_label, setRefusesFirstResponder: true];
         let responds_attr: bool =
             msg_send![text_label, respondsToSelector: sel!(setAllowsEditingTextAttributes:)];
         if responds_attr {

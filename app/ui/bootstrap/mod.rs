@@ -43,7 +43,7 @@ const SIDEBAR_WIDTH: f64 = 204.0;
 const SETTINGS_WINDOW_WIDTH: f64 = 760.0;
 const SETTINGS_WINDOW_HEIGHT: f64 = 660.0;
 // Keep Settings readable while preserving Tafla glass feel.
-const SETTINGS_MAX_OPACITY: f64 = 0.94;
+const SETTINGS_MAX_OPACITY: f64 = ui_tokens::SETTINGS_WINDOW_OPACITY;
 const SETTINGS_CONTENT_INSET_X: f64 = 20.0;
 const SETTINGS_CONTENT_INSET_Y: f64 = 12.0;
 const TAB_BUTTON_HEIGHT: f64 = 38.0;
@@ -1011,7 +1011,7 @@ unsafe fn build_settings_ui(
         ];
         let root_glass_layer: Id = msg_send![root_glass, layer];
         if !root_glass_layer.is_null() {
-            let bg = ui_colors::panel_bg();
+            let bg = ui_colors::settings_glass_bg();
             let cg_bg: Id = msg_send![bg, CGColor];
             let _: () = msg_send![root_glass_layer, setBackgroundColor: cg_bg];
             apply_tafla_surface(root_glass_layer, true);

@@ -41,8 +41,8 @@ use crate::config::{HoldMods, ToggleTrigger};
 
 use crate::ui_helpers::{
     LabelConfig, NS_FLOATING_WINDOW_LEVEL, add_subview, apply_tafla_surface, button_set_action,
-    button_style, color_clear, color_label, color_secondary_label, create_button,
-    create_flipped_vertical_stack_view, create_glass_effect_view_with, create_label,
+    button_style, chat_header_layout, color_clear, color_label, color_secondary_label,
+    create_button, create_flipped_vertical_stack_view, create_glass_effect_view_with, create_label,
     create_scrollable_text_view, create_vertical_stack_view, layout_region_frame_for_view,
     ns_string, set_button_symbol, set_focus_ring, set_hidden, set_tooltip,
     style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha, window_show,
@@ -345,7 +345,7 @@ fn show_voice_chat_overlay_impl() {
         };
         let title_y = ((header_height - 20.0) / 2.0).max(0.0);
         // Give the tab control more room to avoid truncation ("Dr..." / "A...").
-        let title_w = ui_tokens::TITLE_LABEL_WIDTH;
+        let title_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH;
         let title_label = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(title_x, title_y), &CGSize::new(title_w, 20.0)),
             text: "CodeScribe".to_string(),
@@ -363,9 +363,9 @@ fn show_voice_chat_overlay_impl() {
         add_subview(header_controls, title_label);
 
         // Header right-side controls (right-aligned, consistent spacing).
-        let btn_w = ui_tokens::HEADER_BUTTON_SIZE;
-        let btn_h = ui_tokens::HEADER_BUTTON_SIZE;
-        let gap = ui_tokens::HEADER_BUTTON_GAP;
+        let btn_w = ui_tokens::CHAT_HEADER_BUTTON_SIZE;
+        let btn_h = ui_tokens::CHAT_HEADER_BUTTON_SIZE;
+        let gap = ui_tokens::CHAT_HEADER_BUTTON_GAP;
         let right_pad = ui_tokens::EDGE_PADDING_TIGHT;
         let header_btn_y = ((header_height - btn_h) / 2.0).max(0.0);
 
@@ -382,14 +382,12 @@ fn show_voice_chat_overlay_impl() {
 
         // Keep the tab control between the title and the right-side icon cluster.
         let right_cluster_start_x = record_button_x;
-        let tab_x = title_x + title_w + 10.0;
-        let status_pill_w = ui_tokens::STATUS_PILL_WIDTH;
-        let tab_btn_w = (btn_w - 2.0).max(24.0);
-        let tab_gap = (gap - 2.0).max(6.0);
-        let tab_cluster_w = tab_btn_w * 3.0 + tab_gap * 2.0;
-        let status_pill_x =
-            (right_cluster_start_x - gap - status_pill_w).max(tab_x + tab_cluster_w + tab_gap);
-        let tab_cluster_x = tab_x;
+        let header_layout = chat_header_layout(title_x, title_w, right_cluster_start_x);
+        let tab_cluster_x = header_layout.tab_cluster_x;
+        let tab_btn_w = header_layout.tab_button_width;
+        let tab_gap = header_layout.tab_button_gap;
+        let status_pill_x = header_layout.status_pill_x;
+        let status_pill_w = header_layout.status_pill_width;
 
         let tab_drawer_button = create_button(
             CGRect::new(
@@ -471,13 +469,17 @@ fn show_voice_chat_overlay_impl() {
             status_pill,
             setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
         ];
+        let _: () = msg_send![status_pill, setHidden: !header_layout.show_status_pill];
 
         let dot_size = ui_tokens::STATUS_DOT_SIZE;
         let dot: Id = msg_send![Class::get("NSView").unwrap(), alloc];
         let dot: Id = msg_send![
             dot,
             initWithFrame: CGRect::new(
-                &CGPoint::new(6.0, (status_pill_h - dot_size) / 2.0),
+                &CGPoint::new(
+                    ui_tokens::STATUS_PILL_DOT_INSET_X,
+                    (status_pill_h - dot_size) / 2.0,
+                ),
                 &CGSize::new(dot_size, dot_size),
             )
         ];
@@ -491,8 +493,14 @@ fn show_voice_chat_overlay_impl() {
 
         let status_label = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(14.0, 1.0),
-                &CGSize::new(status_pill_w - 18.0, status_pill_h - 2.0),
+                &CGPoint::new(ui_tokens::STATUS_PILL_LABEL_INSET_X, 1.0),
+                &CGSize::new(
+                    (status_pill_w
+                        - ui_tokens::STATUS_PILL_LABEL_INSET_X
+                        - ui_tokens::STATUS_PILL_LABEL_INSET_RIGHT)
+                        .max(0.0),
+                    status_pill_h - 2.0,
+                ),
             ),
             text: "Idle".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
@@ -889,7 +897,12 @@ fn show_voice_chat_overlay_impl() {
             let color = ui_colors::input_bar_bg();
             let cg_color: Id = msg_send![color, CGColor];
             let _: () = msg_send![input_layer, setBackgroundColor: cg_color];
-            apply_tafla_surface(input_layer, true);
+            apply_tafla_surface(input_layer, false);
+            let border = ui_colors::input_bar_border();
+            let cg_border: Id = msg_send![border, CGColor];
+            let _: () = msg_send![input_layer, setBorderColor: cg_border];
+            let _: () = msg_send![input_layer, setBorderWidth: ui_tokens::SURFACE_BORDER_WIDTH];
+            let _: () = msg_send![input_layer, setMasksToBounds: true];
             // Keep the field crisp like native NSSearchField: border-only, no heavy drop shadow.
             let _: () = msg_send![input_layer, setShadowOpacity: 0.0f64];
             let _: () = msg_send![input_layer, setShadowRadius: 0.0f64];

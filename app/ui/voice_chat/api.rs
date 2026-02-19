@@ -18,12 +18,12 @@ use codescribe_core::attachment::Attachment;
 use crate::ui::shared::status::{UiStatus, status_from_detail};
 use crate::ui_helpers::{
     BubbleConfig, BubbleRole, LabelConfig, add_subview, apply_tafla_surface, button_set_action,
-    button_style, color_label, color_rgba, color_secondary_label, create_bubble_view,
-    create_button, create_card_view, create_label, get_text_field_string, get_text_view_string,
-    layout_region_frame_for_view, list_draft_files, ns_string, open_file_in_editor,
-    resize_bubble_container_for_text, set_button_symbol, set_text_field_string,
-    set_text_view_string, set_tooltip, stack_view_add, stack_view_clear, ui_colors, ui_tokens,
-    update_bubble_text, window_set_alpha, window_show,
+    button_style, chat_header_layout, color_label, color_rgba, color_secondary_label,
+    create_bubble_view, create_button, create_card_view, create_label, get_text_field_string,
+    get_text_view_string, layout_region_frame_for_view, list_draft_files, ns_string,
+    open_file_in_editor, resize_bubble_container_for_text, set_button_symbol,
+    set_text_field_string, set_text_view_string, set_tooltip, stack_view_add, stack_view_clear,
+    ui_colors, ui_tokens, update_bubble_text, window_set_alpha, window_show,
 };
 
 use super::handlers::{clear_search_field, copy_to_clipboard};
@@ -497,8 +497,122 @@ pub(super) fn reflow_overlay_after_resize_impl() {
     let Ok(mut state) = OVERLAY_STATE.try_lock() else {
         return;
     };
+    reflow_header_controls_locked(&mut state);
     reflow_footer_controls_locked(&mut state);
     resize_agent_input_locked(&mut state);
+}
+
+fn reflow_header_controls_locked(state: &mut VoiceChatOverlayState) {
+    unsafe {
+        let (
+            Some(title_ptr),
+            Some(drawer_ptr),
+            Some(agent_ptr),
+            Some(settings_ptr),
+            Some(favorites_ptr),
+            Some(status_ptr),
+        ) = (
+            state.title_label,
+            state.tab_drawer_button,
+            state.tab_agent_button,
+            state.tab_settings_button,
+            state.favorites_button,
+            state.status_pill,
+        )
+        else {
+            return;
+        };
+
+        let title_label = title_ptr as Id;
+        let tab_drawer_button = drawer_ptr as Id;
+        let tab_agent_button = agent_ptr as Id;
+        let tab_settings_button = settings_ptr as Id;
+        let favorites_button = favorites_ptr as Id;
+        let status_pill = status_ptr as Id;
+
+        let favorites_frame: CGRect = msg_send![favorites_button, frame];
+        let right_cluster_start_x = favorites_frame.origin.x
+            - (ui_tokens::CHAT_HEADER_BUTTON_SIZE + ui_tokens::CHAT_HEADER_BUTTON_GAP);
+
+        let title_frame: CGRect = msg_send![title_label, frame];
+        let title_max_w =
+            (right_cluster_start_x - title_frame.origin.x - ui_tokens::CHAT_HEADER_GROUP_GAP * 2.0)
+                .max(56.0);
+        let title_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH.min(title_max_w);
+        if (title_w - title_frame.size.width).abs() > 0.5 {
+            let resized_title = CGRect::new(
+                &CGPoint::new(title_frame.origin.x, title_frame.origin.y),
+                &CGSize::new(title_w, title_frame.size.height),
+            );
+            let _: () = msg_send![title_label, setFrame: resized_title];
+        }
+        let title_frame: CGRect = msg_send![title_label, frame];
+
+        let layout = chat_header_layout(
+            title_frame.origin.x,
+            title_frame.size.width,
+            right_cluster_start_x,
+        );
+
+        let drawer_frame: CGRect = msg_send![tab_drawer_button, frame];
+        let tab_y = drawer_frame.origin.y;
+        let tab_h = drawer_frame.size.height.max(20.0);
+        let tab_w = layout.tab_button_width.max(0.0);
+        let tab_gap = layout.tab_button_gap.max(0.0);
+
+        let tab_drawer_frame = CGRect::new(
+            &CGPoint::new(layout.tab_cluster_x, tab_y),
+            &CGSize::new(tab_w, tab_h),
+        );
+        let _: () = msg_send![tab_drawer_button, setFrame: tab_drawer_frame];
+
+        let tab_agent_frame = CGRect::new(
+            &CGPoint::new(layout.tab_cluster_x + tab_w + tab_gap, tab_y),
+            &CGSize::new(tab_w, tab_h),
+        );
+        let _: () = msg_send![tab_agent_button, setFrame: tab_agent_frame];
+
+        let tab_settings_frame = CGRect::new(
+            &CGPoint::new(layout.tab_cluster_x + (tab_w + tab_gap) * 2.0, tab_y),
+            &CGSize::new(tab_w, tab_h),
+        );
+        let _: () = msg_send![tab_settings_button, setFrame: tab_settings_frame];
+
+        let status_h = ui_tokens::STATUS_PILL_HEIGHT;
+        let status_y = (tab_y + (tab_h - status_h) * 0.5).max(0.0);
+        let status_frame = CGRect::new(
+            &CGPoint::new(layout.status_pill_x, status_y),
+            &CGSize::new(layout.status_pill_width.max(0.0), status_h),
+        );
+        let _: () = msg_send![status_pill, setFrame: status_frame];
+        let _: () = msg_send![status_pill, setHidden: !layout.show_status_pill];
+
+        if let Some(dot_ptr) = state.status_pill_dot {
+            let dot = dot_ptr as Id;
+            let dot_size = ui_tokens::STATUS_DOT_SIZE;
+            let dot_frame = CGRect::new(
+                &CGPoint::new(
+                    ui_tokens::STATUS_PILL_DOT_INSET_X,
+                    (status_h - dot_size) * 0.5,
+                ),
+                &CGSize::new(dot_size, dot_size),
+            );
+            let _: () = msg_send![dot, setFrame: dot_frame];
+        }
+
+        if let Some(label_ptr) = state.status_pill_label {
+            let label = label_ptr as Id;
+            let label_width = (layout.status_pill_width
+                - ui_tokens::STATUS_PILL_LABEL_INSET_X
+                - ui_tokens::STATUS_PILL_LABEL_INSET_RIGHT)
+                .max(0.0);
+            let label_frame = CGRect::new(
+                &CGPoint::new(ui_tokens::STATUS_PILL_LABEL_INSET_X, 1.0),
+                &CGSize::new(label_width, (status_h - 2.0).max(0.0)),
+            );
+            let _: () = msg_send![label, setFrame: label_frame];
+        }
+    }
 }
 
 fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
@@ -2584,7 +2698,7 @@ fn create_drawer_empty_state(width: f64, handler: Option<usize>) -> Id {
         let _: () = msg_send![view, setWantsLayer: true];
         let layer: Id = msg_send![view, layer];
         if !layer.is_null() {
-            let bg = ui_colors::surface_paper_cool();
+            let bg = ui_colors::empty_state_bg();
             let cg: Id = msg_send![bg, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg];
             apply_tafla_surface(layer, true);
@@ -2986,8 +3100,7 @@ unsafe fn apply_search_highlight(field: Id, text: &str, query: &str) {
                 length: char_to_utf16[i + query_lower.len()] - char_to_utf16[i],
             };
             let _: () = msg_send![attr_str, addAttribute: font_key value: bold_font range: range];
-            // NSColor expects 0.0–1.0 for RGBA components.
-            let highlight = color_rgba(1.0, 0.82, 0.0, 0.3);
+            let highlight = ui_colors::search_highlight_bg();
             let bg_key = ns_string("NSBackgroundColor");
             let _: () = msg_send![attr_str, addAttribute: bg_key value: highlight range: range];
             i += query_lower.len();
