@@ -165,6 +165,56 @@ struct NSRange {
     length: usize,
 }
 
+/// Snapshot of widget pointers + layout params for AppKit calls outside lock scope.
+///
+/// DEADLOCK PREVENTION: extract this while holding `OVERLAY_STATE`, then
+/// **drop the lock** before using the pointers in AppKit `msg_send!` calls.
+/// AppKit can spin a nested run-loop during `setFrame:display:`, `orderFront:`,
+/// etc., and pending `Queue::main().exec_async` blocks that also lock
+/// `OVERLAY_STATE` will deadlock on the non-reentrant `std::sync::Mutex`.
+#[derive(Clone)]
+struct OverlaySnapshot {
+    window: Option<usize>,
+    header_label: Option<usize>,
+    text_scroll_view: Option<usize>,
+    text_view: Option<usize>,
+    status_field: Option<usize>,
+    auto_hide_label: Option<usize>,
+    blur_view: Option<usize>,
+    copy_button: Option<usize>,
+    augment_button: Option<usize>,
+    save_button: Option<usize>,
+    commit_button: Option<usize>,
+    progress_indicator: Option<usize>,
+    window_width: f64,
+    min_height: f64,
+    max_height: f64,
+    last_applied_height: f64,
+}
+
+impl OverlaySnapshot {
+    fn from_state(state: &TranscriptionOverlayState) -> Self {
+        Self {
+            window: state.window,
+            header_label: state.header_label,
+            text_scroll_view: state.text_scroll_view,
+            text_view: state.text_view,
+            status_field: state.status_field,
+            auto_hide_label: state.auto_hide_label,
+            blur_view: state.blur_view,
+            copy_button: state.copy_button,
+            augment_button: state.augment_button,
+            save_button: state.save_button,
+            commit_button: state.commit_button,
+            progress_indicator: state.progress_indicator,
+            window_width: state.window_width,
+            min_height: state.min_height,
+            max_height: state.max_height,
+            last_applied_height: state.last_applied_height,
+        }
+    }
+}
+
 /// Flag to track if auto-hide timer is pending
 static AUTO_HIDE_PENDING: AtomicBool = AtomicBool::new(false);
 /// Counter to invalidate old timers
@@ -221,17 +271,19 @@ fn action_text_for_contract(state: &TranscriptionOverlayState) -> String {
 
 /// Handler: Copy transcript using contract source of truth.
 extern "C" fn on_copy_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
-    let text = {
+    let (text, snap) = {
         let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        action_text_for_contract(&state)
+        (
+            action_text_for_contract(&state),
+            OverlaySnapshot::from_state(&state),
+        )
     };
     if text.is_empty() {
         return;
     }
     if let Err(e) = clipboard::set_clipboard(&text) {
         warn!("Failed to copy transcript: {}", e);
-        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        set_status_message(&state, "Copy failed", true);
+        set_status_message_unlocked(&snap, "Copy failed", true);
         return;
     }
 
@@ -265,59 +317,55 @@ extern "C" fn on_commit_recording(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_mouse_entered(_this: &Object, _cmd: Sel, _sender: Id) {
-    let cancel_auto_hide = {
+    let (cancel_auto_hide, snap) = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.hover_active = true;
-        if state.decision_mode {
-            set_action_buttons_visible(&state, true);
-            true
-        } else {
-            false
-        }
-    };
+        let dm = state.decision_mode;
+        (dm, OverlaySnapshot::from_state(&state))
+    }; // Lock dropped before AppKit calls.
     if cancel_auto_hide {
+        set_action_buttons_visible_unlocked(&snap, true);
         AUTO_HIDE_GENERATION.fetch_add(1, Ordering::SeqCst);
         AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
     }
 }
 
 extern "C" fn on_mouse_exited(_this: &Object, _cmd: Sel, _sender: Id) {
-    let should_reschedule_auto_hide = {
+    let (decision_mode, snap) = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.hover_active = false;
-        if state.decision_mode {
-            set_action_buttons_visible(&state, true);
-            true
-        } else {
-            set_action_buttons_visible(&state, false);
-            false
-        }
-    };
-    if should_reschedule_auto_hide {
+        (state.decision_mode, OverlaySnapshot::from_state(&state))
+    }; // Lock dropped before AppKit calls.
+    if decision_mode {
+        set_action_buttons_visible_unlocked(&snap, true);
         schedule_auto_hide();
+    } else {
+        set_action_buttons_visible_unlocked(&snap, false);
     }
 }
 
-fn set_action_buttons_visible(state: &TranscriptionOverlayState, visible: bool) {
-    if let Some(copy_ptr) = state.copy_button {
+/// Show/hide action buttons. Call ONLY outside the `OVERLAY_STATE` lock.
+fn set_action_buttons_visible_unlocked(snap: &OverlaySnapshot, visible: bool) {
+    if let Some(copy_ptr) = snap.copy_button {
         unsafe {
             set_hidden(copy_ptr as Id, !visible);
         }
     }
-    if let Some(augment_ptr) = state.augment_button {
+    if let Some(augment_ptr) = snap.augment_button {
         unsafe {
             set_hidden(augment_ptr as Id, !visible);
         }
     }
-    if let Some(save_ptr) = state.save_button {
+    if let Some(save_ptr) = snap.save_button {
         unsafe {
             set_hidden(save_ptr as Id, !visible);
         }
     }
 }
 
-fn set_recording_button_visible(state: &TranscriptionOverlayState, visible: bool) {
-    if let Some(commit_ptr) = state.commit_button {
+/// Show/hide commit button. Call ONLY outside the `OVERLAY_STATE` lock.
+fn set_recording_button_visible_unlocked(snap: &OverlaySnapshot, visible: bool) {
+    if let Some(commit_ptr) = snap.commit_button {
         unsafe {
             set_hidden(commit_ptr as Id, !visible);
         }
@@ -359,24 +407,23 @@ fn decision_hint_text(mode: TranscriptionActionContractMode, include_auto_hide: 
     }
 }
 
-fn refresh_action_contract_ui(state: &TranscriptionOverlayState, include_auto_hide_hint: bool) {
-    if let Some(copy_ptr) = state.copy_button {
+/// Refresh action contract tooltips/hints. Call ONLY outside the `OVERLAY_STATE` lock.
+fn refresh_action_contract_ui_unlocked(
+    snap: &OverlaySnapshot,
+    mode: TranscriptionActionContractMode,
+    include_auto_hide_hint: bool,
+) {
+    if let Some(copy_ptr) = snap.copy_button {
         unsafe {
-            set_tooltip(
-                copy_ptr as Id,
-                copy_action_tooltip(state.action_contract_mode),
-            );
+            set_tooltip(copy_ptr as Id, copy_action_tooltip(mode));
         }
     }
-    if let Some(augment_ptr) = state.augment_button {
+    if let Some(augment_ptr) = snap.augment_button {
         unsafe {
-            set_tooltip(
-                augment_ptr as Id,
-                augment_action_tooltip(state.action_contract_mode),
-            );
+            set_tooltip(augment_ptr as Id, augment_action_tooltip(mode));
         }
     }
-    if let Some(save_ptr) = state.save_button {
+    if let Some(save_ptr) = snap.save_button {
         unsafe {
             set_tooltip(
                 save_ptr as Id,
@@ -384,10 +431,10 @@ fn refresh_action_contract_ui(state: &TranscriptionOverlayState, include_auto_hi
             );
         }
     }
-    if let Some(label_ptr) = state.auto_hide_label {
+    if let Some(label_ptr) = snap.auto_hide_label {
         unsafe {
             if include_auto_hide_hint {
-                let hint = decision_hint_text(state.action_contract_mode, true);
+                let hint = decision_hint_text(mode, true);
                 set_text(label_ptr as Id, &hint);
                 set_tooltip(label_ptr as Id, "Transcription overlay action contract");
                 set_hidden(label_ptr as Id, false);
@@ -398,8 +445,13 @@ fn refresh_action_contract_ui(state: &TranscriptionOverlayState, include_auto_hi
     }
 }
 
-fn set_auto_hide_hint_visible(state: &TranscriptionOverlayState, visible: bool) {
-    refresh_action_contract_ui(state, visible);
+/// Show/hide auto-hide hint. Call ONLY outside the `OVERLAY_STATE` lock.
+fn set_auto_hide_hint_visible_unlocked(
+    snap: &OverlaySnapshot,
+    mode: TranscriptionActionContractMode,
+    visible: bool,
+) {
+    refresh_action_contract_ui_unlocked(snap, mode, visible);
 }
 
 fn overlay_status_label(kind: UiStatus) -> &'static str {
@@ -452,12 +504,13 @@ fn compute_overlay_layout_metrics(
     }
 }
 
-fn set_status_message(state: &TranscriptionOverlayState, msg: &str, allow_spinner: bool) {
+/// Update status label + spinner. Call ONLY outside the `OVERLAY_STATE` lock.
+fn set_status_message_unlocked(snap: &OverlaySnapshot, msg: &str, allow_spinner: bool) {
     let status_kind = status_from_detail(msg);
     let status_text = overlay_status_label(status_kind);
     let palette = status_kind.palette();
 
-    if let Some(status_ptr) = state.status_field {
+    if let Some(status_ptr) = snap.status_field {
         unsafe {
             set_text(status_ptr as Id, status_text);
             set_hidden(status_ptr as Id, false);
@@ -481,7 +534,7 @@ fn set_status_message(state: &TranscriptionOverlayState, msg: &str, allow_spinne
     let _ = crate::tray::update_tray_status(status_kind.to_tray());
 
     let show_spinner = allow_spinner && status_kind == UiStatus::Processing;
-    if let Some(spinner_ptr) = state.progress_indicator {
+    if let Some(spinner_ptr) = snap.progress_indicator {
         unsafe {
             set_hidden(spinner_ptr as Id, !show_spinner);
             if show_spinner {
@@ -526,25 +579,25 @@ fn scroll_text_view_to_bottom(text_view: Id) {
     }
 }
 
-fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
+/// Resize overlay window to fit text content. Call ONLY outside the `OVERLAY_STATE` lock.
+/// Returns the new `last_applied_height` for write-back to state.
+fn resize_overlay_unlocked(snap: &OverlaySnapshot) -> f64 {
     let (window_ptr, text_scroll_ptr, text_view_ptr) =
-        match (state.window, state.text_scroll_view, state.text_view) {
-            (Some(window_ptr), Some(text_scroll_ptr), Some(text_view_ptr)) => {
-                (window_ptr as Id, text_scroll_ptr as Id, text_view_ptr as Id)
-            }
-            _ => return,
+        match (snap.window, snap.text_scroll_view, snap.text_view) {
+            (Some(w), Some(ts), Some(tv)) => (w as Id, ts as Id, tv as Id),
+            _ => return snap.last_applied_height,
         };
 
-    let text_width = (state.window_width - OVERLAY_PADDING * 2.0).max(120.0);
+    let text_width = (snap.window_width - OVERLAY_PADDING * 2.0).max(120.0);
     let text_content_height = measure_text_view_content_height(text_view_ptr, text_width);
     let metrics =
-        compute_overlay_layout_metrics(text_content_height, state.min_height, state.max_height);
+        compute_overlay_layout_metrics(text_content_height, snap.min_height, snap.max_height);
 
     unsafe {
         let current_frame: CGRect = msg_send![window_ptr, frame];
         let top_y = current_frame.origin.y + current_frame.size.height;
-        let should_resize = (state.last_applied_height - metrics.target_height).abs()
-            > OVERLAY_LAYOUT_HYSTERESIS_PX;
+        let should_resize =
+            (snap.last_applied_height - metrics.target_height).abs() > OVERLAY_LAYOUT_HYSTERESIS_PX;
         let applied_height = if should_resize {
             let new_frame = CGRect {
                 origin: CGPoint {
@@ -552,12 +605,11 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
                     y: top_y - metrics.target_height,
                 },
                 size: CGSize {
-                    width: state.window_width,
+                    width: snap.window_width,
                     height: metrics.target_height,
                 },
             };
             let _: () = msg_send![window_ptr, setFrame: new_frame display: true];
-            state.last_applied_height = metrics.target_height;
             metrics.target_height
         } else {
             current_frame.size.height
@@ -594,14 +646,14 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
         let header_y = applied_height - OVERLAY_PADDING - OVERLAY_HEADER_HEIGHT;
         let info_y = header_y - OVERLAY_HEADER_GAP - OVERLAY_INFO_HEIGHT;
         let spinner_size = 14.0;
-        let spinner_x = state.window_width - OVERLAY_PADDING - spinner_size;
+        let spinner_x = snap.window_width - OVERLAY_PADDING - spinner_size;
         let status_gap = 6.0;
         let status_max_x = spinner_x - status_gap;
         let status_width = OVERLAY_STATUS_WIDTH.min((status_max_x - OVERLAY_PADDING).max(80.0));
         let status_x = (status_max_x - status_width).max(OVERLAY_PADDING);
         let header_width = (status_x - OVERLAY_CONTENT_GAP - OVERLAY_PADDING).max(120.0);
 
-        if let Some(header_ptr) = state.header_label {
+        if let Some(header_ptr) = snap.header_label {
             let header_frame = CGRect {
                 origin: CGPoint {
                     x: OVERLAY_PADDING,
@@ -615,7 +667,7 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
             let _: () = msg_send![header_ptr as Id, setFrame: header_frame];
         }
 
-        if let Some(status_ptr) = state.status_field {
+        if let Some(status_ptr) = snap.status_field {
             let status_frame = CGRect {
                 origin: CGPoint {
                     x: status_x,
@@ -629,21 +681,21 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
             let _: () = msg_send![status_ptr as Id, setFrame: status_frame];
         }
 
-        if let Some(auto_hide_ptr) = state.auto_hide_label {
+        if let Some(auto_hide_ptr) = snap.auto_hide_label {
             let hint_frame = CGRect {
                 origin: CGPoint {
                     x: OVERLAY_PADDING,
                     y: info_y,
                 },
                 size: CGSize {
-                    width: state.window_width - OVERLAY_PADDING * 2.0,
+                    width: snap.window_width - OVERLAY_PADDING * 2.0,
                     height: OVERLAY_INFO_HEIGHT,
                 },
             };
             let _: () = msg_send![auto_hide_ptr as Id, setFrame: hint_frame];
         }
 
-        if let Some(spinner_ptr) = state.progress_indicator {
+        if let Some(spinner_ptr) = snap.progress_indicator {
             let spinner_frame = CGRect {
                 origin: CGPoint {
                     x: spinner_x,
@@ -657,11 +709,11 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
             let _: () = msg_send![spinner_ptr as Id, setFrame: spinner_frame];
         }
 
-        if let Some(blur_ptr) = state.blur_view {
+        if let Some(blur_ptr) = snap.blur_view {
             let blur_frame = CGRect {
                 origin: CGPoint { x: 0.0, y: 0.0 },
                 size: CGSize {
-                    width: state.window_width,
+                    width: snap.window_width,
                     height: applied_height,
                 },
             };
@@ -671,7 +723,7 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
         let button_width = 100.0;
         let button_gap = 10.0;
         let row_width = button_width * 3.0 + button_gap * 2.0;
-        let row_x = (state.window_width - row_width) / 2.0;
+        let row_x = (snap.window_width - row_width) / 2.0;
         let save_frame = CGRect {
             origin: CGPoint {
                 x: row_x,
@@ -703,23 +755,25 @@ fn resize_overlay_to_fit_text(state: &mut TranscriptionOverlayState) {
             },
         };
 
-        if let Some(save_ptr) = state.save_button {
+        if let Some(save_ptr) = snap.save_button {
             let _: () = msg_send![save_ptr as Id, setFrame: save_frame];
         }
-        if let Some(copy_ptr) = state.copy_button {
+        if let Some(copy_ptr) = snap.copy_button {
             let _: () = msg_send![copy_ptr as Id, setFrame: copy_frame];
         }
-        if let Some(augment_ptr) = state.augment_button {
+        if let Some(augment_ptr) = snap.augment_button {
             let _: () = msg_send![augment_ptr as Id, setFrame: augment_frame];
         }
+
+        applied_height
     }
 }
 
-fn update_overlay_text_only(state: &TranscriptionOverlayState) {
-    if let Some(text_view_ptr) = state.text_view {
-        let visible_text = overlay_visible_text(&state.accumulated_text, state.decision_mode);
+/// Update the overlay text content. Call ONLY outside the `OVERLAY_STATE` lock.
+fn update_overlay_text_unlocked(text_view_ptr: Option<usize>, visible_text: &str) {
+    if let Some(tv_ptr) = text_view_ptr {
         unsafe {
-            set_text_view_string(text_view_ptr as Id, visible_text);
+            set_text_view_string(tv_ptr as Id, visible_text);
         }
     }
 }
@@ -784,39 +838,22 @@ fn is_preview_boundary_char(ch: char) -> bool {
         )
 }
 
-fn update_overlay_text_and_layout(state: &mut TranscriptionOverlayState) {
-    update_overlay_text_only(state);
-    resize_overlay_to_fit_text(state);
-    state.last_layout_resize_at = Instant::now();
-    state.pending_layout_resize = false;
+// NOTE: update_overlay_text_and_layout and maybe_resize_overlay_layout were removed.
+// Their logic is now inlined into callers using the extract-drop-execute pattern
+// to prevent deadlocks. See append_transcription_delta_impl, set_transcription_text_impl, etc.
+
+/// Reset status to idle. Call ONLY outside the `OVERLAY_STATE` lock.
+fn reset_overlay_to_idle_unlocked(snap: &OverlaySnapshot) {
+    set_status_message_unlocked(snap, "Idle", false);
 }
 
-fn maybe_resize_overlay_layout(state: &mut TranscriptionOverlayState, delta: &str) {
-    let structural_delta = delta
-        .chars()
-        .any(|ch| ch == '\n' || ch == codescribe_core::pipeline::contracts::BACKSPACE);
-    let throttle = Duration::from_millis(OVERLAY_LAYOUT_THROTTLE_MS);
-    let due = state.last_layout_resize_at.elapsed() >= throttle;
-
-    if structural_delta || due || state.pending_layout_resize {
-        resize_overlay_to_fit_text(state);
-        state.last_layout_resize_at = Instant::now();
-        state.pending_layout_resize = false;
-    } else {
-        state.pending_layout_resize = true;
-    }
-}
-
-fn reset_overlay_to_idle(state: &TranscriptionOverlayState) {
-    set_status_message(state, "Idle", false);
-}
-
-fn set_recording_status(state: &TranscriptionOverlayState, show: bool) {
+/// Toggle recording status indicator. Call ONLY outside the `OVERLAY_STATE` lock.
+fn set_recording_status_unlocked(snap: &OverlaySnapshot, show: bool) {
     if show {
-        set_status_message(state, "Listening", false);
+        set_status_message_unlocked(snap, "Listening", false);
         return;
     }
-    reset_overlay_to_idle(state);
+    reset_overlay_to_idle_unlocked(snap);
 }
 
 /// Show the transcription overlay window
@@ -836,10 +873,20 @@ fn show_transcription_overlay_impl() {
 
         // Reuse existing window if any
         if let Some(window_ptr) = state.window {
+            // DEADLOCK PREVENTION: extract snapshot, drop lock before AppKit calls.
+            let snap = OverlaySnapshot::from_state(&state);
+            drop(state);
+
             let window = window_ptr as Id;
             let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
             window_show(window);
-            resize_overlay_to_fit_text(&mut state);
+            let new_h = resize_overlay_unlocked(&snap);
+            {
+                let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                state.last_applied_height = new_h;
+                state.last_layout_resize_at = Instant::now();
+                state.pending_layout_resize = false;
+            }
             info!("Transcription overlay reused");
             return;
         }
@@ -1230,9 +1277,19 @@ fn show_transcription_overlay_impl() {
         state.last_layout_resize_at = Instant::now();
         state.pending_layout_resize = false;
 
-        refresh_action_contract_ui(&state, false);
-        reset_overlay_to_idle(&state);
-        resize_overlay_to_fit_text(&mut state);
+        // DEADLOCK PREVENTION: snapshot + drop before AppKit layout calls.
+        let snap = OverlaySnapshot::from_state(&state);
+        drop(state);
+
+        refresh_action_contract_ui_unlocked(&snap, TranscriptionActionContractMode::Raw, false);
+        reset_overlay_to_idle_unlocked(&snap);
+        let new_h = resize_overlay_unlocked(&snap);
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.last_applied_height = new_h;
+            state.last_layout_resize_at = Instant::now();
+            state.pending_layout_resize = false;
+        }
 
         info!("Transcription overlay shown (Tahoe-style with HudWindow vibrancy)");
     }
@@ -1247,8 +1304,11 @@ pub fn update_transcription_status(status: &str) {
 }
 
 fn update_transcription_status_impl(status: &str) {
-    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    set_status_message(&state, status, true);
+    let snap = {
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        OverlaySnapshot::from_state(&state)
+    };
+    set_status_message_unlocked(&snap, status, true);
 }
 
 /// Append a delta (streaming token) to the overlay text
@@ -1260,11 +1320,35 @@ pub fn append_transcription_delta(delta: &str) {
 }
 
 fn append_transcription_delta_impl(delta: &str) {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    codescribe_core::pipeline::contracts::TranscriptDelta::from_raw(delta)
-        .apply(&mut state.accumulated_text);
-    update_overlay_text_only(&state);
-    maybe_resize_overlay_layout(&mut state, delta);
+    // Extract text + snapshot under lock, then drop before AppKit calls.
+    let (visible_text, snap, needs_resize) = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        codescribe_core::pipeline::contracts::TranscriptDelta::from_raw(delta)
+            .apply(&mut state.accumulated_text);
+        let visible =
+            overlay_visible_text(&state.accumulated_text, state.decision_mode).to_string();
+        let snap = OverlaySnapshot::from_state(&state);
+
+        // Throttled resize: only if enough time has passed since last layout.
+        let now = Instant::now();
+        let needs_resize = delta.contains('\n')
+            || now.duration_since(state.last_layout_resize_at).as_millis()
+                >= OVERLAY_LAYOUT_THROTTLE_MS as u128;
+        if needs_resize {
+            state.last_layout_resize_at = now;
+            state.pending_layout_resize = false;
+        } else {
+            state.pending_layout_resize = true;
+        }
+        (visible, snap, needs_resize)
+    }; // Lock dropped.
+
+    update_overlay_text_unlocked(snap.text_view, &visible_text);
+    if needs_resize {
+        let new_h = resize_overlay_unlocked(&snap);
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.last_applied_height = new_h;
+    }
 }
 
 /// Set the full text in the overlay
@@ -1276,10 +1360,24 @@ pub fn set_transcription_text(text: &str) {
 }
 
 fn set_transcription_text_impl(text: &str) {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.accumulated_text = text.to_string();
-    state.last_pass_text = text.to_string();
-    update_overlay_text_and_layout(&mut state);
+    let (visible_text, snap) = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.accumulated_text = text.to_string();
+        state.last_pass_text = text.to_string();
+        let visible =
+            overlay_visible_text(&state.accumulated_text, state.decision_mode).to_string();
+        let snap = OverlaySnapshot::from_state(&state);
+        state.last_layout_resize_at = Instant::now();
+        state.pending_layout_resize = false;
+        (visible, snap)
+    }; // Lock dropped.
+
+    update_overlay_text_unlocked(snap.text_view, &visible_text);
+    let new_h = resize_overlay_unlocked(&snap);
+    {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.last_applied_height = new_h;
+    }
 }
 
 /// Set decision-mode action contract payload.
@@ -1294,13 +1392,28 @@ pub fn set_transcription_action_contract(
     let last_pass_owned = last_pass_text.to_string();
     let mode_copy = mode;
     Queue::main().exec_async(move || {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.raw_text = raw_text_owned;
-        state.last_pass_text = last_pass_owned;
-        state.action_contract_mode = mode_copy;
-        state.accumulated_text = action_text_for_contract(&state);
-        refresh_action_contract_ui(&state, state.decision_mode);
-        update_overlay_text_and_layout(&mut state);
+        let (visible_text, snap, decision_mode) = {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.raw_text = raw_text_owned;
+            state.last_pass_text = last_pass_owned;
+            state.action_contract_mode = mode_copy;
+            state.accumulated_text = action_text_for_contract(&state);
+            let visible =
+                overlay_visible_text(&state.accumulated_text, state.decision_mode).to_string();
+            let dm = state.decision_mode;
+            let snap = OverlaySnapshot::from_state(&state);
+            state.last_layout_resize_at = Instant::now();
+            state.pending_layout_resize = false;
+            (visible, snap, dm)
+        }; // Lock dropped.
+
+        refresh_action_contract_ui_unlocked(&snap, mode_copy, decision_mode);
+        update_overlay_text_unlocked(snap.text_view, &visible_text);
+        let new_h = resize_overlay_unlocked(&snap);
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.last_applied_height = new_h;
+        }
     });
 }
 
@@ -1318,49 +1431,35 @@ pub fn clear_transcription_text() {
 }
 
 fn clear_transcription_text_impl() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.accumulated_text.clear();
-    state.raw_text.clear();
-    state.last_pass_text.clear();
-    state.action_contract_mode = TranscriptionActionContractMode::Raw;
+    let snap = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.accumulated_text.clear();
+        state.raw_text.clear();
+        state.last_pass_text.clear();
+        state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.decision_mode = false;
+        state.hover_active = false;
+        state.last_layout_resize_at = Instant::now();
+        state.pending_layout_resize = false;
+        OverlaySnapshot::from_state(&state)
+    }; // Lock dropped before AppKit calls.
 
-    if let Some(text_view_ptr) = state.text_view {
-        unsafe {
-            set_text_view_string(text_view_ptr as Id, "");
-        }
-    }
-    resize_overlay_to_fit_text(&mut state);
-    state.last_layout_resize_at = Instant::now();
-    state.pending_layout_resize = false;
-    if let Some(copy_ptr) = state.copy_button {
-        unsafe {
-            set_hidden(copy_ptr as Id, true);
-        }
-    }
-    if let Some(augment_ptr) = state.augment_button {
-        unsafe {
-            set_hidden(augment_ptr as Id, true);
-        }
-    }
-    if let Some(save_ptr) = state.save_button {
-        unsafe {
-            set_hidden(save_ptr as Id, true);
-        }
-    }
-    if let Some(commit_ptr) = state.commit_button {
-        unsafe {
-            set_hidden(commit_ptr as Id, true);
-        }
-    }
-    set_auto_hide_hint_visible(&state, false);
-    if let Some(spinner_ptr) = state.progress_indicator {
+    update_overlay_text_unlocked(snap.text_view, "");
+    let new_h = resize_overlay_unlocked(&snap);
+    set_action_buttons_visible_unlocked(&snap, false);
+    set_recording_button_visible_unlocked(&snap, false);
+    set_auto_hide_hint_visible_unlocked(&snap, TranscriptionActionContractMode::Raw, false);
+    if let Some(spinner_ptr) = snap.progress_indicator {
         unsafe {
             set_hidden(spinner_ptr as Id, true);
         }
     }
-    state.decision_mode = false;
-    state.hover_active = false;
-    reset_overlay_to_idle(&state);
+    reset_overlay_to_idle_unlocked(&snap);
+
+    {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.last_applied_height = new_h;
+    }
 }
 
 /// Check if the transcription overlay is currently visible
@@ -1375,8 +1474,14 @@ pub fn schedule_auto_hide() {
     AUTO_HIDE_PENDING.store(true, Ordering::SeqCst);
 
     Queue::main().exec_async(|| {
-        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        set_auto_hide_hint_visible(&state, true);
+        let (snap, mode) = {
+            let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                OverlaySnapshot::from_state(&state),
+                state.action_contract_mode,
+            )
+        }; // Lock dropped.
+        set_auto_hide_hint_visible_unlocked(&snap, mode, true);
     });
 
     std::thread::spawn(move || {
@@ -1412,27 +1517,38 @@ fn should_auto_hide(expected_generation: u64) -> bool {
 /// Enter decision mode: show actions on hover for the current transcript
 pub fn enter_decision_mode() {
     Queue::main().exec_async(|| {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.decision_mode = true;
-        set_action_buttons_visible(&state, true);
-        set_auto_hide_hint_visible(&state, true);
-        set_recording_button_visible(&state, false);
-        // Clear recording indicator, restore white text color
-        set_recording_status(&state, false);
+        let (snap, mode) = {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.decision_mode = true;
+            (
+                OverlaySnapshot::from_state(&state),
+                state.action_contract_mode,
+            )
+        }; // Lock dropped before AppKit calls.
+        set_action_buttons_visible_unlocked(&snap, true);
+        set_auto_hide_hint_visible_unlocked(&snap, mode, true);
+        set_recording_button_visible_unlocked(&snap, false);
+        set_recording_status_unlocked(&snap, false);
     });
 }
 
 /// Enter recording mode: hide actions, show recording indicator
 pub fn enter_recording_mode() {
     Queue::main().exec_async(|| {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.decision_mode = false;
-        state.hover_active = false;
-        set_action_buttons_visible(&state, false);
-        set_auto_hide_hint_visible(&state, false);
-        set_recording_button_visible(&state, true);
+        let (snap, mode) = {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.decision_mode = false;
+            state.hover_active = false;
+            (
+                OverlaySnapshot::from_state(&state),
+                state.action_contract_mode,
+            )
+        }; // Lock dropped before AppKit calls.
+        set_action_buttons_visible_unlocked(&snap, false);
+        set_auto_hide_hint_visible_unlocked(&snap, mode, false);
+        set_recording_button_visible_unlocked(&snap, true);
         // Show recording indicator (red dot + text), no spinner
-        set_recording_status(&state, true);
+        set_recording_status_unlocked(&snap, true);
     });
 }
 
@@ -1454,8 +1570,35 @@ fn close_window_by_ptr(window_ptr: usize) {
 }
 
 fn hide_transcription_overlay_impl() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(window_ptr) = state.window.take() {
+    // DEADLOCK PREVENTION: extract window_ptr and clear state under lock,
+    // then drop lock before the animate_fade AppKit call.
+    let window_ptr = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let wp = state.window.take();
+        state.header_label = None;
+        state.text_scroll_view = None;
+        state.text_view = None;
+        state.status_field = None;
+        state.auto_hide_label = None;
+        state.blur_view = None;
+        state.copy_button = None;
+        state.augment_button = None;
+        state.save_button = None;
+        state.commit_button = None;
+        state.progress_indicator = None;
+        state.tracking_area = None;
+        state.decision_mode = false;
+        state.hover_active = false;
+        state.action_handler = None;
+        state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
+        state.last_layout_resize_at = Instant::now();
+        state.pending_layout_resize = false;
+        // Note: accumulated_text is NOT cleared here - it's needed for clipboard copy
+        wp
+    }; // Lock dropped.
+
+    if let Some(window_ptr) = window_ptr {
         let window = window_ptr as Id;
 
         // Fade out animation (0.15s)
@@ -1473,26 +1616,6 @@ fn hide_transcription_overlay_impl() {
 
         debug!("Transcription overlay hidden");
     }
-    state.header_label = None;
-    state.text_scroll_view = None;
-    state.text_view = None;
-    state.status_field = None;
-    state.auto_hide_label = None;
-    state.blur_view = None;
-    state.copy_button = None;
-    state.augment_button = None;
-    state.save_button = None;
-    state.commit_button = None;
-    state.progress_indicator = None;
-    state.tracking_area = None;
-    state.decision_mode = false;
-    state.hover_active = false;
-    state.action_handler = None;
-    state.action_contract_mode = TranscriptionActionContractMode::Raw;
-    state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
-    state.last_layout_resize_at = Instant::now();
-    state.pending_layout_resize = false;
-    // Note: accumulated_text is NOT cleared here - it's needed for clipboard copy
 }
 
 #[cfg(test)]

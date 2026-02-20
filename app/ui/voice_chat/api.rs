@@ -385,8 +385,129 @@ pub fn update_active_tab_impl(tab: Tab) {
         crate::show_bootstrap_overlay();
         return;
     }
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    update_active_tab_locked(&mut state, tab);
+
+    // DEADLOCK PREVENTION: extract widget pointers under lock, drop lock before
+    // AppKit calls (setCollapsed can animate and spin a nested run-loop).
+    let (
+        _prev_tab,
+        tab_drawer_btn,
+        tab_agent_btn,
+        tab_settings_btn,
+        sidebar_item,
+        content_item,
+        split_vc,
+        drawer_sv,
+        search_f,
+        search_l,
+        fav_btn,
+        drawer_edge,
+        agent_sv,
+        agent_bar,
+        agent_attach,
+        agent_send,
+        window_ptr,
+        agent_input_tv,
+        need_chat_update,
+    ) = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = state.active_tab;
+        state.active_tab = tab;
+        (
+            prev, // kept to compute need_chat_update below
+            state.tab_drawer_button,
+            state.tab_agent_button,
+            state.tab_settings_button,
+            state.split_sidebar_item,
+            state.split_content_item,
+            state.split_view_controller,
+            state.drawer_scroll_view,
+            state.search_field,
+            state.search_label,
+            state.favorites_button,
+            state.drawer_edge_effect,
+            state.agent_scroll_view,
+            state.agent_input_bar,
+            state.agent_attach_button,
+            state.agent_send_button,
+            state.window,
+            state.agent_input_text_view,
+            tab == Tab::Agent && prev != Tab::Agent,
+        )
+    }; // Lock dropped.
+
+    let show_drawer = tab == Tab::Drawer;
+    let show_agent = tab == Tab::Agent;
+
+    unsafe {
+        if let Some(b) = tab_drawer_btn {
+            crate::ui_helpers::set_tab_button_active(b as Id, show_drawer);
+        }
+        if let Some(b) = tab_agent_btn {
+            crate::ui_helpers::set_tab_button_active(b as Id, show_agent);
+        }
+        if let Some(b) = tab_settings_btn {
+            crate::ui_helpers::set_tab_button_active(b as Id, false);
+        }
+        if let Some(p) = sidebar_item {
+            let _: () = msg_send![p as Id, setCollapsed: show_agent];
+        }
+        if let Some(p) = content_item {
+            let _: () = msg_send![p as Id, setCollapsed: !show_agent];
+        }
+        if let Some(p) = split_vc {
+            let split_view: Id = msg_send![p as Id, view];
+            if !split_view.is_null() {
+                crate::ui_helpers::set_hidden(split_view, false);
+            }
+        }
+        if let Some(p) = drawer_sv {
+            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
+        }
+        if let Some(p) = search_f {
+            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
+        }
+        if let Some(p) = search_l {
+            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
+        }
+        if let Some(p) = fav_btn {
+            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
+        }
+        if let Some(p) = drawer_edge {
+            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
+        }
+        if let Some(p) = agent_sv {
+            crate::ui_helpers::set_hidden(p as Id, !show_agent);
+        }
+        if let Some(p) = agent_bar {
+            crate::ui_helpers::set_hidden(p as Id, !show_agent);
+        }
+        if let Some(p) = agent_attach {
+            crate::ui_helpers::set_hidden(p as Id, !show_agent);
+        }
+        if let Some(p) = agent_send {
+            crate::ui_helpers::set_hidden(p as Id, !show_agent);
+        }
+
+        // Complex agent-tab operations need full state access; re-lock briefly.
+        if show_agent {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if need_chat_update {
+                update_chat_view_with_state(&mut state, true);
+            }
+            resize_agent_input_locked(&mut state);
+        }
+
+        // Nudge first responder to agent input when window is already key.
+        if tab == Tab::Agent
+            && let (Some(w), Some(inp)) = (window_ptr, agent_input_tv)
+        {
+            let window = w as Id;
+            let is_key: bool = msg_send![window, isKeyWindow];
+            if is_key {
+                let _: bool = msg_send![window, makeFirstResponder: inp as Id];
+            }
+        }
+    }
 }
 
 fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {

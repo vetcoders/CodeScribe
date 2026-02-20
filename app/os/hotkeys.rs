@@ -900,22 +900,29 @@ mod macos {
                 return;
             }
 
-            let tap = self.tap.load(Ordering::SeqCst) as CFMachPortRef;
+            // Swap each pointer to null BEFORE invalidating. The swap is the
+            // ownership transfer: whoever gets a non-null value from swap is
+            // responsible for teardown. This prevents the double-invalidate
+            // race with `Drop for EventTapResources`.
+            let tap = self.tap.swap(ptr::null_mut(), Ordering::SeqCst) as CFMachPortRef;
             if !tap.is_null() {
                 unsafe {
                     CGEventTapEnable(tap, false);
                     CFMachPortInvalidate(tap);
+                    CFRelease(tap as *const c_void);
                 }
             }
 
-            let source = self.source.load(Ordering::SeqCst) as CFRunLoopSourceRef;
+            let source = self.source.swap(ptr::null_mut(), Ordering::SeqCst) as CFRunLoopSourceRef;
             if !source.is_null() {
                 unsafe {
                     CFRunLoopSourceInvalidate(source);
+                    CFRelease(source as *const c_void);
                 }
             }
 
-            let run_loop = self.run_loop.load(Ordering::SeqCst) as CFRunLoopRef;
+            // run_loop is NOT owned (CFRunLoopGetCurrent doesn't retain) — no CFRelease.
+            let run_loop = self.run_loop.swap(ptr::null_mut(), Ordering::SeqCst) as CFRunLoopRef;
             if !run_loop.is_null() {
                 unsafe {
                     CFRunLoopStop(run_loop);
@@ -972,42 +979,46 @@ mod macos {
 
     impl Drop for EventTapResources {
         fn drop(&mut self) {
-            if let Some(tap) = self.tap {
+            // Use atomic swap to claim ownership of each resource. If
+            // `request_stop()` already swapped a pointer to null, we get null
+            // and skip teardown for that resource (it was already cleaned up).
+            // This eliminates the double-invalidate crash (EXC_BREAKPOINT in
+            // CFRunLoopSourceInvalidate).
+
+            let tap = self.control.tap.swap(ptr::null_mut(), Ordering::SeqCst) as CFMachPortRef;
+            if !tap.is_null() {
                 unsafe {
                     CGEventTapEnable(tap, false);
                     CFMachPortInvalidate(tap);
+                    CFRelease(tap as *const c_void);
                 }
             }
 
-            if let Some(source) = self.source {
+            let source =
+                self.control.source.swap(ptr::null_mut(), Ordering::SeqCst) as CFRunLoopSourceRef;
+            if !source.is_null() {
                 unsafe {
                     CFRunLoopSourceInvalidate(source);
+                    CFRelease(source as *const c_void);
                 }
             }
 
-            if let Some(run_loop) = self.run_loop {
+            // run_loop is NOT owned (CFRunLoopGetCurrent doesn't retain) — no CFRelease.
+            let run_loop = self
+                .control
+                .run_loop
+                .swap(ptr::null_mut(), Ordering::SeqCst) as CFRunLoopRef;
+            if !run_loop.is_null() {
                 unsafe {
                     CFRunLoopStop(run_loop);
                     CFRunLoopWakeUp(run_loop);
                 }
             }
 
-            if let Some(source) = self.source.take() {
-                unsafe {
-                    CFRelease(source as *const c_void);
-                }
-            }
-            if let Some(tap) = self.tap.take() {
-                unsafe {
-                    CFRelease(tap as *const c_void);
-                }
-            }
-
-            self.control.tap.store(ptr::null_mut(), Ordering::SeqCst);
-            self.control.source.store(ptr::null_mut(), Ordering::SeqCst);
-            self.control
-                .run_loop
-                .store(ptr::null_mut(), Ordering::SeqCst);
+            // Clear Option fields so they don't dangle.
+            self.tap = None;
+            self.source = None;
+            self.run_loop = None;
         }
     }
 
