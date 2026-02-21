@@ -477,7 +477,7 @@ async fn handle_transcribe_live(language: Option<String>) -> Result<()> {
 
 async fn run_daemon() -> Result<()> {
     use anyhow::Context;
-    use codescribe::config::Config;
+    use codescribe::config::{Config, UserSettings};
     use codescribe::controller::RecordingController;
     use codescribe::os::hotkeys::HotkeyEvent;
     use codescribe::{ipc, tray};
@@ -487,6 +487,7 @@ async fn run_daemon() -> Result<()> {
 
     eprintln!("CodeScribe daemon starting...");
     let config = Config::load();
+    let user_settings = UserSettings::load();
 
     #[cfg(target_os = "macos")]
     {
@@ -635,7 +636,10 @@ async fn run_daemon() -> Result<()> {
     //
     // The daemon is useful, but if it survives app restarts it can confuse macOS
     // permissions / input monitoring workflows. Turn it on explicitly when needed.
-    let quality_child = if env_bool("CODESCRIBE_AUTOSTART_QUALITY_DAEMON", false) {
+    let quality_autostart = user_settings
+        .quality_daemon_autostart
+        .unwrap_or_else(|| env_bool("CODESCRIBE_AUTOSTART_QUALITY_DAEMON", false));
+    let quality_child = if quality_autostart {
         spawn_quality_daemon()
     } else {
         stop_quality_daemon_if_running();

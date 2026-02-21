@@ -78,6 +78,8 @@ pub struct UserSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_at_login: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_daemon_autostart: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_enter_sends: Option<bool>,
 
     // ── Voice Lab survivors (user-facing UX knobs) ──
@@ -93,6 +95,176 @@ pub struct UserSettings {
     pub whisper_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_max_upload_mb: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct SettingsV2 {
+    schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interaction: Option<InteractionV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speech: Option<SpeechV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<AudioV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ui: Option<UiV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<FeaturesV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<SystemV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct InteractionV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger: Option<TriggerV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hold: Option<HoldV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct TriggerV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    double_tap_interval_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_silence_timeout_sec: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    double_tap_sides: Option<DoubleTapSidesV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct DoubleTapSidesV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    left: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    right: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct HoldV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modifiers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclusive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct SpeechV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine: Option<SpeechEngineV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    formatting: Option<FormattingV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assistive: Option<AssistiveV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emission: Option<EmissionV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct SpeechEngineV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_transcription_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_max_upload_mb: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct FormattingV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct AssistiveV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct EmissionV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buffer_delay_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    typing_cps: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emit_words_max: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interim_cadence_sec: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct AudioV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_device_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback: Option<FeedbackV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct FeedbackV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    beep_on_start: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sound_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    volume: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct UiV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_zoom: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct FeaturesV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quick_notes_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct SystemV2 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_at_login: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quality_daemon_autostart: Option<bool>,
 }
 
 /// Canonical list of env keys that route to `settings.json` (not `.env`).
@@ -139,6 +311,7 @@ pub const PROMOTED_SETTINGS_KEYS: &[&str] = &[
     "QUICK_NOTES_ENABLED",
     "QUICK_NOTES_SAVE_ONLY",
     "START_AT_LOGIN",
+    "CODESCRIBE_AUTOSTART_QUALITY_DAEMON",
     "AGENT_ENTER_SENDS",
     // Voice Lab survivors
     "CODESCRIBE_BUFFER_DELAY_MS",
@@ -155,6 +328,246 @@ pub fn is_promoted_key(key: &str) -> bool {
 }
 
 impl UserSettings {
+    fn to_v2(&self) -> SettingsV2 {
+        SettingsV2 {
+            schema_version: 2,
+            interaction: Some(InteractionV2 {
+                trigger: Some(TriggerV2 {
+                    mode: self.toggle_trigger.clone(),
+                    double_tap_interval_ms: self.double_tap_interval_ms,
+                    toggle_silence_timeout_sec: self.toggle_silence_sec,
+                    double_tap_sides: Some(DoubleTapSidesV2 {
+                        left: self.double_tap_left,
+                        right: self.double_tap_right,
+                    }),
+                }),
+                hold: Some(HoldV2 {
+                    modifiers: self.hold_mods.as_ref().map(|mods| {
+                        mods.split('_')
+                            .map(std::string::ToString::to_string)
+                            .collect::<Vec<_>>()
+                    }),
+                    exclusive: self.hold_exclusive,
+                    start_delay_ms: self.hold_start_delay_ms,
+                }),
+            }),
+            speech: Some(SpeechV2 {
+                language: self.whisper_language.clone(),
+                engine: Some(SpeechEngineV2 {
+                    mode: self
+                        .use_local_stt
+                        .map(|v| if v { "local_whisper" } else { "cloud_whisper" }.to_string()),
+                    local_model_id: self.local_model.clone(),
+                    cloud_transcription_endpoint: self.stt_endpoint.clone(),
+                    cloud_max_upload_mb: self.backend_max_upload_mb,
+                }),
+                formatting: Some(FormattingV2 {
+                    enabled: self.ai_formatting_enabled,
+                    level: self.formatting_level.clone(),
+                    llm_endpoint: self.llm_formatting_endpoint.clone(),
+                    llm_model: self.llm_formatting_model.clone(),
+                }),
+                assistive: Some(AssistiveV2 {
+                    llm_endpoint: self.llm_assistive_endpoint.clone(),
+                    llm_model: self.llm_assistive_model.clone(),
+                }),
+                emission: Some(EmissionV2 {
+                    mode: None,
+                    buffer_delay_ms: self.buffer_delay_ms,
+                    typing_cps: self.typing_cps,
+                    emit_words_max: self.emit_words_max,
+                    interim_cadence_sec: self.buffered_interim_sec,
+                }),
+            }),
+            audio: Some(AudioV2 {
+                input_device_id: self.audio_input_device.clone(),
+                feedback: Some(FeedbackV2 {
+                    beep_on_start: self.beep_on_start,
+                    sound_name: self.sound_name.clone(),
+                    volume: self.sound_volume,
+                }),
+            }),
+            ui: Some(UiV2 {
+                chat_zoom: self.chat_zoom,
+            }),
+            features: Some(FeaturesV2 {
+                history_enabled: self.history_enabled,
+                quick_notes_enabled: self.quick_notes_enabled,
+            }),
+            system: Some(SystemV2 {
+                start_at_login: self.start_at_login,
+                quality_daemon_autostart: self.quality_daemon_autostart,
+            }),
+        }
+    }
+
+    fn from_v2(v2: SettingsV2) -> Self {
+        Self {
+            whisper_language: v2.speech.as_ref().and_then(|s| s.language.clone()),
+            hold_mods: v2
+                .interaction
+                .as_ref()
+                .and_then(|i| i.hold.as_ref())
+                .and_then(|h| h.modifiers.clone())
+                .map(|mods| mods.join("_")),
+            hold_exclusive: v2
+                .interaction
+                .as_ref()
+                .and_then(|i| i.hold.as_ref())
+                .and_then(|h| h.exclusive),
+            toggle_trigger: v2
+                .interaction
+                .as_ref()
+                .and_then(|i| i.trigger.as_ref())
+                .and_then(|t| t.mode.clone()),
+            hold_start_delay_ms: v2
+                .interaction
+                .as_ref()
+                .and_then(|i| i.hold.as_ref())
+                .and_then(|h| h.start_delay_ms),
+            double_tap_interval_ms: v2
+                .interaction
+                .as_ref()
+                .and_then(|i| i.trigger.as_ref())
+                .and_then(|t| t.double_tap_interval_ms),
+            toggle_silence_sec: v2
+                .interaction
+                .as_ref()
+                .and_then(|i| i.trigger.as_ref())
+                .and_then(|t| t.toggle_silence_timeout_sec),
+            ai_formatting_enabled: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.formatting.as_ref())
+                .and_then(|f| f.enabled),
+            beep_on_start: v2
+                .audio
+                .as_ref()
+                .and_then(|a| a.feedback.as_ref())
+                .and_then(|f| f.beep_on_start),
+            sound_volume: v2
+                .audio
+                .as_ref()
+                .and_then(|a| a.feedback.as_ref())
+                .and_then(|f| f.volume),
+            formatting_level: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.formatting.as_ref())
+                .and_then(|f| f.level.clone()),
+            llm_endpoint: None,
+            llm_model: None,
+            llm_assistive_endpoint: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.assistive.as_ref())
+                .and_then(|a| a.llm_endpoint.clone()),
+            llm_assistive_model: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.assistive.as_ref())
+                .and_then(|a| a.llm_model.clone()),
+            double_tap_left: v2
+                .interaction
+                .as_ref()
+                .and_then(|i| i.trigger.as_ref())
+                .and_then(|t| t.double_tap_sides.as_ref())
+                .and_then(|s| s.left),
+            double_tap_right: v2
+                .interaction
+                .as_ref()
+                .and_then(|i| i.trigger.as_ref())
+                .and_then(|t| t.double_tap_sides.as_ref())
+                .and_then(|s| s.right),
+            chat_zoom: v2.ui.as_ref().and_then(|ui| ui.chat_zoom),
+            show_dock_icon: None,
+            llm_formatting_endpoint: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.formatting.as_ref())
+                .and_then(|f| f.llm_endpoint.clone()),
+            llm_formatting_model: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.formatting.as_ref())
+                .and_then(|f| f.llm_model.clone()),
+            use_local_stt: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.engine.as_ref())
+                .and_then(|e| e.mode.as_ref())
+                .map(|mode| mode == "local_whisper"),
+            local_model: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.engine.as_ref())
+                .and_then(|e| e.local_model_id.clone()),
+            stt_endpoint: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.engine.as_ref())
+                .and_then(|e| e.cloud_transcription_endpoint.clone()),
+            transcript_send_mode: None,
+            audio_input_device: v2.audio.as_ref().and_then(|a| a.input_device_id.clone()),
+            sound_name: v2
+                .audio
+                .as_ref()
+                .and_then(|a| a.feedback.as_ref())
+                .and_then(|f| f.sound_name.clone()),
+            history_enabled: v2.features.as_ref().and_then(|f| f.history_enabled),
+            quick_notes_enabled: v2.features.as_ref().and_then(|f| f.quick_notes_enabled),
+            quick_notes_save_only: None,
+            start_at_login: v2.system.as_ref().and_then(|s| s.start_at_login),
+            quality_daemon_autostart: v2.system.as_ref().and_then(|s| s.quality_daemon_autostart),
+            agent_enter_sends: None,
+            buffer_delay_ms: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.emission.as_ref())
+                .and_then(|e| e.buffer_delay_ms),
+            typing_cps: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.emission.as_ref())
+                .and_then(|e| e.typing_cps),
+            emit_words_max: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.emission.as_ref())
+                .and_then(|e| e.emit_words_max),
+            buffered_interim_sec: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.emission.as_ref())
+                .and_then(|e| e.interim_cadence_sec),
+            whisper_model: None,
+            backend_max_upload_mb: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.engine.as_ref())
+                .and_then(|e| e.cloud_max_upload_mb),
+        }
+    }
+
+    fn validate_v2(v2: &SettingsV2) -> anyhow::Result<()> {
+        if v2.schema_version != 2 {
+            anyhow::bail!("settings schema_version must be 2")
+        }
+        if let Some(chat_zoom) = v2.ui.as_ref().and_then(|ui| ui.chat_zoom)
+            && !(0.75..=2.0).contains(&chat_zoom)
+        {
+            anyhow::bail!("ui.chat_zoom must be within [0.75, 2.0]")
+        }
+        Ok(())
+    }
+
+    fn write_json_atomic(path: &PathBuf, json: &str) -> anyhow::Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, json)?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
     /// Returns the settings directory.
     ///
     /// Respects `CODESCRIBE_DATA_DIR` for test isolation; otherwise uses
@@ -188,10 +601,49 @@ impl UserSettings {
     pub fn load() -> Self {
         let path = Self::settings_path();
         match fs::read_to_string(&path) {
-            Ok(contents) => match serde_json::from_str(&contents) {
-                Ok(s) => {
-                    debug!("Loaded settings from {}", path.display());
-                    s
+            Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
+                Ok(value) => {
+                    if value.get("schema_version").is_some() {
+                        match serde_json::from_value::<SettingsV2>(value) {
+                            Ok(v2) => {
+                                if let Err(e) = Self::validate_v2(&v2) {
+                                    warn!("Invalid settings V2 at {}: {e}", path.display());
+                                    return Self::default();
+                                }
+                                debug!("Loaded settings V2 from {}", path.display());
+                                Self::from_v2(v2)
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse settings V2 at {}: {e}", path.display());
+                                Self::default()
+                            }
+                        }
+                    } else {
+                        match serde_json::from_str::<Self>(&contents) {
+                            Ok(v1) => {
+                                let backup_path = Self::settings_dir().join("settings.v1.bak.json");
+                                if let Err(e) = fs::write(&backup_path, &contents) {
+                                    warn!(
+                                        "Failed to write V1 backup {}: {e}",
+                                        backup_path.display()
+                                    );
+                                }
+                                if let Err(e) = v1.save() {
+                                    warn!("Failed hard-migrating settings V1 -> V2: {e}");
+                                } else {
+                                    info!(
+                                        "Migrated settings V1 to V2 and wrote backup {}",
+                                        backup_path.display()
+                                    );
+                                }
+                                v1
+                            }
+                            Err(e) => {
+                                debug!("Failed to parse {}: {e}, using defaults", path.display());
+                                Self::default()
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     debug!("Failed to parse {}: {e}, using defaults", path.display());
@@ -213,7 +665,9 @@ impl UserSettings {
         let dir = Self::settings_dir();
         fs::create_dir_all(&dir)?;
         let path = Self::settings_path();
-        let json = serde_json::to_string_pretty(self)?;
+        let v2 = self.to_v2();
+        Self::validate_v2(&v2)?;
+        let json = serde_json::to_string_pretty(&v2)?;
 
         if let Ok(existing) = fs::read_to_string(&path)
             && existing == json
@@ -222,7 +676,7 @@ impl UserSettings {
             return Ok(());
         }
 
-        fs::write(&path, json)?;
+        Self::write_json_atomic(&path, &json)?;
         info!("Saved settings to {}", path.display());
         Ok(())
     }
@@ -312,6 +766,7 @@ impl UserSettings {
             "QUICK_NOTES_ENABLED" => self.quick_notes_enabled = Some(value),
             "QUICK_NOTES_SAVE_ONLY" => self.quick_notes_save_only = Some(value),
             "START_AT_LOGIN" => self.start_at_login = Some(value),
+            "CODESCRIBE_AUTOSTART_QUALITY_DAEMON" => self.quality_daemon_autostart = Some(value),
             "AGENT_ENTER_SENDS" => self.agent_enter_sends = Some(value),
             other => {
                 warn!("Unknown bool setting key: {other}");
@@ -405,6 +860,43 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_v1_settings_hard_migrate_to_v2_with_backup() {
+        let _tmp = setup_isolated_data_dir();
+        let path = UserSettings::settings_path();
+        fs::write(
+            &path,
+            r#"{
+  "hold_mods": "ctrl_shift",
+  "chat_zoom": 1.2
+}"#,
+        )
+        .expect("write v1 settings");
+
+        let loaded = UserSettings::load();
+        assert_eq!(loaded.hold_mods.as_deref(), Some("ctrl_shift"));
+
+        let backup = UserSettings::settings_dir().join("settings.v1.bak.json");
+        assert!(backup.exists(), "expected v1 backup file");
+
+        let migrated: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read migrated settings"))
+                .expect("parse migrated settings");
+        assert_eq!(
+            migrated.get("schema_version").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            migrated
+                .get("interaction")
+                .and_then(|v| v.get("hold"))
+                .and_then(|v| v.get("modifiers"))
+                .and_then(|v| v.get(0))
+                .and_then(|v| v.as_str()),
+            Some("ctrl")
+        );
+    }
+    #[test]
+    #[serial]
     fn test_show_dock_icon_bool_persists_and_roundtrips() {
         let _tmp = setup_isolated_data_dir();
         let mut settings = UserSettings::default();
@@ -414,5 +906,28 @@ mod tests {
 
         let loaded = UserSettings::load();
         assert_eq!(loaded.show_dock_icon, Some(false));
+    }
+
+    #[test]
+    #[serial]
+    fn test_quality_daemon_autostart_persists_in_v2_system_section() {
+        let _tmp = setup_isolated_data_dir();
+        let mut settings = UserSettings::default();
+        settings.set_bool("CODESCRIBE_AUTOSTART_QUALITY_DAEMON", true);
+
+        let loaded = UserSettings::load();
+        assert_eq!(loaded.quality_daemon_autostart, Some(true));
+
+        let path = UserSettings::settings_path();
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).expect("read persisted settings"))
+                .expect("parse persisted settings");
+        assert_eq!(
+            persisted
+                .get("system")
+                .and_then(|v| v.get("quality_daemon_autostart"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 }

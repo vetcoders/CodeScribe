@@ -16,7 +16,7 @@ concurrency:
 jobs:
   semgrep:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     container:
       image: semgrep/semgrep
     steps:

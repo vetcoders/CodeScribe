@@ -16,7 +16,7 @@ use objc::{msg_send, sel, sel_impl};
 use objc2_app_kit::{NSVisualEffectMaterial, NSWindowButton, NSWindowCollectionBehavior};
 use tracing::{info, warn};
 
-use crate::config::{Config, HoldMods, ToggleTrigger, keychain};
+use crate::config::{Config, HoldMods, ToggleTrigger, UserSettings, keychain};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::hotkeys;
 use crate::os::permissions::PermissionStatus;
@@ -2946,9 +2946,13 @@ unsafe fn build_user_tab(
         );
         state.ultra_quality_checkbox = Some(ultra_check as usize);
 
-        let quality_on = std::env::var("CODESCRIBE_AUTOSTART_QUALITY_DAEMON")
-            .map(|v| parse_env_bool(&v))
-            .unwrap_or(false);
+        let quality_on = UserSettings::load()
+            .quality_daemon_autostart
+            .unwrap_or_else(|| {
+                std::env::var("CODESCRIBE_AUTOSTART_QUALITY_DAEMON")
+                    .map(|v| parse_env_bool(&v))
+                    .unwrap_or(false)
+            });
         let quality_check = add_toggle_row(
             container,
             action_handler,
