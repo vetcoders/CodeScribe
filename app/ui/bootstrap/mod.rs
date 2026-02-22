@@ -80,6 +80,11 @@ const STEP_TEST_MIC: usize = 0;
 const STEP_SHOW_OVERLAY: usize = 1;
 const STEP_PRESS_HOTKEY: usize = 2;
 
+#[inline]
+fn objc_class(name: &'static str) -> &'static Class {
+    Class::get(name).unwrap_or_else(|| panic!("Objective-C class not found: {name}"))
+}
+
 #[derive(Clone, Copy)]
 struct ToggleRowSpec<'a> {
     title: &'a str,
@@ -276,7 +281,7 @@ unsafe fn autosize_tab_document_view(document_view: Id, minimum_height: f64) -> 
 }
 
 unsafe fn wrap_tab_content_in_scroll_view(frame: CGRect, document_view: Id) -> Id {
-    let ns_scroll_view = Class::get("NSScrollView").unwrap();
+    let ns_scroll_view = objc_class("NSScrollView");
     let scroll: Id = msg_send![ns_scroll_view, alloc];
     let scroll: Id = msg_send![scroll, initWithFrame: frame];
     let _: () = msg_send![scroll, setHasVerticalScroller: true];
@@ -577,7 +582,7 @@ fn show_bootstrap_overlay_impl() {
         let reuse_window = {
             let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(window_ptr) = state.window {
-                let ns_window = Class::get("NSWindow").unwrap();
+                let ns_window = objc_class("NSWindow");
                 let window = window_ptr as Id;
                 let is_window: bool = msg_send![window, isKindOfClass: ns_window];
                 if is_window {
@@ -597,7 +602,7 @@ fn show_bootstrap_overlay_impl() {
             return;
         }
 
-        let ns_screen = Class::get("NSScreen").unwrap();
+        let ns_screen = objc_class("NSScreen");
         let screen: Id = msg_send![ns_screen, mainScreen];
         if screen.is_null() {
             warn!("No NSScreen available for settings window");
@@ -629,7 +634,7 @@ fn show_bootstrap_overlay_impl() {
         }
         let toolbar_delegate_class = toolbar_delegate_class();
         let toolbar_delegate: Id = msg_send![toolbar_delegate_class, new];
-        let ns_toolbar = Class::get("NSToolbar").unwrap();
+        let ns_toolbar = objc_class("NSToolbar");
         let toolbar: Id = msg_send![ns_toolbar, alloc];
         let toolbar: Id = msg_send![toolbar, initWithIdentifier: ns_string("settings-toolbar")];
         let _: () = msg_send![toolbar, setDelegate: toolbar_delegate];
@@ -707,7 +712,7 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         }
 
         // Create a container view (transparent) to hold the split visual effects.
-        let ns_view = Class::get("NSView").unwrap();
+        let ns_view = objc_class("NSView");
         let root: Id = msg_send![ns_view, alloc];
         let root: Id = msg_send![root, initWithFrame: frame];
         let _: () = msg_send![
@@ -897,7 +902,7 @@ unsafe fn update_key_status_indicator(indicator: Id, is_set: bool) {
 }
 
 unsafe fn create_key_status_indicator(frame: CGRect, is_set: bool) -> Id {
-    let ns_button = Class::get("NSButton").unwrap();
+    let ns_button = objc_class("NSButton");
     let indicator: Id = msg_send![ns_button, alloc];
     let indicator: Id = msg_send![indicator, initWithFrame: frame];
     let _: () = msg_send![indicator, setBordered: false];
@@ -1037,7 +1042,7 @@ unsafe fn build_settings_ui(
 ) -> BootstrapState {
     unsafe {
         use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-        let ns_view = Class::get("NSView").unwrap();
+        let ns_view = objc_class("NSView");
         let mut state = BootstrapState::default();
 
         let settings_width = settings_width.max(SIDEBAR_WIDTH + 240.0);
@@ -1445,8 +1450,8 @@ unsafe fn create_sidebar_tab_button(
     active: bool,
 ) -> Id {
     unsafe {
-        let ns_button = Class::get("NSButton").unwrap();
-        let ns_font = Class::get("NSFont").unwrap();
+        let ns_button = objc_class("NSButton");
+        let ns_font = objc_class("NSFont");
 
         let btn: Id = msg_send![ns_button, alloc];
         let btn: Id = msg_send![btn, initWithFrame: frame];
@@ -1784,8 +1789,8 @@ unsafe fn build_hotkeys_tab(
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
-        let ns_view = Class::get("NSView").unwrap();
-        let ns_popup = Class::get("NSPopUpButton").unwrap();
+        let ns_view = objc_class("NSView");
+        let ns_popup = objc_class("NSPopUpButton");
 
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
@@ -2068,7 +2073,7 @@ unsafe fn build_api_tab(
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
-        let ns_view = Class::get("NSView").unwrap();
+        let ns_view = objc_class("NSView");
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
 
@@ -2312,8 +2317,8 @@ unsafe fn build_audio_tab(
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
-        let ns_view = Class::get("NSView").unwrap();
-        let ns_popup = Class::get("NSPopUpButton").unwrap();
+        let ns_view = objc_class("NSView");
+        let ns_popup = objc_class("NSPopUpButton");
 
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
@@ -2489,8 +2494,8 @@ unsafe fn build_audio_tab(
 unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry::CGRect) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
-        let ns_view = Class::get("NSView").unwrap();
-        let ns_scroll_view = Class::get("NSScrollView").unwrap();
+        let ns_view = objc_class("NSView");
+        let ns_scroll_view = objc_class("NSScrollView");
         let env_snapshot: HashMap<String, String> = std::env::vars().collect();
 
         let container: Id = msg_send![ns_view, alloc];
@@ -2652,7 +2657,7 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
 unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
-        let ns_view = Class::get("NSView").unwrap();
+        let ns_view = objc_class("NSView");
 
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
@@ -2838,7 +2843,7 @@ unsafe fn build_user_tab(
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
-        let ns_view = Class::get("NSView").unwrap();
+        let ns_view = objc_class("NSView");
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
 
@@ -3683,7 +3688,7 @@ mod tests {
             return;
         }
         unsafe {
-            let ns_view = Class::get("NSView").unwrap();
+            let ns_view = objc_class("NSView");
             let parent: Id = msg_send![ns_view, alloc];
             let parent: Id = msg_send![
                 parent,
