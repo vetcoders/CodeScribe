@@ -1411,7 +1411,7 @@ unsafe fn build_settings_ui(
         add_subview(content_container, voice_lab_scroll);
 
         // --- Engine tab (index 5) ---
-        let engine_view = build_engine_tab(tab_document_frame);
+        let engine_view = build_engine_tab(tab_document_frame, config);
         let engine_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, engine_view);
         let _: () = msg_send![engine_scroll, setHidden: true];
         add_subview(content_container, engine_scroll);
@@ -2661,7 +2661,7 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
 // Engine tab — read-only engine status panel
 // ============================================================================
 
-unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect) -> Id {
+unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect, config: &Config) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
         let ns_view = objc_class("NSView");
@@ -2676,6 +2676,32 @@ unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect) -> Id {
         let primary = crate::ui_helpers::color_label();
         let secondary = crate::ui_helpers::color_secondary_label();
         let mono = crate::ui_helpers::monospace_font(ui_tokens::SMALL_FONT_SIZE);
+        let user_settings = UserSettings::load();
+        let read_setting =
+            |primary: Option<&String>, fallback: Option<&String>, shared: Option<&String>| {
+                primary
+                    .or(fallback)
+                    .or(shared)
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_default()
+            };
+        let compact_endpoint = |endpoint: &str| -> String {
+            let trimmed = endpoint.trim();
+            if trimmed.is_empty() {
+                return "(not set)".to_string();
+            }
+            let without_scheme = trimmed
+                .strip_prefix("https://")
+                .or_else(|| trimmed.strip_prefix("http://"))
+                .unwrap_or(trimmed);
+            const MAX_LEN: usize = 48;
+            if without_scheme.len() <= MAX_LEN {
+                without_scheme.to_string()
+            } else {
+                format!("{}…", &without_scheme[..MAX_LEN])
+            }
+        };
 
         // ── Title ──────────────────────────────────────────────
         let title = create_label(LabelConfig {
@@ -2807,6 +2833,65 @@ unsafe fn build_engine_tab(frame: core_graphics::geometry::CGRect) -> Id {
                 "MiniLM (lazy init)"
             },
             true,
+        );
+
+        // ── LLM Runtime (read-only mirror of API Keys tab) ────
+        let fmt_endpoint = read_setting(
+            user_settings.llm_formatting_endpoint.as_ref(),
+            user_settings.llm_endpoint.as_ref(),
+            config.llm_endpoint.as_ref(),
+        );
+        let fmt_model = read_setting(
+            user_settings.llm_formatting_model.as_ref(),
+            user_settings.llm_model.as_ref(),
+            None,
+        );
+        let fmt_key_set = keychain::load_key("LLM_FORMATTING_API_KEY").is_some()
+            || keychain::load_key("LLM_API_KEY").is_some()
+            || config.llm_api_key.is_some();
+        let fmt_status = format!(
+            "{} | model={} | key={}",
+            compact_endpoint(&fmt_endpoint),
+            if fmt_model.is_empty() {
+                "(not set)"
+            } else {
+                fmt_model.as_str()
+            },
+            if fmt_key_set { "set" } else { "not set" }
+        );
+        add_row(
+            "Fmt LLM",
+            &fmt_status,
+            !fmt_endpoint.is_empty() && !fmt_model.is_empty(),
+        );
+
+        let assist_endpoint = read_setting(
+            user_settings.llm_assistive_endpoint.as_ref(),
+            user_settings.llm_endpoint.as_ref(),
+            config.llm_endpoint.as_ref(),
+        );
+        let assist_model = read_setting(
+            user_settings.llm_assistive_model.as_ref(),
+            user_settings.llm_model.as_ref(),
+            None,
+        );
+        let assist_key_set = keychain::load_key("LLM_ASSISTIVE_API_KEY").is_some()
+            || keychain::load_key("LLM_API_KEY").is_some()
+            || config.llm_api_key.is_some();
+        let assist_status = format!(
+            "{} | model={} | key={}",
+            compact_endpoint(&assist_endpoint),
+            if assist_model.is_empty() {
+                "(not set)"
+            } else {
+                assist_model.as_str()
+            },
+            if assist_key_set { "set" } else { "not set" }
+        );
+        add_row(
+            "Assist LLM",
+            &assist_status,
+            !assist_endpoint.is_empty() && !assist_model.is_empty(),
         );
 
         // ── Separator ──────────────────────────────────────────
