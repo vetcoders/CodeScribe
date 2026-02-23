@@ -2125,8 +2125,9 @@ fn start_mode_binding_recorder(mode: WorkMode) {
     );
 }
 
-fn hotkey_conflicts(config: &Config) -> Vec<shortcut_registry::HotkeyConflict> {
-    shortcut_registry::detect_hotkey_conflicts(config)
+fn hotkey_conflicts(_config: &Config) -> Vec<shortcut_registry::HotkeyConflict> {
+    let settings = UserSettings::load();
+    shortcut_registry::detect_hotkey_conflicts(&settings)
 }
 
 fn hotkey_conflict_status_from(conflicts: &[shortcut_registry::HotkeyConflict]) -> (String, bool) {
@@ -4770,9 +4771,20 @@ mod tests {
     #[test]
     fn mode_binding_selection_blocks_option_modes_when_dictation_is_double_ctrl() {
         let settings = UserSettings {
-            hold_mods: Some("none".to_string()),
-            toggle_trigger: Some("double_ctrl".to_string()),
-            mode_bindings: None,
+            mode_bindings: Some(vec![
+                crate::config::ModeBinding {
+                    mode: WorkMode::Dictation,
+                    binding: ShortcutBinding::DoubleCtrl,
+                },
+                crate::config::ModeBinding {
+                    mode: WorkMode::Formatting,
+                    binding: ShortcutBinding::Disabled,
+                },
+                crate::config::ModeBinding {
+                    mode: WorkMode::Assistive,
+                    binding: ShortcutBinding::Disabled,
+                },
+            ]),
             ..Default::default()
         };
         assert_eq!(

@@ -2,14 +2,14 @@
 //!
 //! Tests:
 //! - Setup sentinel creation/detection (`should_show_setup`)
-//! - Settings persistence via `Config::save_to_env()` for keys added by Settings tabs
+//! - Settings persistence for mode-first bindings and tab-level fields
 //!
 //! Run with:
 //!   cargo test --test e2e_bootstrap_settings
 //!
 //! Created by M&K (c)2026 VetCoders
 
-use codescribe::config::{Config, ShortcutBinding, WorkMode};
+use codescribe::config::{Config, ShortcutBinding, UserSettings, WorkMode};
 use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
@@ -32,6 +32,11 @@ fn setup_test_env() -> TempDir {
     tmp
 }
 
+fn set_mode_binding(mode: WorkMode, binding: ShortcutBinding) {
+    let mut settings = UserSettings::load();
+    settings.set_mode_binding(mode, binding);
+}
+
 // ═══════════════════════════════════════════════════════════
 // Setup Lifecycle
 // ═══════════════════════════════════════════════════════════
@@ -41,7 +46,6 @@ fn setup_test_env() -> TempDir {
 fn test_setup_should_show_when_no_sentinel() {
     let _tmp = setup_test_env();
 
-    // Fresh config dir — no setup sentinel file
     assert!(
         codescribe::should_show_setup(),
         "should_show_setup must be true on fresh install"
@@ -54,7 +58,7 @@ fn test_setup_should_not_show_after_done() {
     let _tmp = setup_test_env();
 
     let sentinel = Config::config_dir().join("setup_done");
-    fs::create_dir_all(sentinel.parent().unwrap()).expect("create config dir");
+    fs::create_dir_all(sentinel.parent().expect("setup_done parent")).expect("create config dir");
     fs::write(&sentinel, "done").expect("write sentinel");
 
     assert!(
@@ -70,9 +74,9 @@ fn test_setup_migrates_when_both_legacy_sentinels_exist() {
 
     let onboarding = Config::config_dir().join("onboarding_done");
     let bootstrap = Config::config_dir().join("bootstrap_done");
-    fs::create_dir_all(onboarding.parent().unwrap()).unwrap();
-    fs::write(&onboarding, "done").unwrap();
-    fs::write(&bootstrap, "done").unwrap();
+    fs::create_dir_all(onboarding.parent().expect("onboarding parent")).expect("create config dir");
+    fs::write(&onboarding, "done").expect("write onboarding_done");
+    fs::write(&bootstrap, "done").expect("write bootstrap_done");
 
     assert!(
         !codescribe::should_show_setup(),
@@ -91,8 +95,8 @@ fn test_setup_migrates_when_both_legacy_sentinels_exist() {
 fn test_setup_remains_incomplete_with_only_legacy_onboarding() {
     let _tmp = setup_test_env();
     let onboarding = Config::config_dir().join("onboarding_done");
-    fs::create_dir_all(onboarding.parent().unwrap()).unwrap();
-    fs::write(&onboarding, "done").unwrap();
+    fs::create_dir_all(onboarding.parent().expect("onboarding parent")).expect("create config dir");
+    fs::write(&onboarding, "done").expect("write onboarding_done");
 
     assert!(
         codescribe::should_show_setup(),
@@ -105,8 +109,8 @@ fn test_setup_remains_incomplete_with_only_legacy_onboarding() {
 fn test_setup_remains_incomplete_with_only_legacy_bootstrap() {
     let _tmp = setup_test_env();
     let bootstrap = Config::config_dir().join("bootstrap_done");
-    fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
-    fs::write(&bootstrap, "done").unwrap();
+    fs::create_dir_all(bootstrap.parent().expect("bootstrap parent")).expect("create config dir");
+    fs::write(&bootstrap, "done").expect("write bootstrap_done");
 
     assert!(
         codescribe::should_show_setup(),
@@ -120,49 +124,49 @@ fn test_setup_remains_incomplete_with_only_legacy_bootstrap() {
 
 #[test]
 #[serial]
-fn test_settings_hold_mods_persistence() {
+fn test_settings_mode_bindings_persistence() {
     let _tmp = setup_test_env();
 
-    // Simulate Settings UI changing hold modifier (same as on_hold_mod_changed)
-    for (value, label) in [
-        ("ctrl", "Ctrl"),
-        ("ctrl_alt", "Ctrl+Alt"),
-        ("ctrl_shift", "Ctrl+Shift"),
-        ("ctrl_cmd", "Ctrl+Cmd"),
+    for (binding, label) in [
+        (ShortcutBinding::HoldCtrl, "Hold Ctrl"),
+        (ShortcutBinding::HoldCtrlAlt, "Hold Ctrl+Option"),
+        (ShortcutBinding::HoldCtrlShift, "Hold Ctrl+Shift"),
+        (ShortcutBinding::HoldCtrlCmd, "Hold Ctrl+Command"),
     ] {
-        let config = Config::load();
-        config.save_to_env("HOLD_MODS", value).expect("save");
-        let reloaded = Config::load();
+        set_mode_binding(WorkMode::Dictation, binding);
+        let reloaded = UserSettings::load();
         assert_eq!(
-            reloaded.hold_mods.as_str(),
-            value,
-            "HOLD_MODS should persist as {label}"
+            reloaded.mode_binding_for(WorkMode::Dictation),
+            binding,
+            "Dictation mode binding should persist as {label}"
         );
     }
 }
 
 #[test]
 #[serial]
-fn test_settings_toggle_trigger_persistence() {
+fn test_settings_double_ctrl_profile_persistence() {
     let _tmp = setup_test_env();
 
-    let config = Config::load();
+    set_mode_binding(WorkMode::Formatting, ShortcutBinding::Disabled);
+    set_mode_binding(WorkMode::Assistive, ShortcutBinding::Disabled);
+    set_mode_binding(WorkMode::Dictation, ShortcutBinding::DoubleCtrl);
 
-    // Mode-first contract: double_ctrl is valid only when hold path is disabled.
-    config
-        .save_to_env_many(&[("HOLD_MODS", "none"), ("TOGGLE_TRIGGER", "double_ctrl")])
-        .expect("save double ctrl mode binding");
-
-    let settings = codescribe::config::UserSettings::load();
+    let settings = UserSettings::load();
     assert_eq!(
         settings.mode_binding_for(WorkMode::Dictation),
         ShortcutBinding::DoubleCtrl,
-        "dictation mode should map to double ctrl"
+        "dictation mode should persist as double ctrl"
     );
     assert_eq!(
-        settings.toggle_trigger.as_deref(),
-        Some("double_ctrl"),
-        "legacy toggle mirror should stay in sync"
+        settings.mode_binding_for(WorkMode::Formatting),
+        ShortcutBinding::Disabled,
+        "formatting mode should stay disabled in double-ctrl profile"
+    );
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Assistive),
+        ShortcutBinding::Disabled,
+        "assistive mode should stay disabled in double-ctrl profile"
     );
 }
 
@@ -176,7 +180,7 @@ fn test_settings_hold_exclusive_persistence() {
         .save_to_env("HOLD_EXCLUSIVE", "1")
         .expect("save hold exclusive");
 
-    let settings = codescribe::config::UserSettings::load();
+    let settings = UserSettings::load();
     assert_eq!(
         settings.hold_exclusive,
         Some(true),
@@ -193,7 +197,6 @@ fn test_settings_hold_exclusive_persistence() {
 fn test_settings_language_persistence() {
     let _tmp = setup_test_env();
 
-    // Simulate on_language_changed: idx 0 = pl, idx 1 = en
     for lang in ["pl", "en"] {
         let config = Config::load();
         config.save_to_env("WHISPER_LANGUAGE", lang).expect("save");
@@ -211,7 +214,6 @@ fn test_settings_language_persistence() {
 fn test_settings_formatting_toggle() {
     let _tmp = setup_test_env();
 
-    // on_formatting_toggled: state 1 = on, state 0 = off
     let config = Config::load();
     config
         .save_to_env("AI_FORMATTING_ENABLED", "1")
@@ -237,12 +239,12 @@ fn test_settings_typing_cps_decimal_persistence() {
         .expect("save typing cps");
 
     assert_eq!(
-        std::env::var("CODESCRIBE_TYPING_CPS").unwrap(),
+        std::env::var("CODESCRIBE_TYPING_CPS").expect("CODESCRIBE_TYPING_CPS env"),
         "36.5",
         "runtime env should preserve decimal value"
     );
 
-    let settings = codescribe::config::UserSettings::load();
+    let settings = UserSettings::load();
     let persisted = settings
         .typing_cps
         .expect("typing_cps should be persisted to settings.json");
@@ -256,23 +258,19 @@ fn test_settings_typing_cps_decimal_persistence() {
 #[serial]
 fn test_settings_chat_zoom_dirty_check_skips_equivalent_writes() {
     let _tmp = setup_test_env();
-    let mut settings = codescribe::config::UserSettings::load();
-    let path = codescribe::config::UserSettings::settings_path();
+    let mut settings = UserSettings::load();
+    let path = UserSettings::settings_path();
 
-    // Effective default zoom (1.0) should not create or rewrite settings.
     assert!(!settings.set_chat_zoom(1.0));
     assert!(!path.exists(), "default zoom should stay implicit (None)");
 
-    // First real write.
     assert!(settings.set_chat_zoom(1.125));
     let first_json = fs::read_to_string(&path).expect("read settings after first zoom write");
 
-    // Equivalent value after rounding (1.129 -> 1.13) should be a no-op.
     assert!(!settings.set_chat_zoom(1.129));
     let second_json = fs::read_to_string(&path).expect("read settings after no-op zoom write");
     assert_eq!(first_json, second_json);
 
-    // New effective value should persist.
     assert!(settings.set_chat_zoom(1.25));
     let third_json = fs::read_to_string(&path).expect("read settings after second zoom write");
     assert_ne!(second_json, third_json);
@@ -289,14 +287,11 @@ fn test_settings_full_round_trip() {
 
     let config = Config::load();
 
-    // User clicks through all Settings tabs and saves:
-    // Keys tab
-    config.save_to_env("HOLD_MODS", "ctrl_shift").expect("save");
-    config
-        .save_to_env("TOGGLE_TRIGGER", "double_ralt")
-        .expect("save");
+    set_mode_binding(WorkMode::Dictation, ShortcutBinding::HoldCtrlShift);
+    set_mode_binding(WorkMode::Formatting, ShortcutBinding::Disabled);
+    set_mode_binding(WorkMode::Assistive, ShortcutBinding::DoubleRightOption);
     config.save_to_env("HOLD_EXCLUSIVE", "0").expect("save");
-    // Audio tab
+
     config.save_to_env("WHISPER_LANGUAGE", "en").expect("save");
     config
         .save_to_env("AI_FORMATTING_ENABLED", "0")
@@ -305,14 +300,27 @@ fn test_settings_full_round_trip() {
         .save_to_env("CODESCRIBE_TYPING_CPS", "90")
         .expect("save");
 
-    // Reload and verify all
     let r = Config::load();
-    assert_eq!(r.hold_mods.as_str(), "ctrl_shift");
-    assert_eq!(r.toggle_trigger.as_str(), "double_ralt");
+    let settings = UserSettings::load();
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Dictation),
+        ShortcutBinding::HoldCtrlShift
+    );
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Formatting),
+        ShortcutBinding::Disabled
+    );
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Assistive),
+        ShortcutBinding::DoubleRightOption
+    );
     assert!(!r.hold_exclusive);
     assert_eq!(r.whisper_language.as_str(), "en");
     assert!(!r.ai_formatting_enabled);
-    assert_eq!(std::env::var("CODESCRIBE_TYPING_CPS").unwrap(), "90");
+    assert_eq!(
+        std::env::var("CODESCRIBE_TYPING_CPS").expect("CODESCRIBE_TYPING_CPS env"),
+        "90"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -323,7 +331,6 @@ fn test_settings_full_round_trip() {
 #[serial]
 fn test_engine_tab_stt_engine_env_default() {
     let previous = std::env::var("CODESCRIBE_STT_ENGINE").ok();
-    // Without CODESCRIBE_STT_ENGINE set, should default to candle
     unsafe { std::env::remove_var("CODESCRIBE_STT_ENGINE") };
     let engine = std::env::var("CODESCRIBE_STT_ENGINE").unwrap_or_else(|_| "candle".to_string());
     assert_eq!(engine, "candle", "default STT engine should be candle");
@@ -337,7 +344,6 @@ fn test_engine_tab_stt_engine_env_default() {
 #[serial]
 fn test_engine_tab_stt_engine_env_onnx() {
     let previous = std::env::var("CODESCRIBE_STT_ENGINE").ok();
-    // Engine tab reads CODESCRIBE_STT_ENGINE to display active engine
     unsafe { std::env::set_var("CODESCRIBE_STT_ENGINE", "onnx") };
     let engine = std::env::var("CODESCRIBE_STT_ENGINE").unwrap_or_else(|_| "candle".to_string());
     assert_eq!(engine, "onnx", "STT engine should reflect env var");
@@ -351,7 +357,6 @@ fn test_engine_tab_stt_engine_env_onnx() {
 #[serial]
 fn test_engine_tab_stt_engine_env_apple() {
     let previous = std::env::var("CODESCRIBE_STT_ENGINE").ok();
-    // Engine tab reads CODESCRIBE_STT_ENGINE to display active engine
     unsafe { std::env::set_var("CODESCRIBE_STT_ENGINE", "apple") };
     let engine = std::env::var("CODESCRIBE_STT_ENGINE").unwrap_or_else(|_| "candle".to_string());
     assert_eq!(engine, "apple", "STT engine should reflect env var");
@@ -363,7 +368,6 @@ fn test_engine_tab_stt_engine_env_apple() {
 
 #[test]
 fn test_engine_tab_whisper_embedded_status() {
-    // Engine tab shows whether Whisper model is embedded in binary
     let embedded = codescribe_core::stt::whisper::embedded::is_embedded_available();
     let embedded_data = codescribe_core::stt::whisper::embedded::get_embedded_data();
 
@@ -382,11 +386,9 @@ fn test_engine_tab_whisper_embedded_status() {
 
 #[test]
 fn test_engine_tab_vad_model_available() {
-    // Engine tab shows Silero VAD status
     let embedded = codescribe_core::vad::embedded::is_embedded_available();
     let user_path = codescribe_core::vad::user_model_path();
 
-    // At least one source should be available in dev environment
     let available = embedded || user_path.exists();
     assert!(
         available,
@@ -398,15 +400,11 @@ fn test_engine_tab_vad_model_available() {
 
 #[test]
 fn test_engine_tab_embedder_api_exists() {
-    // Engine tab queries embedder initialization status
-    // Just verify the API is callable (lazy init — may not be initialized yet)
     let _initialized = codescribe_core::embedder::is_initialized();
-    // No assertion on value — lazy init means it's false until first use
 }
 
 #[test]
 fn test_engine_tab_tts_embedded_status() {
-    // Engine tab shows TTS engine status
     let embedded = codescribe_core::tts::embedded::is_embedded_available();
     let embedded_data = codescribe_core::tts::embedded::get_embedded_data();
 

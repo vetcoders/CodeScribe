@@ -359,6 +359,16 @@ fn persist_config(config: &Config) -> Result<()> {
     let mut settings: Option<UserSettings> = None;
     let mut promoted_keys: Vec<String> = Vec::new();
 
+    for legacy_key in [
+        "HOLD_MODS",
+        "TOGGLE_TRIGGER",
+        "HOTKEY_DOUBLE_TAP_LEFT",
+        "HOTKEY_DOUBLE_TAP_RIGHT",
+    ] {
+        env_vars.remove(legacy_key);
+        updated.push(EnvUpdate::Remove(legacy_key.to_string()));
+    }
+
     let mut put = |key: &str, value: String, env_vars: &mut HashMap<String, String>| {
         if is_promoted_key(key) {
             let settings = settings.get_or_insert_with(UserSettings::load);
@@ -373,18 +383,8 @@ fn persist_config(config: &Config) -> Result<()> {
     };
 
     put(
-        "HOLD_MODS",
-        config.hold_mods.as_str().to_string(),
-        &mut env_vars,
-    );
-    put(
         "HOLD_EXCLUSIVE",
         bool_to_env(config.hold_exclusive),
-        &mut env_vars,
-    );
-    put(
-        "TOGGLE_TRIGGER",
-        config.toggle_trigger.as_str().to_string(),
         &mut env_vars,
     );
     put(
@@ -598,8 +598,6 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
     // String fields
     match key {
         "WHISPER_LANGUAGE" => settings.whisper_language = Some(value.to_string()),
-        "HOLD_MODS" => settings.hold_mods = Some(value.to_string()),
-        "TOGGLE_TRIGGER" => settings.toggle_trigger = Some(value.to_string()),
         "LOCAL_MODEL" => settings.local_model = Some(value.to_string()),
         "STT_ENDPOINT" => settings.stt_endpoint = Some(value.to_string()),
         "AUDIO_INPUT_DEVICE" => settings.audio_input_device = Some(value.to_string()),
@@ -667,8 +665,6 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
         | "USE_LOCAL_STT"
         | "HISTORY_ENABLED"
         | "START_AT_LOGIN"
-        | "HOTKEY_DOUBLE_TAP_LEFT"
-        | "HOTKEY_DOUBLE_TAP_RIGHT"
         | "QUICK_NOTES_ENABLED"
         | "QUICK_NOTES_SAVE_ONLY"
         | "AGENT_ENTER_SENDS"
@@ -681,8 +677,6 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
                 "USE_LOCAL_STT" => settings.use_local_stt = Some(bool_val),
                 "HISTORY_ENABLED" => settings.history_enabled = Some(bool_val),
                 "START_AT_LOGIN" => settings.start_at_login = Some(bool_val),
-                "HOTKEY_DOUBLE_TAP_LEFT" => settings.double_tap_left = Some(bool_val),
-                "HOTKEY_DOUBLE_TAP_RIGHT" => settings.double_tap_right = Some(bool_val),
                 "QUICK_NOTES_ENABLED" => settings.quick_notes_enabled = Some(bool_val),
                 "QUICK_NOTES_SAVE_ONLY" => settings.quick_notes_save_only = Some(bool_val),
                 "AGENT_ENTER_SENDS" => settings.agent_enter_sends = Some(bool_val),

@@ -27,7 +27,7 @@
 // - DoubleCtrl: Ctrl only (raw hands-off)
 // - None: Toggle mode completely disabled
 
-use crate::config::{Config, HoldMods, ToggleTrigger};
+use crate::config::{Config, HoldMods, ShortcutBinding, ToggleTrigger, UserSettings, WorkMode};
 use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
@@ -180,11 +180,62 @@ pub struct HotkeyRuntimeConfig {
     pub double_tap_interval_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeHotkeyBindings {
+    pub dictation: ShortcutBinding,
+    pub formatting: ShortcutBinding,
+    pub assistive: ShortcutBinding,
+}
+
+impl ModeHotkeyBindings {
+    pub fn from_settings(settings: &UserSettings) -> Self {
+        Self {
+            dictation: settings.mode_binding_for(WorkMode::Dictation),
+            formatting: settings.mode_binding_for(WorkMode::Formatting),
+            assistive: settings.mode_binding_for(WorkMode::Assistive),
+        }
+    }
+
+    pub fn load() -> Self {
+        Self::from_settings(&UserSettings::load())
+    }
+
+    pub fn runtime_projection(self) -> (HoldMods, ToggleTrigger) {
+        let hold_mods = match self.dictation {
+            ShortcutBinding::HoldFn => HoldMods::Fn,
+            ShortcutBinding::HoldCtrl => HoldMods::Ctrl,
+            ShortcutBinding::HoldCtrlAlt => HoldMods::CtrlAlt,
+            ShortcutBinding::HoldCtrlShift => HoldMods::CtrlShift,
+            ShortcutBinding::HoldCtrlCmd => HoldMods::CtrlCmd,
+            ShortcutBinding::Disabled
+            | ShortcutBinding::DoubleCtrl
+            | ShortcutBinding::DoubleLeftOption
+            | ShortcutBinding::DoubleRightOption => HoldMods::None,
+        };
+
+        let toggle_trigger = if self.dictation == ShortcutBinding::DoubleCtrl {
+            ToggleTrigger::DoubleCtrl
+        } else {
+            let formatting_left = self.formatting == ShortcutBinding::DoubleLeftOption;
+            let assistive_right = self.assistive == ShortcutBinding::DoubleRightOption;
+            match (formatting_left, assistive_right) {
+                (true, true) => ToggleTrigger::DoubleOption,
+                (true, false) => ToggleTrigger::DoubleLeftOption,
+                (false, true) => ToggleTrigger::DoubleRightOption,
+                (false, false) => ToggleTrigger::None,
+            }
+        };
+
+        (hold_mods, toggle_trigger)
+    }
+}
+
 impl From<&Config> for HotkeyRuntimeConfig {
     fn from(config: &Config) -> Self {
+        let (hold_mods, toggle_trigger) = ModeHotkeyBindings::load().runtime_projection();
         Self {
-            hold_mods: config.hold_mods,
-            toggle_trigger: config.toggle_trigger,
+            hold_mods,
+            toggle_trigger,
             hold_exclusive: config.hold_exclusive,
             hold_start_delay_ms: config.hold_start_delay_ms,
             double_tap_interval_ms: config.double_tap_interval_ms,
@@ -1691,6 +1742,34 @@ mod tests {
         assert_eq!(
             get_double_tap_interval_ms(),
             runtime.double_tap_interval_ms.clamp(100, 450)
+        );
+    }
+
+    #[test]
+    fn mode_hotkey_bindings_runtime_projection_hybrid_profile() {
+        let bindings = ModeHotkeyBindings {
+            dictation: ShortcutBinding::HoldFn,
+            formatting: ShortcutBinding::DoubleLeftOption,
+            assistive: ShortcutBinding::DoubleRightOption,
+        };
+
+        assert_eq!(
+            bindings.runtime_projection(),
+            (HoldMods::Fn, ToggleTrigger::DoubleOption)
+        );
+    }
+
+    #[test]
+    fn mode_hotkey_bindings_runtime_projection_double_ctrl_disables_option_toggles() {
+        let bindings = ModeHotkeyBindings {
+            dictation: ShortcutBinding::DoubleCtrl,
+            formatting: ShortcutBinding::DoubleLeftOption,
+            assistive: ShortcutBinding::DoubleRightOption,
+        };
+
+        assert_eq!(
+            bindings.runtime_projection(),
+            (HoldMods::None, ToggleTrigger::DoubleCtrl)
         );
     }
 

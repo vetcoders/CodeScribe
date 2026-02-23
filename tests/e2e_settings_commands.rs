@@ -1,16 +1,14 @@
 //! E2E tests for Settings UI Tauri commands
 //!
-//! Tests the backend commands used by the simplified Settings UI:
-//! - get_config / save_config
-//!
-//! These test the config layer that Tauri frontend invokes.
+//! Tests the backend commands used by the simplified Settings UI.
+//! Hotkeys contract is mode-first: each WorkMode has one ShortcutBinding.
 //!
 //! Run with:
 //!   cargo test --test e2e_settings_commands
 //!
 //! Created by M&K (c)2026 VetCoders
 
-use codescribe::config::{Config, HoldMods, Language, ToggleTrigger};
+use codescribe::config::{Config, Language, ShortcutBinding, UserSettings, WorkMode};
 use serial_test::serial;
 use tempfile::TempDir;
 
@@ -20,7 +18,6 @@ fn setup_test_env() -> TempDir {
     // SAFETY: Tests run serially, single-threaded context
     unsafe {
         std::env::set_var("CODESCRIBE_DATA_DIR", tmp.path());
-        // Clear relevant env vars
         std::env::remove_var("HOLD_MODS");
         std::env::remove_var("TOGGLE_TRIGGER");
         std::env::remove_var("WHISPER_LANGUAGE");
@@ -29,25 +26,38 @@ fn setup_test_env() -> TempDir {
     tmp
 }
 
+fn set_mode_binding(mode: WorkMode, binding: ShortcutBinding) {
+    let mut settings = UserSettings::load();
+    settings.set_mode_binding(mode, binding);
+}
+
 // ═══════════════════════════════════════════════════════════
 // Config Load/Save Tests (simulates get_config/save_config commands)
 // ═══════════════════════════════════════════════════════════
 
-/// Test: Load config returns expected defaults
 #[test]
 #[serial]
 fn test_get_config_defaults() {
     let _tmp = setup_test_env();
 
-    let config = Config::load();
-
-    // Verify defaults match what Settings UI expects
-    assert_eq!(config.hold_mods, HoldMods::Fn, "Default hold_mods");
+    let settings = UserSettings::load();
     assert_eq!(
-        config.toggle_trigger,
-        ToggleTrigger::DoubleOption,
-        "Default toggle_trigger"
+        settings.mode_binding_for(WorkMode::Dictation),
+        ShortcutBinding::HoldFn,
+        "Default dictation binding"
     );
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Formatting),
+        ShortcutBinding::DoubleLeftOption,
+        "Default formatting binding"
+    );
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Assistive),
+        ShortcutBinding::DoubleRightOption,
+        "Default assistive binding"
+    );
+
+    let config = Config::load();
     assert_eq!(
         config.whisper_language,
         Language::Polish,
@@ -55,61 +65,52 @@ fn test_get_config_defaults() {
     );
 }
 
-/// Test: Save config persists hold_mods
 #[test]
 #[serial]
-fn test_save_config_hold_mods() {
+fn test_save_config_dictation_mode_binding() {
     let _tmp = setup_test_env();
 
-    let config = Config::load();
+    set_mode_binding(WorkMode::Dictation, ShortcutBinding::HoldCtrlAlt);
 
-    // Simulate Settings UI changing hold_mods
-    config.save_to_env("HOLD_MODS", "ctrl_alt").expect("save");
-
-    // Reload and verify
-    let reloaded = Config::load();
-    assert_eq!(reloaded.hold_mods, HoldMods::CtrlAlt);
+    let reloaded = UserSettings::load();
+    assert_eq!(
+        reloaded.mode_binding_for(WorkMode::Dictation),
+        ShortcutBinding::HoldCtrlAlt
+    );
 }
 
-/// Test: Save config persists toggle_trigger
 #[test]
 #[serial]
-fn test_save_config_toggle_trigger() {
+fn test_save_config_formatting_mode_binding() {
     let _tmp = setup_test_env();
 
-    let config = Config::load();
+    set_mode_binding(WorkMode::Formatting, ShortcutBinding::Disabled);
 
-    // Simulate Settings UI disabling toggle
-    config.save_to_env("TOGGLE_TRIGGER", "none").expect("save");
-
-    let reloaded = Config::load();
-    assert_eq!(reloaded.toggle_trigger, ToggleTrigger::None);
+    let reloaded = UserSettings::load();
+    assert_eq!(
+        reloaded.mode_binding_for(WorkMode::Formatting),
+        ShortcutBinding::Disabled
+    );
 }
 
-/// Test: Save config persists whisper_language
 #[test]
 #[serial]
 fn test_save_config_language() {
     let _tmp = setup_test_env();
 
     let config = Config::load();
-
-    // Simulate Settings UI setting English
     config.save_to_env("WHISPER_LANGUAGE", "en").expect("save");
 
     let reloaded = Config::load();
     assert_eq!(reloaded.whisper_language, Language::English);
 }
 
-/// Test: Save config persists audio_input_device
 #[test]
 #[serial]
 fn test_save_config_audio_device() {
     let _tmp = setup_test_env();
 
     let config = Config::load();
-
-    // Simulate Settings UI selecting specific device
     config
         .save_to_env("AUDIO_INPUT_DEVICE", "MacBook Pro Microphone")
         .expect("save");
@@ -121,93 +122,93 @@ fn test_save_config_audio_device() {
     );
 }
 
-/// Test: Multiple config saves in sequence
 #[test]
 #[serial]
 fn test_save_config_multiple_fields() {
     let _tmp = setup_test_env();
 
-    let config = Config::load();
+    set_mode_binding(WorkMode::Dictation, ShortcutBinding::HoldCtrlShift);
+    set_mode_binding(WorkMode::Formatting, ShortcutBinding::Disabled);
+    set_mode_binding(WorkMode::Assistive, ShortcutBinding::DoubleRightOption);
 
-    // Simulate Settings UI save (all fields at once)
-    config.save_to_env("HOLD_MODS", "ctrl_shift").expect("save");
-    config
-        .save_to_env("TOGGLE_TRIGGER", "double_ralt")
-        .expect("save");
+    let config = Config::load();
     config.save_to_env("WHISPER_LANGUAGE", "en").expect("save");
     config
         .save_to_env("AUDIO_INPUT_DEVICE", "USB Mic")
         .expect("save");
 
-    // Reload and verify all
+    let reloaded_settings = UserSettings::load();
+    assert_eq!(
+        reloaded_settings.mode_binding_for(WorkMode::Dictation),
+        ShortcutBinding::HoldCtrlShift
+    );
+    assert_eq!(
+        reloaded_settings.mode_binding_for(WorkMode::Formatting),
+        ShortcutBinding::Disabled
+    );
+    assert_eq!(
+        reloaded_settings.mode_binding_for(WorkMode::Assistive),
+        ShortcutBinding::DoubleRightOption
+    );
+
     let reloaded = Config::load();
-    assert_eq!(reloaded.hold_mods, HoldMods::CtrlShift);
-    assert_eq!(reloaded.toggle_trigger, ToggleTrigger::DoubleRightOption);
     assert_eq!(reloaded.whisper_language, Language::English);
     assert_eq!(reloaded.audio_input_device, Some("USB Mic".to_string()));
 }
 
 // ═══════════════════════════════════════════════════════════
-// Config Validation Tests
+// Compatibility History Tests (legacy env fallback only)
 // ═══════════════════════════════════════════════════════════
 
-/// Test: Invalid hold_mods value falls back to default
 #[test]
 #[serial]
-fn test_invalid_hold_mods_fallback() {
-    let _tmp = setup_test_env();
-
-    // Set invalid value
-    unsafe {
-        std::env::set_var("HOLD_MODS", "invalid_value");
-    }
-
-    let config = Config::load();
-
-    // Should fallback to default (Fn)
-    assert_eq!(
-        config.hold_mods,
-        HoldMods::Fn,
-        "Invalid value should fallback to Fn"
-    );
-}
-
-/// Test: Invalid toggle_trigger value falls back to default
-#[test]
-#[serial]
-fn test_invalid_toggle_trigger_fallback() {
+fn test_legacy_hold_mods_is_ignored_history_only() {
     let _tmp = setup_test_env();
 
     unsafe {
-        std::env::set_var("TOGGLE_TRIGGER", "triple_tap");
+        std::env::set_var("HOLD_MODS", "ctrl_alt");
     }
 
-    let config = Config::load();
-
-    // Should fallback to default (DoubleOption)
+    let settings = UserSettings::load();
     assert_eq!(
-        config.toggle_trigger,
-        ToggleTrigger::DoubleOption,
-        "Invalid value should fallback to DoubleOption"
+        settings.mode_binding_for(WorkMode::Dictation),
+        ShortcutBinding::HoldFn,
+        "Legacy HOLD_MODS no longer drives mode bindings"
     );
 }
 
-/// Test: Empty audio_input_device means use system default
+#[test]
+#[serial]
+fn test_legacy_toggle_trigger_is_ignored_history_only() {
+    let _tmp = setup_test_env();
+
+    unsafe {
+        std::env::set_var("TOGGLE_TRIGGER", "double_ctrl");
+    }
+
+    let settings = UserSettings::load();
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Formatting),
+        ShortcutBinding::DoubleLeftOption,
+        "Legacy TOGGLE_TRIGGER no longer drives mode bindings"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════
+// Generic Config Validation Tests
+// ═══════════════════════════════════════════════════════════
+
 #[test]
 #[serial]
 fn test_empty_audio_device_uses_default() {
     let _tmp = setup_test_env();
-
     let config = Config::load();
-
-    // None means "use system default"
     assert!(
         config.audio_input_device.is_none(),
         "Default should be None (system default)"
     );
 }
 
-/// Test: "auto" language maps to Polish (default)
 #[test]
 #[serial]
 fn test_auto_language_maps_to_polish() {
@@ -218,8 +219,6 @@ fn test_auto_language_maps_to_polish() {
     }
 
     let config = Config::load();
-
-    // "auto" maps to Polish (the default)
     assert_eq!(
         config.whisper_language,
         Language::Polish,
@@ -231,91 +230,104 @@ fn test_auto_language_maps_to_polish() {
 // Settings UI Flow Simulation
 // ═══════════════════════════════════════════════════════════
 
-/// Test: Full Settings UI flow - load, modify, save, reload
 #[test]
 #[serial]
 fn test_full_settings_flow() {
     let _tmp = setup_test_env();
 
-    // 1. Initial load (simulates SettingsView mount)
+    let settings = UserSettings::load();
+    println!(
+        "Step 1: Loaded mode bindings: dictation={:?}, formatting={:?}, assistive={:?}",
+        settings.mode_binding_for(WorkMode::Dictation),
+        settings.mode_binding_for(WorkMode::Formatting),
+        settings.mode_binding_for(WorkMode::Assistive)
+    );
+
+    println!("Step 2: User modifies mode bindings + language");
+    set_mode_binding(WorkMode::Dictation, ShortcutBinding::HoldCtrlCmd);
+    set_mode_binding(WorkMode::Formatting, ShortcutBinding::Disabled);
     let config = Config::load();
-    println!("Step 1: Loaded config");
-    println!("  hold_mods: {:?}", config.hold_mods);
-    println!("  toggle_trigger: {:?}", config.toggle_trigger);
-    println!("  language: {:?}", config.whisper_language);
-
-    // 2. User changes settings
-    println!("Step 2: User modifies settings");
-
-    // 3. User clicks Save (simulates save_config command)
-    config.save_to_env("HOLD_MODS", "ctrl_cmd").expect("save");
-    config.save_to_env("TOGGLE_TRIGGER", "none").expect("save");
     config.save_to_env("WHISPER_LANGUAGE", "en").expect("save");
-    println!("Step 3: Saved config");
 
-    // 4. App restart - reload config
+    let reloaded_settings = UserSettings::load();
     let reloaded = Config::load();
-    println!("Step 4: Reloaded config");
-    println!("  hold_mods: {:?}", reloaded.hold_mods);
-    println!("  toggle_trigger: {:?}", reloaded.toggle_trigger);
-    println!("  language: {:?}", reloaded.whisper_language);
+    println!(
+        "Step 3: Reloaded mode bindings: dictation={:?}, formatting={:?}, assistive={:?}",
+        reloaded_settings.mode_binding_for(WorkMode::Dictation),
+        reloaded_settings.mode_binding_for(WorkMode::Formatting),
+        reloaded_settings.mode_binding_for(WorkMode::Assistive)
+    );
 
-    // 5. Verify persistence
-    assert_eq!(reloaded.hold_mods, HoldMods::CtrlCmd);
-    assert_eq!(reloaded.toggle_trigger, ToggleTrigger::None);
+    assert_eq!(
+        reloaded_settings.mode_binding_for(WorkMode::Dictation),
+        ShortcutBinding::HoldCtrlCmd
+    );
+    assert_eq!(
+        reloaded_settings.mode_binding_for(WorkMode::Formatting),
+        ShortcutBinding::Disabled
+    );
     assert_eq!(reloaded.whisper_language, Language::English);
-    println!("Step 5: Verified - all settings persisted correctly");
 }
 
-/// Test: Settings with all HoldMods variants
 #[test]
 #[serial]
-fn test_all_hold_mods_variants() {
+fn test_all_dictation_mode_binding_variants() {
     let _tmp = setup_test_env();
 
     let variants = [
-        ("fn", HoldMods::Fn),
-        ("ctrl", HoldMods::Ctrl),
-        ("ctrl_alt", HoldMods::CtrlAlt),
-        ("ctrl_shift", HoldMods::CtrlShift),
-        ("ctrl_cmd", HoldMods::CtrlCmd),
+        ShortcutBinding::HoldFn,
+        ShortcutBinding::HoldCtrl,
+        ShortcutBinding::HoldCtrlAlt,
+        ShortcutBinding::HoldCtrlShift,
+        ShortcutBinding::HoldCtrlCmd,
+        ShortcutBinding::DoubleCtrl,
+        ShortcutBinding::Disabled,
     ];
 
-    for (value, expected) in variants {
-        let config = Config::load();
-        config.save_to_env("HOLD_MODS", value).expect("save");
-        let reloaded = Config::load();
-        assert_eq!(reloaded.hold_mods, expected, "Failed for value: {}", value);
-    }
-}
-
-/// Test: Settings with all ToggleTrigger variants
-#[test]
-#[serial]
-fn test_all_toggle_trigger_variants() {
-    let _tmp = setup_test_env();
-
-    let variants = [
-        ("double_option", ToggleTrigger::DoubleOption),
-        ("double_lalt", ToggleTrigger::DoubleLeftOption),
-        ("double_ralt", ToggleTrigger::DoubleRightOption),
-        ("double_ctrl", ToggleTrigger::DoubleCtrl),
-        ("none", ToggleTrigger::None),
-    ];
-
-    for (value, expected) in variants {
-        let config = Config::load();
-        config.save_to_env("TOGGLE_TRIGGER", value).expect("save");
-        let reloaded = Config::load();
+    for binding in variants {
+        set_mode_binding(WorkMode::Dictation, binding);
+        let reloaded = UserSettings::load();
         assert_eq!(
-            reloaded.toggle_trigger, expected,
-            "Failed for value: {}",
-            value
+            reloaded.mode_binding_for(WorkMode::Dictation),
+            binding,
+            "Failed for binding: {}",
+            binding.as_str()
         );
     }
 }
 
-/// Test: Settings with all Language variants
+#[test]
+#[serial]
+fn test_toggle_mode_binding_variants() {
+    let _tmp = setup_test_env();
+
+    for (mode, variants) in [
+        (
+            WorkMode::Formatting,
+            [ShortcutBinding::DoubleLeftOption, ShortcutBinding::Disabled],
+        ),
+        (
+            WorkMode::Assistive,
+            [
+                ShortcutBinding::DoubleRightOption,
+                ShortcutBinding::Disabled,
+            ],
+        ),
+    ] {
+        for binding in variants {
+            set_mode_binding(mode, binding);
+            let reloaded = UserSettings::load();
+            assert_eq!(
+                reloaded.mode_binding_for(mode),
+                binding,
+                "Failed for mode={} binding={}",
+                mode.as_str(),
+                binding.as_str()
+            );
+        }
+    }
+}
+
 #[test]
 #[serial]
 fn test_all_language_variants() {

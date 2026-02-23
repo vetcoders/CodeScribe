@@ -3,7 +3,8 @@
 //! Reads the system SymbolicHotkeys registry and reports potential collisions
 //! with our modifier-only gestures (Fn/Ctrl/Option).
 
-use crate::config::{Config, HoldMods, ToggleTrigger};
+use crate::config::{ShortcutBinding, UserSettings};
+use crate::os::hotkeys::ModeHotkeyBindings;
 #[cfg(target_os = "macos")]
 use std::collections::HashSet;
 
@@ -40,45 +41,60 @@ pub struct HotkeyConflict {
     pub message: String,
 }
 
-pub fn detect_hotkey_conflicts(config: &Config) -> Vec<HotkeyConflict> {
-    let mut conflicts = detect_internal_conflicts(config);
-    conflicts.extend(detect_macos_symbolic_conflicts(config));
+pub fn detect_hotkey_conflicts(settings: &UserSettings) -> Vec<HotkeyConflict> {
+    let bindings = ModeHotkeyBindings::from_settings(settings);
+    let mut conflicts = detect_internal_conflicts(bindings);
+    conflicts.extend(detect_macos_symbolic_conflicts(bindings));
     conflicts
 }
 
-fn active_gestures(config: &Config) -> Vec<HotkeyGesture> {
+fn active_gestures(bindings: ModeHotkeyBindings) -> Vec<HotkeyGesture> {
     let mut gestures = Vec::new();
 
-    match config.hold_mods {
-        HoldMods::Fn => gestures.push(HotkeyGesture::HoldFn),
-        HoldMods::None => {}
-        HoldMods::Ctrl => gestures.push(HotkeyGesture::HoldCtrl),
-        HoldMods::CtrlAlt => gestures.push(HotkeyGesture::HoldCtrlAlt),
-        HoldMods::CtrlShift => gestures.push(HotkeyGesture::HoldCtrlShift),
-        HoldMods::CtrlCmd => gestures.push(HotkeyGesture::HoldCtrlCmd),
+    match bindings.dictation {
+        ShortcutBinding::HoldFn => gestures.push(HotkeyGesture::HoldFn),
+        ShortcutBinding::HoldCtrl => gestures.push(HotkeyGesture::HoldCtrl),
+        ShortcutBinding::HoldCtrlAlt => gestures.push(HotkeyGesture::HoldCtrlAlt),
+        ShortcutBinding::HoldCtrlShift => gestures.push(HotkeyGesture::HoldCtrlShift),
+        ShortcutBinding::HoldCtrlCmd => gestures.push(HotkeyGesture::HoldCtrlCmd),
+        ShortcutBinding::Disabled
+        | ShortcutBinding::DoubleCtrl
+        | ShortcutBinding::DoubleLeftOption
+        | ShortcutBinding::DoubleRightOption => {}
     }
 
-    match config.toggle_trigger {
-        ToggleTrigger::None => {}
-        ToggleTrigger::DoubleCtrl => gestures.push(HotkeyGesture::ToggleDoubleCtrl),
-        ToggleTrigger::DoubleLeftOption => gestures.push(HotkeyGesture::ToggleDoubleLeftOption),
-        ToggleTrigger::DoubleRightOption => gestures.push(HotkeyGesture::ToggleDoubleRightOption),
-        ToggleTrigger::DoubleOption => {
-            gestures.push(HotkeyGesture::ToggleDoubleLeftOption);
-            gestures.push(HotkeyGesture::ToggleDoubleRightOption);
-        }
+    if bindings.dictation == ShortcutBinding::DoubleCtrl {
+        gestures.push(HotkeyGesture::ToggleDoubleCtrl);
+    }
+    if bindings.formatting == ShortcutBinding::DoubleLeftOption {
+        gestures.push(HotkeyGesture::ToggleDoubleLeftOption);
+    }
+    if bindings.assistive == ShortcutBinding::DoubleRightOption {
+        gestures.push(HotkeyGesture::ToggleDoubleRightOption);
     }
 
     gestures
 }
 
-fn detect_internal_conflicts(config: &Config) -> Vec<HotkeyConflict> {
+fn detect_internal_conflicts(bindings: ModeHotkeyBindings) -> Vec<HotkeyConflict> {
     let mut conflicts = Vec::new();
 
-    if config.hold_mods == HoldMods::Ctrl && config.toggle_trigger == ToggleTrigger::DoubleCtrl {
+    if bindings.dictation == ShortcutBinding::DoubleCtrl
+        && bindings.formatting == ShortcutBinding::DoubleLeftOption
+    {
         conflicts.push(HotkeyConflict {
-            gesture: HotkeyGesture::ToggleDoubleCtrl,
-            message: "Collides with Hold Ctrl. Use Ctrl+Option hold or disable Double Ctrl toggle."
+            gesture: HotkeyGesture::ToggleDoubleLeftOption,
+            message: "Dictation is set to Double Ctrl, so Left Option toggle is disabled."
+                .to_string(),
+        });
+    }
+
+    if bindings.dictation == ShortcutBinding::DoubleCtrl
+        && bindings.assistive == ShortcutBinding::DoubleRightOption
+    {
+        conflicts.push(HotkeyConflict {
+            gesture: HotkeyGesture::ToggleDoubleRightOption,
+            message: "Dictation is set to Double Ctrl, so Right Option toggle is disabled."
                 .to_string(),
         });
     }
@@ -87,17 +103,17 @@ fn detect_internal_conflicts(config: &Config) -> Vec<HotkeyConflict> {
 }
 
 #[cfg(target_os = "macos")]
-fn detect_macos_symbolic_conflicts(config: &Config) -> Vec<HotkeyConflict> {
+fn detect_macos_symbolic_conflicts(bindings: ModeHotkeyBindings) -> Vec<HotkeyConflict> {
     let signatures = load_symbolic_signatures();
     if signatures.is_empty() {
         return Vec::new();
     }
 
-    collect_symbolic_conflicts(config, &signatures)
+    collect_symbolic_conflicts(bindings, &signatures)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn detect_macos_symbolic_conflicts(_config: &Config) -> Vec<HotkeyConflict> {
+fn detect_macos_symbolic_conflicts(_bindings: ModeHotkeyBindings) -> Vec<HotkeyConflict> {
     Vec::new()
 }
 
@@ -120,13 +136,13 @@ fn symbolic_hotkey_name(id: u32) -> &'static str {
 
 #[cfg(target_os = "macos")]
 fn collect_symbolic_conflicts(
-    config: &Config,
+    bindings: ModeHotkeyBindings,
     signatures: &[SymbolicSignature],
 ) -> Vec<HotkeyConflict> {
     let mut conflicts = Vec::new();
     let mut dedup = HashSet::new();
 
-    for gesture in active_gestures(config) {
+    for gesture in active_gestures(bindings) {
         for signature in signatures {
             if !gesture_conflicts_with_symbolic(gesture, *signature) {
                 continue;
@@ -285,41 +301,71 @@ fn load_symbolic_signatures() -> Vec<SymbolicSignature> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ModeBinding, WorkMode};
 
-    fn config_for(hold_mods: HoldMods, toggle_trigger: ToggleTrigger) -> Config {
-        Config {
-            hold_mods,
-            toggle_trigger,
+    fn settings_for(
+        dictation: ShortcutBinding,
+        formatting: ShortcutBinding,
+        assistive: ShortcutBinding,
+    ) -> UserSettings {
+        UserSettings {
+            mode_bindings: Some(vec![
+                ModeBinding {
+                    mode: WorkMode::Dictation,
+                    binding: dictation,
+                },
+                ModeBinding {
+                    mode: WorkMode::Formatting,
+                    binding: formatting,
+                },
+                ModeBinding {
+                    mode: WorkMode::Assistive,
+                    binding: assistive,
+                },
+            ]),
             ..Default::default()
         }
     }
 
     #[test]
-    fn internal_conflict_detects_ctrl_hold_vs_double_ctrl() {
-        let cfg = config_for(HoldMods::Ctrl, ToggleTrigger::DoubleCtrl);
-        let conflicts = detect_internal_conflicts(&cfg);
+    fn internal_conflict_detects_double_ctrl_vs_left_option() {
+        let settings = settings_for(
+            ShortcutBinding::DoubleCtrl,
+            ShortcutBinding::DoubleLeftOption,
+            ShortcutBinding::Disabled,
+        );
+        let conflicts = detect_internal_conflicts(ModeHotkeyBindings::from_settings(&settings));
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].gesture, HotkeyGesture::ToggleDoubleCtrl);
+        assert_eq!(conflicts[0].gesture, HotkeyGesture::ToggleDoubleLeftOption);
     }
 
     #[test]
     fn internal_conflict_empty_for_safe_combo() {
-        let cfg = config_for(HoldMods::Fn, ToggleTrigger::DoubleOption);
-        let conflicts = detect_internal_conflicts(&cfg);
+        let settings = settings_for(
+            ShortcutBinding::HoldFn,
+            ShortcutBinding::DoubleLeftOption,
+            ShortcutBinding::DoubleRightOption,
+        );
+        let conflicts = detect_internal_conflicts(ModeHotkeyBindings::from_settings(&settings));
         assert!(conflicts.is_empty());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn symbolic_conflict_detects_fn_registry_collision() {
-        let cfg = config_for(HoldMods::Fn, ToggleTrigger::None);
+        let settings = settings_for(
+            ShortcutBinding::HoldFn,
+            ShortcutBinding::Disabled,
+            ShortcutBinding::Disabled,
+        );
         let signatures = vec![SymbolicSignature {
             id: 160,
             keycode: 65535,
             modifiers: 0,
         }];
 
-        let conflicts = collect_symbolic_conflicts(&cfg, &signatures);
+        let conflicts =
+            collect_symbolic_conflicts(ModeHotkeyBindings::from_settings(&settings), &signatures);
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].gesture, HotkeyGesture::HoldFn);
     }

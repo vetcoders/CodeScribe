@@ -2,7 +2,7 @@ mod steps;
 
 pub(crate) use self::steps::PermissionKind;
 use self::steps::{TOTAL_STEPS, WizardStep, step_for_index};
-use crate::config::{Config, HoldMods, ToggleTrigger, UserSettings, keychain};
+use crate::config::{Config, ModeBinding, ShortcutBinding, UserSettings, WorkMode, keychain};
 use crate::os::hotkeys;
 use crate::os::permissions::{self, PermissionStatus};
 use crate::ui::shared::helpers::{
@@ -1509,45 +1509,43 @@ fn save_hotkey_mode() {
         state.hotkey_mode
     };
 
-    let (
-        hold_mods_raw,
-        toggle_trigger_raw,
-        double_tap_left,
-        double_tap_right,
-        hold_mods_runtime,
-        toggle_trigger_runtime,
-    ) = match mode {
+    let (dictation, formatting, assistive) = match mode {
         HotkeyModeChoice::HoldToTalk => (
-            "fn",
-            "none",
-            false,
-            false,
-            HoldMods::Fn,
-            ToggleTrigger::None,
+            ShortcutBinding::HoldFn,
+            ShortcutBinding::Disabled,
+            ShortcutBinding::Disabled,
         ),
         HotkeyModeChoice::Toggle => (
-            "none",
-            "double_option",
-            true,
-            true,
-            HoldMods::None,
-            ToggleTrigger::DoubleOption,
+            ShortcutBinding::Disabled,
+            ShortcutBinding::DoubleLeftOption,
+            ShortcutBinding::DoubleRightOption,
         ),
         HotkeyModeChoice::Both => (
-            "fn",
-            "double_option",
-            true,
-            true,
-            HoldMods::Fn,
-            ToggleTrigger::DoubleOption,
+            ShortcutBinding::HoldFn,
+            ShortcutBinding::DoubleLeftOption,
+            ShortcutBinding::DoubleRightOption,
         ),
     };
 
     let mut settings = UserSettings::load();
-    settings.hold_mods = Some(hold_mods_raw.to_string());
-    settings.toggle_trigger = Some(toggle_trigger_raw.to_string());
-    settings.double_tap_left = Some(double_tap_left);
-    settings.double_tap_right = Some(double_tap_right);
+    settings.mode_bindings = Some(vec![
+        ModeBinding {
+            mode: WorkMode::Dictation,
+            binding: dictation,
+        },
+        ModeBinding {
+            mode: WorkMode::Formatting,
+            binding: formatting,
+        },
+        ModeBinding {
+            mode: WorkMode::Assistive,
+            binding: assistive,
+        },
+    ]);
+    settings.hold_mods = None;
+    settings.toggle_trigger = None;
+    settings.double_tap_left = None;
+    settings.double_tap_right = None;
     if let Err(e) = settings.save() {
         warn!(
             "Onboarding: failed to persist hotkey mode {}: {e}",
@@ -1555,22 +1553,14 @@ fn save_hotkey_mode() {
         );
     }
 
-    let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&Config::load());
-    runtime_config.hold_mods = hold_mods_runtime;
-    runtime_config.toggle_trigger = toggle_trigger_runtime;
-    hotkeys::apply_hotkey_runtime_config(runtime_config);
     unsafe {
-        std::env::set_var("HOLD_MODS", hold_mods_raw);
-        std::env::set_var("TOGGLE_TRIGGER", toggle_trigger_raw);
-        std::env::set_var(
-            "HOTKEY_DOUBLE_TAP_LEFT",
-            if double_tap_left { "1" } else { "0" },
-        );
-        std::env::set_var(
-            "HOTKEY_DOUBLE_TAP_RIGHT",
-            if double_tap_right { "1" } else { "0" },
-        );
+        std::env::remove_var("HOLD_MODS");
+        std::env::remove_var("TOGGLE_TRIGGER");
+        std::env::remove_var("HOTKEY_DOUBLE_TAP_LEFT");
+        std::env::remove_var("HOTKEY_DOUBLE_TAP_RIGHT");
     }
+
+    hotkeys::apply_hotkey_config(&Config::load());
 
     info!("Onboarding: hotkey mode set to {}", mode.label());
 }
@@ -1608,27 +1598,21 @@ fn initial_language_choice() -> LanguageChoice {
 
 fn initial_hotkey_choice() -> HotkeyModeChoice {
     let settings = UserSettings::load();
+    let dictation = settings.mode_binding_for(WorkMode::Dictation);
+    let formatting = settings.mode_binding_for(WorkMode::Formatting);
+    let assistive = settings.mode_binding_for(WorkMode::Assistive);
 
-    let hold_raw = settings
-        .hold_mods
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    let toggle_raw = settings
-        .toggle_trigger
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    let hold_enabled = !hold_raw.is_empty() && hold_raw != "none";
-    let toggle_enabled = if !toggle_raw.is_empty() {
-        toggle_raw != "none"
-    } else {
-        settings.double_tap_left.unwrap_or(false) || settings.double_tap_right.unwrap_or(false)
-    };
+    let hold_enabled = matches!(
+        dictation,
+        ShortcutBinding::HoldFn
+            | ShortcutBinding::HoldCtrl
+            | ShortcutBinding::HoldCtrlAlt
+            | ShortcutBinding::HoldCtrlShift
+            | ShortcutBinding::HoldCtrlCmd
+    );
+    let toggle_enabled = matches!(dictation, ShortcutBinding::DoubleCtrl)
+        || formatting == ShortcutBinding::DoubleLeftOption
+        || assistive == ShortcutBinding::DoubleRightOption;
 
     match (hold_enabled, toggle_enabled) {
         (true, true) => HotkeyModeChoice::Both,
