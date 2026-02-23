@@ -1350,8 +1350,9 @@ extern "C" fn on_export_assistant_save(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_show_shortcuts(_this: &Object, _cmd: Sel, _sender: Id) {
-    let config = Config::load();
-    let (hold, toggle) = super::shortcuts_lines(config.hold_mods, config.toggle_trigger);
+    let (hold_mods, toggle_trigger) =
+        crate::os::hotkeys::ModeHotkeyBindings::load().runtime_projection();
+    let (hold, toggle) = super::shortcuts_lines(hold_mods, toggle_trigger);
     if !super::api::is_voice_chat_overlay_visible() {
         // This action is wired to overlay/header UI. If it fires while hidden
         // (e.g. stale responder chain), ignore it instead of spawning a ghost window.

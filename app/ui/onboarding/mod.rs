@@ -1542,22 +1542,11 @@ fn save_hotkey_mode() {
             binding: assistive,
         },
     ]);
-    settings.hold_mods = None;
-    settings.toggle_trigger = None;
-    settings.double_tap_left = None;
-    settings.double_tap_right = None;
     if let Err(e) = settings.save() {
         warn!(
             "Onboarding: failed to persist hotkey mode {}: {e}",
             mode.label()
         );
-    }
-
-    unsafe {
-        std::env::remove_var("HOLD_MODS");
-        std::env::remove_var("TOGGLE_TRIGGER");
-        std::env::remove_var("HOTKEY_DOUBLE_TAP_LEFT");
-        std::env::remove_var("HOTKEY_DOUBLE_TAP_RIGHT");
     }
 
     hotkeys::apply_hotkey_config(&Config::load());

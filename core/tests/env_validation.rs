@@ -1,4 +1,4 @@
-use codescribe_core::config::Config;
+use codescribe_core::config::{Config, ShortcutBinding, UserSettings, WorkMode};
 use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
@@ -145,18 +145,28 @@ fn required_model_path_when_no_embed() {
 
 #[test]
 #[serial]
-fn env_path_override_is_respected() {
+fn legacy_hotkey_env_path_override_is_respected_history_only() {
     let tmp = TempDir::new().expect("tempdir");
     let env_path = tmp.path().join("custom.env");
-    fs::write(&env_path, "HOLD_MODS=ctrl_alt\n").expect("write env");
+    fs::write(
+        &env_path,
+        "WHISPER_LANGUAGE=en\nHOLD_MODS=ctrl_alt\nTOGGLE_TRIGGER=double_ctrl\n",
+    )
+    .expect("write env");
 
     let _g0 = EnvGuard::set("CODESCRIBE_DATA_DIR", tmp.path().to_string_lossy().as_ref());
     let _g1 = EnvGuard::set("CODESCRIBE_ENV_PATH", env_path.to_string_lossy().as_ref());
-    let _g2 = EnvGuard::unset("HOLD_MODS");
 
     let cfg = Config::load();
-    assert_eq!(cfg.hold_mods.as_str(), "ctrl_alt");
-}
+    assert_eq!(cfg.whisper_language.as_str(), "en");
 
-// NOTE: Legacy key migration test removed - no users have legacy keys yet.
-// If we ever need migration, we'll add proper tests then.
+    let settings = UserSettings::load();
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Dictation),
+        ShortcutBinding::HoldFn
+    );
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Formatting),
+        ShortcutBinding::DoubleLeftOption
+    );
+}

@@ -17,11 +17,7 @@ pub struct UserSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub whisper_language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hold_mods: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_exclusive: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub toggle_trigger: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode_bindings: Option<Vec<ModeBinding>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,10 +42,6 @@ pub struct UserSettings {
     pub llm_assistive_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm_assistive_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub double_tap_left: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub double_tap_right: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_zoom: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,13 +395,11 @@ impl UserSettings {
     fn from_v2(v2: SettingsV2) -> Self {
         Self {
             whisper_language: v2.speech.as_ref().and_then(|s| s.language.clone()),
-            hold_mods: None,
             hold_exclusive: v2
                 .interaction
                 .as_ref()
                 .and_then(|i| i.hold.as_ref())
                 .and_then(|h| h.exclusive),
-            toggle_trigger: None,
             mode_bindings: v2
                 .interaction
                 .as_ref()
@@ -461,8 +451,6 @@ impl UserSettings {
                 .as_ref()
                 .and_then(|s| s.assistive.as_ref())
                 .and_then(|a| a.llm_model.clone()),
-            double_tap_left: None,
-            double_tap_right: None,
             chat_zoom: v2.ui.as_ref().and_then(|ui| ui.chat_zoom),
             show_dock_icon: v2.ui.as_ref().and_then(|ui| ui.show_dock_icon),
             llm_formatting_endpoint: v2
@@ -893,14 +881,6 @@ mod tests {
         .expect("write v1 settings");
 
         let loaded = UserSettings::load();
-        assert!(
-            loaded.hold_mods.is_none(),
-            "legacy hold_mods should not be rehydrated"
-        );
-        assert!(
-            loaded.toggle_trigger.is_none(),
-            "legacy toggle_trigger should not be rehydrated"
-        );
         assert_eq!(
             loaded.mode_binding_for(WorkMode::Dictation),
             ShortcutBinding::HoldFn
@@ -980,8 +960,6 @@ mod tests {
             settings.mode_binding_for(WorkMode::Dictation),
             ShortcutBinding::DoubleCtrl
         );
-        assert!(settings.hold_mods.is_none());
-        assert!(settings.toggle_trigger.is_none());
     }
 
     #[test]
@@ -1005,6 +983,5 @@ mod tests {
             settings.mode_binding_for(WorkMode::Assistive),
             ShortcutBinding::DoubleRightOption
         );
-        assert!(settings.toggle_trigger.is_none());
     }
 }

@@ -18,8 +18,6 @@ fn setup_test_env() -> TempDir {
     // SAFETY: Tests run serially, single-threaded context
     unsafe {
         std::env::set_var("CODESCRIBE_DATA_DIR", tmp.path());
-        std::env::remove_var("HOLD_MODS");
-        std::env::remove_var("TOGGLE_TRIGGER");
         std::env::remove_var("WHISPER_LANGUAGE");
         std::env::remove_var("AUDIO_INPUT_DEVICE");
     }

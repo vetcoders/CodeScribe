@@ -358,22 +358,9 @@ impl FromStr for OverlayPositionMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     // ===== Hotkeys =====
-    /// Modifier keys for hold-to-talk
-    #[serde(default)]
-    pub hold_mods: HoldMods,
-
     /// Whether to ignore extra modifiers when hold key is pressed
     #[serde(default)]
     pub hold_exclusive: bool,
-
-    /// Toggle trigger method:
-    /// - DoubleOption: left=normal toggle, right=assistive toggle
-    /// - DoubleLeftOption: left=normal toggle only
-    /// - DoubleRightOption: right=assistive only
-    /// - DoubleCtrl: raw hands-off toggle (double Ctrl)
-    /// - None: disabled
-    #[serde(default)]
-    pub toggle_trigger: ToggleTrigger,
 
     /// Delay in milliseconds before starting recording after holding key
     #[serde(default = "default_hold_start_delay_ms")]
@@ -527,9 +514,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            hold_mods: HoldMods::default(),
             hold_exclusive: false, // Allow Shift/Cmd mode modifiers by default
-            toggle_trigger: ToggleTrigger::default(),
             hold_start_delay_ms: default_hold_start_delay_ms(),
             double_tap_interval_ms: default_double_tap_interval_ms(),
             toggle_silence_sec: default_toggle_silence_sec(),
@@ -574,13 +559,6 @@ impl Config {
     pub fn sanitize(&mut self) {
         // Token limits: 0 = no limit (API decides). Don't override.
         // Tokens are cheap, lost notes are not.
-
-        // Hotkeys sanity: if DoubleCtrl hands-off toggle is enabled,
-        // Ctrl-only hold-to-talk is disabled to avoid breaking Ctrl+shortcuts.
-        // Use Ctrl+Option hold instead.
-        if self.toggle_trigger == ToggleTrigger::DoubleCtrl && self.hold_mods == HoldMods::Ctrl {
-            self.hold_mods = HoldMods::CtrlAlt;
-        }
 
         // Clamp sound volume
         self.sound_volume = self.sound_volume.clamp(0.0, 1.0);

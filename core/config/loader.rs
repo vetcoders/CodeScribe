@@ -9,10 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
-use super::types::{
-    Config, HoldMods, Language, ModeBinding, OverlayPositionMode, ShortcutBinding, ToggleTrigger,
-    TranscriptSendMode, WorkMode, default_mode_bindings,
-};
+use super::types::{Config, Language, OverlayPositionMode, TranscriptSendMode};
 
 impl Config {
     /// Load configuration from disk or environment.
@@ -268,56 +265,6 @@ impl Config {
         unsafe { std::env::set_var(key, value) };
     }
 
-    /// Runtime projection while macOS hotkey engine still uses legacy fields.
-    ///
-    /// `mode_bindings` stays canonical in settings; this conversion is one-way.
-    fn runtime_hotkeys_from_mode_bindings(
-        mode_bindings: &[ModeBinding],
-    ) -> (HoldMods, ToggleTrigger) {
-        let dictation = mode_bindings
-            .iter()
-            .find(|binding| binding.mode == WorkMode::Dictation)
-            .map(|binding| binding.binding)
-            .unwrap_or(ShortcutBinding::HoldFn);
-        let formatting = mode_bindings
-            .iter()
-            .find(|binding| binding.mode == WorkMode::Formatting)
-            .map(|binding| binding.binding)
-            .unwrap_or(ShortcutBinding::DoubleLeftOption);
-        let assistive = mode_bindings
-            .iter()
-            .find(|binding| binding.mode == WorkMode::Assistive)
-            .map(|binding| binding.binding)
-            .unwrap_or(ShortcutBinding::DoubleRightOption);
-
-        let hold_mods = match dictation {
-            ShortcutBinding::HoldFn => HoldMods::Fn,
-            ShortcutBinding::HoldCtrl => HoldMods::Ctrl,
-            ShortcutBinding::HoldCtrlAlt => HoldMods::CtrlAlt,
-            ShortcutBinding::HoldCtrlShift => HoldMods::CtrlShift,
-            ShortcutBinding::HoldCtrlCmd => HoldMods::CtrlCmd,
-            ShortcutBinding::Disabled
-            | ShortcutBinding::DoubleCtrl
-            | ShortcutBinding::DoubleLeftOption
-            | ShortcutBinding::DoubleRightOption => HoldMods::None,
-        };
-
-        let toggle_trigger = if matches!(dictation, ShortcutBinding::DoubleCtrl) {
-            ToggleTrigger::DoubleCtrl
-        } else {
-            let format_left = matches!(formatting, ShortcutBinding::DoubleLeftOption);
-            let assistive_right = matches!(assistive, ShortcutBinding::DoubleRightOption);
-            match (format_left, assistive_right) {
-                (true, true) => ToggleTrigger::DoubleOption,
-                (true, false) => ToggleTrigger::DoubleLeftOption,
-                (false, true) => ToggleTrigger::DoubleRightOption,
-                (false, false) => ToggleTrigger::None,
-            }
-        };
-
-        (hold_mods, toggle_trigger)
-    }
-
     /// Apply user settings from JSON (lower priority than .env).
     /// Only applies values that are Some AND not already overridden by env vars.
     fn apply_user_settings(&mut self, settings: &super::settings::UserSettings) {
@@ -341,14 +288,6 @@ impl Config {
             settings.whisper_language
         );
         // Hotkeys
-        let mode_bindings = settings
-            .mode_bindings
-            .clone()
-            .filter(|bindings| !bindings.is_empty())
-            .unwrap_or_else(default_mode_bindings);
-        let (hold_mods, toggle_trigger) = Self::runtime_hotkeys_from_mode_bindings(&mode_bindings);
-        self.hold_mods = hold_mods;
-        self.toggle_trigger = toggle_trigger;
         if std::env::var("HOLD_START_DELAY_MS").is_err()
             && let Some(v) = settings.hold_start_delay_ms
         {
@@ -1022,74 +961,23 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ModeBinding, ShortcutBinding, WorkMode};
-    use serial_test::serial;
 
     #[test]
-    fn test_mode_bindings_drive_runtime_hotkeys() {
+    fn test_hotkey_timing_params_applied_from_settings() {
         let mut config = Config::default();
         let settings = super::super::settings::UserSettings {
-            mode_bindings: Some(vec![
-                ModeBinding {
-                    mode: WorkMode::Dictation,
-                    binding: ShortcutBinding::DoubleCtrl,
-                },
-                ModeBinding {
-                    mode: WorkMode::Formatting,
-                    binding: ShortcutBinding::Disabled,
-                },
-                ModeBinding {
-                    mode: WorkMode::Assistive,
-                    binding: ShortcutBinding::Disabled,
-                },
-            ]),
+            hold_start_delay_ms: Some(500),
+            double_tap_interval_ms: Some(300),
+            toggle_silence_sec: Some(3.0),
+            hold_exclusive: Some(true),
             ..Default::default()
         };
 
         config.apply_user_settings(&settings);
 
-        assert_eq!(config.hold_mods, HoldMods::None);
-        assert_eq!(config.toggle_trigger, ToggleTrigger::DoubleCtrl);
-    }
-
-    #[test]
-    #[serial]
-    fn test_legacy_hotkey_env_is_ignored() {
-        // SAFETY: serial test; process env mutation is isolated.
-        unsafe {
-            std::env::set_var("HOLD_MODS", "ctrl_cmd");
-            std::env::set_var("TOGGLE_TRIGGER", "none");
-        }
-
-        let mut config = Config::default();
-        let settings = super::super::settings::UserSettings {
-            mode_bindings: Some(vec![
-                ModeBinding {
-                    mode: WorkMode::Dictation,
-                    binding: ShortcutBinding::HoldCtrl,
-                },
-                ModeBinding {
-                    mode: WorkMode::Formatting,
-                    binding: ShortcutBinding::DoubleLeftOption,
-                },
-                ModeBinding {
-                    mode: WorkMode::Assistive,
-                    binding: ShortcutBinding::DoubleRightOption,
-                },
-            ]),
-            ..Default::default()
-        };
-
-        config.apply_user_settings(&settings);
-        config.load_from_env();
-
-        assert_eq!(config.hold_mods, HoldMods::Ctrl);
-        assert_eq!(config.toggle_trigger, ToggleTrigger::DoubleOption);
-
-        // SAFETY: serial test; cleanup process env.
-        unsafe {
-            std::env::remove_var("HOLD_MODS");
-            std::env::remove_var("TOGGLE_TRIGGER");
-        }
+        assert_eq!(config.hold_start_delay_ms, 500);
+        assert_eq!(config.double_tap_interval_ms, 300);
+        assert!((config.toggle_silence_sec - 3.0).abs() < f32::EPSILON);
+        assert!(config.hold_exclusive);
     }
 }

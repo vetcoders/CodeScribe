@@ -17,8 +17,6 @@ fn setup_test_env() -> TempDir {
     let tmp = TempDir::new().expect("tempdir");
     unsafe {
         std::env::set_var("CODESCRIBE_DATA_DIR", tmp.path());
-        std::env::remove_var("HOLD_MODS");
-        std::env::remove_var("TOGGLE_TRIGGER");
     }
     tmp
 }

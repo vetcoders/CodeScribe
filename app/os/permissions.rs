@@ -448,7 +448,7 @@ pub fn check_all_permissions() {
             info!("Accessibility permission: Granted");
         }
         PermissionStatus::Denied => {
-            warn!("Accessibility permission: DENIED - Global hotkeys may not work!");
+            warn!("Accessibility permission: DENIED - Mode bindings may not trigger.");
             warn!("Grant access in: System Settings > Privacy & Security > Accessibility");
         }
         _ => {
@@ -462,7 +462,7 @@ pub fn check_all_permissions() {
             info!("Input Monitoring permission: Granted");
         }
         PermissionStatus::Denied => {
-            warn!("Input Monitoring permission: DENIED - Hotkeys may not work!");
+            warn!("Input Monitoring permission: DENIED - Mode bindings may not trigger.");
             warn!("Grant access in: System Settings > Privacy & Security > Input Monitoring");
         }
         _ => {
@@ -541,14 +541,56 @@ pub fn diagnostics_report() -> String {
     let _ = writeln!(&mut out, "accessibility: {:?}", check_accessibility());
     let _ = writeln!(&mut out, "input_monitoring: {:?}", check_input_monitoring());
 
+    let settings = crate::config::UserSettings::load();
+    let _ = writeln!(
+        &mut out,
+        "mode_binding.dictation: {}",
+        settings
+            .mode_binding_for(crate::config::WorkMode::Dictation)
+            .as_str()
+    );
+    let _ = writeln!(
+        &mut out,
+        "mode_binding.formatting: {}",
+        settings
+            .mode_binding_for(crate::config::WorkMode::Formatting)
+            .as_str()
+    );
+    let _ = writeln!(
+        &mut out,
+        "mode_binding.assistive: {}",
+        settings
+            .mode_binding_for(crate::config::WorkMode::Assistive)
+            .as_str()
+    );
+
+    let conflicts = crate::os::shortcut_registry::detect_hotkey_conflicts(&settings);
+    let _ = writeln!(
+        &mut out,
+        "mode_binding.conflicts.count: {}",
+        conflicts.len()
+    );
+    if conflicts.is_empty() {
+        let _ = writeln!(&mut out, "mode_binding.conflicts.status: clear");
+    } else {
+        let _ = writeln!(&mut out, "mode_binding.conflicts.status: detected");
+        for (index, conflict) in conflicts.iter().take(5).enumerate() {
+            let _ = writeln!(
+                &mut out,
+                "mode_binding.conflict.{}: {} -> {}",
+                index + 1,
+                conflict.gesture.label(),
+                conflict.message
+            );
+        }
+    }
+
     // Small, safe config hints (do not print secrets).
     for key in [
         "WHISPER_LANGUAGE",
-        "HOLD_MODS",
         "HOLD_START_DELAY_MS",
         "DOUBLE_TAP_INTERVAL_MS",
         "TOGGLE_SILENCE_SEC",
-        "TOGGLE_TRIGGER",
         "CODESCRIBE_STREAM_CHUNK_SEC",
     ] {
         if let Ok(val) = std::env::var(key) {

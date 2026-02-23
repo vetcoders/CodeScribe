@@ -10,7 +10,6 @@ fn main() -> anyhow::Result<()> {
     // Load config (from .env or defaults)
     let config = Config::load();
     println!("Loaded config:");
-    println!("  Hold mods: {:?}", config.hold_mods);
     println!("  Language: {:?}", config.whisper_language);
     println!("  Beep on start: {}", config.beep_on_start);
     println!("  Sound name: {}", config.sound_name);

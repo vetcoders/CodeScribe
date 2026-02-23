@@ -25,12 +25,6 @@ pub fn migrate_if_needed() {
     if let Ok(v) = std::env::var("WHISPER_LANGUAGE") {
         settings.whisper_language = Some(v);
     }
-    if let Ok(v) = std::env::var("HOLD_MODS") {
-        settings.hold_mods = Some(v);
-    }
-    if let Ok(v) = std::env::var("TOGGLE_TRIGGER") {
-        settings.toggle_trigger = Some(v);
-    }
     if let Ok(v) = std::env::var("LLM_ENDPOINT") {
         settings.llm_endpoint = Some(v);
     }
@@ -81,12 +75,6 @@ pub fn migrate_if_needed() {
     }
     if let Ok(v) = std::env::var("HOLD_EXCLUSIVE") {
         settings.hold_exclusive = Some(v == "1" || v.eq_ignore_ascii_case("true"));
-    }
-    if let Ok(v) = std::env::var("HOTKEY_DOUBLE_TAP_LEFT") {
-        settings.double_tap_left = Some(v == "1" || v.eq_ignore_ascii_case("true"));
-    }
-    if let Ok(v) = std::env::var("HOTKEY_DOUBLE_TAP_RIGHT") {
-        settings.double_tap_right = Some(v == "1" || v.eq_ignore_ascii_case("true"));
     }
     // Promoted booleans
     if let Ok(v) = std::env::var("USE_LOCAL_STT") {
