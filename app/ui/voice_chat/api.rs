@@ -3178,6 +3178,29 @@ mod tests {
     }
 
     #[test]
+    fn filtered_drawer_entries_matches_thread_message_and_note_corpus() {
+        let state = VoiceChatOverlayState {
+            drawer_entries: vec![DrawerEntry {
+                source: DrawerEntrySource::Thread {
+                    id: "t_2026-02-23_abc123".to_string(),
+                },
+                path: PathBuf::from("thread_t_2026-02-23_abc123.json"),
+                timestamp: SystemTime::now(),
+                mode: TranscriptionMode::Assistive,
+                preview: "clinical recap".to_string(),
+                search_corpus: "renal values improved call owner tomorrow".to_string(),
+                is_ai_formatted: true,
+                is_favorite: false,
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(filtered_drawer_entries(&state, "renal values").len(), 1);
+        assert_eq!(filtered_drawer_entries(&state, "call owner").len(), 1);
+        assert_eq!(filtered_drawer_entries(&state, "missing phrase").len(), 0);
+    }
+
+    #[test]
     fn display_text_for_message_handles_streaming() {
         let streaming_empty = ChatMessage {
             role: ChatRole::Assistant,
@@ -3486,7 +3509,7 @@ pub fn load_drawer_entries() -> Vec<DrawerEntry> {
 
 fn load_drawer_entries_with_query(query: &str) -> Vec<DrawerEntry> {
     let favorites = load_favorites_from_disk();
-    let mut entries = load_thread_drawer_entries(&favorites, query);
+    let mut entries = load_thread_drawer_entries(&favorites);
     entries.extend(load_legacy_drawer_entries(&favorites));
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
@@ -3498,7 +3521,7 @@ fn load_drawer_entries_with_query(query: &str) -> Vec<DrawerEntry> {
     entries
 }
 
-fn load_thread_drawer_entries(favorites: &HashSet<String>, query: &str) -> Vec<DrawerEntry> {
+fn load_thread_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
     let Ok(store) = ThreadStore::new() else {
         return Vec::new();
     };
@@ -3506,31 +3529,32 @@ fn load_thread_drawer_entries(favorites: &HashSet<String>, query: &str) -> Vec<D
         return Vec::new();
     };
 
-    let summaries = if query.trim().is_empty() {
-        index.list(None)
-    } else {
-        index.search(query)
-    };
-
-    summaries
+    index
+        .list(None)
         .into_iter()
         .map(|summary| {
             let id = summary.id.clone();
             let source = DrawerEntrySource::Thread { id: id.clone() };
             let favorite_key = format!("thread:{id}");
-            let preview = summary
+            let mut preview = summary
                 .latest_note
                 .as_deref()
                 .or(summary.latest_message.as_deref())
                 .or(summary.summary.as_deref())
                 .unwrap_or(summary.title.as_str())
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(120)
-                .collect::<String>();
+                .to_string();
             let mut search_corpus = summary.search_text.clone();
+            if (search_corpus.trim().is_empty() || preview.trim().is_empty())
+                && let Ok(thread) = store.load_thread(&id)
+            {
+                if preview.trim().is_empty() {
+                    preview = thread_preview_for_drawer(&thread);
+                }
+                if search_corpus.trim().is_empty() {
+                    search_corpus = thread_search_corpus_for_drawer(&thread);
+                }
+            }
+            preview = normalize_preview(&preview, 120);
             if search_corpus.trim().is_empty() {
                 search_corpus = format!(
                     "{} {} {} {}",
@@ -3545,26 +3569,8 @@ fn load_thread_drawer_entries(favorites: &HashSet<String>, query: &str) -> Vec<D
             let path = store
                 .thread_file_path(&id)
                 .unwrap_or_else(|_| PathBuf::from(format!("thread_{id}.json")));
-            let timestamp = if summary.updated_at.timestamp_millis() >= 0 {
-                UNIX_EPOCH + Duration::from_millis(summary.updated_at.timestamp_millis() as u64)
-            } else {
-                SystemTime::now()
-            };
-            let mode = if summary.mode.eq_ignore_ascii_case("conversation")
-                || summary.mode.eq_ignore_ascii_case("moshi")
-            {
-                TranscriptionMode::Conversation
-            } else if summary.mode.eq_ignore_ascii_case("assistive")
-                || summary.mode.eq_ignore_ascii_case("chat")
-            {
-                TranscriptionMode::Assistive
-            } else if summary.mode.eq_ignore_ascii_case("hold")
-                || summary.mode.eq_ignore_ascii_case("raw")
-            {
-                TranscriptionMode::Hold
-            } else {
-                TranscriptionMode::Toggle
-            };
+            let timestamp = system_time_from_unix_millis(summary.updated_at.timestamp_millis());
+            let mode = transcription_mode_from_thread_mode(&summary.mode);
 
             DrawerEntry {
                 source,
@@ -3581,35 +3587,41 @@ fn load_thread_drawer_entries(favorites: &HashSet<String>, query: &str) -> Vec<D
 }
 
 fn load_legacy_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
-    let config_dir = codescribe_core::config::Config::config_dir();
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let dir = config_dir.join("transcriptions").join(today);
+    let base_dir = codescribe_core::config::Config::config_dir().join("transcriptions");
+    let today_dir = base_dir.join(chrono::Local::now().format("%Y-%m-%d").to_string());
 
-    let files = list_draft_files(&dir);
+    let mut dirs = vec![today_dir.clone()];
+    if let Ok(entries) = std::fs::read_dir(&base_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path != today_dir {
+                dirs.push(path);
+            }
+        }
+    }
+
+    let mut files: Vec<(PathBuf, SystemTime)> = dirs
+        .into_iter()
+        .flat_map(|dir| list_draft_files(&dir).into_iter())
+        .filter_map(|path| {
+            let modified = path.metadata().ok()?.modified().ok()?;
+            Some((path, modified))
+        })
+        .collect();
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.truncate(500);
+
     files
         .into_iter()
-        .map(|path| {
+        .map(|(path, timestamp)| {
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            let metadata = path.metadata().ok();
-            let timestamp = metadata
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or_else(SystemTime::now);
             let content = std::fs::read_to_string(&path).unwrap_or_default();
-            let preview = content.chars().take(120).collect::<String>();
-            let mode = if name.contains("conversation") || name.contains("moshi") {
-                TranscriptionMode::Conversation
-            } else if name.contains("assistive") {
-                TranscriptionMode::Assistive
-            } else if name.contains("_raw") || name.contains("raw") {
-                TranscriptionMode::Hold
-            } else {
-                TranscriptionMode::Toggle
-            };
+            let preview = normalize_preview(&content, 120);
+            let mode = transcription_mode_from_file_name(&name);
             let is_ai_formatted = name.contains("_ai") && !name.contains("ai-failed");
             let is_favorite = favorites.contains(&path.to_string_lossy().to_string());
             let mode_label = mode_label(mode);
@@ -3635,6 +3647,88 @@ fn load_legacy_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
             }
         })
         .collect()
+}
+
+fn system_time_from_unix_millis(timestamp_millis: i64) -> SystemTime {
+    if timestamp_millis <= 0 {
+        return SystemTime::now();
+    }
+    UNIX_EPOCH + Duration::from_millis(timestamp_millis as u64)
+}
+
+fn transcription_mode_from_thread_mode(mode: &str) -> TranscriptionMode {
+    if mode.eq_ignore_ascii_case("conversation") || mode.eq_ignore_ascii_case("moshi") {
+        TranscriptionMode::Conversation
+    } else if mode.eq_ignore_ascii_case("assistive") || mode.eq_ignore_ascii_case("chat") {
+        TranscriptionMode::Assistive
+    } else if mode.eq_ignore_ascii_case("hold") || mode.eq_ignore_ascii_case("raw") {
+        TranscriptionMode::Hold
+    } else {
+        TranscriptionMode::Toggle
+    }
+}
+
+fn transcription_mode_from_file_name(name_lower: &str) -> TranscriptionMode {
+    if name_lower.contains("conversation") || name_lower.contains("moshi") {
+        TranscriptionMode::Conversation
+    } else if name_lower.contains("assistive") {
+        TranscriptionMode::Assistive
+    } else if name_lower.contains("_raw") || name_lower.contains("raw") {
+        TranscriptionMode::Hold
+    } else {
+        TranscriptionMode::Toggle
+    }
+}
+
+fn normalize_preview(text: &str, max_chars: usize) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect::<String>()
+}
+
+fn thread_preview_for_drawer(thread: &Thread) -> String {
+    if let Some(summary) = &thread.summary
+        && !summary.trim().is_empty()
+    {
+        return normalize_preview(summary, 120);
+    }
+    if let Some(note) = thread
+        .notes
+        .iter()
+        .rev()
+        .find(|note| !note.text.trim().is_empty())
+    {
+        return normalize_preview(&note.text, 120);
+    }
+    for message in thread.messages.iter().rev() {
+        let text = thread_message_text_for_copy(message);
+        if !text.trim().is_empty() {
+            return normalize_preview(&text, 120);
+        }
+    }
+    normalize_preview(&thread.title, 120)
+}
+
+fn thread_search_corpus_for_drawer(thread: &Thread) -> String {
+    let mut pieces = vec![thread.title.clone(), thread.mode.clone()];
+    if let Some(summary) = &thread.summary {
+        pieces.push(summary.clone());
+    }
+    for note in &thread.notes {
+        pieces.push(note.text.clone());
+    }
+    for message in &thread.messages {
+        pieces.push(thread_message_text_for_copy(message));
+    }
+    pieces
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn drawer_entry_favorite_key(entry: &DrawerEntry) -> String {
