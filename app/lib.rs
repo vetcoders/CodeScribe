@@ -22,10 +22,14 @@ pub use codescribe_core::{
 // App/macOS-specific modules
 // ═══════════════════════════════════════════════════════════
 
+pub mod agent;
 pub mod os;
 
 #[cfg(target_os = "macos")]
 pub mod controller;
+
+#[cfg(target_os = "macos")]
+pub mod agent;
 
 #[cfg(target_os = "macos")]
 pub mod presentation;

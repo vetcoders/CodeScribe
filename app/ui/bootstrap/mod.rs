@@ -4267,14 +4267,7 @@ pub(super) extern "C" fn on_prompt_load(_this: &Object, _cmd: objc::runtime::Sel
         Ok(content) => {
             set_prompt_editor_content(&content);
             set_prompt_editor_status(
-                &format!(
-                    "{} prompt loaded.",
-                    if prompt_type == "assistive" {
-                        "Assistive"
-                    } else {
-                        "Formatting"
-                    }
-                ),
+                &format!("{} prompt loaded.", prompt_display_name(prompt_type)),
                 false,
             );
         }
@@ -4293,72 +4286,43 @@ pub(super) extern "C" fn on_prompt_save(_this: &Object, _cmd: objc::runtime::Sel
         return;
     }
 
-    match send_ipc(IpcCommand::SavePrompt {
-        prompt_type: prompt_type.to_string(),
-        content: content.clone(),
-    }) {
-        Ok(IpcResponse::Ok) => {
-            set_prompt_editor_status("Prompt saved.", false);
-            return;
-        }
-        Ok(IpcResponse::Error(err)) => {
-            warn!("Settings: prompt save IPC error: {err}");
-        }
-        Ok(other) => {
-            warn!("Settings: unexpected prompt save response: {other:?}");
+    match save_prompt_content(prompt_type, &content) {
+        Ok(()) => {
+            set_prompt_editor_status(
+                &format!("{} prompt saved.", prompt_display_name(prompt_type)),
+                false,
+            );
         }
         Err(err) => {
-            warn!("Settings: prompt save IPC unavailable: {err}");
+            set_prompt_editor_status(&format!("Failed to save prompt: {err}"), true);
         }
     }
-
-    let target_path = if prompt_type == "assistive" {
-        crate::get_assistive_prompt_path()
-    } else {
-        crate::get_formatting_prompt_path()
-    };
-    match std::fs::write(&target_path, content) {
-        Ok(()) => set_prompt_editor_status("Prompt saved via config fallback.", false),
-        Err(err) => set_prompt_editor_status(
-            &format!("Failed to save prompt to {}: {err}", target_path.display()),
-            true,
-        ),
-    }
+    refresh_prompt_editor_labels();
 }
 
 pub(super) extern "C" fn on_prompt_reset(_this: &Object, _cmd: objc::runtime::Sel, _sender: Id) {
     let prompt_type = selected_prompt_type();
-    match send_ipc(IpcCommand::ResetPrompt {
-        prompt_type: prompt_type.to_string(),
-    }) {
-        Ok(IpcResponse::Prompt(content)) => {
-            set_prompt_editor_content(&content);
-            set_prompt_editor_status("Prompt reset to default.", false);
-            return;
-        }
-        Ok(IpcResponse::Error(err)) => {
-            warn!("Settings: prompt reset IPC error: {err}");
-        }
-        Ok(other) => {
-            warn!("Settings: unexpected prompt reset response: {other:?}");
-        }
+    match reset_prompt_content(prompt_type) {
+        Ok(()) => match load_prompt_content(prompt_type) {
+            Ok(content) => {
+                set_prompt_editor_content(&content);
+                set_prompt_editor_status(
+                    &format!(
+                        "{} prompt reset to default.",
+                        prompt_display_name(prompt_type)
+                    ),
+                    false,
+                );
+            }
+            Err(err) => {
+                set_prompt_editor_status(&format!("Prompt reset but reload failed: {err}"), true);
+            }
+        },
         Err(err) => {
-            warn!("Settings: prompt reset IPC unavailable: {err}");
+            set_prompt_editor_status(&format!("Failed to reset prompt: {err}"), true);
         }
     }
-
-    let fallback_result = crate::reset_to_defaults();
-    if let Err(err) = fallback_result {
-        set_prompt_editor_status(&format!("Failed to reset defaults: {err}"), true);
-        return;
-    }
-    let content = if prompt_type == "assistive" {
-        crate::config::get_assistive_prompt()
-    } else {
-        crate::config::get_formatting_prompt()
-    };
-    set_prompt_editor_content(&content);
-    set_prompt_editor_status("Prompt reset using config fallback.", false);
+    refresh_prompt_editor_labels();
 }
 
 pub(super) extern "C" fn on_quality_refresh(_this: &Object, _cmd: objc::runtime::Sel, _sender: Id) {

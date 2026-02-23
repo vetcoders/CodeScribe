@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::agent::AgentEvent;
+use crate::agent::event::AgentEvent;
 
 use super::ai_formatting::{AiReasoningCallback, AiStreamCallback};
 
@@ -450,6 +450,7 @@ impl<'a> ResponsesStreamingManager<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_stream(
     client: Client,
     endpoint: String,
