@@ -6,16 +6,17 @@ use std::sync::Once;
 use crate::ui_helpers::ns_string;
 
 use super::{
-    TAB_API, TAB_AUDIO, TAB_ENGINE, TAB_KEYS, TAB_SETUP, TAB_USER, TAB_VOICE_LAB,
-    handle_bootstrap_window_closed, handle_hotkey_done, handle_show_overlay, handle_test_mic,
-    on_assistive_endpoint_changed, on_assistive_key_changed, on_assistive_model_changed,
-    on_beep_toggled, on_clear_assistive_key, on_clear_llm_key, on_delay_changed,
-    on_double_tap_interval_changed, on_enter_send_toggled, on_formatting_level_changed,
-    on_formatting_toggled, on_language_changed, on_llm_endpoint_changed, on_llm_key_changed,
-    on_llm_model_changed, on_mode_binding_change, on_open_system_settings, on_permission_action,
-    on_quality_daemon_toggled, on_refresh_permissions, on_save_api_settings,
-    on_show_dock_icon_toggled, on_show_hotkey_conflicts, on_ultra_quality_toggled,
-    on_voice_lab_field_changed, on_voice_lab_toggle_changed, on_volume_changed, switch_tab,
+    TAB_ADVANCED, TAB_AI_PROMPTS, TAB_AUDIO_INPUT, TAB_DIAGNOSTICS, TAB_MODES_SHORTCUTS,
+    TAB_QUALITY, TAB_SETUP, handle_bootstrap_window_closed, handle_hotkey_done,
+    handle_show_overlay, handle_test_mic, on_assistive_endpoint_changed, on_assistive_key_changed,
+    on_assistive_model_changed, on_beep_toggled, on_clear_assistive_key, on_clear_llm_key,
+    on_delay_changed, on_double_tap_interval_changed, on_enter_send_toggled,
+    on_formatting_level_changed, on_formatting_toggled, on_language_changed,
+    on_llm_endpoint_changed, on_llm_key_changed, on_llm_model_changed, on_mode_binding_change,
+    on_open_system_settings, on_permission_action, on_quality_daemon_toggled,
+    on_refresh_permissions, on_save_api_settings, on_show_dock_icon_toggled,
+    on_show_hotkey_conflicts, on_ultra_quality_toggled, on_voice_lab_field_changed,
+    on_voice_lab_toggle_changed, on_volume_changed, switch_tab,
 };
 
 pub type Id = *mut Object;
@@ -270,27 +271,27 @@ extern "C" fn on_tab_setup(_this: &Object, _sel: Sel, _sender: Id) {
 }
 
 extern "C" fn on_tab_keys(_this: &Object, _sel: Sel, _sender: Id) {
-    switch_tab(TAB_KEYS);
+    switch_tab(TAB_MODES_SHORTCUTS);
 }
 
 extern "C" fn on_tab_api(_this: &Object, _sel: Sel, _sender: Id) {
-    switch_tab(TAB_API);
+    switch_tab(TAB_AI_PROMPTS);
 }
 
 extern "C" fn on_tab_audio(_this: &Object, _sel: Sel, _sender: Id) {
-    switch_tab(TAB_AUDIO);
+    switch_tab(TAB_AUDIO_INPUT);
 }
 
 extern "C" fn on_tab_voice_lab(_this: &Object, _sel: Sel, _sender: Id) {
-    switch_tab(TAB_VOICE_LAB);
+    switch_tab(TAB_QUALITY);
 }
 
 extern "C" fn on_tab_engine(_this: &Object, _sel: Sel, _sender: Id) {
-    switch_tab(TAB_ENGINE);
+    switch_tab(TAB_DIAGNOSTICS);
 }
 
 extern "C" fn on_tab_user(_this: &Object, _sel: Sel, _sender: Id) {
-    switch_tab(TAB_USER);
+    switch_tab(TAB_ADVANCED);
 }
 
 extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, _notification: Id) {

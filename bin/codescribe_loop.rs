@@ -239,9 +239,7 @@ async fn run_daemon(args: Args) -> Result<()> {
         args.daemon_interval, threshold
     );
 
-    // Write daemon state file for tray integration
     let config_dir = Config::config_dir();
-    let state_path = config_dir.join("quality_daemon.json");
 
     loop {
         let now = chrono::Local::now();
@@ -262,8 +260,10 @@ async fn run_daemon(args: Args) -> Result<()> {
                 let mismatches = count_mismatches_from_latest_report(&config_dir);
                 let prev = PENDING_MISMATCHES.swap(mismatches, Ordering::SeqCst);
 
-                // Update state file for tray
-                let _ = write_daemon_state(&state_path, mismatches);
+                // Update centralized daemon state for tray/settings
+                if let Err(err) = codescribe::quality_loop::write_daemon_state(mismatches) {
+                    eprintln!("  Failed to write daemon state: {}", err);
+                }
 
                 println!("  Mismatches: {} (was: {})", mismatches, prev);
 
@@ -344,50 +344,6 @@ fn count_mismatches_from_latest_report(config_dir: &Path) -> usize {
         .count()
 }
 
-/// Write daemon state for tray integration
-fn write_daemon_state(path: &Path, mismatches: usize) -> Result<()> {
-    #[derive(serde::Serialize)]
-    struct DaemonState {
-        pending_mismatches: usize,
-        last_check: String,
-        latest_report: Option<String>,
-        available: bool,
-    }
-
-    let config_dir = Config::config_dir();
-    let history_path = config_dir.join("reports").join("quality_history.jsonl");
-
-    // Get latest report path
-    let latest_report = std::fs::read_to_string(&history_path)
-        .ok()
-        .and_then(|content| {
-            content
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .and_then(|line| {
-                    #[derive(serde::Deserialize)]
-                    struct Entry {
-                        report_dir: String,
-                    }
-                    serde_json::from_str::<Entry>(line)
-                        .ok()
-                        .map(|e| e.report_dir)
-                })
-        });
-
-    let state = DaemonState {
-        pending_mismatches: mismatches,
-        last_check: chrono::Local::now().to_rfc3339(),
-        latest_report,
-        available: true,
-    };
-
-    let json = serde_json::to_string_pretty(&state)?;
-    std::fs::write(path, json)?;
-    Ok(())
-}
-
 /// Send macOS notification using osascript
 fn send_macos_notification(message: &str, subtitle: &str) {
     let script = format!(
@@ -397,44 +353,6 @@ fn send_macos_notification(message: &str, subtitle: &str) {
     );
 
     let _ = Command::new("osascript").args(["-e", &script]).spawn();
-}
-
-/// Get path to the latest HTML report
-pub fn get_latest_report_html() -> Option<PathBuf> {
-    let config_dir = Config::config_dir();
-    let state_path = config_dir.join("quality_daemon.json");
-
-    let content = std::fs::read_to_string(&state_path).ok()?;
-
-    #[derive(serde::Deserialize)]
-    struct DaemonState {
-        latest_report: Option<String>,
-    }
-
-    let state: DaemonState = serde_json::from_str(&content).ok()?;
-    state
-        .latest_report
-        .map(|dir| PathBuf::from(dir).join("index.html"))
-}
-
-/// Get pending mismatch count from daemon state
-pub fn get_pending_mismatches() -> usize {
-    let config_dir = Config::config_dir();
-    let state_path = config_dir.join("quality_daemon.json");
-
-    let content = match std::fs::read_to_string(&state_path) {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct DaemonState {
-        pending_mismatches: usize,
-    }
-
-    serde_json::from_str::<DaemonState>(&content)
-        .map(|s| s.pending_mismatches)
-        .unwrap_or(0)
 }
 
 fn env_bool(key: &str) -> bool {

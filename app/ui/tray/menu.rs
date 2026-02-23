@@ -3,8 +3,7 @@
 //! Menu structure (flat):
 //! - Status line (dynamic)
 //! - Show Agent / Open history / Copy last
-//! - Hotkeys ▸
-//! - Prompts ▸ / Notes ▸ / Diagnostics ▸
+//! - Notes ▸ / Diagnostics ▸
 //! - Quick Start / Help / About
 //! - Quit
 //!
@@ -68,23 +67,7 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     // 5. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 6. Prompts submenu
-    let prompts_menu = Submenu::new("Edit prompts…", true);
-    let open_assistive_prompt_item = MenuItem::new("Assistive…", true, None);
-    let open_assistive_prompt_id = open_assistive_prompt_item.id().clone();
-    prompts_menu.append(&open_assistive_prompt_item)?;
-
-    let open_formatting_prompt_item = MenuItem::new("Formatting…", true, None);
-    let open_formatting_prompt_id = open_formatting_prompt_item.id().clone();
-    prompts_menu.append(&open_formatting_prompt_item)?;
-
-    let open_prompts_folder_item = MenuItem::new("Open prompts folder", true, None);
-    let open_prompts_folder_id = open_prompts_folder_item.id().clone();
-    prompts_menu.append(&open_prompts_folder_item)?;
-
-    menu.append(&prompts_menu)?;
-
-    // 6b. Notes submenu
+    // 6. Notes submenu
     let notes_menu = Submenu::new("Notes", true);
     let notes_cfg = Config::load();
 
@@ -125,24 +108,11 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
 
     menu.append(&notes_menu)?;
 
-    // 6c. Diagnostics submenu
+    // 7. Diagnostics submenu
     let diagnostics_menu = Submenu::new("Diagnostics", true);
     let copy_diag_item = MenuItem::new("Copy diagnostics", true, None);
     let copy_diag_id = copy_diag_item.id().clone();
     diagnostics_menu.append(&copy_diag_item)?;
-
-    let open_accessibility_item = MenuItem::new("Open Accessibility settings…", true, None);
-    let open_accessibility_id = open_accessibility_item.id().clone();
-    diagnostics_menu.append(&open_accessibility_item)?;
-
-    let open_input_monitoring_item = MenuItem::new("Open Input Monitoring settings…", true, None);
-    let open_input_monitoring_id = open_input_monitoring_item.id().clone();
-    diagnostics_menu.append(&open_input_monitoring_item)?;
-
-    let reset_input_monitoring_item =
-        MenuItem::new("Reset Input Monitoring permission (restart)…", true, None);
-    let reset_input_monitoring_id = reset_input_monitoring_item.id().clone();
-    diagnostics_menu.append(&reset_input_monitoring_item)?;
 
     // Quality menu item (shows pending mismatches from daemon)
     let state = crate::quality_loop::read_daemon_state();
@@ -193,25 +163,25 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
         None
     };
 
-    // 8. Settings
-    let onboarding_item = MenuItem::new("Settings", true, None);
-    let onboarding_id = onboarding_item.id().clone();
-    menu.append(&onboarding_item)?;
+    // 9. Settings
+    let settings_item = MenuItem::new("Settings", true, None);
+    let settings_id = settings_item.id().clone();
+    menu.append(&settings_item)?;
 
-    // 9. Help
+    // 10. Help
     let help_item = MenuItem::new("Help", true, None);
     let help_id = help_item.id().clone();
     menu.append(&help_item)?;
 
-    // 9. About
+    // 11. About
     let about_item = MenuItem::new("About", true, None);
     let about_id = about_item.id().clone();
     menu.append(&about_item)?;
 
-    // 10. Separator
+    // 12. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 11. Quit (Cmd+Q)
+    // 13. Quit (Cmd+Q)
     let quit_accel = Accelerator::new(Some(Modifiers::SUPER), Code::KeyQ);
     let quit_item = MenuItem::new("Quit", true, Some(quit_accel));
     let quit_id = quit_item.id().clone();
@@ -222,16 +192,10 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
         MenuIds {
             copy_last: copy_last_id,
             show_overlay: show_overlay_id,
-            run_onboarding: onboarding_id,
+            open_settings: settings_id,
             complete_setup: complete_setup_id,
             open_history: open_history_id,
             copy_diagnostics: copy_diag_id,
-            open_accessibility_settings: open_accessibility_id,
-            open_input_monitoring_settings: open_input_monitoring_id,
-            reset_input_monitoring_permission: reset_input_monitoring_id,
-            open_assistive_prompt: open_assistive_prompt_id,
-            open_formatting_prompt: open_formatting_prompt_id,
-            open_prompts_folder: open_prompts_folder_id,
             help: help_id,
             about: about_id,
             quit: quit_id,

@@ -25,24 +25,12 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         .is_some_and(|id| event_id == id)
     {
         crate::show_settings_setup_tab();
-    } else if event_id == &menu_ids.run_onboarding {
-        crate::show_settings_window();
+    } else if event_id == &menu_ids.open_settings {
+        crate::show_settings_tab();
     } else if event_id == &menu_ids.open_history {
         handle_open_history_folder();
     } else if event_id == &menu_ids.copy_diagnostics {
         handle_copy_diagnostics();
-    } else if event_id == &menu_ids.open_accessibility_settings {
-        handle_open_accessibility_settings();
-    } else if event_id == &menu_ids.open_input_monitoring_settings {
-        handle_open_input_monitoring_settings();
-    } else if event_id == &menu_ids.reset_input_monitoring_permission {
-        handle_reset_input_monitoring_permission();
-    } else if event_id == &menu_ids.open_assistive_prompt {
-        handle_open_assistive_prompt();
-    } else if event_id == &menu_ids.open_formatting_prompt {
-        handle_open_formatting_prompt();
-    } else if event_id == &menu_ids.open_prompts_folder {
-        handle_open_prompts_folder();
     } else if event_id == &menu_ids.help {
         handle_open_help();
     } else if event_id == &menu_ids.about {
@@ -106,77 +94,6 @@ fn handle_copy_diagnostics() {
             )
             .spawn();
     }
-}
-
-#[cfg(target_os = "macos")]
-fn open_privacy_settings(deeplink: &str) {
-    let url = format!(
-        "x-apple.systempreferences:com.apple.preference.security?{}",
-        deeplink
-    );
-    let _ = Command::new("open").arg(url).spawn();
-}
-
-#[cfg(target_os = "macos")]
-fn handle_open_accessibility_settings() {
-    send_menu_event(TrayMenuEvent::OpenAccessibilitySettings);
-    open_privacy_settings("Privacy_Accessibility");
-}
-
-#[cfg(target_os = "macos")]
-fn handle_open_input_monitoring_settings() {
-    send_menu_event(TrayMenuEvent::OpenInputMonitoringSettings);
-    open_privacy_settings("Privacy_ListenEvent");
-}
-
-#[cfg(target_os = "macos")]
-fn handle_reset_input_monitoring_permission() {
-    send_menu_event(TrayMenuEvent::ResetInputMonitoringPermission);
-
-    // Reset TCC for ListenEvent (Input Monitoring) for our bundle id.
-    // User still needs to re-grant in System Settings after restart.
-    let _ = Command::new("tccutil")
-        .args(["reset", "ListenEvent", "com.codescribe.app"])
-        .spawn();
-
-    open_privacy_settings("Privacy_ListenEvent");
-
-    let _ = Command::new("osascript")
-        .arg("-e")
-        .arg(
-            r#"display notification "Input Monitoring reset. Re-open CodeScribe, then enable it in Input Monitoring settings." with title "CodeScribe""#,
-        )
-        .spawn();
-}
-
-#[cfg(not(target_os = "macos"))]
-fn handle_open_accessibility_settings() {
-    send_menu_event(TrayMenuEvent::OpenAccessibilitySettings);
-}
-
-#[cfg(not(target_os = "macos"))]
-fn handle_open_input_monitoring_settings() {
-    send_menu_event(TrayMenuEvent::OpenInputMonitoringSettings);
-}
-
-#[cfg(not(target_os = "macos"))]
-fn handle_reset_input_monitoring_permission() {
-    send_menu_event(TrayMenuEvent::ResetInputMonitoringPermission);
-}
-
-fn handle_open_assistive_prompt() {
-    send_menu_event(TrayMenuEvent::OpenAssistivePrompt);
-    crate::config::open_prompt_file("assistive.txt");
-}
-
-fn handle_open_formatting_prompt() {
-    send_menu_event(TrayMenuEvent::OpenFormattingPrompt);
-    crate::config::open_prompt_file("formatting.txt");
-}
-
-fn handle_open_prompts_folder() {
-    send_menu_event(TrayMenuEvent::OpenPromptsFolder);
-    crate::config::open_prompts_folder();
 }
 
 fn handle_install_silero_vad() {

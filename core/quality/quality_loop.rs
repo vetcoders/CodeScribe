@@ -1135,6 +1135,68 @@ pub fn daemon_state_path() -> PathBuf {
     Config::config_dir().join("quality_daemon.json")
 }
 
+fn daemon_history_path() -> PathBuf {
+    Config::config_dir()
+        .join("reports")
+        .join("quality_history.jsonl")
+}
+
+fn read_latest_report_from_history(path: &Path, root: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct DaemonHistoryEntry {
+        report_dir: String,
+    }
+
+    let content = safe_read_to_string_bounded(path, root).ok()?;
+    content
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .and_then(|line| serde_json::from_str::<DaemonHistoryEntry>(line).ok())
+        .map(|entry| entry.report_dir)
+}
+
+fn write_daemon_state_file(path: &Path, root: &Path, state: &QualityDaemonState) -> Result<()> {
+    fs::create_dir_all(root)
+        .with_context(|| format!("Failed to create config directory {}", root.display()))?;
+    let json = serde_json::to_string_pretty(state)?;
+    crate::safe_path::safe_write_bounded(path, root, &json)
+        .with_context(|| format!("Failed to write daemon state {}", path.display()))
+}
+
+fn write_daemon_state_with_paths(
+    state_path: &Path,
+    history_path: &Path,
+    config_root: &Path,
+    pending_mismatches: usize,
+    available: bool,
+) -> Result<QualityDaemonState> {
+    let state = QualityDaemonState {
+        pending_mismatches,
+        last_check: Local::now().to_rfc3339(),
+        latest_report: read_latest_report_from_history(history_path, config_root),
+        available,
+    };
+
+    write_daemon_state_file(state_path, config_root, &state)?;
+    Ok(state)
+}
+
+/// Write daemon state using the canonical quality_history.jsonl contract.
+pub fn write_daemon_state(pending_mismatches: usize) -> Result<QualityDaemonState> {
+    let config_root = Config::config_dir();
+    let state_path = daemon_state_path();
+    let history_path = daemon_history_path();
+    write_daemon_state_with_paths(
+        &state_path,
+        &history_path,
+        &config_root,
+        pending_mismatches,
+        true,
+    )
+}
+
 /// Read daemon state from file
 pub fn read_daemon_state() -> QualityDaemonState {
     let path = daemon_state_path();
@@ -1153,10 +1215,11 @@ pub fn get_pending_mismatches() -> usize {
 
 /// Mark daemon as unavailable (used when binary isn't found or daemon fails to start)
 pub fn mark_daemon_unavailable() {
-    let state = QualityDaemonState::default();
-    if let Ok(json) = serde_json::to_string_pretty(&state) {
-        let _ = std::fs::write(daemon_state_path(), json);
-    }
+    let mut state = read_daemon_state();
+    state.available = false;
+    state.last_check = Local::now().to_rfc3339();
+    let config_root = Config::config_dir();
+    let _ = write_daemon_state_file(&daemon_state_path(), &config_root, &state);
 }
 
 /// Get path to the latest HTML report
@@ -1222,6 +1285,72 @@ mod tests {
             summary: ReportSummary::default(),
             entries,
         }
+    }
+
+    #[test]
+    fn test_write_daemon_state_with_paths_uses_latest_history_entry() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = tmp.path().canonicalize().expect("canonical root");
+        let history_path = root.join("reports").join("quality_history.jsonl");
+        let state_path = root.join("quality_daemon.json");
+        std::fs::create_dir_all(history_path.parent().expect("history parent"))
+            .expect("create reports dir");
+
+        let older = serde_json::json!({
+            "report_dir": "/tmp/quality_old",
+            "report_json": "/tmp/quality_old/report.json"
+        });
+        let latest = serde_json::json!({
+            "report_dir": "/tmp/quality_latest",
+            "report_json": "/tmp/quality_latest/report.json"
+        });
+        std::fs::write(&history_path, format!("{older}\n{latest}\n")).expect("write history");
+
+        let state = write_daemon_state_with_paths(&state_path, &history_path, &root, 7, true)
+            .expect("write daemon state");
+
+        assert_eq!(state.pending_mismatches, 7);
+        assert_eq!(state.latest_report.as_deref(), Some("/tmp/quality_latest"));
+        assert!(state.available);
+        assert!(!state.last_check.is_empty());
+
+        let persisted = std::fs::read_to_string(&state_path).expect("read daemon state file");
+        let loaded: QualityDaemonState =
+            serde_json::from_str(&persisted).expect("parse daemon state file");
+        assert_eq!(loaded.pending_mismatches, 7);
+        assert_eq!(loaded.latest_report.as_deref(), Some("/tmp/quality_latest"));
+        assert!(loaded.available);
+    }
+
+    #[test]
+    fn test_write_daemon_state_with_paths_tolerates_invalid_history() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let root = tmp.path().canonicalize().expect("canonical root");
+        let history_path = root.join("reports").join("quality_history.jsonl");
+        let state_path = root.join("quality_daemon.json");
+        std::fs::create_dir_all(history_path.parent().expect("history parent"))
+            .expect("create reports dir");
+        std::fs::write(&history_path, "{invalid json}\n").expect("write invalid history");
+
+        let state = write_daemon_state_with_paths(&state_path, &history_path, &root, 2, true)
+            .expect("write daemon state");
+        assert_eq!(state.pending_mismatches, 2);
+        assert_eq!(state.latest_report, None);
+        assert!(state.available);
+    }
+
+    #[test]
+    fn test_quality_daemon_state_backward_compatible_defaults() {
+        let raw = r#"{
+            "pending_mismatches": 4,
+            "last_check": "2026-02-01T10:00:00+01:00",
+            "latest_report": "/tmp/quality_latest"
+        }"#;
+
+        let state: QualityDaemonState = serde_json::from_str(raw).expect("parse daemon state");
+        assert_eq!(state.pending_mismatches, 4);
+        assert_eq!(state.latest_report.as_deref(), Some("/tmp/quality_latest"));
+        assert!(state.available);
     }
 
     // ─── normalize_tokens ────────────────────────────────────────────

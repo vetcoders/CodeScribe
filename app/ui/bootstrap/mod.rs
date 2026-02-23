@@ -30,9 +30,10 @@ use crate::ui::onboarding::{
 use crate::ui_helpers::{
     LabelConfig, add_subview, button, button_set_action, button_style, create_button,
     create_floating_window, create_glass_effect_container_view, create_glass_effect_view_with,
-    create_label, create_secure_text_input, create_slider, create_text_input, create_toggle,
-    ns_string, set_glass_container_content_view, set_glass_effect_content_view,
-    set_text_field_string, ui_colors, ui_tokens, window_close, window_content_view, window_show,
+    create_label, create_scrollable_text_view, create_secure_text_input, create_slider,
+    create_text_input, create_toggle, get_text_view_string, ns_string,
+    set_glass_container_content_view, set_glass_effect_content_view, set_text_field_string,
+    set_text_view_string, ui_colors, ui_tokens, window_close, window_content_view, window_show,
 };
 
 mod handlers;
@@ -60,12 +61,12 @@ const SETUP_POST_STEPS_GAP: f64 = 8.0;
 const SETUP_SAVE_MIN_ANCHOR_Y: f64 = 52.0;
 const SETUP_HINT_MIN_Y: f64 = 52.0;
 const TAB_SETUP: usize = 0;
-const TAB_KEYS: usize = 1;
-pub(super) const TAB_API: usize = 2;
-const TAB_AUDIO: usize = 3;
-const TAB_VOICE_LAB: usize = 4;
-const TAB_ENGINE: usize = 5;
-pub(super) const TAB_USER: usize = 6;
+const TAB_MODES_SHORTCUTS: usize = 1;
+const TAB_AI_PROMPTS: usize = 2;
+const TAB_AUDIO_INPUT: usize = 3;
+const TAB_QUALITY: usize = 4;
+const TAB_DIAGNOSTICS: usize = 5;
+const TAB_ADVANCED: usize = 6;
 const TAB_COUNT: usize = 7;
 
 const TOGGLE_ROW_HEIGHT: f64 = 22.0;
@@ -482,6 +483,11 @@ struct BootstrapState {
     permission_polling: bool,
     quality_daemon_checkbox: Option<usize>,
     ultra_quality_checkbox: Option<usize>,
+    quality_available_label: Option<usize>,
+    quality_pending_label: Option<usize>,
+    quality_last_check_label: Option<usize>,
+    quality_report_label: Option<usize>,
+    quality_open_report_button: Option<usize>,
     llm_endpoint_field: Option<usize>,
     llm_model_field: Option<usize>,
     llm_key_field: Option<usize>,
@@ -492,10 +498,60 @@ struct BootstrapState {
     assistive_key_field: Option<usize>,
     assistive_key_status_icon: Option<usize>,
     assistive_key_status_label: Option<usize>,
+    prompt_type_popup: Option<usize>,
+    prompt_editor_text_view: Option<usize>,
+    prompt_status_label: Option<usize>,
+    prompt_path_label: Option<usize>,
+    diagnostics_permission_labels: [Option<usize>; 5],
+    diagnostics_conflict_label: Option<usize>,
+    diagnostics_conflict_details_button: Option<usize>,
+    diagnostics_status_label: Option<usize>,
 }
 
 lazy_static! {
     static ref BOOTSTRAP_STATE: Mutex<BootstrapState> = Mutex::new(BootstrapState::default());
+}
+
+fn clear_bootstrap_ui_state(state: &mut BootstrapState) {
+    state.step_labels = [None, None, None];
+    state.tab_buttons = [None; TAB_COUNT];
+    state.content_views = [None; TAB_COUNT];
+    state.active_tab = TAB_SETUP;
+    state.keys_mode_binding_labels = [None; 3];
+    state.keys_recorder_hint_label = None;
+    state.keys_conflict_label = None;
+    state.keys_conflict_details_button = None;
+    state.hold_delay_value_label = None;
+    state.double_tap_value_label = None;
+    state.permission_labels = [None, None, None, None, None];
+    state.permission_action_buttons = [None, None, None, None, None];
+    state.permission_requested = [false; 5];
+    state.permission_polling = false;
+    state.quality_daemon_checkbox = None;
+    state.ultra_quality_checkbox = None;
+    state.quality_available_label = None;
+    state.quality_pending_label = None;
+    state.quality_last_check_label = None;
+    state.quality_report_label = None;
+    state.quality_open_report_button = None;
+    state.llm_endpoint_field = None;
+    state.llm_model_field = None;
+    state.llm_key_field = None;
+    state.llm_key_status_icon = None;
+    state.llm_key_status_label = None;
+    state.assistive_endpoint_field = None;
+    state.assistive_model_field = None;
+    state.assistive_key_field = None;
+    state.assistive_key_status_icon = None;
+    state.assistive_key_status_label = None;
+    state.prompt_type_popup = None;
+    state.prompt_editor_text_view = None;
+    state.prompt_status_label = None;
+    state.prompt_path_label = None;
+    state.diagnostics_permission_labels = [None; 5];
+    state.diagnostics_conflict_label = None;
+    state.diagnostics_conflict_details_button = None;
+    state.diagnostics_status_label = None;
 }
 
 fn setup_done_path() -> PathBuf {
@@ -773,6 +829,11 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         state.permission_polling = built_state.permission_polling;
         state.quality_daemon_checkbox = built_state.quality_daemon_checkbox;
         state.ultra_quality_checkbox = built_state.ultra_quality_checkbox;
+        state.quality_available_label = built_state.quality_available_label;
+        state.quality_pending_label = built_state.quality_pending_label;
+        state.quality_last_check_label = built_state.quality_last_check_label;
+        state.quality_report_label = built_state.quality_report_label;
+        state.quality_open_report_button = built_state.quality_open_report_button;
         state.llm_endpoint_field = built_state.llm_endpoint_field;
         state.llm_model_field = built_state.llm_model_field;
         state.llm_key_field = built_state.llm_key_field;
@@ -783,6 +844,14 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         state.assistive_key_field = built_state.assistive_key_field;
         state.assistive_key_status_icon = built_state.assistive_key_status_icon;
         state.assistive_key_status_label = built_state.assistive_key_status_label;
+        state.prompt_type_popup = built_state.prompt_type_popup;
+        state.prompt_editor_text_view = built_state.prompt_editor_text_view;
+        state.prompt_status_label = built_state.prompt_status_label;
+        state.prompt_path_label = built_state.prompt_path_label;
+        state.diagnostics_permission_labels = built_state.diagnostics_permission_labels;
+        state.diagnostics_conflict_label = built_state.diagnostics_conflict_label;
+        state.diagnostics_conflict_details_button = built_state.diagnostics_conflict_details_button;
+        state.diagnostics_status_label = built_state.diagnostics_status_label;
 
         drop(state); // Release lock before permission calls to avoid deadlock.
 
@@ -1202,21 +1271,21 @@ unsafe fn build_settings_ui(
         let tab_start_y = body_h - titlebar_inset - 54.0;
         let tab_names = [
             "Setup",
-            "Hotkeys",
-            "API Keys",
-            "Audio",
-            "Voice Lab",
-            "Engine",
-            "User",
+            "Modes & Shortcuts",
+            "AI & Prompts",
+            "Audio & Input",
+            "Quality",
+            "Diagnostics",
+            "Advanced",
         ];
         let tab_sels = [
             sel!(onTabSetup:),
-            sel!(onTabKeys:),
-            sel!(onTabApi:),
-            sel!(onTabAudio:),
-            sel!(onTabVoiceLab:),
-            sel!(onTabEngine:),
-            sel!(onTabUser:),
+            sel!(onTabModesShortcuts:),
+            sel!(onTabAiPrompts:),
+            sel!(onTabAudioInput:),
+            sel!(onTabQuality:),
+            sel!(onTabDiagnostics:),
+            sel!(onTabAdvanced:),
         ];
         let mut tab_buttons: [Option<usize>; TAB_COUNT] = [None; TAB_COUNT];
 
@@ -1440,7 +1509,7 @@ unsafe fn build_settings_ui(
                 &CGSize::new(field_w, 16.0),
             ),
             text:
-                "Hotkeys live in Hotkeys. API credentials live in API Keys. Daily toggles live in User."
+                "Continue in Modes & Shortcuts, AI & Prompts, and Quality to finish runtime setup."
                     .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
@@ -1448,41 +1517,46 @@ unsafe fn build_settings_ui(
         });
         add_subview(setup_view, setup_hint);
 
-        // --- Hotkeys tab (index 1) ---
-        let keys_view = build_hotkeys_tab(action_handler, tab_document_frame, config, &mut state);
+        // --- Modes & Shortcuts tab (index 1) ---
+        let keys_view =
+            build_modes_shortcuts_tab(action_handler, tab_document_frame, config, &mut state);
         let keys_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, keys_view);
         let _: () = msg_send![keys_scroll, setHidden: true];
         add_subview(content_container, keys_scroll);
 
-        // --- API Keys tab (index 2) ---
-        let api_view = build_api_tab(action_handler, tab_document_frame, config, &mut state);
+        // --- AI & Prompts tab (index 2) ---
+        let api_view = build_ai_prompts_tab(action_handler, tab_document_frame, config, &mut state);
         let api_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, api_view);
         let _: () = msg_send![api_scroll, setHidden: true];
         add_subview(content_container, api_scroll);
 
-        // --- Audio tab (index 3) ---
-        let audio_view = build_audio_tab(action_handler, tab_document_frame, config);
+        // --- Audio & Input tab (index 3) ---
+        let audio_view = build_audio_input_tab(action_handler, tab_document_frame, config);
         let audio_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, audio_view);
         let _: () = msg_send![audio_scroll, setHidden: true];
         add_subview(content_container, audio_scroll);
 
-        // --- Voice Lab tab (index 4) ---
-        let voice_lab_view = build_voice_lab_tab(action_handler, tab_document_frame);
-        let voice_lab_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, voice_lab_view);
-        let _: () = msg_send![voice_lab_scroll, setHidden: true];
-        add_subview(content_container, voice_lab_scroll);
+        // --- Quality tab (index 4) ---
+        let quality_view =
+            build_quality_tab(action_handler, tab_document_frame, config, &mut state);
+        let quality_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, quality_view);
+        let _: () = msg_send![quality_scroll, setHidden: true];
+        add_subview(content_container, quality_scroll);
 
-        // --- Engine tab (index 5) ---
-        let engine_view = build_engine_tab(tab_document_frame, config);
-        let engine_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, engine_view);
-        let _: () = msg_send![engine_scroll, setHidden: true];
-        add_subview(content_container, engine_scroll);
+        // --- Diagnostics tab (index 5) ---
+        let diagnostics_view =
+            build_diagnostics_tab(action_handler, tab_document_frame, config, &mut state);
+        let diagnostics_scroll =
+            wrap_tab_content_in_scroll_view(tab_content_frame, diagnostics_view);
+        let _: () = msg_send![diagnostics_scroll, setHidden: true];
+        add_subview(content_container, diagnostics_scroll);
 
-        // --- User tab (index 6) ---
-        let user_view = build_user_tab(action_handler, tab_document_frame, config, &mut state);
-        let user_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, user_view);
-        let _: () = msg_send![user_scroll, setHidden: true];
-        add_subview(content_container, user_scroll);
+        // --- Advanced tab (index 6) ---
+        let advanced_view =
+            build_advanced_tab(action_handler, tab_document_frame, config, &mut state);
+        let advanced_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, advanced_view);
+        let _: () = msg_send![advanced_scroll, setHidden: true];
+        add_subview(content_container, advanced_scroll);
 
         // ====================================================================
         // Store state
@@ -1494,9 +1568,9 @@ unsafe fn build_settings_ui(
             Some(keys_scroll as usize),
             Some(api_scroll as usize),
             Some(audio_scroll as usize),
-            Some(voice_lab_scroll as usize),
-            Some(engine_scroll as usize),
-            Some(user_scroll as usize),
+            Some(quality_scroll as usize),
+            Some(diagnostics_scroll as usize),
+            Some(advanced_scroll as usize),
         ];
         state.active_tab = TAB_SETUP;
         state.permission_labels = perm_labels;
@@ -1535,12 +1609,12 @@ unsafe fn create_sidebar_tab_button(
         // Add SF Symbol icon based on title
         let symbol_name = match title {
             "Setup" => "gearshape",
-            "Hotkeys" => "keyboard",
-            "API Keys" => "key.horizontal",
-            "Audio" => "waveform",
-            "Voice Lab" => "waveform.path.ecg",
-            "Engine" => "cpu",
-            "User" => "person.crop.circle",
+            "Modes & Shortcuts" => "keyboard",
+            "AI & Prompts" => "text.bubble",
+            "Audio & Input" => "waveform",
+            "Quality" => "checkmark.seal",
+            "Diagnostics" => "stethoscope",
+            "Advanced" => "slider.horizontal.3",
             _ => "circle",
         };
         crate::ui_helpers::set_button_symbol(btn, symbol_name);
@@ -1673,31 +1747,7 @@ pub(super) fn handle_bootstrap_window_closed() {
     state.window = None;
     state.window_delegate = None;
     state.root_view = None;
-    state.step_labels = [None, None, None];
-    state.tab_buttons = [None; TAB_COUNT];
-    state.content_views = [None; TAB_COUNT];
-    state.keys_mode_binding_labels = [None; 3];
-    state.keys_recorder_hint_label = None;
-    state.keys_conflict_label = None;
-    state.keys_conflict_details_button = None;
-    state.hold_delay_value_label = None;
-    state.double_tap_value_label = None;
-    state.permission_labels = [None, None, None, None, None];
-    state.permission_action_buttons = [None, None, None, None, None];
-    state.permission_requested = [false; 5];
-    state.permission_polling = false;
-    state.quality_daemon_checkbox = None;
-    state.ultra_quality_checkbox = None;
-    state.llm_endpoint_field = None;
-    state.llm_model_field = None;
-    state.llm_key_field = None;
-    state.llm_key_status_icon = None;
-    state.llm_key_status_label = None;
-    state.assistive_endpoint_field = None;
-    state.assistive_model_field = None;
-    state.assistive_key_field = None;
-    state.assistive_key_status_icon = None;
-    state.assistive_key_status_label = None;
+    clear_bootstrap_ui_state(&mut state);
     state.config_cache = None;
 }
 
@@ -1710,31 +1760,7 @@ pub fn hide_bootstrap_overlay() {
             if window_ptr.is_some() {
                 state.window_delegate = None;
                 state.root_view = None;
-                state.step_labels = [None, None, None];
-                state.tab_buttons = [None; TAB_COUNT];
-                state.content_views = [None; TAB_COUNT];
-                state.keys_mode_binding_labels = [None; 3];
-                state.keys_recorder_hint_label = None;
-                state.keys_conflict_label = None;
-                state.keys_conflict_details_button = None;
-                state.hold_delay_value_label = None;
-                state.double_tap_value_label = None;
-                state.permission_labels = [None, None, None, None, None];
-                state.permission_action_buttons = [None, None, None, None, None];
-                state.permission_requested = [false; 5];
-                state.permission_polling = false;
-                state.quality_daemon_checkbox = None;
-                state.ultra_quality_checkbox = None;
-                state.llm_endpoint_field = None;
-                state.llm_model_field = None;
-                state.llm_key_field = None;
-                state.llm_key_status_icon = None;
-                state.llm_key_status_label = None;
-                state.assistive_endpoint_field = None;
-                state.assistive_model_field = None;
-                state.assistive_key_field = None;
-                state.assistive_key_status_icon = None;
-                state.assistive_key_status_label = None;
+                clear_bootstrap_ui_state(&mut state);
                 (window_ptr, None)
             } else {
                 (None, state.root_view)
@@ -1782,31 +1808,7 @@ pub fn reset_embedded_bootstrap_state() {
     state.root_view = None;
     state.window_delegate = None;
     state.config_cache = None;
-    state.step_labels = [None, None, None];
-    state.tab_buttons = [None; TAB_COUNT];
-    state.content_views = [None; TAB_COUNT];
-    state.keys_mode_binding_labels = [None; 3];
-    state.keys_recorder_hint_label = None;
-    state.keys_conflict_label = None;
-    state.keys_conflict_details_button = None;
-    state.hold_delay_value_label = None;
-    state.double_tap_value_label = None;
-    state.permission_labels = [None, None, None, None, None];
-    state.permission_action_buttons = [None, None, None, None, None];
-    state.permission_requested = [false; 5];
-    state.permission_polling = false;
-    state.quality_daemon_checkbox = None;
-    state.ultra_quality_checkbox = None;
-    state.llm_endpoint_field = None;
-    state.llm_model_field = None;
-    state.llm_key_field = None;
-    state.llm_key_status_icon = None;
-    state.llm_key_status_label = None;
-    state.assistive_endpoint_field = None;
-    state.assistive_model_field = None;
-    state.assistive_key_field = None;
-    state.assistive_key_status_icon = None;
-    state.assistive_key_status_label = None;
+    clear_bootstrap_ui_state(&mut state);
 }
 
 fn update_step_status(index: usize, text: &str) {
@@ -2250,10 +2252,10 @@ fn show_hotkey_conflicts_sheet() {
 }
 
 // ============================================================================
-// Hotkeys tab
+// Modes & Shortcuts tab
 // ============================================================================
 
-unsafe fn build_hotkeys_tab(
+unsafe fn build_modes_shortcuts_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     config: &Config,
@@ -2275,7 +2277,7 @@ unsafe fn build_hotkeys_tab(
 
         let title = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 22.0)),
-            text: "Hotkeys".to_string(),
+            text: "Modes & Shortcuts".to_string(),
             font_size: ui_tokens::BODY_FONT_SIZE,
             bold: true,
             text_color: primary,
@@ -2289,7 +2291,9 @@ unsafe fn build_hotkeys_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Mode -> Shortcut mapping. Each mode has its own binding.".to_string(),
+            text:
+                "Mode-first shortcut model. Each mode has one binding you can customize or disable."
+                    .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -2310,7 +2314,7 @@ unsafe fn build_hotkeys_tab(
             let button_gap = 8.0;
             let change_x = pad + content_w - change_button_w;
             let disable_x = change_x - button_gap - disable_button_w;
-            let mut binding_right_x = disable_x - 8.0;
+            let binding_right_x = disable_x - 8.0;
 
             let row_title = create_label(LabelConfig {
                 frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(126.0, 20.0)),
@@ -2320,23 +2324,6 @@ unsafe fn build_hotkeys_tab(
                 ..Default::default()
             });
             add_subview(container, row_title);
-
-            if mode == WorkMode::Dictation {
-                let quick_button_w = 110.0;
-                let quick_x = disable_x - button_gap - quick_button_w;
-                let quick_button = create_button(
-                    CGRect::new(
-                        &CGPoint::new(quick_x, y - 2.0),
-                        &CGSize::new(quick_button_w, 24.0),
-                    ),
-                    "Double Ctrl",
-                    button_style::GLASS,
-                );
-                let _: () = msg_send![quick_button, setTag: MODE_DICTATION_DOUBLE_CTRL_TAG];
-                button_set_action(quick_button, action_handler, sel!(onModeBindingChange:));
-                add_subview(container, quick_button);
-                binding_right_x = quick_x - 8.0;
-            }
 
             let binding_x = pad + 128.0;
             let binding_label = create_label(LabelConfig {
@@ -2369,7 +2356,7 @@ unsafe fn build_hotkeys_tab(
                     &CGPoint::new(change_x, y - 2.0),
                     &CGSize::new(change_button_w, 24.0),
                 ),
-                "\u{2328} Change",
+                "\u{2328} Customize",
                 button_style::GLASS,
             );
             let _: () = msg_send![change_button, setTag: tag];
@@ -2404,7 +2391,7 @@ unsafe fn build_hotkeys_tab(
 
         let recorder_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Shortcut recorder: click [⌨ Change], press Fn/Ctrl/Option. Esc cancels capture."
+            text: "Shortcut recorder: click [⌨ Customize], press Fn/Ctrl/Option. Esc cancels."
                 .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
@@ -2412,92 +2399,6 @@ unsafe fn build_hotkeys_tab(
         });
         add_subview(container, recorder_hint);
         y -= 16.0 + gap;
-
-        let advanced_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
-            text: "Capture tuning".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: true,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, advanced_label);
-        y -= 18.0 + gap;
-
-        let delay_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
-            text: "Hold delay (ms):".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, delay_label);
-
-        let delay_ms = config.hold_start_delay_ms as f64;
-        let value_w = 60.0;
-        let value_gap = 8.0;
-        let slider_w = (content_w - 124.0 - value_gap - value_w).max(120.0);
-        let delay_slider = create_slider(
-            CGRect::new(&CGPoint::new(pad + 124.0, y), &CGSize::new(slider_w, 20.0)),
-            200.0,
-            1500.0,
-            delay_ms,
-        );
-        button_set_action(delay_slider, action_handler, sel!(onDelayChanged:));
-        add_subview(container, delay_slider);
-
-        let delay_value = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(pad + 124.0 + slider_w + value_gap, y - 1.0),
-                &CGSize::new(value_w, 20.0),
-            ),
-            text: format!("{} ms", delay_ms.round() as u64),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, delay_value);
-        y -= 20.0 + gap;
-
-        let double_tap_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(160.0, 20.0)),
-            text: "Double-tap interval (ms):".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, double_tap_label);
-
-        let double_tap_ms = config.double_tap_interval_ms as f64;
-        let double_tap_slider_w = (content_w - 164.0 - value_gap - value_w).max(120.0);
-        let double_tap_slider = create_slider(
-            CGRect::new(
-                &CGPoint::new(pad + 164.0, y),
-                &CGSize::new(double_tap_slider_w, 20.0),
-            ),
-            100.0,
-            450.0,
-            double_tap_ms,
-        );
-        button_set_action(
-            double_tap_slider,
-            action_handler,
-            sel!(onDoubleTapIntervalChanged:),
-        );
-        add_subview(container, double_tap_slider);
-
-        let double_tap_value = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(pad + 164.0 + double_tap_slider_w + value_gap, y - 1.0),
-                &CGSize::new(value_w, 20.0),
-            ),
-            text: format!("{} ms", double_tap_ms.round() as u64),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, double_tap_value);
-        y -= 20.0 + gap;
 
         let (conflict_text, has_conflict) = hotkey_conflict_status(config);
         let conflict_label = create_label(LabelConfig {
@@ -2542,7 +2443,7 @@ unsafe fn build_hotkeys_tab(
 
         let api_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "API endpoints, models, and keys are in the API Keys tab.".to_string(),
+            text: "Capture timing controls are available in Advanced.".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -2553,18 +2454,16 @@ unsafe fn build_hotkeys_tab(
         state.keys_recorder_hint_label = Some(recorder_hint as usize);
         state.keys_conflict_label = Some(conflict_label as usize);
         state.keys_conflict_details_button = Some(conflict_details_button as usize);
-        state.hold_delay_value_label = Some(delay_value as usize);
-        state.double_tap_value_label = Some(double_tap_value as usize);
 
         container
     } // unsafe
 }
 
 // ============================================================================
-// API Keys tab
+// AI & Prompts tab
 // ============================================================================
 
-unsafe fn build_api_tab(
+unsafe fn build_ai_prompts_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     _config: &Config,
@@ -2573,6 +2472,7 @@ unsafe fn build_api_tab(
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
         let ns_view = objc_class("NSView");
+        let ns_popup = objc_class("NSPopUpButton");
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
 
@@ -2586,7 +2486,7 @@ unsafe fn build_api_tab(
 
         let title = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 22.0)),
-            text: "API Keys".to_string(),
+            text: "AI & Prompts".to_string(),
             font_size: ui_tokens::BODY_FONT_SIZE,
             bold: true,
             text_color: primary,
@@ -2600,7 +2500,8 @@ unsafe fn build_api_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Runtime endpoints, models, and credentials.".to_string(),
+            text: "Runtime AI endpoints plus an in-app prompt editor for formatting and assistive modes."
+                .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -2799,21 +2700,180 @@ unsafe fn build_api_tab(
                 &CGPoint::new(frame.size.width - pad - 90.0, y - 2.0),
                 &CGSize::new(90.0, 24.0),
             ),
-            "Save",
+            "Save AI",
             button_style::GLASS,
         );
         button_set_action(save_btn, action_handler, sel!(onSaveApiSettings:));
         add_subview(container, save_btn);
+        y -= 24.0 + gap;
+
+        let runtime_hint = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w - 98.0, 16.0)),
+            text: "Save AI persists endpoint/model/key values. Prompt content is edited below."
+                .to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, runtime_hint);
+        y -= 16.0 + gap;
+
+        let section_divider = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 1.0)),
+            text: String::new(),
+            background_color: Some(ui_colors::surface_border()),
+            ..Default::default()
+        });
+        let _: () = msg_send![section_divider, setAlphaValue: 0.9f64];
+        add_subview(container, section_divider);
+        y -= gap;
+
+        let prompt_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Prompt Editor".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, prompt_header);
+        y -= 18.0 + gap;
+
+        let prompt_subtitle = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text:
+            "Primary flow is fully in-app: switch prompt type, edit, save, or reset to defaults."
+                .to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, prompt_subtitle);
+        y -= 16.0 + gap;
+
+        let prompt_type_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(106.0, 20.0)),
+            text: "Prompt type:".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, prompt_type_label);
+
+        let prompt_type_popup: Id = msg_send![ns_popup, alloc];
+        let prompt_type_popup: Id = msg_send![prompt_type_popup, initWithFrame:
+            CGRect::new(&CGPoint::new(pad + 108.0, y - 2.0), &CGSize::new(208.0, 24.0))
+            pullsDown: false
+        ];
+        let _: () = msg_send![prompt_type_popup, addItemWithTitle: ns_string("Formatting prompt")];
+        let _: () = msg_send![prompt_type_popup, addItemWithTitle: ns_string("Assistive prompt")];
+        let _: () = msg_send![prompt_type_popup, selectItemAtIndex: 0_isize];
+        button_set_action(
+            prompt_type_popup,
+            action_handler,
+            sel!(onPromptTypeChanged:),
+        );
+        add_subview(container, prompt_type_popup);
+        state.prompt_type_popup = Some(prompt_type_popup as usize);
+
+        let reset_btn_w = 112.0;
+        let save_prompt_btn_w = 98.0;
+        let load_btn_w = 82.0;
+        let reset_btn_x = pad + content_w - reset_btn_w;
+        let save_prompt_btn_x = reset_btn_x - 8.0 - save_prompt_btn_w;
+        let load_btn_x = save_prompt_btn_x - 8.0 - load_btn_w;
+
+        let load_btn = create_button(
+            CGRect::new(
+                &CGPoint::new(load_btn_x, y - 2.0),
+                &CGSize::new(load_btn_w, 24.0),
+            ),
+            "Load",
+            button_style::GLASS,
+        );
+        button_set_action(load_btn, action_handler, sel!(onPromptLoad:));
+        add_subview(container, load_btn);
+
+        let save_prompt_btn = create_button(
+            CGRect::new(
+                &CGPoint::new(save_prompt_btn_x, y - 2.0),
+                &CGSize::new(save_prompt_btn_w, 24.0),
+            ),
+            "Save Prompt",
+            button_style::GLASS,
+        );
+        button_set_action(save_prompt_btn, action_handler, sel!(onPromptSave:));
+        add_subview(container, save_prompt_btn);
+
+        let reset_prompt_btn = create_button(
+            CGRect::new(
+                &CGPoint::new(reset_btn_x, y - 2.0),
+                &CGSize::new(reset_btn_w, 24.0),
+            ),
+            "Reset Default",
+            button_style::GLASS,
+        );
+        button_set_action(reset_prompt_btn, action_handler, sel!(onPromptReset:));
+        add_subview(container, reset_prompt_btn);
+        y -= 24.0 + gap;
+
+        let initial_type = "formatting";
+        let initial_path = prompt_path_text(initial_type);
+        let path_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: format!("Path: {initial_path}"),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, path_label);
+        state.prompt_path_label = Some(path_label as usize);
+        y -= 16.0 + gap;
+
+        let editor_height = 220.0;
+        let editor_y = (y - editor_height).max(28.0);
+        let (editor_scroll, editor_text_view) = create_scrollable_text_view(
+            CGRect::new(
+                &CGPoint::new(pad, editor_y),
+                &CGSize::new(content_w, editor_height),
+            ),
+            true,
+        );
+        let editor_font = crate::ui_helpers::monospace_font(ui_tokens::SMALL_FONT_SIZE);
+        let _: () = msg_send![editor_text_view, setFont: editor_font];
+        let _: () = msg_send![editor_text_view, setRichText: false];
+        let _: () = msg_send![editor_scroll, setDrawsBackground: true];
+        let editor_bg = settings_input_paper_bg();
+        let _: () = msg_send![editor_scroll, setBackgroundColor: editor_bg];
+        add_subview(container, editor_scroll);
+        state.prompt_editor_text_view = Some(editor_text_view as usize);
+
+        let initial_prompt = load_prompt_content(initial_type).unwrap_or_else(|err| {
+            warn!("Settings: failed to load initial prompt: {err}");
+            String::new()
+        });
+        set_text_view_string(editor_text_view, &initial_prompt);
+
+        y = editor_y - gap;
+        let prompt_status = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: "Formatting prompt loaded.".to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, prompt_status);
+        state.prompt_status_label = Some(prompt_status as usize);
 
         container
     }
 }
 
 // ============================================================================
-// Audio tab
+// Audio & Input tab
 // ============================================================================
 
-unsafe fn build_audio_tab(
+unsafe fn build_audio_input_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     config: &Config,
@@ -2836,7 +2896,7 @@ unsafe fn build_audio_tab(
         // Section title
         let title = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 22.0)),
-            text: "Speech & Interaction".to_string(),
+            text: "Audio & Input".to_string(),
             font_size: ui_tokens::BODY_FONT_SIZE,
             bold: true,
             text_color: primary,
@@ -2994,11 +3054,15 @@ unsafe fn build_audio_tab(
     } // unsafe
 }
 
-unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry::CGRect) -> Id {
+unsafe fn build_advanced_tab(
+    action_handler: Id,
+    frame: core_graphics::geometry::CGRect,
+    config: &Config,
+    state: &mut BootstrapState,
+) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
         let ns_view = objc_class("NSView");
-        let ns_scroll_view = objc_class("NSScrollView");
         let env_snapshot: HashMap<String, String> = std::env::vars().collect();
 
         let container: Id = msg_send![ns_view, alloc];
@@ -3006,14 +3070,14 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
 
         let pad = ui_tokens::EDGE_PADDING;
         let content_w = frame.size.width - pad * 2.0;
-        let gap = ui_tokens::DENSITY_COMPACT;
+        let gap = ui_tokens::DENSITY_MEDIUM;
         let mut y = frame.size.height - (22.0 + gap);
         let primary = crate::ui_helpers::color_label();
         let secondary = crate::ui_helpers::color_secondary_label();
 
         let title = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 22.0)),
-            text: "Voice Lab".to_string(),
+            text: "Advanced".to_string(),
             font_size: ui_tokens::BODY_FONT_SIZE,
             bold: true,
             text_color: primary,
@@ -3027,13 +3091,124 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Hot-reload transcription engine controls (persisted to config)".to_string(),
+            text: "Low-level tuning for shortcut timing and transcription pipeline experiments."
+                .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
         });
         add_subview(container, subtitle);
         y -= 16.0 + gap;
+
+        let capture_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Capture Timing".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, capture_header);
+        y -= 18.0 + gap;
+
+        let delay_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
+            text: "Hold delay (ms):".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, delay_label);
+
+        let delay_ms = config.hold_start_delay_ms as f64;
+        let value_w = 60.0;
+        let value_gap = 8.0;
+        let slider_w = (content_w - 124.0 - value_gap - value_w).max(120.0);
+        let delay_slider = create_slider(
+            CGRect::new(&CGPoint::new(pad + 124.0, y), &CGSize::new(slider_w, 20.0)),
+            200.0,
+            1500.0,
+            delay_ms,
+        );
+        button_set_action(delay_slider, action_handler, sel!(onDelayChanged:));
+        add_subview(container, delay_slider);
+
+        let delay_value = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(pad + 124.0 + slider_w + value_gap, y - 1.0),
+                &CGSize::new(value_w, 20.0),
+            ),
+            text: format!("{} ms", delay_ms.round() as u64),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, delay_value);
+        state.hold_delay_value_label = Some(delay_value as usize);
+        y -= 20.0 + gap;
+
+        let double_tap_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(160.0, 20.0)),
+            text: "Double-tap interval (ms):".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, double_tap_label);
+
+        let double_tap_ms = config.double_tap_interval_ms as f64;
+        let double_tap_slider_w = (content_w - 164.0 - value_gap - value_w).max(120.0);
+        let double_tap_slider = create_slider(
+            CGRect::new(
+                &CGPoint::new(pad + 164.0, y),
+                &CGSize::new(double_tap_slider_w, 20.0),
+            ),
+            100.0,
+            450.0,
+            double_tap_ms,
+        );
+        button_set_action(
+            double_tap_slider,
+            action_handler,
+            sel!(onDoubleTapIntervalChanged:),
+        );
+        add_subview(container, double_tap_slider);
+
+        let double_tap_value = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(pad + 164.0 + double_tap_slider_w + value_gap, y - 1.0),
+                &CGSize::new(value_w, 20.0),
+            ),
+            text: format!("{} ms", double_tap_ms.round() as u64),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, double_tap_value);
+        state.double_tap_value_label = Some(double_tap_value as usize);
+        y -= 20.0 + gap;
+
+        let advanced_divider = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 1.0)),
+            text: String::new(),
+            background_color: Some(ui_colors::surface_border()),
+            ..Default::default()
+        });
+        let _: () = msg_send![advanced_divider, setAlphaValue: 0.9f64];
+        add_subview(container, advanced_divider);
+        y -= gap;
+
+        let voice_lab_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Voice Lab Overrides".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, voice_lab_header);
+        y -= 18.0 + gap;
+
         let apply_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 14.0)),
             text: "Apply: press Enter or click outside the field.".to_string(),
@@ -3044,44 +3219,6 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
         add_subview(container, apply_hint);
         y -= 14.0 + gap;
 
-        let scroll_h = (y - 18.0).max(160.0);
-        let scroll_frame = CGRect::new(&CGPoint::new(pad, 12.0), &CGSize::new(content_w, scroll_h));
-        let scroll: Id = msg_send![ns_scroll_view, alloc];
-        let scroll: Id = msg_send![scroll, initWithFrame: scroll_frame];
-        // Configure the vertical scroller after we know actual document height.
-        let _: () = msg_send![scroll, setHasVerticalScroller: false];
-        let _: () = msg_send![scroll, setHasHorizontalScroller: false];
-        let _: () = msg_send![scroll, setAutohidesScrollers: true];
-        let _: () = msg_send![scroll, setBorderType: 0_isize];
-        let _: () = msg_send![scroll, setDrawsBackground: false];
-        let _: () = msg_send![
-            scroll,
-            setAutoresizingMask: 2_isize | 16_isize // width + height sizable
-        ];
-
-        let mut doc_h: f64 = 18.0;
-        for spec in VOICE_LAB_FIELDS {
-            doc_h += if spec.kind == VoiceLabFieldKind::Bool {
-                toggle_row_step(true, gap)
-            } else {
-                16.0 + gap + SETTINGS_INPUT_HEIGHT + gap + 16.0 + gap
-            };
-        }
-        doc_h = doc_h.max(18.0);
-        let needs_vertical_scroll = doc_h > (scroll_h + 1.0);
-        let _: () = msg_send![scroll, setHasVerticalScroller: needs_vertical_scroll];
-
-        let doc_w = (content_w - 14.0).max(260.0);
-        let doc_view: Id = msg_send![ns_view, alloc];
-        let doc_view: Id = msg_send![doc_view, initWithFrame:
-            CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(doc_w, doc_h))
-        ];
-        let _: () = msg_send![
-            doc_view,
-            setAutoresizingMask: 2_isize // width sizable
-        ];
-
-        let mut row_y = doc_h - 24.0;
         for (idx, spec) in VOICE_LAB_FIELDS.iter().enumerate() {
             match spec.kind {
                 VoiceLabFieldKind::Bool => {
@@ -3089,11 +3226,11 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
                         parse_env_bool(&voice_lab_value_from_snapshot(spec, &env_snapshot));
                     let title = format!("{} ({})", spec.label, spec.key);
                     let _check = add_toggle_row(
-                        doc_view,
+                        container,
                         action_handler,
-                        0.0,
-                        &mut row_y,
-                        doc_w - 6.0,
+                        pad,
+                        &mut y,
+                        content_w,
                         secondary,
                         ToggleRowSpec {
                             title: &title,
@@ -3107,20 +3244,20 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
                 }
                 VoiceLabFieldKind::Value => {
                     let label = create_label(LabelConfig {
-                        frame: CGRect::new(&CGPoint::new(0.0, row_y), &CGSize::new(doc_w, 16.0)),
+                        frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
                         text: format!("{} ({})", spec.label, spec.key),
                         font_size: ui_tokens::MICRO_FONT_SIZE,
                         text_color: secondary,
                         ..Default::default()
                     });
-                    add_subview(doc_view, label);
-                    row_y -= 16.0 + gap;
+                    add_subview(container, label);
+                    y -= 16.0 + gap;
 
                     let current = voice_lab_value_from_snapshot(spec, &env_snapshot);
                     let field = create_text_input(
                         CGRect::new(
-                            &CGPoint::new(0.0, row_y),
-                            &CGSize::new(doc_w - 6.0, SETTINGS_INPUT_HEIGHT),
+                            &CGPoint::new(pad, y),
+                            &CGSize::new(content_w, SETTINGS_INPUT_HEIGHT),
                         ),
                         spec.default_value,
                         &current,
@@ -3128,27 +3265,22 @@ unsafe fn build_voice_lab_tab(action_handler: Id, frame: core_graphics::geometry
                     style_paper_input(field);
                     let _: () = msg_send![field, setTag: idx as isize];
                     button_set_action(field, action_handler, sel!(onVoiceLabFieldChanged:));
-                    add_subview(doc_view, field);
-                    row_y -= SETTINGS_INPUT_HEIGHT + gap;
+                    add_subview(container, field);
+                    y -= SETTINGS_INPUT_HEIGHT + gap;
 
                     let desc = create_label(LabelConfig {
-                        frame: CGRect::new(
-                            &CGPoint::new(0.0, row_y),
-                            &CGSize::new(doc_w - 8.0, 16.0),
-                        ),
+                        frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
                         text: spec.description.to_string(),
                         font_size: ui_tokens::MICRO_FONT_SIZE,
                         text_color: secondary,
                         ..Default::default()
                     });
-                    add_subview(doc_view, desc);
-                    row_y -= 16.0 + gap;
+                    add_subview(container, desc);
+                    y -= 16.0 + gap;
                 }
             }
         }
 
-        let _: () = msg_send![scroll, setDocumentView: doc_view];
-        add_subview(container, scroll);
         container
     }
 }
@@ -3587,6 +3719,52 @@ unsafe fn build_user_tab(
 
         container
     }
+}
+
+// Temporary compatibility adapters for Settings V3 naming.
+// They preserve the new tab labels while reusing existing builders.
+unsafe fn build_ai_prompts_tab(
+    action_handler: Id,
+    frame: core_graphics::geometry::CGRect,
+    config: &Config,
+    state: &mut BootstrapState,
+) -> Id {
+    unsafe { build_api_tab(action_handler, frame, config, state) }
+}
+
+unsafe fn build_audio_input_tab(
+    action_handler: Id,
+    frame: core_graphics::geometry::CGRect,
+    config: &Config,
+) -> Id {
+    unsafe { build_audio_tab(action_handler, frame, config) }
+}
+
+unsafe fn build_quality_tab(
+    action_handler: Id,
+    frame: core_graphics::geometry::CGRect,
+    _config: &Config,
+    _state: &mut BootstrapState,
+) -> Id {
+    unsafe { build_voice_lab_tab(action_handler, frame) }
+}
+
+unsafe fn build_diagnostics_tab(
+    _action_handler: Id,
+    frame: core_graphics::geometry::CGRect,
+    config: &Config,
+    _state: &mut BootstrapState,
+) -> Id {
+    unsafe { build_engine_tab(frame, config) }
+}
+
+unsafe fn build_advanced_tab(
+    action_handler: Id,
+    frame: core_graphics::geometry::CGRect,
+    config: &Config,
+    state: &mut BootstrapState,
+) -> Id {
+    unsafe { build_user_tab(action_handler, frame, config, state) }
 }
 
 // ============================================================================

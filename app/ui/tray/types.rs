@@ -63,8 +63,6 @@ impl TrayStatus {
 pub enum TrayMenuEvent {
     /// Copy last transcript to clipboard
     CopyLast,
-    /// Open settings file in editor
-    OpenSettings,
     /// Open help/documentation in browser
     OpenHelp,
     /// Show about dialog
@@ -72,23 +70,12 @@ pub enum TrayMenuEvent {
     /// User clicked Quit - clean shutdown
     Quit,
 
-    /// Open Settings window (onboarding flow)
-    RunOnboarding,
-
     // History (open folder)
     OpenHistoryFolder,
 
     // Diagnostics
     CopyDiagnostics,
-    OpenAccessibilitySettings,
-    OpenInputMonitoringSettings,
-    ResetInputMonitoringPermission,
     InstallSileroVad,
-
-    // Prompts
-    OpenAssistivePrompt,
-    OpenFormattingPrompt,
-    OpenPromptsFolder,
 
     // Notes
     SetQuickNotesEnabled(bool),
@@ -115,16 +102,10 @@ pub struct MenuIds {
     // Top-level
     pub copy_last: MenuId,
     pub show_overlay: MenuId,
-    pub run_onboarding: MenuId,
+    pub open_settings: MenuId,
     pub complete_setup: Option<MenuId>,
     pub open_history: MenuId,
     pub copy_diagnostics: MenuId,
-    pub open_accessibility_settings: MenuId,
-    pub open_input_monitoring_settings: MenuId,
-    pub reset_input_monitoring_permission: MenuId,
-    pub open_assistive_prompt: MenuId,
-    pub open_formatting_prompt: MenuId,
-    pub open_prompts_folder: MenuId,
     pub help: MenuId,
     pub about: MenuId,
     pub quit: MenuId,
