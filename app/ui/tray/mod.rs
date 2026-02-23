@@ -9,31 +9,21 @@
 //! - `icons` - Icon rendering and status glyph management
 //! - `state` - Cross-thread channels for status updates
 //! - `menu` - Menu building logic
-//! - `submenus` - Submenu building functions
 //! - `handlers` - Menu action handlers
 //!
 //! ## Menu Structure
 //!
 //! ```text
-//! Status: Done!
-//! ─────────────
-//! [✓] AI Formatting
-//!     Copy Last to Clipboard
-//! ─────────────
-//! Settings ▸
-//!     ├── Hold Hotkeys ▸
-//!     │   ├── Ctrl only
-//!     │   ├── Ctrl+Option
-//!     │   ├── Ctrl+Shift
-//!     │   └── Ctrl+Command
-//!     ├── Recent Transcripts ▸
-//!     │   ├── [5 entries]
-//!     │   └── Open Folder
-//!     └── Edit Config File
-//! ─────────────
+//! Status: Idle
+//! Show Agent
+//! Open history...
+//! Copy last transcript
+//! Notes ▸
+//! Diagnostics ▸
+//! Complete Setup... (when setup is incomplete)
+//! Settings
 //! Help
 //! About
-//! ─────────────
 //! Quit
 //! ```
 

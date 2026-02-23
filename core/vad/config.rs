@@ -26,8 +26,8 @@ pub struct VadConfig {
 
 pub const SILERO_DEFAULT_THRESHOLD: f32 = 0.5;
 pub const SILERO_DEFAULT_MIN_SPEECH_SEC: f32 = 0.064;
-pub const SILERO_DEFAULT_MAX_SILENCE_SEC: f32 = 0.0;
-pub const SILERO_DEFAULT_MAX_UTTERANCE_SEC: f32 = f32::INFINITY;
+pub const SILERO_DEFAULT_MAX_SILENCE_SEC: f32 = 0.3;
+pub const SILERO_DEFAULT_MAX_UTTERANCE_SEC: f32 = 30.0;
 pub const SILERO_DEFAULT_PRE_ROLL_SEC: f32 = 0.064;
 
 impl Default for VadConfig {
@@ -94,7 +94,7 @@ mod tests {
         assert!(
             (config.max_silence_duration_sec - SILERO_DEFAULT_MAX_SILENCE_SEC).abs() < f32::EPSILON
         );
-        assert!(config.max_utterance_sec.is_infinite());
+        assert!((config.max_utterance_sec - SILERO_DEFAULT_MAX_UTTERANCE_SEC).abs() < f32::EPSILON);
         assert!((config.pre_roll_sec - SILERO_DEFAULT_PRE_ROLL_SEC).abs() < f32::EPSILON);
     }
 
