@@ -9,7 +9,7 @@
 //!
 //! Created by M&K (c)2026 VetCoders
 
-use codescribe::config::Config;
+use codescribe::config::{Config, ShortcutBinding, WorkMode};
 use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
@@ -148,17 +148,21 @@ fn test_settings_toggle_trigger_persistence() {
 
     let config = Config::load();
 
-    // Simulate on_toggle_trigger_changed
+    // Mode-first contract: double_ctrl is valid only when hold path is disabled.
     config
-        .save_to_env("TOGGLE_TRIGGER", "double_ctrl")
-        .expect("save toggle trigger");
+        .save_to_env_many(&[("HOLD_MODS", "none"), ("TOGGLE_TRIGGER", "double_ctrl")])
+        .expect("save double ctrl mode binding");
 
-    // Verify round-trip through settings.json
     let settings = codescribe::config::UserSettings::load();
+    assert_eq!(
+        settings.mode_binding_for(WorkMode::Dictation),
+        ShortcutBinding::DoubleCtrl,
+        "dictation mode should map to double ctrl"
+    );
     assert_eq!(
         settings.toggle_trigger.as_deref(),
         Some("double_ctrl"),
-        "toggle trigger persisted in JSON"
+        "legacy toggle mirror should stay in sync"
     );
 }
 

@@ -16,9 +16,7 @@ use objc::{msg_send, sel, sel_impl};
 use objc2_app_kit::{NSVisualEffectMaterial, NSWindowButton, NSWindowCollectionBehavior};
 use tracing::{info, warn};
 
-use crate::config::{
-    Config, HoldMods, ShortcutBinding, ToggleTrigger, UserSettings, WorkMode, keychain,
-};
+use crate::config::{Config, ShortcutBinding, UserSettings, WorkMode, keychain};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::permissions::PermissionStatus;
 use crate::os::{hotkeys, shortcut_registry};
@@ -85,6 +83,7 @@ const STEP_PRESS_HOTKEY: usize = 2;
 const MODE_DICTATION_TAG: isize = 0;
 const MODE_FORMATTING_TAG: isize = 1;
 const MODE_ASSISTIVE_TAG: isize = 2;
+const MODE_DISABLE_TAG_OFFSET: isize = 10;
 const MODE_DICTATION_DOUBLE_CTRL_TAG: isize = 100;
 
 #[derive(Default)]
@@ -469,10 +468,6 @@ struct BootstrapState {
     tab_buttons: [Option<usize>; TAB_COUNT],
     content_views: [Option<usize>; TAB_COUNT],
     active_tab: usize,
-    keys_hold_popup: Option<usize>,
-    keys_toggle_popup: Option<usize>,
-    keys_preset_popup: Option<usize>,
-    keys_exclusive_checkbox: Option<usize>,
     keys_mode_binding_labels: [Option<usize>; 3],
     keys_recorder_hint_label: Option<usize>,
     keys_conflict_label: Option<usize>,
@@ -766,10 +761,6 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         state.tab_buttons = built_state.tab_buttons;
         state.content_views = built_state.content_views;
         state.active_tab = built_state.active_tab;
-        state.keys_hold_popup = built_state.keys_hold_popup;
-        state.keys_toggle_popup = built_state.keys_toggle_popup;
-        state.keys_preset_popup = built_state.keys_preset_popup;
-        state.keys_exclusive_checkbox = built_state.keys_exclusive_checkbox;
         state.keys_mode_binding_labels = built_state.keys_mode_binding_labels;
         state.keys_recorder_hint_label = built_state.keys_recorder_hint_label;
         state.keys_conflict_label = built_state.keys_conflict_label;
@@ -1683,10 +1674,6 @@ pub(super) fn handle_bootstrap_window_closed() {
     state.step_labels = [None, None, None];
     state.tab_buttons = [None; TAB_COUNT];
     state.content_views = [None; TAB_COUNT];
-    state.keys_hold_popup = None;
-    state.keys_toggle_popup = None;
-    state.keys_preset_popup = None;
-    state.keys_exclusive_checkbox = None;
     state.keys_mode_binding_labels = [None; 3];
     state.keys_recorder_hint_label = None;
     state.keys_conflict_label = None;
@@ -1723,10 +1710,6 @@ pub fn hide_bootstrap_overlay() {
                 state.step_labels = [None, None, None];
                 state.tab_buttons = [None; TAB_COUNT];
                 state.content_views = [None; TAB_COUNT];
-                state.keys_hold_popup = None;
-                state.keys_toggle_popup = None;
-                state.keys_preset_popup = None;
-                state.keys_exclusive_checkbox = None;
                 state.keys_mode_binding_labels = [None; 3];
                 state.keys_recorder_hint_label = None;
                 state.keys_conflict_label = None;
@@ -1798,10 +1781,6 @@ pub fn reset_embedded_bootstrap_state() {
     state.step_labels = [None, None, None];
     state.tab_buttons = [None; TAB_COUNT];
     state.content_views = [None; TAB_COUNT];
-    state.keys_hold_popup = None;
-    state.keys_toggle_popup = None;
-    state.keys_preset_popup = None;
-    state.keys_exclusive_checkbox = None;
     state.keys_mode_binding_labels = [None; 3];
     state.keys_recorder_hint_label = None;
     state.keys_conflict_label = None;
@@ -1835,30 +1814,6 @@ fn update_step_status(index: usize, text: &str) {
     });
 }
 
-fn set_keys_popup_index(popup: Option<usize>, index: isize) {
-    if let Some(popup) = popup {
-        unsafe {
-            let popup = popup as Id;
-            let _: () = msg_send![popup, selectItemAtIndex: index];
-        }
-    }
-}
-
-fn set_keys_checkbox_state(checkbox: Option<usize>, enabled: bool) {
-    if let Some(checkbox) = checkbox {
-        unsafe {
-            let checkbox = checkbox as Id;
-            let state_value: isize = if enabled { 1 } else { 0 };
-            let _: () = msg_send![checkbox, setState: state_value];
-        }
-    }
-}
-
-fn mark_keys_preset_custom() {
-    let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    set_keys_popup_index(state.keys_preset_popup, 2);
-}
-
 fn mode_from_tag(tag: isize) -> Option<WorkMode> {
     match tag {
         MODE_DICTATION_TAG => Some(WorkMode::Dictation),
@@ -1869,7 +1824,11 @@ fn mode_from_tag(tag: isize) -> Option<WorkMode> {
 }
 
 fn mode_from_disable_tag(tag: isize) -> Option<WorkMode> {
-    mode_from_tag(tag - 10)
+    mode_from_tag(tag - MODE_DISABLE_TAG_OFFSET)
+}
+
+fn mode_from_double_ctrl_tag(tag: isize) -> bool {
+    tag == MODE_DICTATION_DOUBLE_CTRL_TAG
 }
 
 fn mode_label_slot(mode: WorkMode) -> usize {
@@ -1878,36 +1837,6 @@ fn mode_label_slot(mode: WorkMode) -> usize {
         WorkMode::Formatting => 1,
         WorkMode::Assistive => 2,
     }
-}
-
-fn hold_popup_index(mods: HoldMods) -> isize {
-    match mods {
-        HoldMods::Fn => 0,
-        HoldMods::Ctrl => 1,
-        HoldMods::CtrlAlt => 2,
-        HoldMods::CtrlShift => 3,
-        HoldMods::CtrlCmd => 4,
-        HoldMods::None => 5,
-    }
-}
-
-fn toggle_popup_index(trigger: ToggleTrigger) -> isize {
-    match trigger {
-        ToggleTrigger::None => 0,
-        ToggleTrigger::DoubleCtrl => 1,
-        ToggleTrigger::DoubleLeftOption => 2,
-        ToggleTrigger::DoubleRightOption => 3,
-        ToggleTrigger::DoubleOption => 4,
-    }
-}
-
-fn refresh_hotkey_popups_from_config(config: &Config) {
-    let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    set_keys_popup_index(state.keys_hold_popup, hold_popup_index(config.hold_mods));
-    set_keys_popup_index(
-        state.keys_toggle_popup,
-        toggle_popup_index(config.toggle_trigger),
-    );
 }
 
 fn set_mode_recorder_hint(text: &str, is_error: bool) {
@@ -1955,6 +1884,7 @@ fn binding_from_recorded_event(
 ) -> Option<ShortcutBinding> {
     // NSEventModifierFlagShift/Control/Option/Command
     const SHIFT: u64 = 1 << 17;
+    const CONTROL: u64 = 1 << 18;
     const OPTION: u64 = 1 << 19;
     const COMMAND: u64 = 1 << 20;
     const EVENT_TYPE_FLAGS_CHANGED: u64 = 12;
@@ -1969,19 +1899,11 @@ fn binding_from_recorded_event(
                     Some(ShortcutBinding::HoldCtrlShift)
                 } else if (flags & COMMAND) != 0 {
                     Some(ShortcutBinding::HoldCtrlCmd)
-                } else if event_type == EVENT_TYPE_FLAGS_CHANGED {
+                } else if event_type == EVENT_TYPE_FLAGS_CHANGED && (flags & CONTROL) != 0 {
                     Some(ShortcutBinding::HoldCtrl)
                 } else {
                     None
                 }
-            }
-            // Double Ctrl is enabled via recorder from plain Ctrl key when no modifiers.
-            // Using event_type keyDown for Control is unreliable, so we map by flags-changed path.
-            59 | 62
-                if event_type == EVENT_TYPE_FLAGS_CHANGED
-                    && (flags & (SHIFT | OPTION | COMMAND)) == 0 =>
-            {
-                Some(ShortcutBinding::DoubleCtrl)
             }
             _ => None,
         },
@@ -2069,8 +1991,6 @@ fn apply_mode_binding(mode: WorkMode, binding: ShortcutBinding) {
 
     let config = Config::load();
     hotkeys::apply_hotkey_runtime_config(hotkeys::HotkeyRuntimeConfig::from(&config));
-    refresh_hotkey_popups_from_config(&config);
-    mark_keys_preset_custom();
     sync_runtime_config_via_ipc();
 
     refresh_mode_binding_labels();
@@ -2251,7 +2171,6 @@ unsafe fn build_hotkeys_tab(
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
     unsafe {
         let ns_view = objc_class("NSView");
-        let ns_popup = objc_class("NSPopUpButton");
 
         let container: Id = msg_send![ns_view, alloc];
         let container: Id = msg_send![container, initWithFrame: frame];
@@ -2279,7 +2198,7 @@ unsafe fn build_hotkeys_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Customize work modes first, then assign shortcuts.".to_string(),
+            text: "Mode -> Shortcut mapping. Each mode has its own binding.".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -2295,6 +2214,13 @@ unsafe fn build_hotkeys_tab(
         let settings_snapshot = UserSettings::load();
         let mut mode_binding_labels: [Option<usize>; 3] = [None; 3];
         for (mode, tag) in mode_specs {
+            let change_button_w = 96.0;
+            let disable_button_w = 72.0;
+            let button_gap = 8.0;
+            let change_x = pad + content_w - change_button_w;
+            let disable_x = change_x - button_gap - disable_button_w;
+            let mut binding_right_x = disable_x - 8.0;
+
             let row_title = create_label(LabelConfig {
                 frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(126.0, 20.0)),
                 text: format!("{}:", mode.label()),
@@ -2304,8 +2230,29 @@ unsafe fn build_hotkeys_tab(
             });
             add_subview(container, row_title);
 
+            if mode == WorkMode::Dictation {
+                let quick_button_w = 110.0;
+                let quick_x = disable_x - button_gap - quick_button_w;
+                let quick_button = create_button(
+                    CGRect::new(
+                        &CGPoint::new(quick_x, y - 2.0),
+                        &CGSize::new(quick_button_w, 24.0),
+                    ),
+                    "Double Ctrl",
+                    button_style::GLASS,
+                );
+                let _: () = msg_send![quick_button, setTag: MODE_DICTATION_DOUBLE_CTRL_TAG];
+                button_set_action(quick_button, action_handler, sel!(onModeBindingChange:));
+                add_subview(container, quick_button);
+                binding_right_x = quick_x - 8.0;
+            }
+
+            let binding_x = pad + 128.0;
             let binding_label = create_label(LabelConfig {
-                frame: CGRect::new(&CGPoint::new(pad + 128.0, y), &CGSize::new(220.0, 20.0)),
+                frame: CGRect::new(
+                    &CGPoint::new(binding_x, y),
+                    &CGSize::new((binding_right_x - binding_x).max(140.0), 20.0),
+                ),
                 text: settings_snapshot.mode_binding_for(mode).label().to_string(),
                 font_size: ui_tokens::SMALL_FONT_SIZE,
                 text_color: secondary,
@@ -2314,10 +2261,22 @@ unsafe fn build_hotkeys_tab(
             add_subview(container, binding_label);
             mode_binding_labels[mode_label_slot(mode)] = Some(binding_label as usize);
 
+            let disable_button = create_button(
+                CGRect::new(
+                    &CGPoint::new(disable_x, y - 2.0),
+                    &CGSize::new(disable_button_w, 24.0),
+                ),
+                "Disable",
+                button_style::GLASS,
+            );
+            let _: () = msg_send![disable_button, setTag: tag + MODE_DISABLE_TAG_OFFSET];
+            button_set_action(disable_button, action_handler, sel!(onModeBindingChange:));
+            add_subview(container, disable_button);
+
             let change_button = create_button(
                 CGRect::new(
-                    &CGPoint::new(pad + content_w - 96.0, y - 2.0),
-                    &CGSize::new(96.0, 24.0),
+                    &CGPoint::new(change_x, y - 2.0),
+                    &CGSize::new(change_button_w, 24.0),
                 ),
                 "\u{2328} Change",
                 button_style::GLASS,
@@ -2326,12 +2285,36 @@ unsafe fn build_hotkeys_tab(
             button_set_action(change_button, action_handler, sel!(onModeBindingChange:));
             add_subview(container, change_button);
 
-            y -= 24.0 + gap;
+            y -= 24.0;
+
+            let mode_hint = create_label(LabelConfig {
+                frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 14.0)),
+                text: format!(
+                    "{} {} {}",
+                    mode.description(),
+                    if mode.defaults_to_auto_paste() {
+                        "Auto-paste: ON."
+                    } else {
+                        "Auto-paste: OFF."
+                    },
+                    if mode.forces_ai() {
+                        "AI required."
+                    } else {
+                        "AI optional."
+                    }
+                ),
+                font_size: ui_tokens::MICRO_FONT_SIZE,
+                text_color: secondary,
+                ..Default::default()
+            });
+            add_subview(container, mode_hint);
+            y -= 14.0 + gap;
         }
 
         let recorder_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Mode recorder: click [⌨ Change], then press Fn/Ctrl/Option.".to_string(),
+            text: "Shortcut recorder: click [⌨ Change], press Fn/Ctrl/Option. Esc cancels capture."
+                .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -2339,135 +2322,16 @@ unsafe fn build_hotkeys_tab(
         add_subview(container, recorder_hint);
         y -= 16.0 + gap;
 
-        let preset_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
-            text: "Mode profile:".to_string(),
+        let advanced_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Capture tuning".to_string(),
             font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
             text_color: secondary,
             ..Default::default()
         });
-        add_subview(container, preset_label);
-
-        let preset_popup: Id = msg_send![ns_popup, alloc];
-        let preset_popup: Id = msg_send![preset_popup, initWithFrame:
-            CGRect::new(&CGPoint::new(pad + 124.0, y - 2.0), &CGSize::new(content_w - 124.0, 24.0))
-            pullsDown: false
-        ];
-        let preset_titles = ["Fn (recommended)", "Safe (no toggles)", "Custom"];
-        for title in &preset_titles {
-            let ns_title = ns_string(title);
-            let _: () = msg_send![preset_popup, addItemWithTitle: ns_title];
-        }
-        let preset_idx: isize = if config.hold_mods == crate::config::HoldMods::Fn
-            && config.toggle_trigger == crate::config::ToggleTrigger::DoubleOption
-            && !config.hold_exclusive
-        {
-            0
-        } else if config.toggle_trigger == crate::config::ToggleTrigger::None
-            && config.hold_mods == crate::config::HoldMods::Fn
-            && config.hold_exclusive
-        {
-            1
-        } else {
-            2
-        };
-        let _: () = msg_send![preset_popup, selectItemAtIndex: preset_idx];
-        button_set_action(preset_popup, action_handler, sel!(onPresetChanged:));
-        add_subview(container, preset_popup);
-        y -= 24.0 + gap;
-
-        let hold_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
-            text: "Mode key (hold):".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, hold_label);
-
-        let hold_popup: Id = msg_send![ns_popup, alloc];
-        let hold_popup: Id = msg_send![hold_popup, initWithFrame:
-            CGRect::new(&CGPoint::new(pad + 124.0, y - 2.0), &CGSize::new(content_w - 124.0, 24.0))
-            pullsDown: false
-        ];
-        for title in &[
-            "Fn (Globe)",
-            "Ctrl",
-            "Ctrl+Option",
-            "Ctrl+Shift",
-            "Ctrl+Command",
-            "Disabled (toggle only)",
-        ] {
-            let ns_title = ns_string(title);
-            let _: () = msg_send![hold_popup, addItemWithTitle: ns_title];
-        }
-        let hold_idx: isize = match config.hold_mods.as_str() {
-            "fn" => 0,
-            "ctrl" => 1,
-            "ctrl_alt" => 2,
-            "ctrl_shift" => 3,
-            "ctrl_cmd" => 4,
-            "none" => 5,
-            _ => 0,
-        };
-        let _: () = msg_send![hold_popup, selectItemAtIndex: hold_idx];
-        button_set_action(hold_popup, action_handler, sel!(onHoldModChanged:));
-        add_subview(container, hold_popup);
-        y -= 24.0 + gap;
-
-        let modes_check = add_toggle_row(
-            container,
-            action_handler,
-            pad,
-            &mut y,
-            content_w,
-            secondary,
-            ToggleRowSpec {
-                title: "Enable Shift/Cmd modes (Chat/Selection)",
-                checked: !config.hold_exclusive,
-                action: sel!(onHoldExclusiveChanged:),
-                description: None,
-                tag: None,
-                gap,
-            },
-        );
-
-        let toggle_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
-            text: "Mode key (toggle):".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, toggle_label);
-
-        let toggle_popup: Id = msg_send![ns_popup, alloc];
-        let toggle_popup: Id = msg_send![toggle_popup, initWithFrame:
-            CGRect::new(&CGPoint::new(pad + 124.0, y - 2.0), &CGSize::new(content_w - 124.0, 24.0))
-            pullsDown: false
-        ];
-        let toggle_titles = [
-            "Off",
-            "Double Ctrl (RAW)",
-            "Left Option (normal)",
-            "Right Option (assistive)",
-            "Option keys (left=format, right=assistive)",
-        ];
-        for title in &toggle_titles {
-            let ns_title = ns_string(title);
-            let _: () = msg_send![toggle_popup, addItemWithTitle: ns_title];
-        }
-        let toggle_idx: isize = match config.toggle_trigger {
-            crate::config::ToggleTrigger::None => 0,
-            crate::config::ToggleTrigger::DoubleCtrl => 1,
-            crate::config::ToggleTrigger::DoubleLeftOption => 2,
-            crate::config::ToggleTrigger::DoubleRightOption => 3,
-            crate::config::ToggleTrigger::DoubleOption => 4,
-        };
-        let _: () = msg_send![toggle_popup, selectItemAtIndex: toggle_idx];
-        button_set_action(toggle_popup, action_handler, sel!(onToggleTriggerChanged:));
-        add_subview(container, toggle_popup);
-        y -= 24.0 + gap;
+        add_subview(container, advanced_label);
+        y -= 18.0 + gap;
 
         let delay_label = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
@@ -2578,10 +2442,6 @@ unsafe fn build_hotkeys_tab(
         });
         add_subview(container, api_hint);
 
-        state.keys_hold_popup = Some(hold_popup as usize);
-        state.keys_toggle_popup = Some(toggle_popup as usize);
-        state.keys_preset_popup = Some(preset_popup as usize);
-        state.keys_exclusive_checkbox = Some(modes_check as usize);
         state.keys_mode_binding_labels = mode_binding_labels;
         state.keys_recorder_hint_label = Some(recorder_hint as usize);
         state.keys_conflict_label = Some(conflict_label as usize);
@@ -3632,172 +3492,20 @@ pub(super) extern "C" fn on_mode_binding_change(
 ) {
     unsafe {
         let tag: isize = msg_send![sender, tag];
+        if mode_from_double_ctrl_tag(tag) {
+            apply_mode_binding(WorkMode::Dictation, ShortcutBinding::DoubleCtrl);
+            return;
+        }
+        if let Some(mode) = mode_from_disable_tag(tag) {
+            apply_mode_binding(mode, ShortcutBinding::Disabled);
+            return;
+        }
         if let Some(mode) = mode_from_tag(tag) {
             start_mode_binding_recorder(mode);
         }
     }
 }
 
-pub(super) extern "C" fn on_hold_mod_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
-    unsafe {
-        let idx: isize = msg_send![sender, indexOfSelectedItem];
-        let (value, mods) = match idx {
-            0 => ("fn", HoldMods::Fn),
-            1 => ("ctrl", HoldMods::Ctrl),
-            2 => ("ctrl_alt", HoldMods::CtrlAlt),
-            3 => ("ctrl_shift", HoldMods::CtrlShift),
-            4 => ("ctrl_cmd", HoldMods::CtrlCmd),
-            5 => ("none", HoldMods::None),
-            _ => ("fn", HoldMods::Fn),
-        };
-        info!("Settings: hold modifier -> {}", value);
-        let config = Config::load();
-        let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
-        runtime_config.hold_mods = mods;
-
-        // If DoubleCtrl toggle is enabled, Ctrl-only hold is unsafe → disable toggle.
-        if mods == HoldMods::Ctrl && config.toggle_trigger == ToggleTrigger::DoubleCtrl {
-            let _ = config.save_to_env_many(&[
-                ("HOLD_MODS", value),
-                ("TOGGLE_TRIGGER", ToggleTrigger::None.as_str()),
-            ]);
-            runtime_config.toggle_trigger = ToggleTrigger::None;
-
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            set_keys_popup_index(state.keys_toggle_popup, 0);
-        } else {
-            let _ = config.save_to_env("HOLD_MODS", value);
-        }
-        hotkeys::apply_hotkey_runtime_config(runtime_config);
-        mark_keys_preset_custom();
-        sync_runtime_config_via_ipc();
-        refresh_mode_binding_labels();
-        refresh_hotkey_conflict_indicator();
-    }
-}
-
-pub(super) extern "C" fn on_preset_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
-    unsafe {
-        let idx: isize = msg_send![sender, indexOfSelectedItem];
-        match idx {
-            // Fn (recommended)
-            0 => {
-                info!("Settings: hotkey preset -> fn_recommended");
-                let config = Config::load();
-                let _ = config.save_to_env_many(&[
-                    ("HOLD_MODS", HoldMods::Fn.as_str()),
-                    ("TOGGLE_TRIGGER", ToggleTrigger::DoubleOption.as_str()),
-                    ("HOLD_EXCLUSIVE", "0"),
-                ]);
-                let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
-                runtime_config.hold_mods = HoldMods::Fn;
-                runtime_config.toggle_trigger = ToggleTrigger::DoubleOption;
-                runtime_config.hold_exclusive = false;
-                hotkeys::apply_hotkey_runtime_config(runtime_config);
-
-                let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                set_keys_popup_index(state.keys_hold_popup, 0);
-                set_keys_popup_index(state.keys_toggle_popup, 4);
-                set_keys_checkbox_state(state.keys_exclusive_checkbox, true);
-                sync_runtime_config_via_ipc();
-                refresh_mode_binding_labels();
-                refresh_hotkey_conflict_indicator();
-            }
-            // Safe (no toggles)
-            1 => {
-                info!("Settings: hotkey preset -> safe");
-                let config = Config::load();
-                let _ = config.save_to_env_many(&[
-                    ("HOLD_MODS", HoldMods::Fn.as_str()),
-                    ("TOGGLE_TRIGGER", ToggleTrigger::None.as_str()),
-                    ("HOLD_EXCLUSIVE", "1"),
-                ]);
-                let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
-                runtime_config.hold_mods = HoldMods::Fn;
-                runtime_config.toggle_trigger = ToggleTrigger::None;
-                runtime_config.hold_exclusive = true;
-                hotkeys::apply_hotkey_runtime_config(runtime_config);
-
-                let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                set_keys_popup_index(state.keys_hold_popup, 0);
-                set_keys_popup_index(state.keys_toggle_popup, 0);
-                set_keys_checkbox_state(state.keys_exclusive_checkbox, false);
-                sync_runtime_config_via_ipc();
-                refresh_mode_binding_labels();
-                refresh_hotkey_conflict_indicator();
-            }
-            _ => {
-                info!("Settings: hotkey preset -> custom");
-                refresh_mode_binding_labels();
-                refresh_hotkey_conflict_indicator();
-            }
-        }
-    }
-}
-
-pub(super) extern "C" fn on_hold_exclusive_changed(
-    _this: &Object,
-    _cmd: objc::runtime::Sel,
-    sender: Id,
-) {
-    unsafe {
-        let state: isize = msg_send![sender, state];
-        let enabled = state == 1;
-        let hold_exclusive = !enabled;
-        info!("Settings: hold exclusive -> {}", hold_exclusive);
-        let config = Config::load();
-        let _ = config.save_to_env("HOLD_EXCLUSIVE", if hold_exclusive { "1" } else { "0" });
-        let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
-        runtime_config.hold_exclusive = hold_exclusive;
-        hotkeys::apply_hotkey_runtime_config(runtime_config);
-        mark_keys_preset_custom();
-        sync_runtime_config_via_ipc();
-        refresh_hotkey_conflict_indicator();
-    }
-}
-
-pub(super) extern "C" fn on_toggle_trigger_changed(
-    _this: &Object,
-    _cmd: objc::runtime::Sel,
-    sender: Id,
-) {
-    unsafe {
-        let idx: isize = msg_send![sender, indexOfSelectedItem];
-        let (trigger, value) = match idx {
-            0 => (ToggleTrigger::None, "none"),
-            1 => (ToggleTrigger::DoubleCtrl, "double_ctrl"),
-            2 => (ToggleTrigger::DoubleLeftOption, "double_lalt"),
-            3 => (ToggleTrigger::DoubleRightOption, "double_ralt"),
-            4 => (ToggleTrigger::DoubleOption, "double_option"),
-            _ => (ToggleTrigger::None, "none"),
-        };
-        info!("Settings: toggle trigger -> {}", value);
-        let config = Config::load();
-        let _ = config.save_to_env("TOGGLE_TRIGGER", value);
-        let mut runtime_config = hotkeys::HotkeyRuntimeConfig::from(&config);
-        runtime_config.toggle_trigger = trigger;
-
-        // If enabling DoubleCtrl and hold is Ctrl-only, switch to Ctrl+Option and enable modes.
-        if trigger == ToggleTrigger::DoubleCtrl && config.hold_mods == HoldMods::Ctrl {
-            let _ = config.save_to_env_many(&[
-                ("HOLD_MODS", HoldMods::CtrlAlt.as_str()),
-                ("HOLD_EXCLUSIVE", "0"),
-            ]);
-            runtime_config.hold_mods = HoldMods::CtrlAlt;
-            runtime_config.hold_exclusive = false;
-
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            set_keys_popup_index(state.keys_hold_popup, 2);
-            set_keys_checkbox_state(state.keys_exclusive_checkbox, true);
-        }
-        hotkeys::apply_hotkey_runtime_config(runtime_config);
-
-        mark_keys_preset_custom();
-        sync_runtime_config_via_ipc();
-        refresh_mode_binding_labels();
-        refresh_hotkey_conflict_indicator();
-    }
-}
 pub(super) extern "C" fn on_language_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
@@ -4323,6 +4031,45 @@ mod tests {
             validate_voice_lab_value(&allow_empty, " "),
             Some(String::new())
         );
+    }
+
+    #[test]
+    fn mode_binding_tag_helpers_decode_expected_actions() {
+        assert_eq!(mode_from_tag(MODE_DICTATION_TAG), Some(WorkMode::Dictation));
+        assert_eq!(
+            mode_from_disable_tag(MODE_FORMATTING_TAG + MODE_DISABLE_TAG_OFFSET),
+            Some(WorkMode::Formatting)
+        );
+        assert!(mode_from_double_ctrl_tag(MODE_DICTATION_DOUBLE_CTRL_TAG));
+        assert!(!mode_from_double_ctrl_tag(MODE_ASSISTIVE_TAG));
+    }
+
+    #[test]
+    fn mode_binding_selection_rejects_invalid_mode_binding_pairs() {
+        let settings = UserSettings::default();
+        let err =
+            mode_binding_selection_error(WorkMode::Formatting, ShortcutBinding::HoldFn, &settings);
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn mode_binding_selection_blocks_option_modes_when_dictation_is_double_ctrl() {
+        let settings = UserSettings {
+            hold_mods: Some("none".to_string()),
+            toggle_trigger: Some("double_ctrl".to_string()),
+            mode_bindings: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            settings.mode_binding_for(WorkMode::Dictation),
+            ShortcutBinding::DoubleCtrl
+        );
+        let err = mode_binding_selection_error(
+            WorkMode::Assistive,
+            ShortcutBinding::DoubleRightOption,
+            &settings,
+        );
+        assert!(err.is_some());
     }
 
     #[test]

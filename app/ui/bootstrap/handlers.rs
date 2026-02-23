@@ -11,11 +11,10 @@ use super::{
     on_assistive_endpoint_changed, on_assistive_key_changed, on_assistive_model_changed,
     on_beep_toggled, on_clear_assistive_key, on_clear_llm_key, on_delay_changed,
     on_double_tap_interval_changed, on_enter_send_toggled, on_formatting_level_changed,
-    on_formatting_toggled, on_hold_exclusive_changed, on_hold_mod_changed, on_language_changed,
-    on_llm_endpoint_changed, on_llm_key_changed, on_llm_model_changed, on_mode_binding_change,
-    on_open_system_settings, on_permission_action, on_preset_changed, on_quality_daemon_toggled,
-    on_refresh_permissions, on_save_api_settings, on_show_dock_icon_toggled,
-    on_toggle_trigger_changed, on_ultra_quality_toggled, on_voice_lab_field_changed,
+    on_formatting_toggled, on_language_changed, on_llm_endpoint_changed, on_llm_key_changed,
+    on_llm_model_changed, on_mode_binding_change, on_open_system_settings, on_permission_action,
+    on_quality_daemon_toggled, on_refresh_permissions, on_save_api_settings,
+    on_show_dock_icon_toggled, on_ultra_quality_toggled, on_voice_lab_field_changed,
     on_voice_lab_toggle_changed, on_volume_changed, switch_tab,
 };
 
@@ -83,24 +82,8 @@ pub fn action_handler_class() -> *const Class {
 
             // Keys tab actions
             decl.add_method(
-                sel!(onHoldModChanged:),
-                on_hold_mod_changed as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
-                sel!(onHoldExclusiveChanged:),
-                on_hold_exclusive_changed as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
-                sel!(onPresetChanged:),
-                on_preset_changed as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
                 sel!(onModeBindingChange:),
                 on_mode_binding_change as extern "C" fn(&Object, Sel, Id),
-            );
-            decl.add_method(
-                sel!(onToggleTriggerChanged:),
-                on_toggle_trigger_changed as extern "C" fn(&Object, Sel, Id),
             );
 
             // Audio tab actions
