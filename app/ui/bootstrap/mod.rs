@@ -471,6 +471,7 @@ struct BootstrapState {
     keys_mode_binding_labels: [Option<usize>; 3],
     keys_recorder_hint_label: Option<usize>,
     keys_conflict_label: Option<usize>,
+    keys_conflict_details_button: Option<usize>,
     hold_delay_value_label: Option<usize>,
     double_tap_value_label: Option<usize>,
     config_cache: Option<Config>,
@@ -764,6 +765,7 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         state.keys_mode_binding_labels = built_state.keys_mode_binding_labels;
         state.keys_recorder_hint_label = built_state.keys_recorder_hint_label;
         state.keys_conflict_label = built_state.keys_conflict_label;
+        state.keys_conflict_details_button = built_state.keys_conflict_details_button;
         state.config_cache = built_state.config_cache;
         state.permission_labels = built_state.permission_labels;
         state.permission_action_buttons = built_state.permission_action_buttons;
@@ -1677,6 +1679,7 @@ pub(super) fn handle_bootstrap_window_closed() {
     state.keys_mode_binding_labels = [None; 3];
     state.keys_recorder_hint_label = None;
     state.keys_conflict_label = None;
+    state.keys_conflict_details_button = None;
     state.hold_delay_value_label = None;
     state.double_tap_value_label = None;
     state.permission_labels = [None, None, None, None, None];
@@ -1713,6 +1716,7 @@ pub fn hide_bootstrap_overlay() {
                 state.keys_mode_binding_labels = [None; 3];
                 state.keys_recorder_hint_label = None;
                 state.keys_conflict_label = None;
+                state.keys_conflict_details_button = None;
                 state.hold_delay_value_label = None;
                 state.double_tap_value_label = None;
                 state.permission_labels = [None, None, None, None, None];
@@ -1784,6 +1788,7 @@ pub fn reset_embedded_bootstrap_state() {
     state.keys_mode_binding_labels = [None; 3];
     state.keys_recorder_hint_label = None;
     state.keys_conflict_label = None;
+    state.keys_conflict_details_button = None;
     state.hold_delay_value_label = None;
     state.double_tap_value_label = None;
     state.permission_labels = [None, None, None, None, None];
@@ -2104,8 +2109,11 @@ fn start_mode_binding_recorder(mode: WorkMode) {
     );
 }
 
-fn hotkey_conflict_status(config: &Config) -> (String, bool) {
-    let conflicts = shortcut_registry::detect_hotkey_conflicts(config);
+fn hotkey_conflicts(config: &Config) -> Vec<shortcut_registry::HotkeyConflict> {
+    shortcut_registry::detect_hotkey_conflicts(config)
+}
+
+fn hotkey_conflict_status_from(conflicts: &[shortcut_registry::HotkeyConflict]) -> (String, bool) {
     if conflicts.is_empty() {
         return (
             "Mode shortcuts: no conflicts in macOS Keyboard Shortcuts registry.".to_string(),
@@ -2132,20 +2140,67 @@ fn hotkey_conflict_status(config: &Config) -> (String, bool) {
     )
 }
 
-fn refresh_hotkey_conflict_indicator() {
-    let config = Config::load();
-    let label_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.keys_conflict_label
-    };
-    apply_hotkey_conflict_indicator(label_ptr, &config);
+fn hotkey_conflict_status(config: &Config) -> (String, bool) {
+    let conflicts = hotkey_conflicts(config);
+    hotkey_conflict_status_from(&conflicts)
 }
 
-fn apply_hotkey_conflict_indicator(label_ptr: Option<usize>, config: &Config) {
+fn hotkey_conflict_details_text(conflicts: &[shortcut_registry::HotkeyConflict]) -> String {
+    if conflicts.is_empty() {
+        return "No conflicts detected in current mode shortcuts.".to_string();
+    }
+
+    let mut lines = vec![
+        "CodeScribe detected conflicts with macOS/global shortcuts:".to_string(),
+        String::new(),
+    ];
+    for (index, conflict) in conflicts.iter().enumerate() {
+        lines.push(format!(
+            "{}. {} -> {}",
+            index + 1,
+            conflict.gesture.label(),
+            conflict.message
+        ));
+    }
+    lines.push(String::new());
+    lines.push("Recommendation: change the conflicting mode binding or disable that mode shortcut in Settings.".to_string());
+    lines.join("\n")
+}
+
+fn set_hotkey_conflict_details_button_enabled(button_ptr: Option<usize>, enabled: bool) {
+    let Some(button_ptr) = button_ptr else {
+        return;
+    };
+    unsafe {
+        let button = button_ptr as Id;
+        let _: () = msg_send![button, setEnabled: enabled];
+    }
+}
+
+fn refresh_hotkey_conflict_indicator() {
+    let config = Config::load();
+    let (label_ptr, button_ptr) = {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            state.keys_conflict_label,
+            state.keys_conflict_details_button,
+        )
+    };
+    apply_hotkey_conflict_indicator(label_ptr, button_ptr, &config);
+}
+
+fn apply_hotkey_conflict_indicator(
+    label_ptr: Option<usize>,
+    button_ptr: Option<usize>,
+    config: &Config,
+) {
+    let conflicts = hotkey_conflicts(config);
+    let (text, has_conflict) = hotkey_conflict_status_from(&conflicts);
+    set_hotkey_conflict_details_button_enabled(button_ptr, has_conflict);
+
     let Some(label_ptr) = label_ptr else {
         return;
     };
-    let (text, has_conflict) = hotkey_conflict_status(config);
     unsafe {
         let label = label_ptr as Id;
         set_text_field_string(label, &text);
@@ -2155,6 +2210,42 @@ fn apply_hotkey_conflict_indicator(label_ptr: Option<usize>, config: &Config) {
             crate::ui_helpers::color_secondary_label()
         };
         let _: () = msg_send![label, setTextColor: color];
+    }
+}
+
+fn show_hotkey_conflicts_sheet() {
+    let config = Config::load();
+    let conflicts = hotkey_conflicts(&config);
+    let title = if conflicts.is_empty() {
+        "No Shortcut Conflicts"
+    } else {
+        "Shortcut Conflicts Detected"
+    };
+    let details = hotkey_conflict_details_text(&conflicts);
+    let window_ptr = {
+        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.window
+    };
+
+    unsafe {
+        let ns_alert = objc_class("NSAlert");
+        let alert: Id = msg_send![ns_alert, new];
+        let _: () = msg_send![alert, setMessageText: ns_string(title)];
+        let _: () = msg_send![alert, setInformativeText: ns_string(&details)];
+        let _: () = msg_send![alert, setAlertStyle: 1_isize]; // NSAlertStyleInformational
+        let _: () = msg_send![alert, addButtonWithTitle: ns_string("OK")];
+
+        if let Some(window_ptr) = window_ptr {
+            let window = window_ptr as Id;
+            if !window.is_null() {
+                let nil: Id = std::ptr::null_mut();
+                let _: () =
+                    msg_send![alert, beginSheetModalForWindow: window completionHandler: nil];
+                return;
+            }
+        }
+
+        let _: isize = msg_send![alert, runModal];
     }
 }
 
@@ -2410,7 +2501,7 @@ unsafe fn build_hotkeys_tab(
 
         let (conflict_text, has_conflict) = hotkey_conflict_status(config);
         let conflict_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 28.0)),
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w - 130.0, 28.0)),
             text: conflict_text,
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: if has_conflict {
@@ -2421,6 +2512,22 @@ unsafe fn build_hotkeys_tab(
             ..Default::default()
         });
         add_subview(container, conflict_label);
+
+        let conflict_details_button = create_button(
+            CGRect::new(
+                &CGPoint::new(pad + content_w - 120.0, y + 2.0),
+                &CGSize::new(120.0, 24.0),
+            ),
+            "View conflicts",
+            button_style::GLASS,
+        );
+        button_set_action(
+            conflict_details_button,
+            action_handler,
+            sel!(onShowHotkeyConflicts:),
+        );
+        let _: () = msg_send![conflict_details_button, setEnabled: has_conflict];
+        add_subview(container, conflict_details_button);
         y -= 28.0 + gap;
 
         let config_divider = create_label(LabelConfig {
@@ -2445,6 +2552,7 @@ unsafe fn build_hotkeys_tab(
         state.keys_mode_binding_labels = mode_binding_labels;
         state.keys_recorder_hint_label = Some(recorder_hint as usize);
         state.keys_conflict_label = Some(conflict_label as usize);
+        state.keys_conflict_details_button = Some(conflict_details_button as usize);
         state.hold_delay_value_label = Some(delay_value as usize);
         state.double_tap_value_label = Some(double_tap_value as usize);
 
@@ -3506,6 +3614,14 @@ pub(super) extern "C" fn on_mode_binding_change(
     }
 }
 
+pub(super) extern "C" fn on_show_hotkey_conflicts(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    _sender: Id,
+) {
+    show_hotkey_conflicts_sheet();
+}
+
 pub(super) extern "C" fn on_language_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
@@ -4070,6 +4186,30 @@ mod tests {
             &settings,
         );
         assert!(err.is_some());
+    }
+
+    #[test]
+    fn hotkey_conflict_details_text_renders_all_conflicts() {
+        let details = hotkey_conflict_details_text(&[
+            shortcut_registry::HotkeyConflict {
+                gesture: shortcut_registry::HotkeyGesture::HoldFn,
+                message: "Conflicts with Show Emoji & Symbols (macOS #160).".to_string(),
+            },
+            shortcut_registry::HotkeyConflict {
+                gesture: shortcut_registry::HotkeyGesture::ToggleDoubleCtrl,
+                message: "Collides with Hold Ctrl.".to_string(),
+            },
+        ]);
+        assert!(details.contains("1. Hold Fn/Globe -> Conflicts with Show Emoji & Symbols"));
+        assert!(details.contains("2. Double-tap Ctrl -> Collides with Hold Ctrl."));
+    }
+
+    #[test]
+    fn hotkey_conflict_details_text_handles_empty_list() {
+        assert_eq!(
+            hotkey_conflict_details_text(&[]),
+            "No conflicts detected in current mode shortcuts."
+        );
     }
 
     #[test]
