@@ -5,7 +5,8 @@
 use chrono::Utc;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tracing::{debug, warn};
 
@@ -72,6 +73,12 @@ impl codescribe_core::pipeline::contracts::DeltaSink for RoutingDeltaSink {
 }
 
 const AGENT_UI_CHANNEL_CAPACITY: usize = 256;
+static AGENT_THREAD_GENERATION: AtomicU64 = AtomicU64::new(1);
+static SHARED_AGENT_RUNTIME_STATE: OnceLock<StdMutex<Option<Arc<TokioMutex<AgentRuntimeState>>>>> =
+    OnceLock::new();
+const RUNTIME_DEGRADED_REASON: &str = "Legacy formatter fallback is active.";
+const RUNTIME_RECOVERED_MESSAGE: &str =
+    "Agent runtime recovered. Native agent pipeline is active again.";
 
 struct AgentRuntime {
     session: AgentSession,
@@ -82,6 +89,8 @@ struct AgentRuntime {
 #[derive(Default)]
 struct AgentRuntimeState {
     runtime: Option<AgentRuntime>,
+    runtime_generation: u64,
+    runtime_degraded: bool,
 }
 
 #[derive(Default)]
@@ -91,18 +100,84 @@ struct AgentUiOverlayState {
 }
 
 impl AgentRuntimeState {
-    fn ensure_runtime(&mut self) -> Result<&mut AgentRuntime> {
-        if self.runtime.is_none() {
-            self.runtime = Some(initialize_agent_runtime()?);
-        }
-        self.runtime
-            .as_mut()
-            .context("Agent runtime was not initialized")
+    fn ensure_runtime(&mut self, runtime_generation: u64) -> Result<(&mut AgentRuntime, bool)> {
+        self.ensure_runtime_with(runtime_generation, initialize_agent_runtime)
     }
 
-    fn invalidate_runtime(&mut self) {
-        self.runtime = None;
+    fn ensure_runtime_with<F>(
+        &mut self,
+        runtime_generation: u64,
+        initialize_runtime: F,
+    ) -> Result<(&mut AgentRuntime, bool)>
+    where
+        F: FnOnce() -> Result<AgentRuntime>,
+    {
+        let mut recovered_from_degraded = false;
+        if self.runtime_generation != runtime_generation {
+            self.runtime = None;
+            self.runtime_generation = runtime_generation;
+        }
+        if self.runtime.is_none() {
+            self.runtime = Some(initialize_runtime()?);
+            if self.runtime_degraded {
+                self.runtime_degraded = false;
+                recovered_from_degraded = true;
+            }
+        }
+        let runtime = self
+            .runtime
+            .as_mut()
+            .context("Agent runtime was not initialized")?;
+        Ok((runtime, recovered_from_degraded))
     }
+
+    fn mark_runtime_degraded(&mut self) -> bool {
+        self.runtime = None;
+        if self.runtime_degraded {
+            false
+        } else {
+            self.runtime_degraded = true;
+            true
+        }
+    }
+}
+
+fn current_agent_thread_generation() -> u64 {
+    AGENT_THREAD_GENERATION.load(Ordering::SeqCst)
+}
+
+fn shared_agent_runtime_state_slot() -> &'static StdMutex<Option<Arc<TokioMutex<AgentRuntimeState>>>>
+{
+    SHARED_AGENT_RUNTIME_STATE.get_or_init(|| StdMutex::new(None))
+}
+
+fn set_shared_agent_runtime_state(runtime_state: Arc<TokioMutex<AgentRuntimeState>>) {
+    let mut guard = shared_agent_runtime_state_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = Some(runtime_state);
+}
+
+fn shared_agent_runtime_state() -> Arc<TokioMutex<AgentRuntimeState>> {
+    let mut guard = shared_agent_runtime_state_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(state) = guard.as_ref() {
+        return Arc::clone(state);
+    }
+
+    let runtime_state = Arc::new(TokioMutex::new(AgentRuntimeState {
+        runtime_generation: current_agent_thread_generation(),
+        ..AgentRuntimeState::default()
+    }));
+    *guard = Some(Arc::clone(&runtime_state));
+    runtime_state
+}
+
+pub(crate) fn request_new_agent_thread_boundary() -> u64 {
+    let generation = AGENT_THREAD_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    debug!("Agent runtime thread boundary rotated (generation={generation})");
+    generation
 }
 
 fn initialize_agent_runtime() -> Result<AgentRuntime> {
@@ -281,10 +356,26 @@ fn persist_runtime_thread(runtime: &AgentRuntime) -> Result<()> {
 
 async fn run_agent_send_path(
     runtime_state: &mut AgentRuntimeState,
+    runtime_generation: u64,
     text: String,
     stream_options: StreamOptions,
 ) -> Result<()> {
-    let runtime = runtime_state.ensure_runtime()?;
+    let (runtime, recovered_from_degraded) = match runtime_state.ensure_runtime(runtime_generation)
+    {
+        Ok(state) => state,
+        Err(error) => {
+            runtime_state.mark_runtime_degraded();
+            crate::voice_chat_ui::set_voice_chat_runtime_degraded(
+                true,
+                Some(RUNTIME_DEGRADED_REASON),
+            );
+            return Err(error).context("Agent runtime unavailable");
+        }
+    };
+    if recovered_from_degraded {
+        crate::voice_chat_ui::set_voice_chat_runtime_degraded(false, None);
+        crate::voice_chat_ui::add_voice_chat_system_message(RUNTIME_RECOVERED_MESSAGE);
+    }
     let mut overlay_state = AgentUiOverlayState::default();
 
     let send_result = {
@@ -329,7 +420,11 @@ async fn run_agent_send_path(
             if overlay_state.streamed_any_delta {
                 crate::voice_chat_ui::finalize_voice_chat_assistant_message();
             }
-            runtime_state.invalidate_runtime();
+            runtime_state.mark_runtime_degraded();
+            crate::voice_chat_ui::set_voice_chat_runtime_degraded(
+                true,
+                Some(RUNTIME_DEGRADED_REASON),
+            );
             Err(error).context("AgentSession send failed")
         }
     }
@@ -383,21 +478,81 @@ async fn run_legacy_send_path(text: &str, whisper_language: crate::config::Langu
     }
 }
 
+async fn run_agent_send_with_fallback(
+    runtime_state: &Arc<TokioMutex<AgentRuntimeState>>,
+    text: String,
+    whisper_language: crate::config::Language,
+    ai_assistive_max_tokens: i32,
+) {
+    let stream_options = build_agent_stream_options(ai_assistive_max_tokens);
+    let agent_result = {
+        let mut guard = runtime_state.lock().await;
+        let runtime_generation = current_agent_thread_generation();
+        run_agent_send_path(&mut guard, runtime_generation, text.clone(), stream_options).await
+    };
+
+    if let Err(error) = agent_result {
+        warn!(
+            "Agent runtime failed, switching this response to legacy fallback: {}",
+            error
+        );
+        debug!("Legacy fallback input length: {}", text.len());
+        crate::voice_chat_ui::set_voice_chat_sending(true);
+        crate::voice_chat_ui::set_voice_chat_runtime_degraded(true, Some(RUNTIME_DEGRADED_REASON));
+        crate::voice_chat_ui::update_voice_chat_status("Agent fallback active");
+        crate::voice_chat_ui::add_voice_chat_system_message(
+            "Agent runtime unavailable. Using legacy formatter for this response.",
+        );
+        run_legacy_send_path(&text, whisper_language).await;
+    }
+}
+
+pub(crate) async fn send_assistive_with_agent_runtime(
+    text: String,
+    whisper_language: crate::config::Language,
+    ai_assistive_max_tokens: i32,
+) {
+    let runtime_state = shared_agent_runtime_state();
+    run_agent_send_with_fallback(
+        &runtime_state,
+        text,
+        whisper_language,
+        ai_assistive_max_tokens,
+    )
+    .await;
+}
+
 /// Setup the voice chat send callback with config
 pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
+    let initial_generation = current_agent_thread_generation();
     let initial_runtime_state = match initialize_agent_runtime() {
         Ok(runtime) => AgentRuntimeState {
             runtime: Some(runtime),
+            runtime_generation: initial_generation,
+            runtime_degraded: false,
         },
         Err(error) => {
             warn!(
                 "Agent runtime init failed during callback setup; legacy fallback will be used until retry succeeds: {}",
                 error
             );
-            AgentRuntimeState::default()
+            AgentRuntimeState {
+                runtime_generation: initial_generation,
+                runtime_degraded: true,
+                ..AgentRuntimeState::default()
+            }
         }
     };
+    if initial_runtime_state.runtime_degraded {
+        crate::voice_chat_ui::set_voice_chat_runtime_degraded(true, Some(RUNTIME_DEGRADED_REASON));
+        crate::voice_chat_ui::add_voice_chat_system_message(
+            "Agent runtime unavailable. Legacy formatter fallback is active until recovery.",
+        );
+    } else {
+        crate::voice_chat_ui::set_voice_chat_runtime_degraded(false, None);
+    }
     let runtime_state = Arc::new(TokioMutex::new(initial_runtime_state));
+    set_shared_agent_runtime_state(Arc::clone(&runtime_state));
 
     let callback_config = Arc::clone(&config);
     let callback_runtime_state = Arc::clone(&runtime_state);
@@ -412,26 +567,13 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
                 let cfg = config.read().await;
                 (cfg.whisper_language, cfg.ai_assistive_max_tokens)
             };
-            let stream_options = build_agent_stream_options(ai_assistive_max_tokens);
-
-            let agent_result = {
-                let mut guard = runtime_state.lock().await;
-                run_agent_send_path(&mut guard, text.clone(), stream_options).await
-            };
-
-            if let Err(error) = agent_result {
-                warn!(
-                    "Agent runtime failed, switching this response to legacy fallback: {}",
-                    error
-                );
-                debug!("Legacy fallback input length: {}", text.len());
-                crate::voice_chat_ui::set_voice_chat_sending(true);
-                crate::voice_chat_ui::update_voice_chat_status("Agent fallback active");
-                crate::voice_chat_ui::add_voice_chat_system_message(
-                    "Agent runtime unavailable. Using legacy formatter for this response.",
-                );
-                run_legacy_send_path(&text, whisper_language).await;
-            }
+            run_agent_send_with_fallback(
+                &runtime_state,
+                text,
+                whisper_language,
+                ai_assistive_max_tokens,
+            )
+            .await;
         });
     })));
 }
@@ -570,6 +712,65 @@ impl EventSink for SessionTelemetrySink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use codescribe_core::agent::{AgentEvent, AgentProvider, ToolDefinition};
+    use std::sync::atomic::AtomicUsize;
+
+    struct NoopTestProvider;
+
+    #[async_trait]
+    impl AgentProvider for NoopTestProvider {
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _options: &StreamOptions,
+        ) -> anyhow::Result<mpsc::Receiver<AgentEvent>> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+
+        fn build_tool_result(
+            &self,
+            call_id: &str,
+            content: Vec<ContentBlock>,
+            is_error: bool,
+        ) -> Message {
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: call_id.to_string(),
+                    content,
+                    is_error,
+                }],
+            )
+        }
+
+        fn build_image_block(&self, data: &[u8], media_type: &str) -> ContentBlock {
+            ContentBlock::Image {
+                data: data.to_vec(),
+                media_type: media_type.to_string(),
+            }
+        }
+
+        fn name(&self) -> &str {
+            "noop-test-provider"
+        }
+    }
+
+    fn runtime_with_thread_id(thread_store_id: &str) -> AgentRuntime {
+        let (ui_tx, ui_rx) = mpsc::channel(8);
+        let session = AgentSession::new(
+            Box::new(NoopTestProvider),
+            Arc::new(ToolRegistry::new()),
+            ui_tx,
+        );
+        AgentRuntime {
+            session,
+            ui_rx,
+            thread_store_id: thread_store_id.to_string(),
+        }
+    }
 
     #[test]
     fn test_session_telemetry_sink_tracks_no_speech_and_stats() {
@@ -632,5 +833,82 @@ mod tests {
         let snapshot = snapshot_session_telemetry(&shared);
         assert!(snapshot.no_speech_reason.is_none());
         assert!(snapshot.stats.is_none());
+    }
+
+    #[test]
+    fn test_request_new_agent_thread_boundary_is_monotonic() {
+        let before = current_agent_thread_generation();
+        let next = request_new_agent_thread_boundary();
+        let now = current_agent_thread_generation();
+
+        assert!(next > before);
+        assert!(now >= next);
+    }
+
+    #[test]
+    fn test_runtime_generation_reuses_existing_runtime_when_unchanged() {
+        let mut runtime_state = AgentRuntimeState {
+            runtime: Some(runtime_with_thread_id("thread_existing")),
+            runtime_generation: 41,
+            runtime_degraded: false,
+        };
+        let init_calls = AtomicUsize::new(0);
+
+        let (runtime, recovered) = runtime_state
+            .ensure_runtime_with(41, || {
+                init_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(runtime_with_thread_id("thread_should_not_be_used"))
+            })
+            .expect("runtime should be reused for unchanged generation");
+
+        assert_eq!(runtime.thread_store_id, "thread_existing");
+        assert_eq!(init_calls.load(Ordering::SeqCst), 0);
+        assert!(!recovered);
+        assert_eq!(runtime_state.runtime_generation, 41);
+    }
+
+    #[test]
+    fn test_runtime_generation_change_rotates_runtime_identity() {
+        let mut runtime_state = AgentRuntimeState {
+            runtime: Some(runtime_with_thread_id("thread_old")),
+            runtime_generation: 12,
+            runtime_degraded: false,
+        };
+        let init_calls = AtomicUsize::new(0);
+
+        let (runtime, recovered) = runtime_state
+            .ensure_runtime_with(13, || {
+                init_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(runtime_with_thread_id("thread_new"))
+            })
+            .expect("runtime should rotate after generation change");
+
+        assert_eq!(init_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.thread_store_id, "thread_new");
+        assert_eq!(runtime_state.runtime_generation, 13);
+        assert!(!recovered);
+    }
+
+    #[test]
+    fn test_new_thread_boundary_forces_fresh_runtime_identity() {
+        let mut runtime_state = AgentRuntimeState {
+            runtime: Some(runtime_with_thread_id("thread_before_boundary")),
+            runtime_generation: current_agent_thread_generation(),
+            runtime_degraded: false,
+        };
+        let new_generation = request_new_agent_thread_boundary();
+        let init_calls = AtomicUsize::new(0);
+
+        let (runtime, recovered) = runtime_state
+            .ensure_runtime_with(new_generation, || {
+                init_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(runtime_with_thread_id("thread_after_boundary"))
+            })
+            .expect("runtime should rotate after explicit boundary request");
+
+        assert_eq!(init_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.thread_store_id, "thread_after_boundary");
+        assert_eq!(runtime_state.runtime_generation, new_generation);
+        assert!(!recovered);
     }
 }

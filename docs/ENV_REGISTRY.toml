@@ -924,6 +924,13 @@ reload = "restart"
 category = "assistive"
 description = "OCR language(s) for PDF attachments (tesseract)"
 
+[vars.CODESCRIBE_DRAWER_INCLUDE_LEGACY]
+default = "0"
+type = "bool"
+reload = "restart"
+category = "assistive"
+description = "Include legacy transcript files in Drawer alongside ThreadStore entries (off by default)."
+
 # Agent / Chat input behavior
 
 [vars.AGENT_ENTER_SENDS]

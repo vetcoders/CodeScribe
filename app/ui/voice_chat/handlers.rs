@@ -1194,7 +1194,8 @@ extern "C" fn on_control_text_did_change(_this: &Object, _cmd: Sel, notification
 
 extern "C" fn on_new_thread(_this: &Object, _cmd: Sel, _sender: Id) {
     clear_voice_chat_text_impl();
-    info!("New thread started");
+    crate::controller::request_new_agent_thread();
+    info!("New thread started (UI + backend runtime boundary reset)");
 }
 
 extern "C" fn on_toggle_favorites_only(_this: &Object, _cmd: Sel, _sender: Id) {

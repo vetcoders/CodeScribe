@@ -13,13 +13,13 @@ mod state;
 pub use api::{
     add_voice_chat_error_message, add_voice_chat_system_message, add_voice_chat_user_message,
     append_voice_chat_assistant_delta, append_voice_chat_user_delta, clear_voice_chat_text,
-    filter_drawer, finalize_voice_chat_assistant_message, finalize_voice_chat_user_message,
-    handoff_transcript_to_chat, hide_voice_chat_overlay, is_auto_send_enabled,
-    is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
+    dispatch_voice_chat_send, filter_drawer, finalize_voice_chat_assistant_message,
+    finalize_voice_chat_user_message, handoff_transcript_to_chat, hide_voice_chat_overlay,
+    is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
     request_settings_tab_on_open, reset_voice_chat_activity, send_voice_chat_draft,
-    set_voice_chat_send_callback, set_voice_chat_sending, set_voice_chat_target_app,
-    set_voice_chat_text, set_voice_chat_user_text, show_agent_tab, show_drawer_tab,
-    show_settings_tab, update_conversation_state, update_drawer_after_save,
+    set_voice_chat_runtime_degraded, set_voice_chat_send_callback, set_voice_chat_sending,
+    set_voice_chat_target_app, set_voice_chat_text, set_voice_chat_user_text, show_agent_tab,
+    show_drawer_tab, show_settings_tab, update_conversation_state, update_drawer_after_save,
     update_voice_chat_context_summary, update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
@@ -1057,7 +1057,7 @@ fn show_voice_chat_overlay_impl() {
         set_hidden(input_bar, true);
 
         // Phase 3 — store widget pointers into state (short lock scope).
-        let (has_messages, desired_tab, status_text, open_settings) = {
+        let (has_messages, desired_tab, status_base_text, open_settings) = {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.window = Some(window as usize);
             state.window_delegate = Some(window_delegate as usize);
@@ -1118,8 +1118,8 @@ fn show_voice_chat_overlay_impl() {
                 state.active_tab
             };
             state.active_tab = desired_tab;
-            let status_text = state.status_text.clone();
-            (has_messages, desired_tab, status_text, open_settings)
+            let status_base_text = state.status_base_text.clone();
+            (has_messages, desired_tab, status_base_text, open_settings)
         }; // OVERLAY_STATE released — safe to perform AppKit window operations.
 
         // Phase 4 — show window (no lock held; avoids nested-runloop deadlock).
@@ -1158,7 +1158,7 @@ fn show_voice_chat_overlay_impl() {
 
         // Phase 5 — post-show updates.
         api::refresh_drawer();
-        api::update_voice_chat_status(&status_text);
+        api::update_voice_chat_status(&status_base_text);
         update_active_tab_impl(desired_tab);
         if open_settings {
             crate::show_bootstrap_overlay();

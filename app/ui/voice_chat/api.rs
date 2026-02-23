@@ -49,6 +49,14 @@ pub fn update_voice_chat_status(status: &str) {
     });
 }
 
+/// Persist runtime degradation state used by status and tooltip rendering.
+pub fn set_voice_chat_runtime_degraded(is_degraded: bool, reason: Option<&str>) {
+    let reason_owned = reason.map(str::to_string);
+    Queue::main().exec_async(move || {
+        set_voice_chat_runtime_degraded_impl(is_degraded, reason_owned);
+    });
+}
+
 /// Update the context summary shown in the overlay header (best-effort debug aid).
 ///
 /// Examples:
@@ -178,6 +186,27 @@ pub fn handoff_transcript_to_chat(transcript: &str) {
     Queue::main().exec_async(move || {
         handoff_transcript_to_chat_impl(&transcript_owned);
     });
+}
+
+/// Dispatch a payload through the registered chat send callback without mutating bubbles.
+///
+/// Returns `true` when a callback was found and invoked.
+pub fn dispatch_voice_chat_send(payload: &str) -> bool {
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return false;
+    }
+    let handler = {
+        let guard = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    };
+    if let Some(handler) = handler {
+        handler(payload.to_string());
+        true
+    } else {
+        warn!("No voice-chat send callback set; cannot dispatch runtime send request");
+        false
+    }
 }
 
 /// Submit the current draft (manual send)
@@ -807,11 +836,75 @@ fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
 
 fn update_voice_chat_status_impl(status: &str) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.status_text = status.to_string();
-    let next_kind = status_from_detail(status);
+    let trimmed = status.trim();
+    state.status_base_text = if trimmed.is_empty() {
+        "Ready".to_string()
+    } else {
+        trimmed.to_string()
+    };
+    state.status_text = compose_runtime_status_text(
+        &state.status_base_text,
+        state.runtime_degraded,
+        state.runtime_degraded_reason.as_deref(),
+    );
+    let next_kind = status_kind_for_runtime(&state.status_base_text, state.runtime_degraded);
     state.status_kind = next_kind;
     apply_status_pill(&state);
     let _ = crate::tray::update_tray_status(next_kind.to_tray());
+}
+
+fn set_voice_chat_runtime_degraded_impl(is_degraded: bool, reason: Option<String>) {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.runtime_degraded = is_degraded;
+    state.runtime_degraded_reason = if is_degraded {
+        reason.and_then(|text| {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    } else {
+        None
+    };
+    state.status_text = compose_runtime_status_text(
+        &state.status_base_text,
+        state.runtime_degraded,
+        state.runtime_degraded_reason.as_deref(),
+    );
+    state.status_kind = status_kind_for_runtime(&state.status_base_text, state.runtime_degraded);
+    apply_status_pill(&state);
+    let _ = crate::tray::update_tray_status(state.status_kind.to_tray());
+}
+
+fn status_kind_for_runtime(base_status: &str, runtime_degraded: bool) -> UiStatus {
+    if runtime_degraded {
+        UiStatus::Error
+    } else {
+        status_from_detail(base_status)
+    }
+}
+
+fn compose_runtime_status_text(
+    base_status: &str,
+    runtime_degraded: bool,
+    reason: Option<&str>,
+) -> String {
+    let base = base_status.trim();
+    if !runtime_degraded {
+        if base.is_empty() {
+            "Ready".to_string()
+        } else {
+            base.to_string()
+        }
+    } else if base.is_empty() {
+        "Runtime degraded (legacy fallback active)".to_string()
+    } else if let Some(reason) = reason.filter(|text| !text.trim().is_empty()) {
+        format!("{base} • Runtime degraded ({})", reason.trim())
+    } else {
+        format!("{base} • Runtime degraded (legacy fallback active)")
+    }
 }
 
 fn update_voice_chat_context_summary_impl(summary: &str) {
@@ -3201,6 +3294,65 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn runtime_degraded_status_persists_across_status_updates() {
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            *state = VoiceChatOverlayState::default();
+        }
+
+        set_voice_chat_runtime_degraded_impl(
+            true,
+            Some("Legacy formatter fallback is active.".to_string()),
+        );
+        update_voice_chat_status_impl("Sending...");
+
+        {
+            let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(state.runtime_degraded);
+            assert_eq!(state.status_base_text, "Sending...");
+            assert_eq!(state.status_kind, UiStatus::Error);
+            assert!(state.status_text.contains("Runtime degraded"));
+        }
+
+        set_voice_chat_runtime_degraded_impl(false, None);
+
+        {
+            let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(!state.runtime_degraded);
+            assert_eq!(state.status_text, "Sending...");
+            assert_eq!(state.status_kind, UiStatus::Processing);
+        }
+
+        update_voice_chat_status_impl("AI Response:");
+
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.status_base_text, "AI Response:");
+        assert_eq!(state.status_text, "AI Response:");
+        assert_eq!(state.status_kind, UiStatus::Idle);
+    }
+
+    #[test]
+    fn drawer_entry_subtitle_marks_threadstore_index_only_when_path_missing() {
+        let entry = DrawerEntry {
+            source: DrawerEntrySource::Thread {
+                id: "t_2026-02-23_missing".to_string(),
+            },
+            path: PathBuf::from("__missing_thread_guardrail_test__.json"),
+            timestamp: SystemTime::now(),
+            mode: TranscriptionMode::Assistive,
+            preview: "summary".to_string(),
+            search_corpus: "summary".to_string(),
+            is_ai_formatted: true,
+            is_favorite: false,
+        };
+
+        let subtitle = drawer_entry_subtitle(&entry);
+        assert!(subtitle.contains("ThreadStore (index-only)"));
+        assert!(subtitle.contains("thread:t_2026-02-23_missing"));
+    }
+
+    #[test]
     fn display_text_for_message_handles_streaming() {
         let streaming_empty = ChatMessage {
             role: ChatRole::Assistant,
@@ -3288,6 +3440,42 @@ mod tests {
         let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.messages.len(), 1);
         assert!(state.is_sending);
+
+        let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        *cb = None;
+    }
+
+    #[test]
+    #[serial]
+    fn dispatch_voice_chat_send_returns_false_without_callback() {
+        let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        *cb = None;
+        drop(cb);
+
+        assert!(!dispatch_voice_chat_send("payload"));
+        assert!(!dispatch_voice_chat_send("   "));
+    }
+
+    #[test]
+    #[serial]
+    fn dispatch_voice_chat_send_invokes_callback() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::new(Mutex::new(String::new()));
+        {
+            let count = Arc::clone(&call_count);
+            let observed = Arc::clone(&observed);
+            let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+            *cb = Some(Arc::new(move |text: String| {
+                count.fetch_add(1, Ordering::SeqCst);
+                let mut guard = observed.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = text;
+            }));
+        }
+
+        assert!(dispatch_voice_chat_send("runtime payload"));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        let payload = observed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(payload, "runtime payload");
 
         let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
         *cb = None;
@@ -3457,22 +3645,47 @@ unsafe fn apply_search_highlight(field: Id, text: &str, query: &str) {
 }
 fn entry_type_label(entry: &DrawerEntry) -> &'static str {
     match entry.source {
-        DrawerEntrySource::Thread { .. } => "Th",
+        DrawerEntrySource::Thread { .. } => "ThreadStore",
         DrawerEntrySource::LegacyFile => {
             if entry.is_ai_formatted {
-                "AI"
+                "Legacy AI"
             } else {
-                "Tt"
+                "Legacy Raw"
             }
         }
     }
 }
 
+fn drawer_entry_source_label(entry: &DrawerEntry) -> String {
+    match entry.source {
+        DrawerEntrySource::Thread { .. } => {
+            if entry.path.exists() {
+                "ThreadStore".to_string()
+            } else {
+                "ThreadStore (index-only)".to_string()
+            }
+        }
+        DrawerEntrySource::LegacyFile => "Legacy transcript file".to_string(),
+    }
+}
+
 fn drawer_entry_subtitle(entry: &DrawerEntry) -> String {
+    let source_label = drawer_entry_source_label(entry);
     match &entry.source {
-        DrawerEntrySource::Thread { id } => format!("{} • thread:{id}", mode_label(entry.mode)),
+        DrawerEntrySource::Thread { id } => {
+            format!(
+                "{} • {} • thread:{id}",
+                mode_label(entry.mode),
+                source_label
+            )
+        }
         DrawerEntrySource::LegacyFile => {
-            format!("{} • {}", mode_label(entry.mode), entry.path.display())
+            format!(
+                "{} • {} • {}",
+                mode_label(entry.mode),
+                source_label,
+                entry.path.display()
+            )
         }
     }
 }
@@ -3510,7 +3723,9 @@ pub fn load_drawer_entries() -> Vec<DrawerEntry> {
 fn load_drawer_entries_with_query(query: &str) -> Vec<DrawerEntry> {
     let favorites = load_favorites_from_disk();
     let mut entries = load_thread_drawer_entries(&favorites);
-    entries.extend(load_legacy_drawer_entries(&favorites));
+    if should_include_legacy_drawer_entries() {
+        entries.extend(load_legacy_drawer_entries(&favorites));
+    }
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     let query_lower = query.trim().to_ascii_lowercase();
@@ -3523,9 +3738,11 @@ fn load_drawer_entries_with_query(query: &str) -> Vec<DrawerEntry> {
 
 fn load_thread_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
     let Ok(store) = ThreadStore::new() else {
+        warn!("Drawer: failed to open ThreadStore; drawer entries unavailable");
         return Vec::new();
     };
     let Ok(index) = ThreadIndex::load_or_create(store.threads_dir()) else {
+        warn!("Drawer: failed to load ThreadIndex; drawer entries unavailable");
         return Vec::new();
     };
 
@@ -3555,6 +3772,12 @@ fn load_thread_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
                 }
             }
             preview = normalize_preview(&preview, 120);
+            let path = store
+                .thread_file_path(&id)
+                .unwrap_or_else(|_| PathBuf::from(format!("thread_{id}.json")));
+            let timestamp = system_time_from_unix_millis(summary.updated_at.timestamp_millis());
+            let mode = transcription_mode_from_thread_mode(&summary.mode);
+            let mode_label = mode_label(mode);
             if search_corpus.trim().is_empty() {
                 search_corpus = format!(
                     "{} {} {} {}",
@@ -3562,15 +3785,13 @@ fn load_thread_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
                     summary.mode,
                     summary.summary.as_deref().unwrap_or_default(),
                     preview
-                )
-                .to_ascii_lowercase();
+                );
             }
-
-            let path = store
-                .thread_file_path(&id)
-                .unwrap_or_else(|_| PathBuf::from(format!("thread_{id}.json")));
-            let timestamp = system_time_from_unix_millis(summary.updated_at.timestamp_millis());
-            let mode = transcription_mode_from_thread_mode(&summary.mode);
+            search_corpus = format!(
+                "threadstore source:thread {} thread:{} {}",
+                mode_label, id, search_corpus
+            )
+            .to_ascii_lowercase();
 
             DrawerEntry {
                 source,
@@ -3584,6 +3805,18 @@ fn load_thread_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
             }
         })
         .collect()
+}
+
+fn should_include_legacy_drawer_entries() -> bool {
+    std::env::var("CODESCRIBE_DRAWER_INCLUDE_LEGACY")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn load_legacy_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
@@ -3627,7 +3860,7 @@ fn load_legacy_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
             let mode_label = mode_label(mode);
             let entry_type = if is_ai_formatted { "AI" } else { "Tt" };
             let search_corpus = format!(
-                "{entry_type} {mode_label} {} {} {}",
+                "legacy source:legacy_transcript {entry_type} {mode_label} {} {} {}",
                 path.to_string_lossy(),
                 path.file_name()
                     .and_then(|file| file.to_str())
