@@ -17,8 +17,11 @@
 //! ## Architecture
 //!
 //! Each consumer owns its own `AccumulatingVad` (or raw `SileroVad`).
-//! No global singletons. Silero VAD requires 16kHz audio —
+//! Silero VAD requires 16kHz audio —
 //! `AccumulatingVad` handles resampling and chunk accumulation internally.
+//!
+//! `extract_speech()` uses a per-thread cache to avoid reloading the ONNX
+//! model on every call. The cache is invalidated when sample rate changes.
 //!
 //! Created by M&K (c)2026 VetCoders
 
@@ -26,6 +29,8 @@ pub mod config;
 pub mod embedded;
 pub mod install;
 pub mod silero_ort;
+
+use std::cell::RefCell;
 
 use tracing::warn;
 
@@ -61,11 +66,38 @@ pub struct VadExtractStats {
 /// Window size for VAD analysis: 500ms of audio.
 const EXTRACT_WINDOW_MS: u32 = 500;
 
+thread_local! {
+    /// Cached `AccumulatingVad` for `extract_speech()`.
+    /// Stores `(sample_rate, vad)` — invalidated when sample_rate changes.
+    static EXTRACT_VAD: RefCell<Option<(u32, AccumulatingVad)>> = const { RefCell::new(None) };
+}
+
+/// Take a cached VAD instance matching `sample_rate`, or create a new one.
+fn take_extract_vad(sample_rate: u32) -> anyhow::Result<AccumulatingVad> {
+    EXTRACT_VAD.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        match slot.take() {
+            Some((rate, vad)) if rate == sample_rate => Ok(vad),
+            _ => AccumulatingVad::new(sample_rate),
+        }
+    })
+}
+
+/// Return a VAD instance to the thread-local cache for reuse.
+fn return_extract_vad(sample_rate: u32, vad: AccumulatingVad) {
+    EXTRACT_VAD.with(|cell| {
+        *cell.borrow_mut() = Some((sample_rate, vad));
+    });
+}
+
 /// Extract speech-only regions from audio using Silero VAD.
 ///
 /// Runs AccumulatingVad over 500ms windows, keeps windows where
 /// speech probability >= threshold. Returns concatenated speech
 /// samples and stats.
+///
+/// The Silero ONNX model is cached per-thread and reused across calls
+/// with the same `sample_rate`. A sample-rate change invalidates the cache.
 ///
 /// Returns an empty vector when no speech is detected or VAD is unavailable.
 pub fn extract_speech(samples: &[f32], sample_rate: u32) -> (Vec<f32>, VadExtractStats) {
@@ -94,7 +126,7 @@ pub fn extract_speech(samples: &[f32], sample_rate: u32) -> (Vec<f32>, VadExtrac
         );
     }
 
-    let mut vad = match AccumulatingVad::new(sample_rate) {
+    let mut vad = match take_extract_vad(sample_rate) {
         Ok(v) => v,
         Err(e) => {
             warn!(
@@ -157,6 +189,9 @@ pub fn extract_speech(samples: &[f32], sample_rate: u32) -> (Vec<f32>, VadExtrac
             last_window_was_speech = false;
         }
     }
+
+    // Return VAD to thread-local cache for reuse
+    return_extract_vad(sample_rate, vad);
 
     let speech_pct = if total_windows > 0 {
         speech_windows as f32 / total_windows as f32 * 100.0

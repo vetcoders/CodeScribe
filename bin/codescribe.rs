@@ -413,6 +413,10 @@ async fn handle_transcribe_file(
 async fn handle_transcribe_live(language: Option<String>) -> Result<()> {
     use std::io::Write;
 
+    // CLI flag takes priority; fall back to settings.json speech.language.
+    let language =
+        language.or_else(|| codescribe_core::config::UserSettings::load().whisper_language);
+
     eprintln!("CodeScribe Live Transcription");
     eprintln!("Press Ctrl+C to stop.");
 

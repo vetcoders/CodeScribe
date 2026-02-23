@@ -1076,11 +1076,6 @@ fn utterance_interim_sec() -> f32 {
     std::env::var("CODESCRIBE_BUFFERED_INTERIM_SEC")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .or_else(|| {
-            std::env::var("CODESCRIBE_UTTERANCE_INTERIM_SEC")
-                .ok()
-                .and_then(|v| v.parse::<f32>().ok())
-        })
         .unwrap_or(1.2)
         .clamp(1.0, 30.0)
 }
@@ -1089,11 +1084,6 @@ fn utterance_silence_sec_override() -> Option<f32> {
     std::env::var("CODESCRIBE_BUFFERED_SILENCE_SEC")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .or_else(|| {
-            std::env::var("CODESCRIBE_UTTERANCE_SILENCE_SEC")
-                .ok()
-                .and_then(|v| v.parse::<f32>().ok())
-        })
         .map(|v| v.clamp(0.1, 10.0))
 }
 
@@ -1193,9 +1183,6 @@ pub(crate) fn init_silero_vad(sample_rate: u32, config: &vad::VadConfig) -> Opti
 }
 
 fn gate_mode_from_env() -> VadGateMode {
-    if env_bool("CODESCRIBE_VAD_ITER") {
-        return VadGateMode::Iter;
-    }
     match std::env::var("CODESCRIBE_VAD_GATE_MODE")
         .ok()
         .map(|v| v.to_lowercase())
@@ -1206,13 +1193,6 @@ fn gate_mode_from_env() -> VadGateMode {
         Some("simple") | Some("gate") | Some("basic") => VadGateMode::Simple,
         _ => VadGateMode::Supervisor,
     }
-}
-
-fn env_bool(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1516,8 +1496,7 @@ mod tests {
         // Ensure a clean baseline for this test (do not inherit user shell env).
         let _g1 = EnvGuard::unset("CODESCRIBE_VAD_SILENCE_SEC");
         let _g2 = EnvGuard::unset("CODESCRIBE_VAD_MAX_SILENCE_SEC");
-        let _g3 = EnvGuard::unset("CODESCRIBE_UTTERANCE_SILENCE_SEC");
-        let _g4 = EnvGuard::unset("CODESCRIBE_BUFFERED_SILENCE_SEC");
+        let _g3 = EnvGuard::unset("CODESCRIBE_BUFFERED_SILENCE_SEC");
 
         let sr = 16000u32;
 
@@ -1545,8 +1524,7 @@ mod tests {
     fn utterance_silence_env_override_does_not_change_stream_default() {
         let _g1 = EnvGuard::unset("CODESCRIBE_VAD_SILENCE_SEC");
         let _g2 = EnvGuard::unset("CODESCRIBE_VAD_MAX_SILENCE_SEC");
-        let _g3 = EnvGuard::unset("CODESCRIBE_BUFFERED_SILENCE_SEC");
-        let _g4 = EnvGuard::set("CODESCRIBE_UTTERANCE_SILENCE_SEC", "0.45");
+        let _g3 = EnvGuard::set("CODESCRIBE_BUFFERED_SILENCE_SEC", "0.45");
 
         let sr = 16000u32;
         let stream = SpeechSession::new_stream(sr, 6.0, 1.0);

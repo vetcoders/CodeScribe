@@ -998,18 +998,13 @@ impl Config {
 
     /// Get the configuration directory path (`$HOME/.codescribe`).
     ///
-    /// Can be overridden with `CODESCRIBE_DATA_DIR` or `CODESCRIBE_APP_DIR`
-    /// environment variables.
+    /// Can be overridden with `CODESCRIBE_DATA_DIR` environment variable.
     pub fn config_dir() -> PathBuf {
         // Helper to canonicalize if path exists (resolves macOS /var → /private/var)
         let maybe_canonicalize = |p: PathBuf| -> PathBuf { p.canonicalize().unwrap_or(p) };
 
         // Check for environment variable overrides
         if let Ok(custom) = std::env::var("CODESCRIBE_DATA_DIR") {
-            return maybe_canonicalize(PathBuf::from(shellexpand::tilde(&custom).into_owned()));
-        }
-
-        if let Ok(custom) = std::env::var("CODESCRIBE_APP_DIR") {
             return maybe_canonicalize(PathBuf::from(shellexpand::tilde(&custom).into_owned()));
         }
 

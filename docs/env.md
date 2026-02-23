@@ -59,7 +59,6 @@ Poniższe działają „same z siebie” — jeśli ich nie ustawisz, aplikacja 
 
 - `CODESCRIBE_STREAM_CHUNK_SEC` – domyślnie `3.0` (HOT RELOADED)
 - `CODESCRIBE_STREAM_OVERLAP_RATIO` – domyślnie `0.2` (HOT RELOADED)
-- `CODESCRIBE_EVENT_PIPELINE` – **deprecated migration flag** (event pipeline jest zawsze ON)
 - `CODESCRIBE_BUFFER_DELAY_MS` – domyślnie `280` (HOT RELOADED)
 - `CODESCRIBE_TYPING_CPS` – domyślnie `90` (HOT RELOADED)
 - `CODESCRIBE_EMIT_WORDS_MAX` – max słów na tick (buffered), domyślnie `2` (HOT RELOADED)
@@ -115,9 +114,8 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 
 **Ścieżki / data dir**
 
-- `CODESCRIBE_DATA_DIR` > `CODESCRIBE_APP_DIR` > `~/.codescribe` (RESTART NEEDED)
+- `CODESCRIBE_DATA_DIR` > `~/.codescribe` (RESTART NEEDED)
 - `CODESCRIBE_ENV_PATH` nadpisuje lokalizację `.env` (RESTART NEEDED)
-- `CODESCRIBE_ENV_TEMPLATE` tylko do wygenerowania `.env` (jeśli nie istnieje) (RESTART NEEDED)
 
 **Model lokalny**
 
@@ -137,7 +135,6 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 **Streaming runtime**
 
 - App runtime używa jednej ścieżki: `start_event_session` + `transcription_session`.
-- `CODESCRIBE_EVENT_PIPELINE` to flaga kompatybilności (nie przełącza architektury).
 - `TRANSCRIPT_SEND_MODE=streaming` wysyła delty do overlayu (RESTART NEEDED)
 
 **Overlay pozycja**
@@ -164,7 +161,6 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 
 - `CODESCRIBE_STREAM_CHUNK_SEC` (HOT RELOADED)
 - `CODESCRIBE_STREAM_OVERLAP_RATIO` (HOT RELOADED)
-- `CODESCRIBE_EVENT_PIPELINE` (deprecated migration flag; event pipeline always on)
 - `CODESCRIBE_BUFFER_DELAY_MS` (HOT RELOADED)
 - `CODESCRIBE_TYPING_CPS` (HOT RELOADED)
 - `CODESCRIBE_VAD_THRESHOLD` (RESTART NEEDED)
@@ -219,7 +215,7 @@ Wymagane **tylko jeśli** zbudowałeś bez embedu:
 
 - `HISTORY_ENABLED` (RESTART NEEDED)
 - `DUMP_AUDIO_LOGS` (RESTART NEEDED)
-- `CODESCRIBE_DATA_DIR`, `CODESCRIBE_APP_DIR`, `CODESCRIBE_ENV_PATH`, `CODESCRIBE_ENV_TEMPLATE` (RESTART NEEDED)
+- `CODESCRIBE_DATA_DIR`, `CODESCRIBE_ENV_PATH` (RESTART NEEDED)
 
 ### Quality / Report
 

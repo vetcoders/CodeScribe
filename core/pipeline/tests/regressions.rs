@@ -58,7 +58,6 @@ fn utterance_silence_default_regression() {
     let _g1 = EnvGuard::unset("CODESCRIBE_VAD_SILENCE_SEC");
     let _g2 = EnvGuard::unset("CODESCRIBE_VAD_MAX_SILENCE_SEC");
     let _g3 = EnvGuard::unset("CODESCRIBE_BUFFERED_SILENCE_SEC");
-    let _g4 = EnvGuard::unset("CODESCRIBE_UTTERANCE_SILENCE_SEC");
 
     let sr = 16000u32;
     let stream = SpeechSession::new_stream(sr, 3.0, 0.6);
@@ -86,7 +85,6 @@ fn utterance_silence_override_env_regression() {
     let _g1 = EnvGuard::unset("CODESCRIBE_VAD_SILENCE_SEC");
     let _g2 = EnvGuard::unset("CODESCRIBE_VAD_MAX_SILENCE_SEC");
     let _g3 = EnvGuard::set("CODESCRIBE_BUFFERED_SILENCE_SEC", "0.45");
-    let _g4 = EnvGuard::unset("CODESCRIBE_UTTERANCE_SILENCE_SEC");
 
     let sr = 16000u32;
     let stream = SpeechSession::new_stream(sr, 3.0, 0.6);

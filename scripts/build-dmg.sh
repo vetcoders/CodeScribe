@@ -53,7 +53,7 @@ if [[ "$NO_EMBED" -eq 1 ]]; then
 else
   BUILD_ENV+=(-u CODESCRIBE_NO_EMBED)
 fi
-BUILD_ENV+=(-u CODESCRIBE_EMBED_TTS -u CODESCRIBE_EMBED_E5)
+BUILD_ENV+=(-u CODESCRIBE_EMBED_TTS)
 
 echo "=== Build DMG ==="
 echo "App: $APP_NAME"

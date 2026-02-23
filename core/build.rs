@@ -36,7 +36,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CODESCRIBE_EMBED_MODEL");
     println!("cargo:rerun-if-env-changed=CODESCRIBE_MODEL_PATH");
     println!("cargo:rerun-if-env-changed=CODESCRIBE_NO_EMBED");
-    println!("cargo:rerun-if-env-changed=CODESCRIBE_NO_EMBED_WHISPER");
     println!("cargo:rerun-if-env-changed=CODESCRIBE_EMBED_TTS");
     println!("cargo:rerun-if-env-changed=CODESCRIBE_TTS_PATH");
     println!("cargo:rerun-if-env-changed=CODESCRIBE_EMBEDDER_REPO");
@@ -44,7 +43,6 @@ fn main() {
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let is_release = profile == "release";
     let no_embed = env::var("CODESCRIBE_NO_EMBED").is_ok();
-    let no_embed_whisper = env::var("CODESCRIBE_NO_EMBED_WHISPER").is_ok();
 
     if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
         let codescribe_dir = dirs::home_dir()
@@ -202,11 +200,6 @@ fn main() {
             println!(
                 "cargo:warning=Whisper embedding is disabled by policy; using runtime model loading"
             );
-            if no_embed_whisper {
-                println!(
-                    "cargo:warning=CODESCRIBE_NO_EMBED_WHISPER is set (legacy override, now redundant)"
-                );
-            }
             if !model_exists {
                 println!(
                     "cargo:warning=Whisper model not found in build context (OK; resolve via CODESCRIBE_MODEL_PATH/HF cache at runtime)"

@@ -93,13 +93,6 @@ reload = "restart"
 category = "vad"
 description = "Silero gate mode: supervisor (default, preserves raw sample rate), iter, or simple"
 
-[vars.CODESCRIBE_VAD_ITER]
-default = "0"
-type = "bool"
-reload = "restart"
-category = "vad"
-description = "Shortcut for CODESCRIBE_VAD_GATE_MODE=iter"
-
 [vars.VAD_PRESET]
 default = ""
 type = "string"
@@ -150,13 +143,6 @@ range = "0.0-1.0"
 # ═══════════════════════════════════════════════════════════════════════════════
 # Streaming / Buffering
 # ═══════════════════════════════════════════════════════════════════════════════
-
-[vars.CODESCRIBE_EVENT_PIPELINE]
-default = "1"
-type = "bool"
-reload = "hot"
-category = "streaming"
-description = "Deprecated migration flag. Event pipeline is always active in app runtime."
 
 [vars.CODESCRIBE_BUFFER_DELAY_MS]
 default = "280"
@@ -237,22 +223,6 @@ reload = "hot"
 category = "streaming"
 description = "Strip trailing ':D' hallucinations from streaming output"
 
-[vars.CODESCRIBE_BUFFERED_CORRECTION_UTTERANCES]
-default = "2"
-type = "usize"
-reload = "hot"
-category = "streaming"
-description = "Minimum utterances before buffered correction pass"
-range = "1-10"
-
-[vars.CODESCRIBE_BUFFERED_CORRECTION_SEC]
-default = "6.0"
-type = "f32"
-reload = "hot"
-category = "streaming"
-description = "Minimum elapsed seconds before buffered correction pass"
-range = "1.0-60.0"
-
 [vars.CODESCRIBE_BUFFERED_CORRECTION_PREFIX]
 default = "0.50"
 type = "f32"
@@ -269,28 +239,12 @@ category = "streaming"
 description = "Interim emission cadence for buffered mode (sec)"
 range = "1.0-30.0"
 
-[vars.CODESCRIBE_UTTERANCE_INTERIM_SEC]
-default = "1.2"
-type = "f32"
-reload = "hot"
-category = "streaming"
-description = "Legacy interim cadence for utterance mode (sec)"
-range = "1.0-30.0"
-
 [vars.CODESCRIBE_BUFFERED_SILENCE_SEC]
 default = ""
 type = "f32"
 reload = "restart"
 category = "streaming"
 description = "Override silence duration before utterance flush in buffered mode (sec)"
-range = "0.1-10.0"
-
-[vars.CODESCRIBE_UTTERANCE_SILENCE_SEC]
-default = ""
-type = "f32"
-reload = "restart"
-category = "streaming"
-description = "Legacy override silence duration before utterance flush in utterance mode (sec)"
 range = "0.1-10.0"
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -373,13 +327,6 @@ type = "bool"
 reload = "restart"
 category = "stt"
 description = "Allow SpeechAnalyzer bridge to auto-install missing Apple speech assets"
-
-[vars.CODESCRIBE_NO_EMBED_WHISPER]
-default = "0"
-type = "bool"
-reload = "restart"
-category = "stt"
-description = "Disable embedded Whisper model (use external)"
 
 [vars.CODESCRIBE_ONNX_CPU_ONLY]
 default = "0"
@@ -815,13 +762,6 @@ reload = "hot"
 category = "ui"
 description = "Use stable-word-only preview for live overlay text (0 = show exact live text)"
 
-[vars.CODESCRIBE_DISABLE_GLASS]
-default = "0"
-type = "bool"
-reload = "restart"
-category = "ui"
-description = "Disable glass effects (force NSVisualEffectView fallback)"
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Clipboard
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -886,13 +826,6 @@ reload = "restart"
 category = "storage"
 description = "Override data directory (default: ~/.codescribe)"
 
-[vars.CODESCRIBE_APP_DIR]
-default = ""
-type = "string"
-reload = "restart"
-category = "storage"
-description = "Override app directory (fallback for DATA_DIR)"
-
 [vars.CODESCRIBE_ENV_PATH]
 default = ""
 type = "string"
@@ -900,23 +833,9 @@ reload = "restart"
 category = "storage"
 description = "Override .env file path"
 
-[vars.CODESCRIBE_ENV_TEMPLATE]
-default = ""
-type = "string"
-reload = "restart"
-category = "storage"
-description = "Override template .env used to seed config"
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Quality / Daemon
 # ═══════════════════════════════════════════════════════════════════════════════
-
-[vars.CODESCRIBE_QUALITY_DAEMON]
-default = "1"
-type = "bool"
-reload = "restart"
-category = "quality"
-description = "Enable background quality daemon (codescribe-loop)"
 
 [vars.CODESCRIBE_AUTOSTART_QUALITY_DAEMON]
 default = "0"
@@ -989,13 +908,6 @@ reload = "rebuild"
 category = "build"
 description = "Embed TTS model in binary"
 
-[vars.CODESCRIBE_EMBED_E5]
-default = "0"
-type = "bool"
-reload = "rebuild"
-category = "build"
-description = "Embed E5 embedder model in binary"
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Debug / Test
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1020,13 +932,6 @@ type = "string"
 reload = "hot"
 category = "debug"
 description = "Path for streaming debug log"
-
-[vars.CODESCRIBE_LOG_STDOUT]
-default = "0"
-type = "bool"
-reload = "restart"
-category = "debug"
-description = "Also log to stdout (in addition to log file)"
 
 [vars.RUST_LOG]
 default = ""
