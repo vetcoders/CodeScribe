@@ -6,13 +6,14 @@ CodeScribe exposes **three work modes**. Each mode has **one shortcut binding** 
 
 ## Mode Comparison
 
-| Mode                 | Default Shortcut            | Auto‑Paste | AI         | Best For                                  |
-| -------------------- | --------------------------- | ---------- | ---------- | ----------------------------------------- |
-| **Dictation**        | Hold `Fn/Globe`             | ON         | Optional   | Fast dictation into any app               |
-| **Formatting**       | Double‑tap `Left Option`    | ON         | Always     | Cleanup/polish of dictated text           |
-| **Assistive (Agent)**| Double‑tap `Right Option`   | OFF        | Always     | Questions, transformations, selected text |
+| Mode                  | Default Shortcut          | Auto‑Paste | AI       | Best For                                  |
+| --------------------- | ------------------------- | ---------- | -------- | ----------------------------------------- |
+| **Dictation**         | Hold `Fn/Globe`           | ON         | Optional | Fast dictation into any app               |
+| **Formatting**        | Double‑tap `Left Option`  | ON         | Always   | Cleanup/polish of dictated text           |
+| **Assistive (Agent)** | Double‑tap `Right Option` | OFF        | Always   | Questions, transformations, selected text |
 
 Notes:
+
 - **Dictation** runs with or without AI depending on **Settings → Audio & Input → AI Formatting**.
 - **Formatting** and **Assistive** always require AI provider config (see **Settings → AI & Prompts**).
 

@@ -96,13 +96,13 @@ silence_counter < min_silence      → keep buffering (might be mid-sentence pau
 
 ### Key parameters (hardcoded)
 
-| Parameter                | Value     | Source                  |
-| ------------------------ | --------- | ----------------------- |
-| `threshold`              | 0.5       | Silero default profile  |
-| `min_speech_duration`    | 0.064s    | Silero Rust example     |
-| `min_silence_duration`   | 0.0s      | Silero Rust example     |
-| `max_utterance_duration` | ∞         | Silero Rust example     |
-| `speech_pad / pre_roll`  | 0.064s    | Silero Rust example     |
+| Parameter                | Value  | Source                 |
+| ------------------------ | ------ | ---------------------- |
+| `threshold`              | 0.5    | Silero default profile |
+| `min_speech_duration`    | 0.064s | Silero Rust example    |
+| `min_silence_duration`   | 0.0s   | Silero Rust example    |
+| `max_utterance_duration` | ∞      | Silero Rust example    |
+| `speech_pad / pre_roll`  | 0.064s | Silero Rust example    |
 
 ### Pre-roll buffer
 

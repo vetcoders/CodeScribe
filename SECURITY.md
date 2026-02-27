@@ -5,19 +5,21 @@
 CodeScribe follows rolling support for the latest stable release.
 
 | Version | Supported |
-| --- | --- |
-| 0.8.x | Yes |
-| < 0.8.0 | No |
+| ------- | --------- |
+| 0.8.x   | Yes       |
+| < 0.8.0 | No        |
 
 ## Reporting a Vulnerability
 
 If you discover a security issue, please do not open a public issue.
 
 Use one of these private channels:
+
 - Email: `security@vetcoders.io`
 - Fallback: `hello@vetcoders.io`
 
 Please include:
+
 - Affected version
 - Reproduction steps
 - Impact assessment
@@ -40,6 +42,7 @@ Please include:
 ## Scope Notes
 
 For local-first workflows, this project handles:
+
 - Microphone/audio capture
 - Local model execution
 - Optional API traffic to configured LLM providers

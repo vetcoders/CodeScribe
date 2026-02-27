@@ -3,6 +3,7 @@
 The Chat Overlay is the live UI for **agent responses**, **streaming**, and **history**.
 
 It has three tabs:
+
 - **Drawer**: searchable history (threads + transcriptions), favorites filter
 - **Agent**: chat bubbles + streaming responses
 - **Settings**: routes you to the main Settings window / onboarding

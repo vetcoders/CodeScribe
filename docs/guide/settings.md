@@ -47,9 +47,9 @@ Open **Settings → AI & Prompts**.
 
 Prompt files live in `~/.codescribe/prompts/`:
 
-| File                                   | Used For |
-| -------------------------------------- | -------- |
-| `~/.codescribe/prompts/formatting.txt` | Formatting behavior |
+| File                                   | Used For                                                |
+| -------------------------------------- | ------------------------------------------------------- |
+| `~/.codescribe/prompts/formatting.txt` | Formatting behavior                                     |
 | `~/.codescribe/prompts/assistive.txt`  | Agent behavior (user instruction + selected text rules) |
 
 You can edit prompts in-app (prompt editor) or edit the files directly.

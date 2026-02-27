@@ -34,6 +34,7 @@ What happened instead?
 ## Logs / Diagnostics
 
 Attach relevant logs and output:
+
 - `codescribe -v` output
 - `codescribe-run.log` / `codescribe-debug.log`
 - screenshots if UI/overlay related

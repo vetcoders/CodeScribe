@@ -75,11 +75,11 @@ Power-user overrides still exist via `~/.codescribe/.env`, but you should not ne
 
 ### Recording Modes
 
-| Mode                 | Shortcut                     | What It Does                                  |
-| -------------------- | ---------------------------- | --------------------------------------------- |
-| **Dictation**        | Hold your Dictation binding  | Fast dictation, auto‑paste (AI optional)      |
-| **Formatting**       | Double‑tap `Left Option`     | Hands‑free + AI formatting pass (auto‑paste)  |
-| **Assistive (Agent)**| Double‑tap `Right Option`    | Agent chat overlay (auto‑paste OFF)           |
+| Mode                  | Shortcut                    | What It Does                                 |
+| --------------------- | --------------------------- | -------------------------------------------- |
+| **Dictation**         | Hold your Dictation binding | Fast dictation, auto‑paste (AI optional)     |
+| **Formatting**        | Double‑tap `Left Option`    | Hands‑free + AI formatting pass (auto‑paste) |
+| **Assistive (Agent)** | Double‑tap `Right Option`   | Agent chat overlay (auto‑paste OFF)          |
 
 ### Visual Feedback
 

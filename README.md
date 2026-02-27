@@ -214,11 +214,11 @@ flowchart TD
 
 ### Recording Modes
 
-| Mode                  | Trigger                   | Description                                    |
-| --------------------- | ------------------------- | ---------------------------------------------- |
-| **Dictation**         | Hold `Fn/Globe` (default) | Fast transcript (AI optional), auto‑paste      |
-| **Formatting**        | Double‑tap `Left Option`  | AI formatting pass, auto‑paste                 |
-| **Assistive (Agent)** | Double‑tap `Right Option` | Agent chat with optional selection context     |
+| Mode                  | Trigger                   | Description                                |
+| --------------------- | ------------------------- | ------------------------------------------ |
+| **Dictation**         | Hold `Fn/Globe` (default) | Fast transcript (AI optional), auto‑paste  |
+| **Formatting**        | Double‑tap `Left Option`  | AI formatting pass, auto‑paste             |
+| **Assistive (Agent)** | Double‑tap `Right Option` | Agent chat with optional selection context |
 
 See [`docs/BACKLOG.md`](docs/BACKLOG.md) for detailed mode descriptions and future enhancements (VAD, Overlay).
 
