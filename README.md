@@ -148,6 +148,16 @@ make install
 codescribe --version
 ```
 
+### Install via Release DMG
+
+Tagged builds can publish a signed-or-ad-hoc DMG through GitHub Releases:
+
+1. Open [Releases](https://github.com/VetCoders/CodeScribe/releases)
+2. Download `CodeScribe_<version>.dmg`
+3. Drag `CodeScribe.app` into `Applications`
+
+> **Current truth:** source install is the guaranteed path inside this repo. The release workflow lives in `.github/workflows/release.yml` and publishes DMGs on `v*` tags.
+
 ### Build Options
 
 ```bash

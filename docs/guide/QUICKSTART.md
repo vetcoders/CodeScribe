@@ -29,6 +29,8 @@ make install-app       # Copy to /Applications
 2. Open DMG, drag to Applications
 3. Open CodeScribe from Applications
 
+> If Releases is empty for the branch you are on, fall back to Option A and build locally.
+
 ---
 
 ## 2. Grant Permissions

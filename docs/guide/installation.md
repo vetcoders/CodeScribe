@@ -13,20 +13,16 @@
 
 ## Installation Methods
 
-### Option 1: Homebrew (Recommended)
-
-```bash
-brew install --cask codescribe
-```
-
-### Option 2: Direct Download
+### Option 1: Direct Download (Preferred for end users once a release is published)
 
 1. Go to [Releases](https://github.com/VetCoders/CodeScribe/releases)
 2. Download `CodeScribe-x.x.x.dmg`
 3. Open DMG, drag CodeScribe to Applications
 4. Eject DMG
 
-### Option 3: Build from Source
+> If Releases is empty, use the source path below. The repository now ships a release workflow, but not every branch has a published tag yet.
+
+### Option 2: Build from Source
 
 ```bash
 git clone https://github.com/VetCoders/CodeScribe.git
@@ -110,25 +106,13 @@ codescribe --config
 
 ## Updating
 
-### Homebrew
-
-```bash
-brew upgrade codescribe
-```
-
-### Manual
+### Manual / Releases
 
 Download new version from Releases and replace the old app.
 
 ---
 
 ## Uninstalling
-
-### Homebrew
-
-```bash
-brew uninstall codescribe
-```
 
 ### Manual
 

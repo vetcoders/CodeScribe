@@ -3,6 +3,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -58,15 +59,15 @@ impl<'a> ResponsesStreamingManager<'a> {
     pub async fn stream<T: Serialize>(&self, request: &T) -> Result<ResponsesStreamOutput> {
         let endpoint_url =
             validated_endpoint_url(self.endpoint).context("Invalid Responses API endpoint URL")?;
-        let request_builder = self
-            .client
+        let request_builder = apply_auth_headers(
             // nosemgrep: rust.actix.ssrf.reqwest-taint.reqwest-taint -- URL is validated by `validated_endpoint_url`.
-            .post(endpoint_url.clone())
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .timeout(STREAM_REQUEST_TIMEOUT)
-            .json(request);
+            self.client.post(endpoint_url.clone()),
+            self.api_key,
+        )
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .timeout(STREAM_REQUEST_TIMEOUT)
+        .json(request);
         let response =
             match tokio::time::timeout(self.initial_response_timeout, request_builder.send()).await
             {
@@ -342,10 +343,8 @@ impl<'a> ResponsesStreamingManager<'a> {
             resume_url, starting_after
         );
 
-        let response = self
-            .client
-            .get(&resume_url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+        let response = self.client.get(&resume_url);
+        let response = apply_auth_headers(response, self.api_key)
             .header("Accept", "text/event-stream")
             .timeout(STREAM_REQUEST_TIMEOUT)
             .send()
@@ -466,14 +465,15 @@ async fn run_agent_stream(
 ) -> Result<()> {
     let endpoint_url =
         validated_endpoint_url(&endpoint).context("Invalid agent streaming endpoint URL")?;
-    let request_builder = client
+    let request_builder = apply_auth_headers(
         // nosemgrep: rust.actix.ssrf.reqwest-taint.reqwest-taint -- URL is validated by `validated_endpoint_url`.
-        .post(endpoint_url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .timeout(STREAM_REQUEST_TIMEOUT)
-        .json(&request_payload);
+        client.post(endpoint_url),
+        &api_key,
+    )
+    .header("Content-Type", "application/json")
+    .header("Accept", "text/event-stream")
+    .timeout(STREAM_REQUEST_TIMEOUT)
+    .json(&request_payload);
 
     let response =
         match tokio::time::timeout(initial_response_timeout, request_builder.send()).await {
@@ -605,6 +605,12 @@ async fn run_agent_stream(
     Ok(())
 }
 
+fn apply_auth_headers(builder: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+    builder
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("x-api-key", api_key)
+}
+
 fn validated_endpoint_url(endpoint: &str) -> Result<reqwest::Url> {
     let endpoint = endpoint.trim();
     if endpoint.is_empty() {
@@ -612,8 +618,12 @@ fn validated_endpoint_url(endpoint: &str) -> Result<reqwest::Url> {
     }
 
     let url = reqwest::Url::parse(endpoint).context("Endpoint is not a valid URL")?;
+    let is_loopback = is_loopback_host(&url);
+
     match url.scheme() {
-        "https" | "http" => {}
+        "https" => {}
+        "http" if is_loopback => {}
+        "http" => anyhow::bail!("Plain HTTP is only allowed for localhost loopback endpoints"),
         other => anyhow::bail!("Unsupported endpoint URL scheme: {}", other),
     }
 
@@ -621,7 +631,112 @@ fn validated_endpoint_url(endpoint: &str) -> Result<reqwest::Url> {
         anyhow::bail!("Endpoint URL is missing a host");
     }
 
+    if is_private_host(&url) && !is_loopback {
+        anyhow::bail!("Private/internal endpoint URLs are not allowed");
+    }
+
+    if resolves_to_private_host(&url) && !is_loopback {
+        anyhow::bail!("Endpoint resolves to a private/internal address");
+    }
+
     Ok(url)
+}
+
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    let Some(host_raw) = url.host_str() else {
+        return false;
+    };
+    let host = host_raw.trim_matches(['[', ']']);
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn is_private_host(url: &reqwest::Url) -> bool {
+    let Some(host_raw) = url.host_str() else {
+        return true;
+    };
+    let host = host_raw.trim_matches(['[', ']']);
+
+    if matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") {
+        return true;
+    }
+
+    if host.ends_with(".local") || host.ends_with(".internal") {
+        return true;
+    }
+
+    if let Some(is_private) = check_ipv4_private(host) {
+        return is_private;
+    }
+
+    if let Some(is_private) = check_ipv6_private(host) {
+        return is_private;
+    }
+
+    false
+}
+
+fn resolves_to_private_host(url: &reqwest::Url) -> bool {
+    let Some(host_raw) = url.host_str() else {
+        return true;
+    };
+    let host = host_raw.trim_matches(['[', ']']);
+
+    if host.parse::<IpAddr>().is_ok() {
+        return false;
+    }
+
+    let port = url
+        .port_or_known_default()
+        .unwrap_or(if url.scheme() == "http" { 80 } else { 443 });
+
+    let addrs = (host, port).to_socket_addrs();
+    let Ok(iter) = addrs else {
+        return true;
+    };
+
+    let mut resolved_any = false;
+    for addr in iter {
+        resolved_any = true;
+        if is_private_ip(addr.ip()) {
+            return true;
+        }
+    }
+
+    !resolved_any
+}
+
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_ipv4(v4),
+        IpAddr::V6(v6) => is_private_ipv6(v6),
+    }
+}
+
+fn check_ipv4_private(host: &str) -> Option<bool> {
+    let ip = host.parse::<Ipv4Addr>().ok()?;
+    Some(is_private_ipv4(ip))
+}
+
+fn check_ipv6_private(host: &str) -> Option<bool> {
+    let ip = host.parse::<Ipv6Addr>().ok()?;
+    Some(is_private_ipv6(ip))
+}
+
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    match octets[0] {
+        10 => true,
+        172 => (16..=31).contains(&octets[1]),
+        192 if octets[1] == 168 => true,
+        169 if octets[1] == 254 => true,
+        127 => true,
+        0 => true,
+        _ => false,
+    }
+}
+
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() || ip.is_unique_local()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -941,9 +1056,10 @@ fn extract_output_channels(output: &[StreamOutputItem]) -> (String, Option<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentEvent, StreamChunk, StreamOutputItem, ToolCallTracker, extract_output_channels,
-        fallback_reasoning, parse_agent_event,
+        AgentEvent, StreamChunk, StreamOutputItem, ToolCallTracker, apply_auth_headers,
+        extract_output_channels, fallback_reasoning, parse_agent_event, validated_endpoint_url,
     };
+    use reqwest::Client;
     use serde_json::json;
 
     #[test]
@@ -1119,6 +1235,59 @@ mod tests {
                 name: "fetch_summary".to_string(),
                 arguments: json!({"id": "abc"}),
             }
+        );
+    }
+
+    #[test]
+    fn apply_auth_headers_sets_both_bearer_and_x_api_key() {
+        let client = Client::new();
+        let request = apply_auth_headers(client.post("https://example.com/v1/responses"), "secret")
+            .build()
+            .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer secret")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn validated_endpoint_url_allows_https_public_and_loopback_http() {
+        let public = validated_endpoint_url("https://1.1.1.1/v1/responses")
+            .expect("public https endpoint should be allowed");
+        assert_eq!(public.as_str(), "https://1.1.1.1/v1/responses");
+
+        let localhost = validated_endpoint_url("http://127.0.0.1:11434/v1/responses")
+            .expect("loopback http endpoint should be allowed");
+        assert_eq!(localhost.as_str(), "http://127.0.0.1:11434/v1/responses");
+    }
+
+    #[test]
+    fn validated_endpoint_url_rejects_plain_http_and_private_remote_hosts() {
+        let public_http = validated_endpoint_url("http://1.1.1.1/v1/responses")
+            .expect_err("public http endpoint should be rejected");
+        assert!(
+            public_http
+                .to_string()
+                .contains("Plain HTTP is only allowed for localhost loopback endpoints")
+        );
+
+        let private_https = validated_endpoint_url("https://192.168.1.10/v1/responses")
+            .expect_err("private https endpoint should be rejected");
+        assert!(
+            private_https
+                .to_string()
+                .contains("Private/internal endpoint URLs are not allowed")
         );
     }
 }

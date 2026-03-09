@@ -693,7 +693,7 @@ fn hold_base_pressed(
     match dictation_binding {
         ShortcutBinding::HoldFn => modifiers.fn_key,
         ShortcutBinding::HoldCtrl => modifiers.ctrl,
-        ShortcutBinding::HoldCtrlAlt => modifiers.ctrl,
+        ShortcutBinding::HoldCtrlAlt => modifiers.ctrl && modifiers.option,
         ShortcutBinding::HoldCtrlShift => modifiers.ctrl && modifiers.shift,
         ShortcutBinding::HoldCtrlCmd => modifiers.ctrl && modifiers.cmd,
         ShortcutBinding::Disabled
@@ -716,7 +716,7 @@ fn check_hold_combo(modifiers: HotkeyModifierSnapshot, dictation_binding: Shortc
     match dictation_binding {
         ShortcutBinding::HoldFn => modifiers.fn_key,
         ShortcutBinding::HoldCtrl => modifiers.ctrl,
-        ShortcutBinding::HoldCtrlAlt => modifiers.ctrl,
+        ShortcutBinding::HoldCtrlAlt => modifiers.ctrl && modifiers.option,
         ShortcutBinding::HoldCtrlShift => modifiers.ctrl && modifiers.shift,
         ShortcutBinding::HoldCtrlCmd => modifiers.ctrl && modifiers.cmd,
         ShortcutBinding::Disabled
@@ -1837,6 +1837,50 @@ mod tests {
             None
         );
         assert!(!detector.is_combo_active());
+    }
+
+    #[test]
+    fn detector_hold_ctrl_alt_requires_option_before_starting_hold() {
+        let mut detector = HotkeyDetector::default();
+        let config = test_config(
+            ShortcutBinding::HoldCtrlAlt,
+            ShortcutBinding::Disabled,
+            ShortcutBinding::Disabled,
+        );
+        let base = Instant::now();
+
+        assert_eq!(
+            detector.feed(
+                HotkeyDetectorInput::FlagsChanged {
+                    now: base,
+                    key: HotkeyPhysicalKey::LeftControl,
+                    modifiers: mods(true, false, false, false, false),
+                },
+                config,
+            ),
+            None
+        );
+        assert!(
+            !detector.is_combo_active(),
+            "Ctrl alone must not arm HoldCtrlAlt"
+        );
+
+        assert_eq!(
+            detector.feed(
+                HotkeyDetectorInput::FlagsChanged {
+                    now: base + Duration::from_millis(1),
+                    key: HotkeyPhysicalKey::LeftOption,
+                    modifiers: mods(true, true, false, false, false),
+                },
+                config,
+            ),
+            Some(HotkeyEvent::Hold {
+                action: HoldAction::Down,
+                mode: HoldMode::Raw,
+                force_ai: true,
+            })
+        );
+        assert!(detector.is_combo_active());
     }
 
     #[test]

@@ -8,7 +8,7 @@ CodeScribe is a native macOS menu-bar application that transcribes your speech l
 
 ## Quick Start (30 seconds)
 
-1. **Install**: `brew install --cask codescribe` or download from [Releases](https://github.com/VetCoders/CodeScribe/releases)
+1. **Install**: download a DMG from [Releases](https://github.com/VetCoders/CodeScribe/releases), or build from source if no tagged release is published yet
 2. **Launch**: Open CodeScribe from Applications
 3. **Grant permissions**: Microphone + Accessibility (follow prompts)
 4. **Transcribe**: Use your **Dictation** hotkey (default: hold `Fn/Globe`), speak, release → text appears at cursor (Settings → Modes & Shortcuts)

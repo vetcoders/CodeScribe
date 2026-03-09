@@ -22,32 +22,28 @@ impl Config {
     /// If the .env file doesn't exist or is malformed, returns default configuration
     /// without raising an error.
     pub fn load() -> Self {
-        // One-time migration from .env-only to tiered config
-        super::migrate::migrate_if_needed();
+        let env_path = Self::env_path();
+        let pre_env_use_local_stt = std::env::var("USE_LOCAL_STT").ok();
+        let mut file_env_vars: Option<HashMap<String, String>> = None;
+        let mut env_use_local_stt: Option<bool> = None;
 
         // Load .env file if it exists (power-user overrides only)
         // In production, .env doesn't exist — regular users use settings.json
-        let env_path = Self::env_path();
-        let pre_env_use_local_stt = std::env::var("USE_LOCAL_STT").ok();
-        let mut env_use_local_stt: Option<bool> = None;
         if env_path.exists() {
-            if let Ok(vars) = Self::parse_env_file(&env_path)
-                && let Some(raw) = vars.get("USE_LOCAL_STT")
-            {
-                let normalized = raw.trim().to_lowercase();
-                env_use_local_stt = match normalized.as_str() {
-                    "1" | "true" | "yes" | "on" => Some(true),
-                    "0" | "false" | "no" | "off" => Some(false),
-                    _ => {
-                        warn!("Ignoring invalid USE_LOCAL_STT value in .env: {raw}");
-                        None
-                    }
-                };
-            }
             // Migrate legacy keys inside existing .env (power users only)
             Self::migrate_env_legacy_keys();
+
+            if let Ok(vars) = Self::parse_env_file(&env_path) {
+                env_use_local_stt = vars
+                    .get("USE_LOCAL_STT")
+                    .and_then(|raw| parse_use_local_stt(raw, ".env"));
+                file_env_vars = Some(vars);
+            }
             let _ = dotenvy::from_path(&env_path);
         }
+
+        // One-time migration from .env-only to tiered config
+        super::migrate::migrate_if_needed(file_env_vars.as_ref());
 
         // Load API keys from Keychain (only if not already set by .env)
         super::keychain::populate_env_from_keychain();
@@ -63,6 +59,8 @@ impl Config {
         // Override with environment variables (.env + runtime; highest priority)
         config.load_from_env();
         if let Some(v) = env_use_local_stt {
+            config.use_local_stt = v;
+        } else if let Some(v) = user_settings.use_local_stt {
             config.use_local_stt = v;
         } else {
             if pre_env_use_local_stt.is_some() {
@@ -958,9 +956,34 @@ impl Config {
     }
 }
 
+fn parse_use_local_stt(raw: &str, source: &str) -> Option<bool> {
+    let normalized = raw.trim().to_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => {
+            warn!("Ignoring invalid USE_LOCAL_STT value in {source}: {raw}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::UserSettings;
+    use serial_test::serial;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn setup_isolated_data_dir() -> TempDir {
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("CODESCRIBE_DATA_DIR", tmp.path());
+            std::env::remove_var("USE_LOCAL_STT");
+        }
+        tmp
+    }
 
     #[test]
     fn test_hotkey_timing_params_applied_from_settings() {
@@ -979,5 +1002,38 @@ mod tests {
         assert_eq!(config.double_tap_interval_ms, 300);
         assert!((config.toggle_silence_sec - 3.0).abs() < f32::EPSILON);
         assert!(config.hold_exclusive);
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_respects_use_local_stt_from_settings_json() {
+        let _tmp = setup_isolated_data_dir();
+
+        let mut settings = UserSettings::load();
+        settings.use_local_stt = Some(false);
+        settings.save().expect("save settings");
+
+        let config = Config::load();
+        assert!(
+            !config.use_local_stt,
+            "settings.json should be able to disable local STT"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_load_migrates_use_local_stt_from_env_file_before_settings_json_exists() {
+        let _tmp = setup_isolated_data_dir();
+
+        let env_path = Config::env_path();
+        fs::create_dir_all(env_path.parent().expect("env dir")).expect("create env dir");
+        fs::write(&env_path, "USE_LOCAL_STT=0\n").expect("write .env");
+
+        let config = Config::load();
+        assert!(!config.use_local_stt, ".env should disable local STT");
+
+        let settings = UserSettings::load();
+        assert_eq!(settings.use_local_stt, Some(false));
+        assert!(UserSettings::settings_path().exists());
     }
 }

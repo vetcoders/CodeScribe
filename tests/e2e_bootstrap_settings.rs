@@ -24,6 +24,7 @@ fn setup_test_env() -> TempDir {
         std::env::remove_var("AI_FORMATTING_ENABLED");
         std::env::remove_var("HOLD_EXCLUSIVE");
         std::env::remove_var("CODESCRIBE_TYPING_CPS");
+        std::env::remove_var("USE_LOCAL_STT");
     }
     tmp
 }
@@ -181,6 +182,22 @@ fn test_settings_hold_exclusive_persistence() {
         settings.hold_exclusive,
         Some(true),
         "hold_exclusive persisted"
+    );
+}
+
+#[test]
+#[serial]
+fn test_settings_use_local_stt_false_roundtrips_through_config_load() {
+    let _tmp = setup_test_env();
+
+    let mut settings = UserSettings::load();
+    settings.use_local_stt = Some(false);
+    settings.save().expect("save settings");
+
+    let config = Config::load();
+    assert!(
+        !config.use_local_stt,
+        "Config::load should honor settings.json when local STT is disabled"
     );
 }
 

@@ -89,7 +89,7 @@ impl AgentProvider for OpenAiProvider {
 
         let request = OpenAiResponsesRequest {
             model,
-            input: build_input_items(messages)?,
+            input: build_request_input_items(messages, previous_response_id.as_deref())?,
             previous_response_id,
             instructions: options.system_prompt.clone(),
             max_output_tokens: options.max_tokens,
@@ -202,6 +202,29 @@ fn build_tool_payload(tools: &[ToolDefinition]) -> Vec<OpenAiToolDefinition> {
             parameters: tool.input_schema.clone(),
         })
         .collect()
+}
+
+fn build_request_input_items(
+    messages: &[Message],
+    previous_response_id: Option<&str>,
+) -> Result<Vec<Value>> {
+    build_input_items(request_messages(messages, previous_response_id))
+}
+
+fn request_messages<'a>(
+    messages: &'a [Message],
+    previous_response_id: Option<&str>,
+) -> &'a [Message] {
+    if previous_response_id.is_none() {
+        return messages;
+    }
+
+    let mut start = messages.len();
+    while start > 0 && messages[start - 1].role == Role::User {
+        start -= 1;
+    }
+
+    &messages[start..]
 }
 
 fn build_input_items(messages: &[Message]) -> Result<Vec<Value>> {
@@ -355,5 +378,93 @@ fn parse_env_bool(key: &str, default: bool) -> bool {
             _ => default,
         },
         Err(_) => default,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_request_input_items, request_messages};
+    use codescribe_core::agent::{ContentBlock, Message, Role};
+    use serde_json::json;
+
+    #[test]
+    fn request_messages_replays_full_history_without_previous_response_id() {
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text("first".to_string())]),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text("second".to_string())],
+            ),
+        ];
+
+        let selected = request_messages(&messages, None);
+        assert_eq!(selected, messages.as_slice());
+    }
+
+    #[test]
+    fn request_messages_uses_only_trailing_user_messages_with_previous_response_id() {
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text("earlier turn".to_string())],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({"path": "/tmp/ignored.txt"}),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: vec![ContentBlock::Text("tool output".to_string())],
+                    is_error: false,
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text("follow-up".to_string())],
+            ),
+        ];
+
+        let selected = request_messages(&messages, Some("resp_prev"));
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(|message| message.role == Role::User));
+    }
+
+    #[test]
+    fn build_request_input_items_skips_prior_history_when_resuming_chain() {
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text("earlier turn".to_string())],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({"path": "/tmp/ignored.txt"}),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: vec![ContentBlock::Text("tool output".to_string())],
+                    is_error: false,
+                }],
+            ),
+        ];
+
+        let items = build_request_input_items(&messages, Some("resp_prev"))
+            .expect("request input items should build");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "function_call_output");
+        assert_eq!(items[0]["call_id"], "call_1");
     }
 }

@@ -59,6 +59,20 @@ fn missing_required_envs(config: &Config) -> Vec<&'static str> {
     }
 
     if config.ai_formatting_enabled {
+        let has_endpoint = std::env::var("LLM_FORMATTING_ENDPOINT")
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        if !has_endpoint {
+            missing.push("LLM_FORMATTING_ENDPOINT");
+        }
+        let has_model = std::env::var("LLM_FORMATTING_MODEL")
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        if !has_model {
+            missing.push("LLM_FORMATTING_MODEL");
+        }
         let has_key = std::env::var("LLM_FORMATTING_API_KEY")
             .ok()
             .map(|v| !v.trim().is_empty())
@@ -128,6 +142,35 @@ fn required_llm_key_when_ai_enabled() {
 
     let missing = missing_required_envs(&cfg);
     assert!(missing.contains(&"LLM_FORMATTING_API_KEY"));
+}
+
+#[test]
+#[serial]
+fn required_llm_endpoint_and_model_when_ai_enabled() {
+    let _g1 = EnvGuard::set("AI_FORMATTING_ENABLED", "1");
+    let _g2 = EnvGuard::unset("LLM_FORMATTING_ENDPOINT");
+    let _g3 = EnvGuard::unset("LLM_FORMATTING_MODEL");
+
+    let mut cfg = Config::default();
+    cfg.load_from_env();
+
+    let missing = missing_required_envs(&cfg);
+    assert!(missing.contains(&"LLM_FORMATTING_ENDPOINT"));
+    assert!(missing.contains(&"LLM_FORMATTING_MODEL"));
+}
+
+#[test]
+fn default_env_does_not_reference_internal_formatting_host() {
+    let default_env = include_str!("../config/default_env.txt");
+
+    assert!(
+        !default_env.contains("dragon:"),
+        "default_env must not ship internal-only hosts"
+    );
+    assert!(
+        default_env.contains("LLM_FORMATTING_ENDPOINT=https://"),
+        "default formatting endpoint should be a public https URL"
+    );
 }
 
 #[test]
