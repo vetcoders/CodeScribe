@@ -1,0 +1,34 @@
+[package]
+name = "qube-stt"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+candle-core.workspace = true
+candle-nn.workspace = true
+candle-transformers.workspace = true
+flate2.workspace = true
+hound.workspace = true
+indicatif.workspace = true
+ndarray.workspace = true
+ndarray-npy.workspace = true
+ort.workspace = true
+qube-audio = { path = "../qube-audio" }
+qube-support = { path = "../qube-support" }
+rand.workspace = true
+security-framework.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokenizers.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(embed_model)'] }

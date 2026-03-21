@@ -1,0 +1,24 @@
+[package]
+name = "vista-kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+qube-audio = { path = "../qube-audio" }
+qube-stt = { path = "../qube-stt" }
+qube-support = { path = "../qube-support" }
+qube-ws = { path = "../qube-ws" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

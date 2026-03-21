@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["core", "ffi", "uniffi-bindgen"]
+members = [
+    "crates/qube-support",
+    "crates/qube-audio",
+    "crates/qube-stt",
+    "crates/qube-ws",
+    "crates/vista-kernel",
+    "crates/qube-ffi",
+    "uniffi-bindgen",
+]
 
 [workspace.package]
 version = "0.8.0"
@@ -14,6 +22,35 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 tracing = "0.1"
+axum = { version = "0.8.8", features = ["ws"] }
+base64 = "0.22"
+cap-std = "3"
+candle-core = { version = "0.9", features = ["metal"] }
+candle-nn = "0.9"
+candle-transformers = { version = "0.9", features = ["metal"] }
+chrono = { version = "0.4", features = ["serde"] }
+cpal = "0.17"
+directories = "6"
+flate2 = "1.0"
+futures-util = "0.3"
+hound = "3.5"
+indicatif = "0.18"
+lazy_static = "1.4"
+ndarray = "0.17"
+ndarray-npy = { version = "0.10", default-features = false }
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "download-binaries", "tls-native", "coreml"] }
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", features = ["json", "multipart", "blocking", "stream"] }
+security-framework = "3"
+serial_test = "3"
+symphonia = { version = "0.5", features = ["all", "mp3", "pcm", "isomp4", "alac"] }
+tempfile = "3"
+tokenizers = "0.22"
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+uniffi = "0.30"
+uuid = { version = "1", features = ["v4"] }
+zip = "0.6"
 
 [profile.release]
 opt-level = 3

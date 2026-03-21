@@ -1,0 +1,27 @@
+[package]
+name = "qube-ws"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+offline_eval = []
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+lazy_static.workspace = true
+qube-audio = { path = "../qube-audio" }
+qube-stt = { path = "../qube-stt" }
+qube-support = { path = "../qube-support" }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

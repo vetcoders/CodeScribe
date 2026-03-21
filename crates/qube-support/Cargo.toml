@@ -1,0 +1,15 @@
+[package]
+name = "qube-support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+cap-std.workspace = true
+directories.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serial_test.workspace = true
+tempfile.workspace = true

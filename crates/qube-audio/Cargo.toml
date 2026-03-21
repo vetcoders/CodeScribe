@@ -1,0 +1,25 @@
+[package]
+name = "qube-audio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+cpal.workspace = true
+directories.workspace = true
+hound.workspace = true
+ndarray.workspace = true
+ort.workspace = true
+qube-support = { path = "../qube-support" }
+reqwest.workspace = true
+symphonia.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serial_test.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(embed_vad)'] }
