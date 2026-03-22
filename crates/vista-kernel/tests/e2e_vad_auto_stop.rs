@@ -13,6 +13,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
+use vista_kernel as codescribe;
 
 /// Test atomic flag mechanism used for VAD signaling
 ///

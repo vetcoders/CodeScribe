@@ -4,7 +4,7 @@
 //! `StreamPostProcessor::process_utterance` (lexicon + cleanup, no semantic gate),
 //! so short acknowledgements like "tak"/"nie" never disappear.
 
-use codescribe_core::pipeline::stream_postprocess::StreamPostProcessor;
+use qube_ws::pipeline::stream_postprocess::StreamPostProcessor;
 use serial_test::serial;
 
 struct EnvGuard {

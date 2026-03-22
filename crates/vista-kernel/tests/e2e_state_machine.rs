@@ -11,6 +11,7 @@
 use codescribe::config::{Config, Language, ShortcutBinding, UserSettings, WorkMode};
 use serial_test::serial;
 use tempfile::TempDir;
+use vista_kernel as codescribe;
 
 /// Setup isolated test environment
 fn setup_test_env() -> TempDir {

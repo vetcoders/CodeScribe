@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use vista_kernel as codescribe;
 
 #[tokio::test]
 async fn test_format_text_with_status_signature() {

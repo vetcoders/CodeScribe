@@ -11,6 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 qube-stt = { path = "../qube-stt" }
+qube-support = { path = "../qube-support" }
+vista-kernel = { path = "../vista-kernel" }
+anyhow.workspace = true
+tokio.workspace = true
 uniffi.workspace = true
 
 [build-dependencies]

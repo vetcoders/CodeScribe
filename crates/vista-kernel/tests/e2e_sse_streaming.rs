@@ -10,6 +10,7 @@
 use codescribe::ai_formatting;
 use serial_test::serial;
 use tracing_subscriber::EnvFilter;
+use vista_kernel as codescribe;
 
 /// Load environment from ~/.codescribe/.env if not already set
 fn load_codescribe_env() {
@@ -109,7 +110,7 @@ async fn e2e_sse_streaming_real_formatting() {
 #[ignore = "Requires real API key - run with make test-sse"]
 async fn e2e_sse_streaming_real_assistive() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new("codescribe_core::llm=debug"))
+        .with_env_filter(EnvFilter::new("vista_kernel::llm=debug"))
         .with_writer(std::io::stderr)
         .try_init();
     load_codescribe_env();

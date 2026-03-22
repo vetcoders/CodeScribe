@@ -9,10 +9,13 @@
 //!
 //! Created by M&K (c)2026 VetCoders
 
-use codescribe::config::{Config, ShortcutBinding, UserSettings, WorkMode};
+use qube_audio::vad;
+use qube_stt::stt::whisper;
 use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
+use vista_kernel::config::{Config, ShortcutBinding, UserSettings, WorkMode};
+use vista_kernel::{embedder, should_show_onboarding, tts};
 
 /// Setup isolated config environment (same pattern as e2e_settings_commands)
 fn setup_test_env() -> TempDir {
@@ -46,7 +49,7 @@ fn test_setup_should_show_when_no_sentinel() {
     let _tmp = setup_test_env();
 
     assert!(
-        codescribe::should_show_onboarding(),
+        should_show_onboarding(),
         "should_show_onboarding must be true on fresh install"
     );
 }
@@ -61,7 +64,7 @@ fn test_setup_should_not_show_after_done() {
     fs::write(&sentinel, "done").expect("write sentinel");
 
     assert!(
-        !codescribe::should_show_onboarding(),
+        !should_show_onboarding(),
         "should_show_onboarding must be false after setup_done exists"
     );
 }
@@ -78,7 +81,7 @@ fn test_setup_migrates_when_both_legacy_sentinels_exist() {
     fs::write(&bootstrap, "done").expect("write bootstrap_done");
 
     assert!(
-        !codescribe::should_show_onboarding(),
+        !should_show_onboarding(),
         "both legacy sentinels should migrate to setup_done and mark setup complete"
     );
 
@@ -98,7 +101,7 @@ fn test_setup_remains_incomplete_with_only_legacy_onboarding() {
     fs::write(&onboarding, "done").expect("write onboarding_done");
 
     assert!(
-        codescribe::should_show_onboarding(),
+        should_show_onboarding(),
         "legacy onboarding_done alone means permissions were done, but setup is still pending"
     );
 }
@@ -112,7 +115,7 @@ fn test_setup_remains_incomplete_with_only_legacy_bootstrap() {
     fs::write(&bootstrap, "done").expect("write bootstrap_done");
 
     assert!(
-        codescribe::should_show_onboarding(),
+        should_show_onboarding(),
         "legacy bootstrap_done alone means settings were opened before, but setup is still pending"
     );
 }
@@ -128,7 +131,7 @@ fn test_setup_done_blocks_onboarding_even_with_resume_checkpoint() {
     fs::write(config_dir.join("setup_done"), "done").expect("write setup_done");
 
     assert!(
-        !codescribe::should_show_onboarding(),
+        !should_show_onboarding(),
         "setup_done must keep onboarding hidden even if a stale resume checkpoint exists"
     );
 }
@@ -399,8 +402,8 @@ fn test_engine_tab_stt_engine_env_apple() {
 
 #[test]
 fn test_engine_tab_whisper_embedded_status() {
-    let embedded = codescribe_core::stt::whisper::embedded::is_embedded_available();
-    let embedded_data = codescribe_core::stt::whisper::embedded::get_embedded_data();
+    let embedded = whisper::embedded::is_embedded_available();
+    let embedded_data = whisper::embedded::get_embedded_data();
 
     assert_eq!(
         embedded_data.is_some(),
@@ -417,8 +420,8 @@ fn test_engine_tab_whisper_embedded_status() {
 
 #[test]
 fn test_engine_tab_vad_model_available() {
-    let embedded = codescribe_core::vad::embedded::is_embedded_available();
-    let user_path = codescribe_core::vad::user_model_path();
+    let embedded = vad::embedded::is_embedded_available();
+    let user_path = vad::user_model_path();
 
     let available = embedded || user_path.exists();
     assert!(
@@ -431,13 +434,13 @@ fn test_engine_tab_vad_model_available() {
 
 #[test]
 fn test_engine_tab_embedder_api_exists() {
-    let _initialized = codescribe_core::embedder::is_initialized();
+    let _initialized = embedder::is_initialized();
 }
 
 #[test]
 fn test_engine_tab_tts_embedded_status() {
-    let embedded = codescribe_core::tts::embedded::is_embedded_available();
-    let embedded_data = codescribe_core::tts::embedded::get_embedded_data();
+    let embedded = tts::embedded::is_embedded_available();
+    let embedded_data = tts::embedded::get_embedded_data();
 
     assert_eq!(
         embedded_data.is_some(),

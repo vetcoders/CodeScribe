@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codescribe::whisper::LocalWhisperEngine;
+use qube_stt::stt::whisper::LocalWhisperEngine;
 use tempfile::TempDir;
 
 #[path = "support/e2e_stt_matrix.rs"]

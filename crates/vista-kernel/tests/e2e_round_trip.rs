@@ -12,6 +12,8 @@
 //! Created by M&K (c)2026 VetCoders
 
 use anyhow::Result;
+use qube_stt::stt::whisper;
+use vista_kernel::{embedder, tts};
 
 #[path = "support/e2e_stt_matrix.rs"]
 mod e2e_stt_matrix;
@@ -72,8 +74,8 @@ fn test_roundtrip_gate_requires_explicit_opt_in() {
 
 #[test]
 fn test_whisper_embedded_readiness_contract() {
-    let available = codescribe_core::stt::whisper::embedded::is_embedded_available();
-    let embedded = codescribe_core::stt::whisper::embedded::get_embedded_data();
+    let available = whisper::embedded::is_embedded_available();
+    let embedded = whisper::embedded::get_embedded_data();
 
     assert_eq!(
         available,
@@ -117,14 +119,14 @@ fn test_tts_stt_round_trip_english() -> Result<()> {
     }
 
     // Initialize components
-    codescribe_core::tts::init()?;
-    codescribe_core::stt::whisper::init()?;
+    tts::init()?;
+    whisper::init()?;
 
     let input = "Hello, this is a test of the speech pipeline.";
     eprintln!("Input:  '{}'", input);
 
     // TTS: text → audio (24kHz)
-    let audio = codescribe_core::tts::synthesize(input)?;
+    let audio = tts::synthesize(input)?;
     eprintln!(
         "TTS generated {} samples ({:.2}s @ 24kHz)",
         audio.len(),
@@ -134,7 +136,7 @@ fn test_tts_stt_round_trip_english() -> Result<()> {
     assert!(audio.len() > 24000, "Should be at least 1 second of audio");
 
     // STT: audio → text
-    let transcribed = codescribe_core::stt::whisper::transcribe(&audio, 24000, Some("en"))?;
+    let transcribed = whisper::transcribe(&audio, 24000, Some("en"))?;
     eprintln!("Output: '{}'", transcribed.trim());
 
     // Verify similarity (not exact match due to STT variations)
@@ -157,16 +159,16 @@ fn test_tts_stt_round_trip_polish() -> Result<()> {
         return Ok(());
     }
 
-    codescribe_core::tts::init()?;
-    codescribe_core::stt::whisper::init()?;
+    tts::init()?;
+    whisper::init()?;
 
     let input = "Cześć, to jest test systemu rozpoznawania mowy.";
     eprintln!("Input:  '{}'", input);
 
-    let audio = codescribe_core::tts::synthesize(input)?;
+    let audio = tts::synthesize(input)?;
     eprintln!("TTS generated {} samples", audio.len());
 
-    let transcribed = codescribe_core::stt::whisper::transcribe(&audio, 24000, Some("pl"))?;
+    let transcribed = whisper::transcribe(&audio, 24000, Some("pl"))?;
     eprintln!("Output: '{}'", transcribed.trim());
 
     let similarity = word_similarity(input, &transcribed);
@@ -192,24 +194,24 @@ fn test_embedding_round_trip_similarity() -> Result<()> {
         return Ok(());
     }
 
-    codescribe_core::tts::init()?;
-    codescribe_core::stt::whisper::init()?;
-    codescribe_core::embedder::init()?;
+    tts::init()?;
+    whisper::init()?;
+    embedder::init()?;
 
     let input = "The quick brown fox jumps over the lazy dog.";
     eprintln!("Input: '{}'", input);
 
     // Generate audio and transcribe back
-    let audio = codescribe_core::tts::synthesize(input)?;
-    let transcribed = codescribe_core::stt::whisper::transcribe(&audio, 24000, Some("en"))?;
+    let audio = tts::synthesize(input)?;
+    let transcribed = whisper::transcribe(&audio, 24000, Some("en"))?;
     eprintln!("Transcribed: '{}'", transcribed.trim());
 
     // Get embeddings for both
-    let input_embedding = codescribe_core::embedder::embed(input)?;
-    let output_embedding = codescribe_core::embedder::embed(&transcribed)?;
+    let input_embedding = embedder::embed(input)?;
+    let output_embedding = embedder::embed(&transcribed)?;
 
     // Calculate cosine similarity
-    let similarity = codescribe_core::embedder::similarity(&input_embedding, &output_embedding);
+    let similarity = embedder::similarity(&input_embedding, &output_embedding);
     eprintln!("Embedding similarity: {:.4}", similarity);
 
     assert!(
@@ -228,7 +230,7 @@ fn test_embedding_preserves_meaning() -> Result<()> {
         return Ok(());
     }
 
-    codescribe_core::embedder::init()?;
+    embedder::init()?;
 
     // Similar meaning, different words
     let pairs = [
@@ -241,9 +243,9 @@ fn test_embedding_preserves_meaning() -> Result<()> {
     ];
 
     for (a, b) in pairs {
-        let emb_a = codescribe_core::embedder::embed(a)?;
-        let emb_b = codescribe_core::embedder::embed(b)?;
-        let sim = codescribe_core::embedder::similarity(&emb_a, &emb_b);
+        let emb_a = embedder::embed(a)?;
+        let emb_b = embedder::embed(b)?;
+        let sim = embedder::similarity(&emb_a, &emb_b);
 
         eprintln!("'{}' vs '{}' → {:.4}", a, b, sim);
         assert!(
@@ -267,27 +269,27 @@ fn test_full_pipeline_double_round_trip() -> Result<()> {
         return Ok(());
     }
 
-    codescribe_core::tts::init()?;
-    codescribe_core::stt::whisper::init()?;
-    codescribe_core::embedder::init()?;
+    tts::init()?;
+    whisper::init()?;
+    embedder::init()?;
 
     let original = "Please remember to call me tomorrow morning.";
     eprintln!("Original: '{}'", original);
 
     // First round-trip: text → audio → text
-    let audio1 = codescribe_core::tts::synthesize(original)?;
-    let text1 = codescribe_core::stt::whisper::transcribe(&audio1, 24000, Some("en"))?;
+    let audio1 = tts::synthesize(original)?;
+    let text1 = whisper::transcribe(&audio1, 24000, Some("en"))?;
     eprintln!("After 1st round-trip: '{}'", text1.trim());
 
     // Second round-trip: text → audio → text
-    let audio2 = codescribe_core::tts::synthesize(&text1)?;
-    let text2 = codescribe_core::stt::whisper::transcribe(&audio2, 24000, Some("en"))?;
+    let audio2 = tts::synthesize(&text1)?;
+    let text2 = whisper::transcribe(&audio2, 24000, Some("en"))?;
     eprintln!("After 2nd round-trip: '{}'", text2.trim());
 
     // Compare original with final using embeddings
-    let emb_original = codescribe_core::embedder::embed(original)?;
-    let emb_final = codescribe_core::embedder::embed(&text2)?;
-    let similarity = codescribe_core::embedder::similarity(&emb_original, &emb_final);
+    let emb_original = embedder::embed(original)?;
+    let emb_final = embedder::embed(&text2)?;
+    let similarity = embedder::similarity(&emb_original, &emb_final);
 
     eprintln!(
         "Semantic preservation after 2 round-trips: {:.4}",
@@ -312,10 +314,10 @@ fn test_whisper_embedded_model_works() -> Result<()> {
     }
 
     // Verify embedded model is being used
-    let embedded = codescribe_core::stt::whisper::embedded::is_embedded_available();
+    let embedded = whisper::embedded::is_embedded_available();
     eprintln!("Whisper embedded model available: {}", embedded);
 
-    codescribe_core::stt::whisper::init()?;
+    whisper::init()?;
 
     // Generate test audio (simple sine wave as speech proxy)
     // In real tests, we'd use TTS-generated audio
@@ -329,7 +331,7 @@ fn test_whisper_embedded_model_works() -> Result<()> {
         .collect();
 
     // Should not crash, even with non-speech audio
-    let result = codescribe_core::stt::whisper::transcribe(&samples, sample_rate, Some("en"));
+    let result = whisper::transcribe(&samples, sample_rate, Some("en"));
     eprintln!("Transcription result: {:?}", result);
 
     // It's OK if it returns empty or noise - we're testing it doesn't crash
@@ -348,13 +350,13 @@ fn test_tts_embedded_model_works() -> Result<()> {
         return Ok(());
     }
 
-    let embedded = codescribe_core::tts::embedded::is_embedded_available();
+    let embedded = tts::embedded::is_embedded_available();
     eprintln!("TTS embedded model available: {}", embedded);
 
-    codescribe_core::tts::init()?;
+    tts::init()?;
 
     let text = "Test.";
-    let audio = codescribe_core::tts::synthesize(text)?;
+    let audio = tts::synthesize(text)?;
 
     eprintln!("Generated {} samples for '{}'", audio.len(), text);
     assert!(!audio.is_empty(), "TTS should produce audio");
@@ -380,18 +382,18 @@ fn test_embedded_model_works() -> Result<()> {
         return Ok(());
     }
 
-    let embedded = codescribe_core::embedder::embedded::is_embedded_available();
+    let embedded = embedder::embedded::is_embedded_available();
     eprintln!("Embedded model available: {}", embedded);
 
-    codescribe_core::embedder::init()?;
+    embedder::init()?;
 
     let text = "Hello world";
-    let embedding = codescribe_core::embedder::embed(text)?;
+    let embedding = embedder::embed(text)?;
 
     eprintln!("Embedding dimension: {}", embedding.len());
     assert_eq!(
         embedding.len(),
-        codescribe_core::embedder::EMBEDDING_DIM,
+        embedder::EMBEDDING_DIM,
         "Embedding should match expected dimension"
     );
 
@@ -418,8 +420,8 @@ fn test_numbers_survive_round_trip() -> Result<()> {
         return Ok(());
     }
 
-    codescribe_core::tts::init()?;
-    codescribe_core::stt::whisper::init()?;
+    tts::init()?;
+    whisper::init()?;
 
     let inputs = [
         "My phone number is 555-1234.",
@@ -429,8 +431,8 @@ fn test_numbers_survive_round_trip() -> Result<()> {
 
     for input in inputs {
         eprintln!("\nTesting: '{}'", input);
-        let audio = codescribe_core::tts::synthesize(input)?;
-        let output = codescribe_core::stt::whisper::transcribe(&audio, 24000, Some("en"))?;
+        let audio = tts::synthesize(input)?;
+        let output = whisper::transcribe(&audio, 24000, Some("en"))?;
         eprintln!("Got: '{}'", output.trim());
 
         // Numbers are tricky - just ensure we get something back
@@ -447,14 +449,14 @@ fn test_punctuation_handling() -> Result<()> {
         return Ok(());
     }
 
-    codescribe_core::tts::init()?;
-    codescribe_core::stt::whisper::init()?;
+    tts::init()?;
+    whisper::init()?;
 
     let input = "Hello! How are you? I'm fine, thanks.";
     eprintln!("Input: '{}'", input);
 
-    let audio = codescribe_core::tts::synthesize(input)?;
-    let output = codescribe_core::stt::whisper::transcribe(&audio, 24000, Some("en"))?;
+    let audio = tts::synthesize(input)?;
+    let output = whisper::transcribe(&audio, 24000, Some("en"))?;
     eprintln!("Output: '{}'", output.trim());
 
     // Check that multiple sentences are preserved

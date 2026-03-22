@@ -1,10 +1,10 @@
 use std::fs;
 
 use codescribe::{ai_formatting, config::prompts, state::history};
-
 use mockito::Matcher;
 use serial_test::serial;
 use tempfile::TempDir;
+use vista_kernel as codescribe;
 
 #[test]
 #[serial]
@@ -56,7 +56,7 @@ fn e2e_prompts_are_file_backed_and_history_uses_config_dir() {
 
     // Mimic tray behavior: read last, format, save as new entry
     let mut server = mockito::Server::new();
-    let endpoint = format!("{}/v1/responses", server.url());
+    let endpoint = format!("{}/v1/chat/completions", server.url());
 
     unsafe {
         std::env::set_var("CODESCRIBE_AI_MAX_RETRIES", "0");
@@ -71,19 +71,11 @@ fn e2e_prompts_are_file_backed_and_history_uses_config_dir() {
     }
 
     let m = server
-        .mock("POST", "/v1/responses")
+        .mock("POST", "/v1/chat/completions")
         .match_body(Matcher::Regex(r"raw one two".to_string()))
         .with_status(200)
-        .with_header("content-type", "text/event-stream")
-        .with_body(
-            r#"data: {"type":"response.output_text.delta","delta":"RAW ONE TWO."}
-
-data: {"type":"response.completed","response":{"id":"resp_test_2"}}
-
-data: [DONE]
-
-"#,
-        )
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"choices":[{"message":{"content":"RAW ONE TWO."}}]}"#)
         .create();
 
     let last = history::latest_entry().expect("latest_entry");

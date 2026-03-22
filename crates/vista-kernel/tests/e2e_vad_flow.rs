@@ -9,7 +9,7 @@
 //!
 //! Created by M&K (c)2026 VetCoders
 
-use codescribe_core::vad::{self, AccumulatingVad, VadConfig};
+use qube_audio::vad::{self, AccumulatingVad, VadConfig};
 use std::path::PathBuf;
 use std::time::Instant;
 

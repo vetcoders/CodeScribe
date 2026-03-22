@@ -9,7 +9,8 @@
 
 use std::path::PathBuf;
 
-use codescribe::audio;
+use qube_audio::audio;
+use qube_stt::stt::whisper::LocalWhisperEngine;
 #[path = "support/e2e_stt_matrix.rs"]
 mod e2e_stt_matrix;
 
@@ -132,8 +133,6 @@ fn test_full_transcription() {
     ) {
         return;
     }
-
-    use codescribe::whisper::LocalWhisperEngine;
 
     let model = match discover_local_whisper_model() {
         Some(found) => found,

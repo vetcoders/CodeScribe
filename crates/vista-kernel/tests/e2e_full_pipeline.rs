@@ -15,14 +15,14 @@
 
 use std::path::PathBuf;
 
-use codescribe::whisper::LocalWhisperEngine;
-use codescribe_core::audio::load_audio_file;
-use codescribe_core::pipeline::contracts::{BACKSPACE, DeltaSink, TranscriptDelta};
-use codescribe_core::pipeline::sinks::CollectorSink;
-use codescribe_core::pipeline::stream_postprocess::{StreamPostProcessStats, StreamPostProcessor};
-use codescribe_core::vad_api::{
-    CHUNK_SIZE, Resampler, SAMPLE_RATE as VAD_SAMPLE_RATE, SileroVad, VadConfig,
+use qube_audio::audio::load_audio_file;
+use qube_audio::vad::{
+    CHUNK_SIZE, Resampler, SAMPLE_RATE as VAD_SAMPLE_RATE, SileroVad, VadConfig, default_model_path,
 };
+use qube_stt::pipeline::contracts::{BACKSPACE, DeltaSink, TranscriptDelta};
+use qube_stt::stt::whisper::LocalWhisperEngine;
+use qube_ws::pipeline::sinks::CollectorSink;
+use qube_ws::pipeline::stream_postprocess::{StreamPostProcessStats, StreamPostProcessor};
 
 // ═══════════════════════════════════════════════════════════
 // Helpers
@@ -578,7 +578,7 @@ fn count_hallucinations(text: &str) -> (usize, Vec<String>) {
 
 /// Use SileroVad directly (synchronous) to gate audio — returns only speech frames.
 fn vad_gate_audio(samples: &[f32], sample_rate: u32) -> Vec<f32> {
-    let vad_model = codescribe_core::vad_api::default_model_path();
+    let vad_model = default_model_path();
     assert!(
         vad_model.exists(),
         "Silero VAD model not found at: {}",

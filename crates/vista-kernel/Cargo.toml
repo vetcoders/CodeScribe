@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+manual-examples = []
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
@@ -12,7 +16,7 @@ futures-util.workspace = true
 qube-audio = { path = "../qube-audio" }
 qube-stt = { path = "../qube-stt" }
 qube-support = { path = "../qube-support" }
-qube-ws = { path = "../qube-ws" }
+qube-ws = { path = "../qube-ws", features = ["offline_eval"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,5 +25,45 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+hound.workspace = true
+mockito = "1"
+serial_test.workspace = true
 tempfile.workspace = true
-tracing-subscriber = "0.3.23"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid.workspace = true
+
+[[example]]
+name = "config_demo"
+required-features = ["manual-examples"]
+
+[[example]]
+name = "demo_full_pipeline"
+required-features = ["manual-examples"]
+
+[[example]]
+name = "e2e_stt"
+required-features = ["manual-examples"]
+
+[[example]]
+name = "hold_badge_demo"
+required-features = ["manual-examples"]
+
+[[example]]
+name = "roundtrip_live"
+required-features = ["manual-examples"]
+
+[[example]]
+name = "test_audio"
+required-features = ["manual-examples"]
+
+[[example]]
+name = "test_audio_long"
+required-features = ["manual-examples"]
+
+[[example]]
+name = "test_clipboard_snapshot"
+required-features = ["manual-examples"]
+
+[[example]]
+name = "transcribe_file"
+required-features = ["manual-examples"]

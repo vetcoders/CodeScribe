@@ -1,9 +1,13 @@
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
 fn e2e_env_example_matches_registry() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("resolve repo root");
     let tmp_env =
         std::env::temp_dir().join(format!("codescribe_env_e2e_{}.env", std::process::id()));
 
@@ -14,7 +18,7 @@ fn e2e_env_example_matches_registry() {
         .arg(".env.example")
         .arg("--emit-e2e-env")
         .arg(&tmp_env)
-        .current_dir(manifest_dir)
+        .current_dir(&repo_root)
         .status()
         .expect("failed to run validate-envs.sh");
 

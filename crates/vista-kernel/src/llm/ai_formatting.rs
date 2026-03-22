@@ -1,4 +1,22 @@
 use std::env;
+use std::sync::Arc;
+
+use crate::state::reset_conversation;
+
+pub type AiStreamCallback = Arc<dyn Fn(&str) + Send + Sync>;
+pub type AiReasoningCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatTextStatus {
+    Completed,
+    Fallback,
+}
+
+#[derive(Debug, Clone)]
+pub struct FormatTextWithStatus {
+    pub text: String,
+    pub status: FormatTextStatus,
+}
 
 pub fn has_repetition_loop(text: &str) -> bool {
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -129,7 +147,7 @@ pub fn is_formatting_available() -> bool {
     true
 }
 
-pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) -> String {
+pub async fn format_text(text: &str, _language: Option<&str>, assistive: bool) -> String {
     let fallback = || -> String {
         let mut cleaned = text.trim().to_string();
         if has_repetition_loop(&cleaned) {
@@ -179,10 +197,10 @@ pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) ->
 
     match request.send().await {
         Ok(resp) if resp.status().is_success() => {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
-                    return content.to_string();
-                }
+            if let Ok(json) = resp.json::<serde_json::Value>().await
+                && let Some(content) = json["choices"][0]["message"]["content"].as_str()
+            {
+                return content.to_string();
             }
         }
         Ok(resp) => {
@@ -194,4 +212,28 @@ pub async fn format_text(text: &str, language: Option<&str>, assistive: bool) ->
     }
 
     fallback()
+}
+
+pub async fn format_text_with_status(
+    text: &str,
+    language: Option<&str>,
+    assistive: bool,
+    callback: Option<AiStreamCallback>,
+) -> FormatTextWithStatus {
+    let status = if is_formatting_available() {
+        FormatTextStatus::Completed
+    } else {
+        FormatTextStatus::Fallback
+    };
+    let text = format_text(text, language, assistive).await;
+
+    if let Some(callback) = callback {
+        callback(&text);
+    }
+
+    FormatTextWithStatus { text, status }
+}
+
+pub fn reset_ollama_memory() {
+    reset_conversation();
 }

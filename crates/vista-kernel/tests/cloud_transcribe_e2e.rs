@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use serial_test::serial;
+use vista_kernel as codescribe;
 
 fn write_min_valid_audio_file() -> tempfile::NamedTempFile {
     let mut audio = tempfile::NamedTempFile::new().expect("create temp audio file");

@@ -1,9 +1,9 @@
 use std::fs;
 
 use codescribe::{ai_formatting, config::prompts};
-
 use serial_test::serial;
 use tempfile::TempDir;
+use vista_kernel as codescribe;
 
 fn get_required_env(keys: &[&str]) -> String {
     for k in keys {

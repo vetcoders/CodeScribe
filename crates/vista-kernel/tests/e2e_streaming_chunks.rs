@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use codescribe::audio;
-use codescribe::whisper::append_with_overlap_dedup;
+use qube_audio::audio;
+use qube_stt::stt::whisper::{LocalWhisperEngine, append_with_overlap_dedup};
 
 #[path = "support/e2e_stt_matrix.rs"]
 mod e2e_stt_matrix;
@@ -52,8 +52,6 @@ fn test_streaming_callback_invoked() {
     ) {
         return;
     }
-
-    use codescribe::whisper::LocalWhisperEngine;
 
     let model = match resolve_model_or_skip("streaming callback E2E") {
         Some(found) => found,
@@ -138,8 +136,6 @@ fn test_streaming_no_callback() {
         return;
     }
 
-    use codescribe::whisper::LocalWhisperEngine;
-
     let model = match resolve_model_or_skip("streaming no-callback E2E") {
         Some(found) => found,
         None => return,
@@ -169,8 +165,6 @@ fn test_chunk_word_boundaries() {
     ) {
         return;
     }
-
-    use codescribe::whisper::LocalWhisperEngine;
 
     let model = match resolve_model_or_skip("streaming word-boundary E2E") {
         Some(found) => found,
@@ -260,8 +254,6 @@ fn test_streaming_matches_non_streaming_output() {
     ) {
         return;
     }
-
-    use codescribe::whisper::LocalWhisperEngine;
 
     let model = match resolve_model_or_skip("streaming parity E2E") {
         Some(found) => found,

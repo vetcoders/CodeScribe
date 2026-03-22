@@ -11,9 +11,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use codescribe::audio::streaming_recorder::StreamingRecorder;
-use codescribe_core::pipeline::contracts::{EngineEvent, EventSink};
-use codescribe_core::pipeline::sinks::CollectorEventSink;
+use qube_stt::stt::whisper;
+use qube_ws::pipeline::contracts::{EngineEvent, EventSink};
+use qube_ws::pipeline::sinks::CollectorEventSink;
+use vista_kernel::audio::streaming_recorder::StreamingRecorder;
 
 #[tokio::test]
 async fn test_stream_postprocess_with_mic() {
@@ -35,7 +36,7 @@ async fn test_stream_postprocess_with_mic() {
 
     let language = std::env::var("CODESCRIBE_E2E_MIC_LANGUAGE").ok();
 
-    codescribe::whisper::init().expect("Failed to init Whisper");
+    whisper::init().expect("Failed to init Whisper");
 
     let mut recorder = StreamingRecorder::new().expect("Failed to init streaming recorder");
     let sink = Arc::new(CollectorEventSink::new());
