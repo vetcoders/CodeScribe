@@ -57,6 +57,12 @@ pub struct SttScheduler {
     next_request_id: AtomicU64,
 }
 
+impl Default for SttScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SttScheduler {
     pub fn new() -> Self {
         Self::with_runtime_fns(Arc::new(default_infer), Arc::new(default_commit_prefilter))

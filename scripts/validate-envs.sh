@@ -82,16 +82,16 @@ REGISTERED=$(grep -E '^\[vars\.' "$REGISTRY" | sed 's/\[vars\.\(.*\)\]/\1/' | so
 
 # Find all env vars used in Rust code (env::var patterns)
 echo "Scanning Rust code for env var usage..."
-CODE_VARS=$(grep -rhoE "${GREP_EXCLUDES[@]}" 'env::var\("([A-Z_]+)"' core/ app/ bin/ 2>/dev/null | \
+CODE_VARS=$(grep -rhoE "${GREP_EXCLUDES[@]}" 'env::var\("([A-Z_]+)"' crates/ app/ bin/ 2>/dev/null | \
     sed 's/.*env::var("\([^"]*\)".*/\1/' | \
     sort -u || true)
 
 # Find env vars in helper patterns
-CODE_VARS2=$(grep -rhoE "${GREP_EXCLUDES[@]}" 'env_(bool|bool_default|u64|usize|f32|f32_clamped)\("([A-Z_]+)"' core/ app/ bin/ 2>/dev/null | \
+CODE_VARS2=$(grep -rhoE "${GREP_EXCLUDES[@]}" 'env_(bool|bool_default|u64|usize|f32|f32_clamped)\("([A-Z_]+)"' crates/ app/ bin/ 2>/dev/null | \
     sed 's/.*("\([^"]*\)"/\1/' | \
     sort -u || true)
 
-CODE_VARS3=$(grep -rhoE "${GREP_EXCLUDES[@]}" 'env_flag\("([A-Z_]+)"' core/ 2>/dev/null | \
+CODE_VARS3=$(grep -rhoE "${GREP_EXCLUDES[@]}" 'env_flag\("([A-Z_]+)"' crates/ 2>/dev/null | \
     sed 's/env_flag("\([^"]*\)"/\1/' | \
     sort -u || true)
 
