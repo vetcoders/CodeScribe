@@ -16,16 +16,17 @@ use codescribe_core::attachment::{Attachment, AttachmentSource, AttachmentStore}
 use codescribe_core::config::UserSettings;
 
 use crate::config::Config;
+use crate::ui::bootstrap;
 use crate::ui_helpers::{
     clamp_overlay_position, get_text_field_string, ns_string, set_hidden, set_text_field_string,
 };
 
 use super::api::{
-    clear_overlay_state, commit_last_user_message_impl, discard_last_message_impl, filter_drawer,
-    handle_card_copy, handle_card_delete, handle_card_edit, handle_card_favorite,
-    reflow_agent_after_resize_impl, reflow_overlay_after_resize_impl, render_attachment_chips,
-    send_draft_message_impl, start_new_thread_impl, toggle_drawer_favorites_only_impl,
-    update_active_tab_impl, update_attach_button_ui,
+    clear_overlay_state, clear_voice_chat_text_impl, commit_last_user_message_impl,
+    discard_last_message_impl, filter_drawer, handle_card_copy, handle_card_delete,
+    handle_card_edit, handle_card_favorite, reflow_agent_after_resize_impl,
+    reflow_overlay_after_resize_impl, render_attachment_chips, send_draft_message_impl,
+    toggle_drawer_favorites_only_impl, update_active_tab_impl, update_attach_button_ui,
 };
 use super::state::{ChatRole, OVERLAY_STATE, Tab, VoiceChatOverlayState};
 
@@ -191,11 +192,6 @@ pub fn action_handler_class() -> *const Class {
             decl.add_method(
                 sel!(onSearchChanged:),
                 on_search_changed as extern "C" fn(&Object, Sel, Id),
-            );
-            // NSTextField/NSSearchField delegate callback for per-keystroke filtering.
-            decl.add_method(
-                sel!(controlTextDidChange:),
-                on_control_text_did_change as extern "C" fn(&Object, Sel, Id),
             );
             decl.add_method(
                 sel!(onNewThread:),
@@ -863,6 +859,9 @@ extern "C" fn on_attach_clear(_this: &Object, _cmd: Sel, _sender: Id) {
 
 extern "C" fn on_close(_this: &Object, _cmd: Sel, _sender: Id) {
     super::api::hide_voice_chat_overlay();
+    if bootstrap::should_show_bootstrap() {
+        bootstrap::handle_hotkey_done();
+    }
 }
 
 extern "C" fn on_window_will_close(_this: &Object, _cmd: Sel, _notification: Id) {
@@ -1035,7 +1034,7 @@ extern "C" fn on_tab_agent(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_tab_settings(_this: &Object, _cmd: Sel, _sender: Id) {
-    crate::show_settings_window();
+    update_active_tab_impl(Tab::Settings);
     info!("Settings window opened from chat overlay");
 }
 
@@ -1164,33 +1163,14 @@ extern "C" fn on_card_favorite(_this: &Object, _cmd: Sel, sender: Id) {
     handle_card_favorite(index);
 }
 
-fn filter_drawer_for_search_field(search_field: Id) {
-    if search_field.is_null() {
-        return;
-    }
-    let is_active_search_field = {
-        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.search_field == Some(search_field as usize)
-    };
-    if !is_active_search_field {
-        return;
-    }
-    let query = unsafe { get_text_field_string(search_field) };
+extern "C" fn on_search_changed(_this: &Object, _cmd: Sel, sender: Id) {
+    let query = unsafe { get_text_field_string(sender) };
     filter_drawer(&query);
 }
 
-extern "C" fn on_search_changed(_this: &Object, _cmd: Sel, sender: Id) {
-    filter_drawer_for_search_field(sender);
-}
-
-extern "C" fn on_control_text_did_change(_this: &Object, _cmd: Sel, notification: Id) {
-    let search_field: Id = unsafe { msg_send![notification, object] };
-    filter_drawer_for_search_field(search_field);
-}
-
 extern "C" fn on_new_thread(_this: &Object, _cmd: Sel, _sender: Id) {
-    start_new_thread_impl();
-    info!("New thread requested (backend reset + UI clear)");
+    clear_voice_chat_text_impl();
+    info!("New thread started");
 }
 
 extern "C" fn on_toggle_favorites_only(_this: &Object, _cmd: Sel, _sender: Id) {
@@ -1346,7 +1326,8 @@ extern "C" fn on_export_assistant_save(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_show_shortcuts(_this: &Object, _cmd: Sel, _sender: Id) {
-    let (hold, toggle) = super::shortcuts_lines(crate::os::hotkeys::ModeHotkeyBindings::load());
+    let config = Config::load();
+    let (hold, toggle) = super::shortcuts_lines(config.hold_mods, config.toggle_trigger);
     if !super::api::is_voice_chat_overlay_visible() {
         // This action is wired to overlay/header UI. If it fires while hidden
         // (e.g. stale responder chain), ignore it instead of spawning a ghost window.

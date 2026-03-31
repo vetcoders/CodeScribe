@@ -11,84 +11,62 @@ use crate::os::permissions;
 use crate::tray::state::{NOTES_MENU_ITEMS, send_menu_event};
 use crate::tray::types::{MenuIds, TrayMenuEvent};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MenuRoute {
-    CopyLast,
-    ShowOverlay,
-    ContinueOnboarding,
-    OpenSettings,
-    OpenHistory,
-    CopyDiagnostics,
-    Help,
-    About,
-    Quit,
-    ToggleQuickNotes,
-    ToggleQuickNotesSaveOnly,
-    OpenNotesFolder,
-    OpenTodayNote,
-    OpenQualityReport,
-    InstallSileroVad,
-}
-
-fn resolve_menu_route(event_id: &MenuId, menu_ids: &MenuIds) -> Option<MenuRoute> {
+/// Handle menu item click and send appropriate event
+/// Note: Settings handlers removed - settings now in Chat Overlay Settings tab
+pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
+    // Top-level items
     if event_id == &menu_ids.copy_last {
-        Some(MenuRoute::CopyLast)
+        handle_copy_last();
     } else if event_id == &menu_ids.show_overlay {
-        Some(MenuRoute::ShowOverlay)
+        crate::show_voice_chat_overlay();
     } else if menu_ids
-        .continue_onboarding
+        .complete_setup
         .as_ref()
         .is_some_and(|id| event_id == id)
     {
-        Some(MenuRoute::ContinueOnboarding)
-    } else if event_id == &menu_ids.open_settings {
-        Some(MenuRoute::OpenSettings)
+        crate::show_settings_setup_tab();
+    } else if event_id == &menu_ids.run_onboarding {
+        crate::show_settings_window();
     } else if event_id == &menu_ids.open_history {
-        Some(MenuRoute::OpenHistory)
+        handle_open_history_folder();
     } else if event_id == &menu_ids.copy_diagnostics {
-        Some(MenuRoute::CopyDiagnostics)
+        handle_copy_diagnostics();
+    } else if event_id == &menu_ids.open_accessibility_settings {
+        handle_open_accessibility_settings();
+    } else if event_id == &menu_ids.open_input_monitoring_settings {
+        handle_open_input_monitoring_settings();
+    } else if event_id == &menu_ids.reset_input_monitoring_permission {
+        handle_reset_input_monitoring_permission();
+    } else if event_id == &menu_ids.open_assistive_prompt {
+        handle_open_assistive_prompt();
+    } else if event_id == &menu_ids.open_formatting_prompt {
+        handle_open_formatting_prompt();
+    } else if event_id == &menu_ids.open_prompts_folder {
+        handle_open_prompts_folder();
     } else if event_id == &menu_ids.help {
-        Some(MenuRoute::Help)
+        handle_open_help();
     } else if event_id == &menu_ids.about {
-        Some(MenuRoute::About)
+        handle_show_about();
     } else if event_id == &menu_ids.quit {
-        Some(MenuRoute::Quit)
-    } else if event_id == &menu_ids.notes_toggle_quick_notes {
-        Some(MenuRoute::ToggleQuickNotes)
-    } else if event_id == &menu_ids.notes_toggle_save_only {
-        Some(MenuRoute::ToggleQuickNotesSaveOnly)
-    } else if event_id == &menu_ids.notes_open_folder {
-        Some(MenuRoute::OpenNotesFolder)
-    } else if event_id == &menu_ids.notes_open_today {
-        Some(MenuRoute::OpenTodayNote)
-    } else if event_id == &menu_ids.quality_open_report {
-        Some(MenuRoute::OpenQualityReport)
-    } else if event_id == &menu_ids.silero_vad_install {
-        Some(MenuRoute::InstallSileroVad)
-    } else {
-        None
+        send_menu_event(TrayMenuEvent::Quit);
     }
-}
-
-/// Handle menu item click and send appropriate event.
-pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
-    match resolve_menu_route(event_id, menu_ids) {
-        Some(MenuRoute::CopyLast) => handle_copy_last(),
-        Some(MenuRoute::ShowOverlay) => crate::show_voice_chat_overlay(),
-        Some(MenuRoute::ContinueOnboarding) => crate::show_onboarding_wizard(),
-        Some(MenuRoute::OpenSettings) => crate::show_settings_window(),
-        Some(MenuRoute::OpenHistory) => handle_open_history_folder(),
-        Some(MenuRoute::CopyDiagnostics) => handle_copy_diagnostics(),
-        Some(MenuRoute::Help) => handle_open_help(),
-        Some(MenuRoute::About) => handle_show_about(),
-        Some(MenuRoute::Quit) => send_menu_event(TrayMenuEvent::Quit),
-        Some(MenuRoute::ToggleQuickNotes) => handle_toggle_quick_notes(),
-        Some(MenuRoute::ToggleQuickNotesSaveOnly) => handle_toggle_quick_notes_save_only(),
-        Some(MenuRoute::OpenNotesFolder) => handle_open_notes_folder(),
-        Some(MenuRoute::OpenTodayNote) => handle_open_today_note(),
-        Some(MenuRoute::OpenQualityReport) => handle_open_quality_report(),
-        Some(MenuRoute::InstallSileroVad) => handle_install_silero_vad(),
-        None => debug!("Unknown menu event id: {:?}", event_id),
+    // Notes
+    else if event_id == &menu_ids.notes_toggle_quick_notes {
+        handle_toggle_quick_notes();
+    } else if event_id == &menu_ids.notes_toggle_save_only {
+        handle_toggle_quick_notes_save_only();
+    } else if event_id == &menu_ids.notes_open_folder {
+        handle_open_notes_folder();
+    } else if event_id == &menu_ids.notes_open_today {
+        handle_open_today_note();
+    }
+    // Quality - Open Report
+    else if event_id == &menu_ids.quality_open_report {
+        handle_open_quality_report();
+    } else if event_id == &menu_ids.silero_vad_install {
+        handle_install_silero_vad();
+    } else {
+        debug!("Unknown menu event id: {:?}", event_id);
     }
 }
 
@@ -128,6 +106,77 @@ fn handle_copy_diagnostics() {
             )
             .spawn();
     }
+}
+
+#[cfg(target_os = "macos")]
+fn open_privacy_settings(deeplink: &str) {
+    let url = format!(
+        "x-apple.systempreferences:com.apple.preference.security?{}",
+        deeplink
+    );
+    let _ = Command::new("open").arg(url).spawn();
+}
+
+#[cfg(target_os = "macos")]
+fn handle_open_accessibility_settings() {
+    send_menu_event(TrayMenuEvent::OpenAccessibilitySettings);
+    open_privacy_settings("Privacy_Accessibility");
+}
+
+#[cfg(target_os = "macos")]
+fn handle_open_input_monitoring_settings() {
+    send_menu_event(TrayMenuEvent::OpenInputMonitoringSettings);
+    open_privacy_settings("Privacy_ListenEvent");
+}
+
+#[cfg(target_os = "macos")]
+fn handle_reset_input_monitoring_permission() {
+    send_menu_event(TrayMenuEvent::ResetInputMonitoringPermission);
+
+    // Reset TCC for ListenEvent (Input Monitoring) for our bundle id.
+    // User still needs to re-grant in System Settings after restart.
+    let _ = Command::new("tccutil")
+        .args(["reset", "ListenEvent", "com.codescribe.app"])
+        .spawn();
+
+    open_privacy_settings("Privacy_ListenEvent");
+
+    let _ = Command::new("osascript")
+        .arg("-e")
+        .arg(
+            r#"display notification "Input Monitoring reset. Re-open CodeScribe, then enable it in Input Monitoring settings." with title "CodeScribe""#,
+        )
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn handle_open_accessibility_settings() {
+    send_menu_event(TrayMenuEvent::OpenAccessibilitySettings);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn handle_open_input_monitoring_settings() {
+    send_menu_event(TrayMenuEvent::OpenInputMonitoringSettings);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn handle_reset_input_monitoring_permission() {
+    send_menu_event(TrayMenuEvent::ResetInputMonitoringPermission);
+}
+
+fn handle_open_assistive_prompt() {
+    send_menu_event(TrayMenuEvent::OpenAssistivePrompt);
+    crate::config::open_prompt_file("assistive.txt");
+}
+
+fn handle_open_formatting_prompt() {
+    send_menu_event(TrayMenuEvent::OpenFormattingPrompt);
+    crate::config::open_prompt_file("formatting.txt");
+}
+
+fn handle_open_prompts_folder() {
+    send_menu_event(TrayMenuEvent::OpenPromptsFolder);
+    crate::config::open_prompts_folder();
 }
 
 fn handle_install_silero_vad() {
@@ -272,51 +321,5 @@ fn handle_open_quality_report() {
             .arg("-e")
             .arg(r#"display notification "No quality report available. Run: codescribe-loop --daemon" with title "CodeScribe Quality""#)
             .spawn();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use muda::MenuId;
-
-    fn menu_ids_for_test() -> MenuIds {
-        MenuIds {
-            copy_last: MenuId::new("copy-last"),
-            show_overlay: MenuId::new("show-overlay"),
-            open_settings: MenuId::new("open-settings"),
-            continue_onboarding: Some(MenuId::new("continue-onboarding")),
-            open_history: MenuId::new("open-history"),
-            copy_diagnostics: MenuId::new("copy-diagnostics"),
-            help: MenuId::new("help"),
-            about: MenuId::new("about"),
-            quit: MenuId::new("quit"),
-            quality_open_report: MenuId::new("quality-open-report"),
-            silero_vad_install: MenuId::new("silero-vad-install"),
-            notes_toggle_quick_notes: MenuId::new("notes-toggle-quick-notes"),
-            notes_toggle_save_only: MenuId::new("notes-toggle-save-only"),
-            notes_open_folder: MenuId::new("notes-open-folder"),
-            notes_open_today: MenuId::new("notes-open-today"),
-        }
-    }
-
-    #[test]
-    fn resolve_menu_route_separates_onboarding_from_settings() {
-        let menu_ids = menu_ids_for_test();
-
-        assert_eq!(
-            resolve_menu_route(&menu_ids.open_settings, &menu_ids),
-            Some(MenuRoute::OpenSettings)
-        );
-        assert_eq!(
-            resolve_menu_route(
-                menu_ids
-                    .continue_onboarding
-                    .as_ref()
-                    .expect("test menu ids should include onboarding"),
-                &menu_ids
-            ),
-            Some(MenuRoute::ContinueOnboarding)
-        );
     }
 }

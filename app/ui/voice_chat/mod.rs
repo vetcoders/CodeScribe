@@ -3,7 +3,7 @@
 //! This module provides a floating overlay window with:
 //! - Drawer tab: clipboard-style transcription cards
 //! - Agent tab: chat bubbles with streaming LLM responses
-//! - Settings button: opens the persistent settings window
+//! - Settings: routes to settings window/onboarding
 
 mod api;
 mod handlers;
@@ -13,14 +13,14 @@ mod state;
 pub use api::{
     add_voice_chat_error_message, add_voice_chat_system_message, add_voice_chat_user_message,
     append_voice_chat_assistant_delta, append_voice_chat_user_delta, clear_voice_chat_text,
-    dispatch_voice_chat_send, filter_drawer, finalize_voice_chat_assistant_message,
-    finalize_voice_chat_user_message, handoff_transcript_to_chat, hide_voice_chat_overlay,
-    is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
-    reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_runtime_degraded,
+    filter_drawer, finalize_voice_chat_assistant_message, finalize_voice_chat_user_message,
+    handoff_transcript_to_chat, hide_voice_chat_overlay, is_auto_send_enabled,
+    is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
+    request_settings_tab_on_open, reset_voice_chat_activity, send_voice_chat_draft,
     set_voice_chat_send_callback, set_voice_chat_sending, set_voice_chat_target_app,
     set_voice_chat_text, set_voice_chat_user_text, show_agent_tab, show_drawer_tab,
-    update_conversation_state, update_drawer_after_save, update_voice_chat_context_summary,
-    update_voice_chat_status,
+    show_settings_tab, update_conversation_state, update_drawer_after_save,
+    update_voice_chat_context_summary, update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 
@@ -37,16 +37,14 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::config::ShortcutBinding;
-use crate::os::hotkeys::ModeHotkeyBindings;
+use crate::config::{HoldMods, ToggleTrigger};
 
 use crate::ui_helpers::{
     LabelConfig, NS_FLOATING_WINDOW_LEVEL, add_subview, apply_tafla_surface, button_set_action,
-    button_style, chat_header_layout, chat_input_row_layout, color_clear, color_label,
-    color_secondary_label, create_button, create_flipped_vertical_stack_view,
-    create_glass_effect_view_with, create_label, create_scrollable_text_view,
-    create_vertical_stack_view, layout_region_frame_for_view, ns_string, set_button_symbol,
-    set_focus_ring, set_glass_effect_content_view, set_hidden, set_tooltip,
+    button_style, chat_header_layout, color_clear, color_label, color_secondary_label,
+    create_button, create_flipped_vertical_stack_view, create_glass_effect_view_with, create_label,
+    create_scrollable_text_view, create_vertical_stack_view, layout_region_frame_for_view,
+    ns_string, set_button_symbol, set_focus_ring, set_hidden, set_tooltip,
     style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha, window_show,
 };
 
@@ -67,32 +65,24 @@ const NSVIEW_MIN_Y_MARGIN: isize = 8;
 const NSVIEW_HEIGHT_SIZABLE: isize = 16;
 const NSVIEW_MAX_Y_MARGIN: isize = 32;
 
-pub(super) fn shortcuts_lines(bindings: ModeHotkeyBindings) -> (String, String) {
-    let hold_line = match bindings.dictation {
-        ShortcutBinding::HoldFn => "Hold Fn — record • Fn+Shift — chat • Fn+Cmd — selection",
-        ShortcutBinding::HoldCtrl => "Hold Ctrl — record",
-        ShortcutBinding::HoldCtrlAlt => {
+pub(super) fn shortcuts_lines(hold: HoldMods, toggle: ToggleTrigger) -> (String, String) {
+    let hold_line = match hold {
+        HoldMods::Fn => "Hold Fn — record • Fn+Shift — chat • Fn+Cmd — selection",
+        HoldMods::None => "Hold-to-talk disabled",
+        HoldMods::Ctrl => "Hold Ctrl — record",
+        HoldMods::CtrlAlt => {
             "Hold Ctrl — record • Ctrl+Option — format • Ctrl+Shift — chat • Ctrl+Cmd — selection"
         }
-        ShortcutBinding::HoldCtrlShift => "Hold Ctrl+Shift — record",
-        ShortcutBinding::HoldCtrlCmd => "Hold Ctrl+Cmd — record",
-        ShortcutBinding::Disabled
-        | ShortcutBinding::DoubleCtrl
-        | ShortcutBinding::DoubleLeftOption
-        | ShortcutBinding::DoubleRightOption => "Hold-to-talk disabled",
+        HoldMods::CtrlShift => "Hold Ctrl+Shift — record",
+        HoldMods::CtrlCmd => "Hold Ctrl+Cmd — record",
     };
 
-    let toggle_line = if bindings.dictation == ShortcutBinding::DoubleCtrl {
-        "Ctrl Ctrl — toggle (raw)"
-    } else {
-        let formatting_left = bindings.formatting == ShortcutBinding::DoubleLeftOption;
-        let assistive_right = bindings.assistive == ShortcutBinding::DoubleRightOption;
-        match (formatting_left, assistive_right) {
-            (true, true) => "⌥⌥ — toggle • Right ⌥⌥ — AI",
-            (true, false) => "Left ⌥⌥ — toggle",
-            (false, true) => "Right ⌥⌥ — AI",
-            (false, false) => "Toggle disabled",
-        }
+    let toggle_line = match toggle {
+        ToggleTrigger::DoubleOption => "⌥⌥ — toggle • Right ⌥⌥ — AI",
+        ToggleTrigger::DoubleLeftOption => "Left ⌥⌥ — toggle",
+        ToggleTrigger::DoubleRightOption => "Right ⌥⌥ — AI",
+        ToggleTrigger::DoubleCtrl => "Ctrl Ctrl — toggle (raw)",
+        ToggleTrigger::None => "Toggle disabled",
     };
 
     (hold_line.to_string(), toggle_line.to_string())
@@ -252,7 +242,7 @@ fn show_voice_chat_overlay_impl() {
         let window_delegate: Id = msg_send![delegate_class, new];
         let _: () = msg_send![window, setDelegate: window_delegate];
 
-        let window_content_view: Id = msg_send![window, contentView];
+        let content_view: Id = msg_send![window, contentView];
         let ns_mut_array = Class::get("NSMutableArray").unwrap();
         let window_drag_types: Id = msg_send![ns_mut_array, array];
         let _: () = msg_send![window_drag_types, addObject: ns_string("public.file-url")];
@@ -281,14 +271,7 @@ fn show_voice_chat_overlay_impl() {
             apply_tafla_surface(layer, true);
             let _: () = msg_send![layer, setMasksToBounds: true];
         }
-        add_subview(window_content_view, blur_view);
-        let glass_content_view: Id = msg_send![Class::get("NSView").unwrap(), alloc];
-        let glass_content_view: Id = msg_send![glass_content_view, initWithFrame: blur_frame];
-        let _: () = msg_send![
-            glass_content_view,
-            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
-        ];
-        let _: bool = set_glass_effect_content_view(blur_view, glass_content_view);
+        add_subview(content_view, blur_view);
         let bounds: CGRect = msg_send![blur_view, bounds];
         let content_bounds = layout_region_frame_for_view(blur_view).unwrap_or(bounds);
 
@@ -361,7 +344,7 @@ fn show_voice_chat_overlay_impl() {
             ui_tokens::EDGE_PADDING_TIGHT
         };
         let title_y = ((header_height - 20.0) / 2.0).max(0.0);
-        // Keep enough width so "CodeScribe" is not clipped at default window sizes.
+        // Give the tab control more room to avoid truncation ("Dr..." / "A...").
         let title_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH;
         let title_label = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(title_x, title_y), &CGSize::new(title_w, 20.0)),
@@ -760,9 +743,9 @@ fn show_voice_chat_overlay_impl() {
                 let _: () = msg_send![split_view, setDividerColor: divider_color];
             }
         }
-        add_subview(glass_content_view, split_view);
+        add_subview(blur_view, split_view);
         // Ensure header controls stay above the split view content.
-        add_subview(glass_content_view, header_bg);
+        add_subview(blur_view, header_bg);
         add_subview(header_bg, header_separator);
         add_subview(header_bg, header_controls);
 
@@ -869,7 +852,7 @@ fn show_voice_chat_overlay_impl() {
             search_label,
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MAX_Y_MARGIN
         ];
-        add_subview(glass_content_view, search_label);
+        add_subview(blur_view, search_label);
 
         let ns_search = Class::get("NSSearchField").unwrap();
         let search_field: Id = msg_send![ns_search, alloc];
@@ -880,28 +863,14 @@ fn show_voice_chat_overlay_impl() {
         let search_field: Id = msg_send![search_field, initWithFrame: search_frame];
         let placeholder = ns_string("Filter transcripts");
         let _: () = msg_send![search_field, setPlaceholderString: placeholder];
-        let _: () = msg_send![search_field, setDelegate: action_handler];
         let _: () = msg_send![search_field, setTarget: action_handler];
         let _: () = msg_send![search_field, setAction: sel!(onSearchChanged:)];
-        let search_cell: Id = msg_send![search_field, cell];
-        if !search_cell.is_null() {
-            let supports_immediate: bool =
-                msg_send![search_cell, respondsToSelector: sel!(setSendsSearchStringImmediately:)];
-            if supports_immediate {
-                let _: () = msg_send![search_cell, setSendsSearchStringImmediately: true];
-            }
-            let supports_whole: bool =
-                msg_send![search_cell, respondsToSelector: sel!(setSendsWholeSearchString:)];
-            if supports_whole {
-                let _: () = msg_send![search_cell, setSendsWholeSearchString: false];
-            }
-        }
         let _: () = msg_send![
             search_field,
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MAX_Y_MARGIN
         ];
         set_focus_ring(search_field);
-        add_subview(glass_content_view, search_field);
+        add_subview(blur_view, search_field);
 
         // Agent input bar
         let drop_target_cls = drop_target_view_class();
@@ -942,10 +911,10 @@ fn show_voice_chat_overlay_impl() {
         add_subview(content_view, input_bar);
 
         let input_width = input_frame.size.width;
-        let input_row = chat_input_row_layout(input_width, agent_input_height);
         let text_area_frame = CGRect::new(
-            &CGPoint::new(input_row.text_x, input_row.text_y),
-            &CGSize::new(input_row.text_width, input_row.text_height),
+            &CGPoint::new(14.0, 7.0),
+            // Leave room for Attach + Send buttons on the right.
+            &CGSize::new((input_width - 144.0).max(120.0), agent_input_height - 14.0),
         );
         let (agent_input_scroll, agent_input_text_view) =
             create_scrollable_text_view(text_area_frame, true);
@@ -972,41 +941,36 @@ fn show_voice_chat_overlay_impl() {
         set_focus_ring(agent_input_text_view);
         let _: () = msg_send![input_bar, addSubview: agent_input_scroll];
 
-        // Attach button (file context for Agent) — anchored left.
+        // Attach button (file context for Agent).
+        let send_y = ((agent_input_height - 32.0) / 2.0).max(8.0);
         let agent_attach_button = create_button(
             CGRect::new(
-                &CGPoint::new(input_row.attach_x, input_row.attach_y),
-                &CGSize::new(input_row.button_width, input_row.button_height),
+                &CGPoint::new((input_width - 120.0).max(0.0), send_y),
+                &CGSize::new(36.0, 32.0),
             ),
             "",
-            button_style::INLINE,
+            button_style::ROUNDED,
         );
-        let has_symbol = set_button_symbol(agent_attach_button, "paperclip");
+        let has_symbol = set_button_symbol(agent_attach_button, "doc.badge.plus");
         if !has_symbol {
             let _: () = msg_send![agent_attach_button, setTitle: ns_string("Attach")];
         }
-        style_toolbar_icon_button(agent_attach_button);
         button_set_action(agent_attach_button, action_handler, sel!(onAttachMenu:));
         let _: () = msg_send![
             agent_attach_button,
-            setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MAX_Y_MARGIN
+            setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MAX_Y_MARGIN
         ];
         set_tooltip(agent_attach_button, "Attach files (assistant context)");
         let _: () = msg_send![input_bar, addSubview: agent_attach_button];
 
         let agent_send_button = create_button(
             CGRect::new(
-                &CGPoint::new(input_row.send_x, input_row.send_y),
-                &CGSize::new(input_row.button_width, input_row.button_height),
+                &CGPoint::new((input_width - 76.0).max(0.0), send_y),
+                &CGSize::new(36.0, 32.0),
             ),
-            "",
-            button_style::INLINE,
+            ">",
+            button_style::ROUNDED,
         );
-        let has_symbol = set_button_symbol(agent_send_button, "arrow.up.circle.fill");
-        if !has_symbol {
-            let _: () = msg_send![agent_send_button, setTitle: ns_string("Send")];
-        }
-        style_toolbar_icon_button(agent_send_button);
         button_set_action(agent_send_button, action_handler, sel!(onSend:));
         set_tooltip(agent_send_button, "Send (Enter)");
         let _: () = msg_send![
@@ -1057,7 +1021,7 @@ fn show_voice_chat_overlay_impl() {
         set_hidden(input_bar, true);
 
         // Phase 3 — store widget pointers into state (short lock scope).
-        let (has_messages, desired_tab, status_base_text) = {
+        let (has_messages, desired_tab, status_text, open_settings) = {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.window = Some(window as usize);
             state.window_delegate = Some(window_delegate as usize);
@@ -1097,17 +1061,29 @@ fn show_voice_chat_overlay_impl() {
                 state.zoom_level = zoom.clamp(0.75, 2.0);
             }
             let pending_tab = state.pending_tab.take();
+            state.active_tab = pending_tab.unwrap_or(Tab::Drawer);
+
             let has_messages = !state.messages.is_empty();
+            let mut open_settings = false;
             let desired_tab = if let Some(tab) = pending_tab {
-                tab
+                if tab == Tab::Settings {
+                    open_settings = true;
+                    if has_messages {
+                        Tab::Agent
+                    } else {
+                        Tab::Drawer
+                    }
+                } else {
+                    tab
+                }
             } else if has_messages {
                 Tab::Agent
             } else {
                 state.active_tab
             };
             state.active_tab = desired_tab;
-            let status_base_text = state.status_base_text.clone();
-            (has_messages, desired_tab, status_base_text)
+            let status_text = state.status_text.clone();
+            (has_messages, desired_tab, status_text, open_settings)
         }; // OVERLAY_STATE released — safe to perform AppKit window operations.
 
         // Phase 4 — show window (no lock held; avoids nested-runloop deadlock).
@@ -1146,8 +1122,11 @@ fn show_voice_chat_overlay_impl() {
 
         // Phase 5 — post-show updates.
         api::refresh_drawer();
-        api::update_voice_chat_status(&status_base_text);
+        api::update_voice_chat_status(&status_text);
         update_active_tab_impl(desired_tab);
+        if open_settings {
+            crate::show_bootstrap_overlay();
+        }
         if has_messages || matches!(desired_tab, Tab::Agent) {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             api::update_chat_view_with_state(&mut state, true);
@@ -1209,11 +1188,7 @@ mod tests {
 
     #[test]
     fn shortcuts_lines_reflect_modifiers() {
-        let (hold, toggle) = shortcuts_lines(ModeHotkeyBindings {
-            dictation: ShortcutBinding::HoldCtrlAlt,
-            formatting: ShortcutBinding::Disabled,
-            assistive: ShortcutBinding::DoubleRightOption,
-        });
+        let (hold, toggle) = shortcuts_lines(HoldMods::CtrlAlt, ToggleTrigger::DoubleRightOption);
         assert!(hold.contains("Ctrl+Option"));
         assert!(toggle.contains("Right"));
     }

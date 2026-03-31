@@ -9,7 +9,9 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
-use super::types::{Config, Language, OverlayPositionMode, TranscriptSendMode};
+use super::types::{
+    Config, HoldMods, Language, OverlayPositionMode, ToggleTrigger, TranscriptSendMode,
+};
 
 impl Config {
     /// Load configuration from disk or environment.
@@ -77,6 +79,16 @@ impl Config {
     /// Load configuration values from environment variables.
     pub fn load_from_env(&mut self) {
         // Hotkeys
+        if let Ok(val) = std::env::var("HOLD_MODS")
+            && let Ok(mods) = val.parse::<HoldMods>()
+        {
+            self.hold_mods = mods;
+        }
+        if let Ok(val) = std::env::var("TOGGLE_TRIGGER")
+            && let Ok(trigger) = val.parse::<ToggleTrigger>()
+        {
+            self.toggle_trigger = trigger;
+        }
         if let Ok(val) = std::env::var("HOLD_EXCLUSIVE") {
             self.hold_exclusive = matches!(val.as_str(), "1" | "true" | "yes" | "on");
         }
@@ -290,6 +302,12 @@ impl Config {
             settings.whisper_language
         );
         // Hotkeys
+        if std::env::var("HOLD_MODS").is_err() {
+            self.hold_mods = settings.legacy_hold_mods();
+        }
+        if std::env::var("TOGGLE_TRIGGER").is_err() {
+            self.toggle_trigger = settings.legacy_toggle_trigger();
+        }
         if std::env::var("HOLD_START_DELAY_MS").is_err()
             && let Some(v) = settings.hold_start_delay_ms
         {
@@ -504,6 +522,38 @@ impl Config {
     /// - Regular-user fields → settings.json
     /// - Everything else → .env
     pub fn save_to_env(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        if matches!(key, "HOLD_MODS" | "TOGGLE_TRIGGER") {
+            let mut settings = super::settings::UserSettings::load();
+            let hold = if key == "HOLD_MODS" {
+                value.parse::<HoldMods>().map_err(|e| anyhow::anyhow!(e))?
+            } else {
+                settings.legacy_hold_mods()
+            };
+            let toggle = if key == "TOGGLE_TRIGGER" {
+                value
+                    .parse::<ToggleTrigger>()
+                    .map_err(|e| anyhow::anyhow!(e))?
+            } else {
+                settings.legacy_toggle_trigger()
+            };
+            settings.apply_legacy_hotkeys(hold, toggle);
+            settings.save()?;
+
+            let env_path = Self::env_path();
+            if let Some(parent) = env_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut env_vars = if env_path.exists() {
+                Self::parse_env_file(&env_path)?
+            } else {
+                HashMap::new()
+            };
+            env_vars.insert(key.to_string(), value.to_string());
+            Self::write_env_file(&env_path, &env_vars)?;
+            unsafe { std::env::set_var(key, value) };
+            return Ok(());
+        }
+
         // API keys → Keychain
         if super::keychain::KEYCHAIN_ACCOUNTS.contains(&key) {
             super::keychain::save_key(key, value)?;
@@ -588,11 +638,38 @@ impl Config {
         let mut settings: Option<super::settings::UserSettings> = None;
         let mut env_vars: Option<HashMap<String, String>> = None;
         let mut env_path: Option<PathBuf> = None;
+        let mut legacy_hold_override: Option<HoldMods> = None;
+        let mut legacy_toggle_override: Option<ToggleTrigger> = None;
 
         for (key, value) in entries {
             // API keys → Keychain
             if super::keychain::KEYCHAIN_ACCOUNTS.contains(key) {
                 super::keychain::save_key(key, value)?;
+                unsafe { std::env::set_var(key, value) };
+                continue;
+            }
+
+            if *key == "HOLD_MODS" || *key == "TOGGLE_TRIGGER" {
+                if *key == "HOLD_MODS" {
+                    legacy_hold_override =
+                        Some(value.parse::<HoldMods>().map_err(|e| anyhow::anyhow!(e))?);
+                } else {
+                    legacy_toggle_override = Some(
+                        value
+                            .parse::<ToggleTrigger>()
+                            .map_err(|e| anyhow::anyhow!(e))?,
+                    );
+                }
+
+                let path = env_path.get_or_insert_with(Self::env_path).clone();
+                let vars_ref = env_vars.get_or_insert_with(|| {
+                    if path.exists() {
+                        Self::parse_env_file(&path).unwrap_or_default()
+                    } else {
+                        HashMap::new()
+                    }
+                });
+                vars_ref.insert((*key).to_string(), (*value).to_string());
                 unsafe { std::env::set_var(key, value) };
                 continue;
             }
@@ -736,6 +813,14 @@ impl Config {
             });
             vars_ref.insert((*key).to_string(), (*value).to_string());
             unsafe { std::env::set_var(key, value) };
+        }
+
+        if legacy_hold_override.is_some() || legacy_toggle_override.is_some() {
+            let settings_ref = settings.get_or_insert_with(super::settings::UserSettings::load);
+            let hold = legacy_hold_override.unwrap_or_else(|| settings_ref.legacy_hold_mods());
+            let toggle =
+                legacy_toggle_override.unwrap_or_else(|| settings_ref.legacy_toggle_trigger());
+            settings_ref.apply_legacy_hotkeys(hold, toggle);
         }
 
         if let Some(settings) = settings

@@ -131,6 +131,115 @@ impl FromStr for ShortcutBinding {
     }
 }
 
+/// Legacy-compatible hold gesture contract used by the macOS shell.
+///
+/// Canonical persistence lives in `mode_bindings`, but the app layer still
+/// consumes this condensed representation in several places.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldMods {
+    #[default]
+    Fn,
+    None,
+    Ctrl,
+    CtrlAlt,
+    CtrlShift,
+    CtrlCmd,
+}
+
+impl HoldMods {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fn => "fn",
+            Self::None => "none",
+            Self::Ctrl => "ctrl",
+            Self::CtrlAlt => "ctrl_alt",
+            Self::CtrlShift => "ctrl_shift",
+            Self::CtrlCmd => "ctrl_cmd",
+        }
+    }
+
+    pub fn as_shortcut_binding(self) -> ShortcutBinding {
+        match self {
+            Self::Fn => ShortcutBinding::HoldFn,
+            Self::None => ShortcutBinding::Disabled,
+            Self::Ctrl => ShortcutBinding::HoldCtrl,
+            Self::CtrlAlt => ShortcutBinding::HoldCtrlAlt,
+            Self::CtrlShift => ShortcutBinding::HoldCtrlShift,
+            Self::CtrlCmd => ShortcutBinding::HoldCtrlCmd,
+        }
+    }
+
+    pub fn from_shortcut_binding(binding: ShortcutBinding) -> Self {
+        match binding {
+            ShortcutBinding::HoldFn => Self::Fn,
+            ShortcutBinding::Disabled => Self::None,
+            ShortcutBinding::HoldCtrl => Self::Ctrl,
+            ShortcutBinding::HoldCtrlAlt => Self::CtrlAlt,
+            ShortcutBinding::HoldCtrlShift => Self::CtrlShift,
+            ShortcutBinding::HoldCtrlCmd => Self::CtrlCmd,
+            ShortcutBinding::DoubleCtrl
+            | ShortcutBinding::DoubleLeftOption
+            | ShortcutBinding::DoubleRightOption => Self::None,
+        }
+    }
+}
+
+impl FromStr for HoldMods {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "fn" | "globe" => Ok(Self::Fn),
+            "none" | "disabled" | "off" => Ok(Self::None),
+            "ctrl" => Ok(Self::Ctrl),
+            "ctrl_alt" | "ctrl+alt" => Ok(Self::CtrlAlt),
+            "ctrl_shift" | "ctrl+shift" => Ok(Self::CtrlShift),
+            "ctrl_cmd" | "ctrl+cmd" => Ok(Self::CtrlCmd),
+            _ => Err(format!("Unknown HoldMods: {}", s)),
+        }
+    }
+}
+
+/// Legacy-compatible toggle contract used by the macOS shell.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ToggleTrigger {
+    #[default]
+    DoubleOption,
+    DoubleLeftOption,
+    DoubleRightOption,
+    DoubleCtrl,
+    None,
+}
+
+impl ToggleTrigger {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DoubleOption => "double_option",
+            Self::DoubleLeftOption => "double_lalt",
+            Self::DoubleRightOption => "double_ralt",
+            Self::DoubleCtrl => "double_ctrl",
+            Self::None => "none",
+        }
+    }
+}
+
+impl FromStr for ToggleTrigger {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "double_option" => Ok(Self::DoubleOption),
+            "double_lalt" | "double_left_option" => Ok(Self::DoubleLeftOption),
+            "double_ralt" | "double_right_option" => Ok(Self::DoubleRightOption),
+            "double_ctrl" | "double_control" => Ok(Self::DoubleCtrl),
+            "none" | "disabled" | "off" => Ok(Self::None),
+            _ => Err(format!("Unknown ToggleTrigger: {}", s)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModeBinding {
     pub mode: WorkMode,
@@ -254,6 +363,14 @@ impl FromStr for OverlayPositionMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     // ===== Hotkeys =====
+    /// Legacy-compatible base hold gesture derived from canonical mode bindings.
+    #[serde(default)]
+    pub hold_mods: HoldMods,
+
+    /// Legacy-compatible toggle gesture derived from canonical mode bindings.
+    #[serde(default)]
+    pub toggle_trigger: ToggleTrigger,
+
     /// Whether to ignore extra modifiers when hold key is pressed
     #[serde(default)]
     pub hold_exclusive: bool,
@@ -417,6 +534,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            hold_mods: HoldMods::Fn,
+            toggle_trigger: ToggleTrigger::DoubleOption,
             hold_exclusive: false, // Allow Shift/Cmd mode modifiers by default
             hold_start_delay_ms: default_hold_start_delay_ms(),
             double_tap_interval_ms: default_double_tap_interval_ms(),
@@ -461,6 +580,11 @@ impl Default for Config {
 impl Config {
     /// Sanitize configuration values to ensure they're valid.
     pub fn sanitize(&mut self) {
+        // Double-Ctrl toggle needs Ctrl free for taps; keep the legacy safe fallback.
+        if self.toggle_trigger == ToggleTrigger::DoubleCtrl && self.hold_mods == HoldMods::Ctrl {
+            self.hold_mods = HoldMods::CtrlAlt;
+        }
+
         // Token limits: 0 = no limit (API decides). Don't override.
         // Tokens are cheap, lost notes are not.
 
@@ -482,7 +606,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::ShortcutBinding;
+    use super::{HoldMods, ShortcutBinding, ToggleTrigger};
 
     #[test]
     fn shortcut_binding_parser_rejects_legacy_aliases() {
@@ -490,5 +614,18 @@ mod tests {
         assert!("fn".parse::<ShortcutBinding>().is_err());
         assert!("double_lalt".parse::<ShortcutBinding>().is_err());
         assert!("double_ralt".parse::<ShortcutBinding>().is_err());
+    }
+
+    #[test]
+    fn legacy_hotkey_parsers_accept_compat_aliases() {
+        assert_eq!("fn".parse::<HoldMods>(), Ok(HoldMods::Fn));
+        assert_eq!(
+            "double_lalt".parse::<ToggleTrigger>(),
+            Ok(ToggleTrigger::DoubleLeftOption)
+        );
+        assert_eq!(
+            "double_ralt".parse::<ToggleTrigger>(),
+            Ok(ToggleTrigger::DoubleRightOption)
+        );
     }
 }

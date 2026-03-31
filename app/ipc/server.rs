@@ -373,8 +373,18 @@ fn persist_config(config: &Config) -> Result<()> {
     };
 
     put(
+        "HOLD_MODS",
+        config.hold_mods.as_str().to_string(),
+        &mut env_vars,
+    );
+    put(
         "HOLD_EXCLUSIVE",
         bool_to_env(config.hold_exclusive),
+        &mut env_vars,
+    );
+    put(
+        "TOGGLE_TRIGGER",
+        config.toggle_trigger.as_str().to_string(),
         &mut env_vars,
     );
     put(
@@ -423,11 +433,6 @@ fn persist_config(config: &Config) -> Result<()> {
     put(
         "SHOW_DOCK_ICON",
         bool_to_env(config.show_dock_icon),
-        &mut env_vars,
-    );
-    put(
-        "TRANSCRIPTION_OVERLAY_ENABLED",
-        bool_to_env(config.transcription_overlay_enabled),
         &mut env_vars,
     );
     put(
@@ -593,6 +598,16 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
     // String fields
     match key {
         "WHISPER_LANGUAGE" => settings.whisper_language = Some(value.to_string()),
+        "HOLD_MODS" => match value.parse() {
+            Ok(hold) => settings.apply_legacy_hotkeys(hold, settings.legacy_toggle_trigger()),
+            Err(e) => warn!("IPC promoted setting rejected invalid HOLD_MODS={value}: {e}"),
+        },
+        "TOGGLE_TRIGGER" => match value.parse() {
+            Ok(toggle) => settings.apply_legacy_hotkeys(settings.legacy_hold_mods(), toggle),
+            Err(e) => {
+                warn!("IPC promoted setting rejected invalid TOGGLE_TRIGGER={value}: {e}")
+            }
+        },
         "LOCAL_MODEL" => settings.local_model = Some(value.to_string()),
         "STT_ENDPOINT" => settings.stt_endpoint = Some(value.to_string()),
         "AUDIO_INPUT_DEVICE" => settings.audio_input_device = Some(value.to_string()),
@@ -663,8 +678,7 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
         | "QUICK_NOTES_ENABLED"
         | "QUICK_NOTES_SAVE_ONLY"
         | "AGENT_ENTER_SENDS"
-        | "SHOW_DOCK_ICON"
-        | "TRANSCRIPTION_OVERLAY_ENABLED" => {
+        | "SHOW_DOCK_ICON" => {
             let bool_val = matches!(value, "1" | "true" | "yes" | "on");
             match key {
                 "HOLD_EXCLUSIVE" => settings.hold_exclusive = Some(bool_val),
@@ -677,11 +691,11 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
                 "QUICK_NOTES_SAVE_ONLY" => settings.quick_notes_save_only = Some(bool_val),
                 "AGENT_ENTER_SENDS" => settings.agent_enter_sends = Some(bool_val),
                 "SHOW_DOCK_ICON" => settings.show_dock_icon = Some(bool_val),
-                "TRANSCRIPTION_OVERLAY_ENABLED" => {
-                    settings.transcription_overlay_enabled = Some(bool_val)
-                }
                 _ => unreachable!(),
             }
+        }
+        "CODESCRIBE_BUFFERED_STREAM" | "HOTKEY_DOUBLE_TAP_LEFT" | "HOTKEY_DOUBLE_TAP_RIGHT" => {
+            warn!("Ignoring deprecated promoted setting key: {key}");
         }
         _ => {
             warn!("IPC promoted setting key is not mapped to UserSettings: {key}");

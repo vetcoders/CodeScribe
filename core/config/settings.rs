@@ -2,7 +2,9 @@
 //!
 //! These are the "regular user" tier. Power users override via ~/.codescribe/.env.
 
-use super::types::{ModeBinding, ShortcutBinding, WorkMode, default_mode_bindings};
+use super::types::{
+    HoldMods, ModeBinding, ShortcutBinding, ToggleTrigger, WorkMode, default_mode_bindings,
+};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -696,6 +698,24 @@ impl UserSettings {
         self.save_if_changed(&before, "set_mode_binding", mode.as_str());
     }
 
+    pub fn legacy_hold_mods(&self) -> HoldMods {
+        legacy_hold_mods_from_bindings(&self.mode_bindings_normalized())
+    }
+
+    pub fn legacy_toggle_trigger(&self) -> ToggleTrigger {
+        legacy_toggle_trigger_from_bindings(&self.mode_bindings_normalized())
+    }
+
+    pub fn apply_legacy_hotkeys(&mut self, hold: HoldMods, toggle: ToggleTrigger) {
+        self.mode_bindings = Some(mode_bindings_from_legacy(hold, toggle));
+    }
+
+    pub fn set_legacy_hotkeys(&mut self, hold: HoldMods, toggle: ToggleTrigger) {
+        let before = self.clone();
+        self.apply_legacy_hotkeys(hold, toggle);
+        self.save_if_changed(&before, "set_legacy_hotkeys", "mode_bindings");
+    }
+
     /// Normalize zoom value into persisted representation.
     ///
     /// - Clamps to [0.75, 2.0]
@@ -733,6 +753,20 @@ impl UserSettings {
         let before = self.clone();
         match key {
             "WHISPER_LANGUAGE" => self.whisper_language = Some(value.to_owned()),
+            "HOLD_MODS" => match value.parse::<HoldMods>() {
+                Ok(hold) => self.apply_legacy_hotkeys(hold, self.legacy_toggle_trigger()),
+                Err(e) => {
+                    warn!("Unknown string setting key value {key}={value}: {e}");
+                    return;
+                }
+            },
+            "TOGGLE_TRIGGER" => match value.parse::<ToggleTrigger>() {
+                Ok(toggle) => self.apply_legacy_hotkeys(self.legacy_hold_mods(), toggle),
+                Err(e) => {
+                    warn!("Unknown string setting key value {key}={value}: {e}");
+                    return;
+                }
+            },
             "LLM_ENDPOINT" => self.llm_endpoint = Some(value.to_owned()),
             "LLM_MODEL" => self.llm_model = Some(value.to_owned()),
             "LLM_ASSISTIVE_ENDPOINT" => self.llm_assistive_endpoint = Some(value.to_owned()),
@@ -869,6 +903,75 @@ fn set_mode_binding_value(bindings: &mut [ModeBinding], mode: WorkMode, binding:
     if let Some(existing) = bindings.iter_mut().find(|entry| entry.mode == mode) {
         existing.binding = binding;
     }
+}
+
+fn binding_value(bindings: &[ModeBinding], mode: WorkMode) -> ShortcutBinding {
+    bindings
+        .iter()
+        .find(|entry| entry.mode == mode)
+        .map(|entry| entry.binding)
+        .unwrap_or(ShortcutBinding::Disabled)
+}
+
+fn legacy_hold_mods_from_bindings(bindings: &[ModeBinding]) -> HoldMods {
+    let dictation = binding_value(bindings, WorkMode::Dictation);
+    if dictation == ShortcutBinding::DoubleCtrl {
+        HoldMods::None
+    } else {
+        HoldMods::from_shortcut_binding(dictation)
+    }
+}
+
+fn legacy_toggle_trigger_from_bindings(bindings: &[ModeBinding]) -> ToggleTrigger {
+    let dictation = binding_value(bindings, WorkMode::Dictation);
+    let formatting = binding_value(bindings, WorkMode::Formatting);
+    let assistive = binding_value(bindings, WorkMode::Assistive);
+
+    if dictation == ShortcutBinding::DoubleCtrl {
+        ToggleTrigger::DoubleCtrl
+    } else if formatting == ShortcutBinding::DoubleLeftOption
+        && assistive == ShortcutBinding::DoubleRightOption
+    {
+        ToggleTrigger::DoubleOption
+    } else if formatting == ShortcutBinding::DoubleLeftOption {
+        ToggleTrigger::DoubleLeftOption
+    } else if assistive == ShortcutBinding::DoubleRightOption {
+        ToggleTrigger::DoubleRightOption
+    } else {
+        ToggleTrigger::None
+    }
+}
+
+fn mode_bindings_from_legacy(hold: HoldMods, toggle: ToggleTrigger) -> Vec<ModeBinding> {
+    let mut bindings = default_mode_bindings();
+
+    let dictation = if toggle == ToggleTrigger::DoubleCtrl {
+        ShortcutBinding::DoubleCtrl
+    } else {
+        hold.as_shortcut_binding()
+    };
+    let formatting = match toggle {
+        ToggleTrigger::DoubleOption | ToggleTrigger::DoubleLeftOption => {
+            ShortcutBinding::DoubleLeftOption
+        }
+        ToggleTrigger::DoubleCtrl | ToggleTrigger::DoubleRightOption | ToggleTrigger::None => {
+            ShortcutBinding::Disabled
+        }
+    };
+    let assistive = match toggle {
+        ToggleTrigger::DoubleOption | ToggleTrigger::DoubleRightOption => {
+            ShortcutBinding::DoubleRightOption
+        }
+        ToggleTrigger::DoubleCtrl | ToggleTrigger::DoubleLeftOption | ToggleTrigger::None => {
+            ShortcutBinding::Disabled
+        }
+    };
+
+    set_mode_binding_value(&mut bindings, WorkMode::Dictation, dictation);
+    set_mode_binding_value(&mut bindings, WorkMode::Formatting, formatting);
+    set_mode_binding_value(&mut bindings, WorkMode::Assistive, assistive);
+
+    bindings
 }
 
 fn parse_legacy_hold_binding(raw: &str) -> Option<ShortcutBinding> {

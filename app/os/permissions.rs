@@ -380,11 +380,6 @@ pub fn check_full_disk_access() -> PermissionStatus {
     PermissionStatus::Granted
 }
 
-pub fn hotkey_permissions_granted() -> bool {
-    check_accessibility() == PermissionStatus::Granted
-        && check_input_monitoring() == PermissionStatus::Granted
-}
-
 /// Request Full Disk Access by opening the relevant System Settings pane.
 #[cfg(target_os = "macos")]
 pub fn request_full_disk_access() -> bool {
@@ -453,7 +448,7 @@ pub fn check_all_permissions() {
             info!("Accessibility permission: Granted");
         }
         PermissionStatus::Denied => {
-            warn!("Accessibility permission: DENIED - Mode bindings may not trigger.");
+            warn!("Accessibility permission: DENIED - Global hotkeys may not work!");
             warn!("Grant access in: System Settings > Privacy & Security > Accessibility");
         }
         _ => {
@@ -467,7 +462,7 @@ pub fn check_all_permissions() {
             info!("Input Monitoring permission: Granted");
         }
         PermissionStatus::Denied => {
-            warn!("Input Monitoring permission: DENIED - Mode bindings may not trigger.");
+            warn!("Input Monitoring permission: DENIED - Hotkeys may not work!");
             warn!("Grant access in: System Settings > Privacy & Security > Input Monitoring");
         }
         _ => {
@@ -491,9 +486,7 @@ pub fn check_all_permissions() {
         PermissionStatus::Denied => {
             warn!("Microphone permission: DENIED - Recording will not work!");
             warn!("Grant access in: System Settings > Privacy & Security > Microphone");
-            warn!(
-                "After enabling access, retry recording or reopen Setup so CodeScribe can recheck live."
-            );
+            warn!("After enabling access, restart CodeScribe if status does not refresh.");
         }
     }
 }
@@ -548,74 +541,20 @@ pub fn diagnostics_report() -> String {
     let _ = writeln!(&mut out, "accessibility: {:?}", check_accessibility());
     let _ = writeln!(&mut out, "input_monitoring: {:?}", check_input_monitoring());
 
-    let settings = crate::config::UserSettings::load();
-    let _ = writeln!(
-        &mut out,
-        "mode_binding.dictation: {}",
-        settings
-            .mode_binding_for(crate::config::WorkMode::Dictation)
-            .as_str()
-    );
-    let _ = writeln!(
-        &mut out,
-        "mode_binding.formatting: {}",
-        settings
-            .mode_binding_for(crate::config::WorkMode::Formatting)
-            .as_str()
-    );
-    let _ = writeln!(
-        &mut out,
-        "mode_binding.assistive: {}",
-        settings
-            .mode_binding_for(crate::config::WorkMode::Assistive)
-            .as_str()
-    );
-
-    let conflicts = crate::os::shortcut_registry::detect_hotkey_conflicts(&settings);
-    let _ = writeln!(
-        &mut out,
-        "mode_binding.conflicts.count: {}",
-        conflicts.len()
-    );
-    if conflicts.is_empty() {
-        let _ = writeln!(&mut out, "mode_binding.conflicts.status: clear");
-    } else {
-        let _ = writeln!(&mut out, "mode_binding.conflicts.status: detected");
-        for (index, conflict) in conflicts.iter().take(5).enumerate() {
-            let _ = writeln!(
-                &mut out,
-                "mode_binding.conflict.{}: {} -> {}",
-                index + 1,
-                conflict.gesture.label(),
-                conflict.message
-            );
-        }
-    }
-
     // Small, safe config hints (do not print secrets).
-    let config = crate::config::Config::load();
-    let _ = writeln!(
-        &mut out,
-        "WHISPER_LANGUAGE: {}",
-        config.whisper_language.as_str()
-    );
-    let _ = writeln!(
-        &mut out,
-        "mode_binding.hold_start_delay_ms: {}",
-        config.hold_start_delay_ms
-    );
-    let _ = writeln!(
-        &mut out,
-        "mode_binding.double_tap_interval_ms: {}",
-        config.double_tap_interval_ms
-    );
-    let _ = writeln!(
-        &mut out,
-        "mode_binding.toggle_silence_sec: {}",
-        config.toggle_silence_sec
-    );
-    if let Ok(val) = std::env::var("CODESCRIBE_STREAM_CHUNK_SEC") {
-        let _ = writeln!(&mut out, "CODESCRIBE_STREAM_CHUNK_SEC: {val}");
+    for key in [
+        "WHISPER_LANGUAGE",
+        "HOLD_MODS",
+        "HOLD_START_DELAY_MS",
+        "DOUBLE_TAP_INTERVAL_MS",
+        "TOGGLE_SILENCE_SEC",
+        "TOGGLE_TRIGGER",
+        "CODESCRIBE_BUFFERED_STREAM",
+        "CODESCRIBE_STREAM_CHUNK_SEC",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            let _ = writeln!(&mut out, "{key}: {val}");
+        }
     }
 
     // Best-effort codesign info (helps debug TCC resets).

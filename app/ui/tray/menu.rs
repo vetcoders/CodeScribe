@@ -3,11 +3,12 @@
 //! Menu structure (flat):
 //! - Status line (dynamic)
 //! - Show Agent / Open history / Copy last
-//! - Notes ▸ / Diagnostics ▸
-//! - Continue Onboarding / Settings / Help / About
+//! - Hotkeys ▸
+//! - Prompts ▸ / Notes ▸ / Diagnostics ▸
+//! - Quick Start / Help / About
 //! - Quit
 //!
-//! Note: Settings opens the persistent Settings window.
+//! Note: Settings options moved to Settings tab in Chat Overlay
 
 use std::cell::RefCell;
 
@@ -28,12 +29,12 @@ thread_local! {
     pub static STATUS_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
     pub static QUALITY_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
     pub static SILERO_VAD_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
-    pub static CONTINUE_ONBOARDING_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
+    pub static COMPLETE_SETUP_MENU_ITEM: RefCell<Option<MenuItem>> = const { RefCell::new(None) };
 }
 
 /// Build the tray menu
 ///
-/// Note: Settings opens the persistent Settings window.
+/// Note: Settings moved to Settings tab in Chat Overlay
 pub fn build_menu() -> Result<(Menu, MenuIds)> {
     let menu = Menu::new();
     ROOT_MENU.with(|cell| {
@@ -67,7 +68,23 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
     // 5. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 6. Notes submenu
+    // 6. Prompts submenu
+    let prompts_menu = Submenu::new("Edit prompts…", true);
+    let open_assistive_prompt_item = MenuItem::new("Assistive…", true, None);
+    let open_assistive_prompt_id = open_assistive_prompt_item.id().clone();
+    prompts_menu.append(&open_assistive_prompt_item)?;
+
+    let open_formatting_prompt_item = MenuItem::new("Formatting…", true, None);
+    let open_formatting_prompt_id = open_formatting_prompt_item.id().clone();
+    prompts_menu.append(&open_formatting_prompt_item)?;
+
+    let open_prompts_folder_item = MenuItem::new("Open prompts folder", true, None);
+    let open_prompts_folder_id = open_prompts_folder_item.id().clone();
+    prompts_menu.append(&open_prompts_folder_item)?;
+
+    menu.append(&prompts_menu)?;
+
+    // 6b. Notes submenu
     let notes_menu = Submenu::new("Notes", true);
     let notes_cfg = Config::load();
 
@@ -108,11 +125,24 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
 
     menu.append(&notes_menu)?;
 
-    // 7. Diagnostics submenu
+    // 6c. Diagnostics submenu
     let diagnostics_menu = Submenu::new("Diagnostics", true);
     let copy_diag_item = MenuItem::new("Copy diagnostics", true, None);
     let copy_diag_id = copy_diag_item.id().clone();
     diagnostics_menu.append(&copy_diag_item)?;
+
+    let open_accessibility_item = MenuItem::new("Open Accessibility settings…", true, None);
+    let open_accessibility_id = open_accessibility_item.id().clone();
+    diagnostics_menu.append(&open_accessibility_item)?;
+
+    let open_input_monitoring_item = MenuItem::new("Open Input Monitoring settings…", true, None);
+    let open_input_monitoring_id = open_input_monitoring_item.id().clone();
+    diagnostics_menu.append(&open_input_monitoring_item)?;
+
+    let reset_input_monitoring_item =
+        MenuItem::new("Reset Input Monitoring permission (restart)…", true, None);
+    let reset_input_monitoring_id = reset_input_monitoring_item.id().clone();
+    diagnostics_menu.append(&reset_input_monitoring_item)?;
 
     // Quality menu item (shows pending mismatches from daemon)
     let state = crate::quality_loop::read_daemon_state();
@@ -147,40 +177,41 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
 
     menu.append(&PredefinedMenuItem::separator())?;
 
-    let continue_onboarding_id = if crate::should_show_onboarding() {
-        let continue_onboarding_item = MenuItem::new("Continue Onboarding...", true, None);
-        let id = continue_onboarding_item.id().clone();
-        menu.append(&continue_onboarding_item)?;
-        CONTINUE_ONBOARDING_MENU_ITEM.with(|cell| {
-            *cell.borrow_mut() = Some(continue_onboarding_item);
+    let show_complete_setup = crate::should_show_onboarding() || crate::should_show_bootstrap();
+    let complete_setup_id = if show_complete_setup {
+        let complete_setup_item = MenuItem::new("Complete Setup...", true, None);
+        let id = complete_setup_item.id().clone();
+        menu.append(&complete_setup_item)?;
+        COMPLETE_SETUP_MENU_ITEM.with(|cell| {
+            *cell.borrow_mut() = Some(complete_setup_item);
         });
         Some(id)
     } else {
-        CONTINUE_ONBOARDING_MENU_ITEM.with(|cell| {
+        COMPLETE_SETUP_MENU_ITEM.with(|cell| {
             *cell.borrow_mut() = None;
         });
         None
     };
 
-    // 9. Settings
-    let settings_item = MenuItem::new("Settings", true, None);
-    let settings_id = settings_item.id().clone();
-    menu.append(&settings_item)?;
+    // 8. Settings
+    let onboarding_item = MenuItem::new("Settings", true, None);
+    let onboarding_id = onboarding_item.id().clone();
+    menu.append(&onboarding_item)?;
 
-    // 10. Help
+    // 9. Help
     let help_item = MenuItem::new("Help", true, None);
     let help_id = help_item.id().clone();
     menu.append(&help_item)?;
 
-    // 11. About
+    // 9. About
     let about_item = MenuItem::new("About", true, None);
     let about_id = about_item.id().clone();
     menu.append(&about_item)?;
 
-    // 12. Separator
+    // 10. Separator
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // 13. Quit (Cmd+Q)
+    // 11. Quit (Cmd+Q)
     let quit_accel = Accelerator::new(Some(Modifiers::SUPER), Code::KeyQ);
     let quit_item = MenuItem::new("Quit", true, Some(quit_accel));
     let quit_id = quit_item.id().clone();
@@ -191,10 +222,16 @@ pub fn build_menu() -> Result<(Menu, MenuIds)> {
         MenuIds {
             copy_last: copy_last_id,
             show_overlay: show_overlay_id,
-            open_settings: settings_id,
-            continue_onboarding: continue_onboarding_id,
+            run_onboarding: onboarding_id,
+            complete_setup: complete_setup_id,
             open_history: open_history_id,
             copy_diagnostics: copy_diag_id,
+            open_accessibility_settings: open_accessibility_id,
+            open_input_monitoring_settings: open_input_monitoring_id,
+            reset_input_monitoring_permission: reset_input_monitoring_id,
+            open_assistive_prompt: open_assistive_prompt_id,
+            open_formatting_prompt: open_formatting_prompt_id,
+            open_prompts_folder: open_prompts_folder_id,
             help: help_id,
             about: about_id,
             quit: quit_id,
@@ -258,18 +295,18 @@ pub fn update_silero_vad_label() {
     });
 }
 
-pub fn update_onboarding_item() {
-    if crate::should_show_onboarding() {
+pub fn update_complete_setup_item() {
+    if crate::should_show_setup() {
         return;
     }
 
     let menu = ROOT_MENU.with(|cell| cell.borrow().clone());
-    let onboarding_item = CONTINUE_ONBOARDING_MENU_ITEM.with(|cell| cell.borrow_mut().take());
-    if let (Some(menu), Some(item)) = (menu, onboarding_item)
+    let complete_setup_item = COMPLETE_SETUP_MENU_ITEM.with(|cell| cell.borrow_mut().take());
+    if let (Some(menu), Some(item)) = (menu, complete_setup_item)
         && let Err(err) = menu.remove(&item)
     {
-        debug!("Failed to remove Continue Onboarding menu item: {}", err);
-        CONTINUE_ONBOARDING_MENU_ITEM.with(|cell| {
+        debug!("Failed to remove Complete Setup menu item: {}", err);
+        COMPLETE_SETUP_MENU_ITEM.with(|cell| {
             *cell.borrow_mut() = Some(item);
         });
     }
@@ -283,7 +320,6 @@ mod tests {
             "Show Agent".to_string(),
             "Open history...".to_string(),
             "Copy last transcript".to_string(),
-            "Continue Onboarding...".to_string(),
             "Settings".to_string(),
             "Help".to_string(),
             "About".to_string(),
@@ -297,12 +333,5 @@ mod tests {
         let labels = menu_labels_for_test();
         let found = labels.iter().any(|label| label == "Show Agent");
         assert!(found, "Show Agent menu item missing");
-    }
-
-    #[test]
-    fn tray_menu_uses_onboarding_vocabulary() {
-        let labels = menu_labels_for_test();
-        assert!(labels.iter().any(|label| label == "Continue Onboarding..."));
-        assert!(!labels.iter().any(|label| label.contains("Setup")));
     }
 }

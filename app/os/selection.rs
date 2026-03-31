@@ -56,14 +56,6 @@ pub fn get_recent_assistive_context(max_age: Duration) -> Option<AssistiveContex
     None
 }
 
-#[cfg(test)]
-fn clear_recent_assistive_context_for_tests() {
-    let mut guard = recent_assistive_context_store()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *guard = None;
-}
-
 fn env_flag(key: &str, default: bool) -> bool {
     std::env::var(key)
         .ok()

@@ -617,12 +617,16 @@ async fn run_daemon() -> Result<()> {
         }
     });
 
-    if let Err(e) = hotkeys::install_global_hotkey_manager(tx) {
-        eprintln!(
-            "Hotkeys waiting on permissions ({}). Grant Accessibility + Input Monitoring and CodeScribe will reinitialize them live.",
-            e
-        );
-    }
+    let hotkey_manager = match hotkeys::HotkeyManager::new(tx) {
+        Ok(manager) => Some(manager),
+        Err(e) => {
+            eprintln!(
+                "Hotkeys waiting on permissions ({}). Grant Accessibility + Input Monitoring and CodeScribe will reinitialize them live.",
+                e
+            );
+            None
+        }
+    };
 
     // VAD monitor task - auto-finish recording when silence detected
     let vad_controller = Arc::clone(&controller);
@@ -663,7 +667,7 @@ async fn run_daemon() -> Result<()> {
         None
     };
 
-    tray::run_with_hotkeys(None)?;
+    tray::run_with_hotkeys(hotkey_manager)?;
 
     // Cleanup: kill quality daemon when tray exits
     if let Some(mut handle) = quality_child {

@@ -21,13 +21,16 @@ use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 #[cfg(feature = "liquid_glass")]
 use objc2_app_kit::{NSAppKitVersionNumber, NSGlassEffectView, NSGlassEffectViewStyle};
-use objc2_app_kit::{NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState};
+use objc2_app_kit::{
+    NSBackingStoreType, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+    NSWindowCollectionBehavior, NSWindowStyleMask,
+};
 #[cfg(feature = "liquid_glass")]
 use objc2_core_foundation::{
     CGPoint as Objc2CGPoint, CGRect as Objc2CGRect, CGSize as Objc2CGSize,
 };
 use std::ffi::CString;
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
 /// Type alias for Objective-C object pointers
 pub type Id = *mut Object;
@@ -58,7 +61,7 @@ pub mod ui_tokens {
     pub const EDGE_PADDING_TIGHT: f64 = 12.0;
 
     pub const TITLE_LABEL_WIDTH: f64 = 96.0;
-    pub const CHAT_TITLE_LABEL_WIDTH: f64 = 104.0;
+    pub const CHAT_TITLE_LABEL_WIDTH: f64 = 82.0;
     pub const TRAFFIC_LIGHTS_SPACER_WIDTH: f64 = 80.0;
     pub const HEADER_BUTTON_SIZE: f64 = 28.0;
     pub const HEADER_BUTTON_GAP: f64 = 8.0;
@@ -75,13 +78,10 @@ pub mod ui_tokens {
     pub const CONTENT_GAP: f64 = 4.0;
     pub const SIDEBAR_MIN_WIDTH: f64 = 200.0;
     pub const SIDEBAR_MAX_WIDTH: f64 = 320.0;
-    pub const CHAT_INPUT_BUTTON_WIDTH: f64 = 36.0;
-    pub const CHAT_INPUT_BUTTON_HEIGHT: f64 = 32.0;
-    pub const CHAT_INPUT_SIDE_INSET: f64 = 8.0;
-    pub const CHAT_INPUT_CONTROL_GAP: f64 = 8.0;
-    pub const CHAT_INPUT_TEXT_INSET_Y: f64 = 7.0;
 
-    // Legacy CORNER_RADIUS_LG/MD/SM removed — use SURFACE_RADIUS everywhere.
+    pub const CORNER_RADIUS_LG: f64 = 16.0;
+    pub const CORNER_RADIUS_MD: f64 = 12.0;
+    pub const CORNER_RADIUS_SM: f64 = 8.0;
 
     pub const STATUS_PILL_HEIGHT: f64 = 18.0;
     pub const STATUS_PILL_WIDTH: f64 = 96.0;
@@ -110,16 +110,20 @@ pub mod ui_tokens {
     pub const SURFACE_BORDER_ALPHA: f64 = 0.14;
 
     /// Glass background: alpha for vibrancy-backed views.
-    pub const GLASS_BG_ALPHA: f64 = 0.24;
+    pub const GLASS_BG_ALPHA: f64 = 0.20;
     /// Glass fallback: alpha when NSVisualEffectView is not available.
-    pub const GLASS_FALLBACK_ALPHA: f64 = 0.34;
+    pub const GLASS_FALLBACK_ALPHA: f64 = 0.30;
 
-    /// Paper tiers are appearance-aware: derived from controlBackgroundColor.
+    /// Paper warm tint (content areas: bubbles, transcription, inputs).
+    pub const PAPER_WARM_R: f64 = 0.15;
+    pub const PAPER_WARM_G: f64 = 0.16;
+    pub const PAPER_WARM_B: f64 = 0.19;
     pub const PAPER_WARM_ALPHA: f64 = 0.74;
-    pub const PAPER_WARM_FALLBACK_ALPHA: f64 = 0.84;
-    /// Paper cool tier (system/meta areas).
+    /// Paper cool tint (system/meta areas).
+    pub const PAPER_COOL_R: f64 = 0.13;
+    pub const PAPER_COOL_G: f64 = 0.17;
+    pub const PAPER_COOL_B: f64 = 0.24;
     pub const PAPER_COOL_ALPHA: f64 = 0.70;
-    pub const PAPER_COOL_FALLBACK_ALPHA: f64 = 0.80;
     pub const PAPER_BORDER_ALPHA: f64 = 0.14;
 
     /// Compact header for Tafla windows.
@@ -132,12 +136,9 @@ pub mod ui_tokens {
     pub const DENSITY_MEDIUM: f64 = 8.0;
     pub const DENSITY_COMPACT: f64 = 6.0;
 
-    /// Extra vertical gap inserted above section headers within settings tabs.
-    pub const SECTION_GAP: f64 = 20.0;
-
     /// Dictation overlay tuning: lighter sheet + compact action row.
-    pub const OVERLAY_GLASS_BG_ALPHA: f64 = 0.18;
-    pub const OVERLAY_GLASS_FALLBACK_ALPHA: f64 = 0.28;
+    pub const OVERLAY_GLASS_BG_ALPHA: f64 = 0.16;
+    pub const OVERLAY_GLASS_FALLBACK_ALPHA: f64 = 0.24;
     pub const OVERLAY_BORDER_ALPHA: f64 = 0.10;
     pub const OVERLAY_TEXT_PANEL_ALPHA: f64 = 0.74;
     pub const OVERLAY_ACTION_BG_ALPHA: f64 = 0.70;
@@ -168,19 +169,19 @@ pub mod ui_colors {
     }
 
     pub fn sidebar_bg() -> Id {
-        control_bg_tint(adaptive_alpha(0.22, 0.32))
+        control_bg_tint(adaptive_alpha(0.27, 0.38))
     }
 
     pub fn panel_bg() -> Id {
-        control_bg_tint(adaptive_alpha(0.28, 0.38))
+        control_bg_tint(adaptive_alpha(0.35, 0.46))
     }
 
     pub fn settings_glass_bg() -> Id {
-        control_bg_tint(adaptive_alpha(0.26, 0.36))
+        control_bg_tint(adaptive_alpha(0.30, 0.40))
     }
 
     pub fn input_bar_bg() -> Id {
-        control_bg_tint(adaptive_alpha(0.22, 0.32))
+        control_bg_tint(adaptive_alpha(0.24, 0.34))
     }
 
     pub fn input_bar_border() -> Id {
@@ -370,14 +371,14 @@ pub mod ui_colors {
 
     /// Paper warm surface (content: bubbles, transcription text, input fields).
     pub fn surface_paper_warm() -> Id {
-        use super::ui_tokens::{PAPER_WARM_ALPHA, PAPER_WARM_FALLBACK_ALPHA};
-        control_bg_tint(adaptive_alpha(PAPER_WARM_ALPHA, PAPER_WARM_FALLBACK_ALPHA))
+        use super::ui_tokens::*;
+        super::color_rgba(PAPER_WARM_R, PAPER_WARM_G, PAPER_WARM_B, PAPER_WARM_ALPHA)
     }
 
     /// Paper cool surface (system/meta content).
     pub fn surface_paper_cool() -> Id {
-        use super::ui_tokens::{PAPER_COOL_ALPHA, PAPER_COOL_FALLBACK_ALPHA};
-        control_bg_tint(adaptive_alpha(PAPER_COOL_ALPHA, PAPER_COOL_FALLBACK_ALPHA))
+        use super::ui_tokens::*;
+        super::color_rgba(PAPER_COOL_R, PAPER_COOL_G, PAPER_COOL_B, PAPER_COOL_ALPHA)
     }
 
     /// Canonical surface border — one style for all Tafla windows.
@@ -401,20 +402,6 @@ pub struct ChatHeaderLayout {
     pub status_pill_x: f64,
     pub status_pill_width: f64,
     pub show_status_pill: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ChatInputRowLayout {
-    pub attach_x: f64,
-    pub attach_y: f64,
-    pub send_x: f64,
-    pub send_y: f64,
-    pub button_width: f64,
-    pub button_height: f64,
-    pub text_x: f64,
-    pub text_y: f64,
-    pub text_width: f64,
-    pub text_height: f64,
 }
 
 pub fn chat_header_layout(
@@ -469,31 +456,16 @@ pub fn chat_header_layout(
         tab_width = ((tab_space - tab_gap * 2.0) / 3.0).min(tab_target_width);
     }
 
-    tab_space = tab_space.max(0.0);
+    let tab_space = tab_space.max(0.0);
     let max_gap = (tab_space / 2.0).max(0.0);
     tab_gap = tab_gap.min(max_gap);
     let max_width_for_space = ((tab_space - tab_gap * 2.0) / 3.0).max(0.0);
     tab_width = tab_width.min(max_width_for_space);
 
-    let mut tab_total = (tab_width * 3.0 + tab_gap * 2.0).max(0.0);
-    if show_status {
-        let min_status_x = left_anchor + tab_total + CHAT_HEADER_GROUP_GAP;
-        let max_status_width = (right_anchor - min_status_x).max(0.0);
-        if max_status_width < STATUS_PILL_MIN_WIDTH {
-            show_status = false;
-            status_width = 0.0;
-            tab_space = available.max(0.0);
-            tab_gap = tab_target_gap.min((tab_space / 2.0).max(0.0));
-            tab_width = ((tab_space - tab_gap * 2.0) / 3.0)
-                .max(0.0)
-                .min(tab_target_width);
-            tab_total = (tab_width * 3.0 + tab_gap * 2.0).max(0.0);
-        } else {
-            status_width = status_width.min(max_status_width);
-        }
-    }
+    let tab_total = (tab_width * 3.0 + tab_gap * 2.0).max(0.0);
     let status_x = if show_status {
-        (right_anchor - status_width).max(left_anchor + tab_total + CHAT_HEADER_GROUP_GAP)
+        let min_status_x = left_anchor + tab_total + CHAT_HEADER_GROUP_GAP;
+        (right_anchor - status_width).max(min_status_x)
     } else {
         right_anchor
     };
@@ -505,41 +477,6 @@ pub fn chat_header_layout(
         status_pill_x: status_x,
         status_pill_width: status_width,
         show_status_pill: show_status,
-    }
-}
-
-pub fn chat_input_row_layout(bar_width: f64, bar_height: f64) -> ChatInputRowLayout {
-    use ui_tokens::{
-        CHAT_INPUT_BUTTON_HEIGHT, CHAT_INPUT_BUTTON_WIDTH, CHAT_INPUT_CONTROL_GAP,
-        CHAT_INPUT_SIDE_INSET, CHAT_INPUT_TEXT_INSET_Y,
-    };
-
-    let button_width = CHAT_INPUT_BUTTON_WIDTH;
-    let button_height = CHAT_INPUT_BUTTON_HEIGHT;
-    let side_inset = CHAT_INPUT_SIDE_INSET.max(0.0);
-    let control_gap = CHAT_INPUT_CONTROL_GAP.max(0.0);
-
-    let attach_x = side_inset;
-    let send_x = (bar_width - side_inset - button_width).max(attach_x + button_width + control_gap);
-    let text_x = attach_x + button_width + control_gap;
-    let text_right = (send_x - control_gap).max(text_x);
-    let text_width = (text_right - text_x).max(0.0);
-
-    let button_y = ((bar_height - button_height) * 0.5).max(6.0);
-    let text_y = CHAT_INPUT_TEXT_INSET_Y.max(0.0);
-    let text_height = (bar_height - text_y * 2.0).max(24.0);
-
-    ChatInputRowLayout {
-        attach_x,
-        attach_y: button_y,
-        send_x,
-        send_y: button_y,
-        button_width,
-        button_height,
-        text_x,
-        text_y,
-        text_width,
-        text_height,
     }
 }
 
@@ -559,6 +496,95 @@ pub unsafe fn apply_tafla_surface(layer: Id, with_border: bool) {
     let _: () = msg_send![layer, setShadowOpacity: 0.0f32];
 }
 
+unsafe fn style_tafla_view_with_color(view: Id, background: Id, with_border: bool) {
+    let _: () = msg_send![view, setWantsLayer: true];
+    let layer: Id = msg_send![view, layer];
+    if layer.is_null() {
+        return;
+    }
+    let cg_background: Id = msg_send![background, CGColor];
+    let _: () = msg_send![layer, setBackgroundColor: cg_background];
+    unsafe {
+        apply_tafla_surface(layer, with_border);
+    }
+    let _: () = msg_send![layer, setMasksToBounds: true];
+}
+
+/// Style a paper-warm Tafla content section.
+///
+/// # Safety
+/// `view` must be a valid `NSView` instance.
+pub unsafe fn style_tafla_section(view: Id) {
+    let base = ui_colors::surface_paper_warm();
+    let background: Id = msg_send![base, colorWithAlphaComponent: 0.68f64];
+    unsafe {
+        style_tafla_view_with_color(view, background, true);
+    }
+}
+
+/// Style a compact Tafla panel such as a status pill or input bar.
+///
+/// # Safety
+/// `view` must be a valid `NSView` instance.
+pub unsafe fn style_tafla_panel(view: Id) {
+    unsafe {
+        style_tafla_view_with_color(view, ui_colors::panel_bg(), true);
+    }
+}
+
+/// Style a tinted sidebar backing layer used by split-window side panes.
+///
+/// # Safety
+/// `view` must be a valid `NSView` instance.
+pub unsafe fn style_tafla_sidebar_tint(view: Id) {
+    let tint = ui_colors::control_bg_tint(0.22);
+    let tint: Id = msg_send![tint, colorWithAlphaComponent: 0.95f64];
+    unsafe {
+        style_tafla_view_with_color(view, tint, false);
+    }
+}
+
+/// Style a glass-backed Tafla shell for borderless floating windows.
+///
+/// # Safety
+/// `view` must be a valid `NSView`/`NSVisualEffectView` instance.
+pub unsafe fn style_tafla_glass_shell(view: Id) {
+    unsafe {
+        style_tafla_view_with_color(view, ui_colors::surface_glass(), true);
+    }
+}
+
+/// Style a warm paper input field that matches the onboarding/settings shell.
+///
+/// # Safety
+/// `field` must be a valid `NSTextField`/`NSSecureTextField`.
+pub unsafe fn style_tafla_input(field: Id) {
+    let _: () = msg_send![field, setDrawsBackground: true];
+    let base = ui_colors::surface_paper_warm();
+    let background: Id = msg_send![base, colorWithAlphaComponent: 0.84f64];
+    let _: () = msg_send![field, setBackgroundColor: background];
+}
+
+/// Add the canonical thin header separator used across Tafla windows.
+///
+/// Returns the next Y anchor (`y - 1.0`) to preserve existing call sites.
+///
+/// # Safety
+/// `container` must be a valid `NSView`.
+pub unsafe fn add_tafla_header_separator(container: Id, x: f64, y: f64, width: f64) -> f64 {
+    let separator = create_label(LabelConfig {
+        frame: CGRect::new(&CGPoint::new(x, y), &CGSize::new(width, 1.0)),
+        text: String::new(),
+        background_color: Some(ui_colors::header_border()),
+        ..Default::default()
+    });
+    let _: () = msg_send![separator, setAlphaValue: 0.9f64];
+    unsafe {
+        add_subview(container, separator);
+    }
+    y - 1.0
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct NSEdgeInsets {
@@ -568,20 +594,19 @@ pub struct NSEdgeInsets {
     pub right: f64,
 }
 
-#[cfg(feature = "liquid_glass")]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct NSOperatingSystemVersion {
-    major_version: isize,
-    minor_version: isize,
-    patch_version: isize,
-}
-
 /// Create an NSColor from RGBA values (0.0-1.0)
 pub fn color_rgba(r: f64, g: f64, b: f64, a: f64) -> Id {
     unsafe {
         let ns_color = Class::get("NSColor").unwrap();
         msg_send![ns_color, colorWithRed: r green: g blue: b alpha: a]
+    }
+}
+
+/// Create white color with optional alpha
+pub fn color_white(alpha: f64) -> Id {
+    unsafe {
+        let ns_color = Class::get("NSColor").unwrap();
+        msg_send![ns_color, colorWithWhite: 1.0f64 alpha: alpha]
     }
 }
 
@@ -696,68 +721,21 @@ const NS_APPKIT_VERSION_26_0: f64 = 2685.0;
 #[cfg(feature = "liquid_glass")]
 fn glass_effect_style_for_material(material: NSVisualEffectMaterial) -> NSGlassEffectViewStyle {
     match material {
-        // Titlebar stays Clear (light, floating chrome).
-        // Sidebar uses Regular for readability — matches System Settings behaviour.
-        NSVisualEffectMaterial::Titlebar => NSGlassEffectViewStyle::Clear,
+        // Keep side panes and title-like strips lighter.
+        NSVisualEffectMaterial::Sidebar | NSVisualEffectMaterial::Titlebar => {
+            NSGlassEffectViewStyle::Clear
+        }
         _ => NSGlassEffectViewStyle::Regular,
     }
 }
 
 fn glass_effect_view_class_available() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| Class::get("NSGlassEffectView").is_some())
-}
-
-#[cfg(feature = "liquid_glass")]
-#[derive(Clone, Copy)]
-struct GlassRuntimeProbe {
-    appkit_version: f64,
-    appkit_supported: bool,
-    class_available: bool,
-    os_version: NSOperatingSystemVersion,
-    os_supported: bool,
-}
-
-#[cfg(feature = "liquid_glass")]
-impl GlassRuntimeProbe {
-    fn runtime_supported(self) -> bool {
-        self.appkit_supported || self.os_supported
-    }
-}
-
-#[cfg(feature = "liquid_glass")]
-fn probe_glass_runtime() -> GlassRuntimeProbe {
-    unsafe {
-        let appkit_version = NSAppKitVersionNumber;
-        let appkit_supported = appkit_version >= NS_APPKIT_VERSION_26_0;
-        let os_version = Class::get("NSProcessInfo")
-            .map(|cls| {
-                let process_info: Id = msg_send![cls, processInfo];
-                if process_info.is_null() {
-                    NSOperatingSystemVersion::default()
-                } else {
-                    let version: NSOperatingSystemVersion =
-                        msg_send![process_info, operatingSystemVersion];
-                    version
-                }
-            })
-            .unwrap_or_default();
-        let os_supported = os_version.major_version >= 26;
-
-        GlassRuntimeProbe {
-            appkit_version,
-            appkit_supported,
-            class_available: glass_effect_view_class_available(),
-            os_version,
-            os_supported,
-        }
-    }
+    Class::get("NSGlassEffectView").is_some()
 }
 
 #[cfg(feature = "liquid_glass")]
 fn glass_effect_runtime_supported() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| probe_glass_runtime().runtime_supported())
+    unsafe { NSAppKitVersionNumber >= NS_APPKIT_VERSION_26_0 }
 }
 
 #[cfg(not(feature = "liquid_glass"))]
@@ -767,37 +745,10 @@ fn glass_effect_runtime_supported() -> bool {
 
 #[cfg(feature = "liquid_glass")]
 fn create_typed_glass_effect_view(frame: CGRect, material: NSVisualEffectMaterial) -> Option<Id> {
-    let runtime = probe_glass_runtime();
-    if !runtime.runtime_supported() || !runtime.class_available {
-        tracing::info!(
-            "NSGlassEffectView fallback to NSVisualEffectView: runtime_supported={} appkit_supported={} appkit_version={:.1} threshold={:.1} os_version={}.{}.{} os_supported={} class_available={}",
-            runtime.runtime_supported(),
-            runtime.appkit_supported,
-            runtime.appkit_version,
-            NS_APPKIT_VERSION_26_0,
-            runtime.os_version.major_version,
-            runtime.os_version.minor_version,
-            runtime.os_version.patch_version,
-            runtime.os_supported,
-            runtime.class_available
-        );
+    if !glass_effect_supported() {
         return None;
     }
-    let mtm = match MainThreadMarker::new() {
-        Some(marker) => marker,
-        None => {
-            let is_main_thread = if let Some(ns_thread) = Class::get("NSThread") {
-                unsafe { msg_send![ns_thread, isMainThread] }
-            } else {
-                false
-            };
-            tracing::warn!(
-                "NSGlassEffectView fallback to NSVisualEffectView: MainThreadMarker::new() returned None (NSThread.isMainThread={})",
-                is_main_thread
-            );
-            return None;
-        }
-    };
+    let mtm = MainThreadMarker::new()?;
     let frame = Objc2CGRect::new(
         Objc2CGPoint::new(frame.origin.x, frame.origin.y),
         Objc2CGSize::new(frame.size.width, frame.size.height),
@@ -807,11 +758,6 @@ fn create_typed_glass_effect_view(frame: CGRect, material: NSVisualEffectMateria
     let view: Id = Retained::into_raw(view).cast::<Object>();
     unsafe {
         let _: () = msg_send![view, setWantsLayer: true];
-        let supports_corner_radius: bool =
-            msg_send![view, respondsToSelector: sel!(setCornerRadius:)];
-        if supports_corner_radius {
-            let _: () = msg_send![view, setCornerRadius: ui_tokens::SURFACE_RADIUS];
-        }
     }
     Some(view)
 }
@@ -929,60 +875,6 @@ pub fn create_glass_effect_view_with(
         let _: () = msg_send![view, setWantsLayer: true];
         view
     }
-}
-
-/// Create an `NSGlassEffectContainerView` when available, otherwise fallback to `NSView`.
-pub fn create_glass_effect_container_view(frame: CGRect, spacing: f64) -> Id {
-    unsafe {
-        let view: Id = if let Some(container_class) = Class::get("NSGlassEffectContainerView") {
-            let view: Id = msg_send![container_class, alloc];
-            let view: Id = msg_send![view, initWithFrame: frame];
-            let supports_spacing: bool = msg_send![view, respondsToSelector: sel!(setSpacing:)];
-            if supports_spacing {
-                let _: () = msg_send![view, setSpacing: spacing.max(0.0)];
-            }
-            view
-        } else {
-            let ns_view = Class::get("NSView").unwrap();
-            let view: Id = msg_send![ns_view, alloc];
-            msg_send![view, initWithFrame: frame]
-        };
-        let _: () = msg_send![view, setWantsLayer: true];
-        view
-    }
-}
-
-unsafe fn set_content_view_or_subview(host: Id, content_view: Id) -> bool {
-    if host.is_null() || content_view.is_null() {
-        return false;
-    }
-    let supports_content_view: bool =
-        unsafe { msg_send![host, respondsToSelector: sel!(setContentView:)] };
-    if supports_content_view {
-        let _: () = unsafe { msg_send![host, setContentView: content_view] };
-        true
-    } else {
-        let _: () = unsafe { msg_send![host, addSubview: content_view] };
-        false
-    }
-}
-
-/// Attach content to a glass effect view using WWDC25 `contentView` semantics when available.
-///
-/// Returns `true` when `setContentView:` was used; `false` when it fell back to `addSubview:`.
-/// # Safety
-/// `glass_view` and `content_view` must be valid Objective-C view objects.
-pub unsafe fn set_glass_effect_content_view(glass_view: Id, content_view: Id) -> bool {
-    unsafe { set_content_view_or_subview(glass_view, content_view) }
-}
-
-/// Attach content to a glass container view using `contentView` when available.
-///
-/// Returns `true` when `setContentView:` was used; `false` when it fell back to `addSubview:`.
-/// # Safety
-/// `container_view` and `content_view` must be valid Objective-C view objects.
-pub unsafe fn set_glass_container_content_view(container_view: Id, content_view: Id) -> bool {
-    unsafe { set_content_view_or_subview(container_view, content_view) }
 }
 
 /// # Safety
@@ -1221,7 +1113,6 @@ pub mod button_style {
     pub const SHADOWLESS_SQUARE: isize = 6;
     pub const SMALL_SQUARE: isize = 10;
     pub const INLINE: isize = 15;
-    pub const GLASS: isize = 16;
 }
 
 /// Create a button with title and action
@@ -1369,18 +1260,26 @@ pub fn button(frame: CGRect, title: &str) -> Id {
 }
 
 // ============================================================================
-// Toggle Helpers
+// Checkbox Helpers
 // ============================================================================
 
-/// Create a native NSSwitch toggle.
-pub fn create_toggle(frame: CGRect, checked: bool) -> Id {
+/// Create a checkbox (switch style button)
+pub fn create_checkbox(frame: CGRect, title: &str, checked: bool) -> Id {
     unsafe {
-        let ns_switch = Class::get("NSSwitch").unwrap();
-        let toggle: Id = msg_send![ns_switch, alloc];
-        let toggle: Id = msg_send![toggle, initWithFrame: frame];
+        let ns_button = Class::get("NSButton").unwrap();
+
+        let btn: Id = msg_send![ns_button, alloc];
+        let btn: Id = msg_send![btn, initWithFrame: frame];
+
+        let _: () = msg_send![btn, setButtonType: 3_isize]; // NSSwitchButton
+
+        let title_str = ns_string(title);
+        let _: () = msg_send![btn, setTitle: title_str];
+
         let state: isize = if checked { 1 } else { 0 };
-        let _: () = msg_send![toggle, setState: state];
-        toggle
+        let _: () = msg_send![btn, setState: state];
+
+        btn
     }
 }
 
@@ -1404,10 +1303,6 @@ pub fn create_card_view(frame: CGRect, title: &str, subtitle: &str, preview: &st
             let cg_color: Id = msg_send![bg_color, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg_color];
             apply_tafla_surface(layer, true);
-            // Drawer cards stay intentionally flat: one border, no halo.
-            let _: () = msg_send![layer, setMasksToBounds: true];
-            let _: () = msg_send![layer, setShadowRadius: 0.0f64];
-            let _: () = msg_send![layer, setShadowOffset: CGSize::new(0.0, 0.0)];
         }
 
         let title_frame = CGRect::new(
@@ -1552,6 +1447,68 @@ pub fn create_scrollable_text_view(frame: CGRect, editable: bool) -> (Id, Id) {
 // Window Helpers
 // ============================================================================
 
+/// Create a floating overlay window
+pub fn create_floating_window(
+    frame: CGRect,
+    title: &str,
+    transparent_titlebar: bool,
+    resizable: bool,
+) -> Id {
+    unsafe {
+        let ns_window = Class::get("NSWindow").unwrap();
+
+        let mut style = NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable;
+        if transparent_titlebar {
+            style |= NSWindowStyleMask::FullSizeContentView;
+        }
+        if resizable {
+            style |= NSWindowStyleMask::Resizable;
+        }
+
+        let window: Id = msg_send![ns_window, alloc];
+        let window: Id = msg_send![
+            window,
+            initWithContentRect: frame
+            styleMask: style
+            backing: NSBackingStoreType::Buffered
+            defer: false
+        ];
+
+        if transparent_titlebar {
+            // Re-apply FullSizeContentView post-init to avoid AppKit falling back to
+            // separate titlebar/content regions (which visually looks like a duplicate top bar).
+            let current_style: NSWindowStyleMask = msg_send![window, styleMask];
+            let full_style = current_style | NSWindowStyleMask::FullSizeContentView;
+            let _: () = msg_send![window, setStyleMask: full_style];
+            let _: () = msg_send![window, setTitleVisibility: 1_isize]; // NSWindowTitleHidden
+            let _: () = msg_send![window, setTitlebarAppearsTransparent: true];
+            let _: () = msg_send![window, setOpaque: false];
+            let ns_color = Class::get("NSColor").unwrap();
+            let clear: Id = msg_send![ns_color, clearColor];
+            let _: () = msg_send![window, setBackgroundColor: clear];
+        }
+
+        let _: () = msg_send![window, setMovableByWindowBackground: true];
+        let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
+        // Keep the window instance alive even after close; we manage lifecycle explicitly.
+        let _: () = msg_send![window, setReleasedWhenClosed: false];
+
+        // Can join all spaces
+        let collection = NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary;
+        let _: () = msg_send![window, setCollectionBehavior: collection];
+
+        if !title.is_empty() {
+            let title_str = ns_string(title);
+            let _: () = msg_send![window, setTitle: title_str];
+        }
+
+        window
+    }
+}
+
 /// Get window's content view
 /// # Safety
 /// `window` must be a valid `NSWindow` instance.
@@ -1657,39 +1614,6 @@ mod tests {
         let tabs_right =
             layout.tab_cluster_x + layout.tab_button_width * 3.0 + layout.tab_button_gap * 2.0;
         assert!(tabs_right <= 142.0 - ui_tokens::CHAT_HEADER_GROUP_GAP + 0.001);
-    }
-
-    #[test]
-    fn chat_header_layout_keeps_status_before_right_cluster() {
-        let right_cluster_start_x = 270.0;
-        let layout = chat_header_layout(
-            86.0,
-            ui_tokens::CHAT_TITLE_LABEL_WIDTH,
-            right_cluster_start_x,
-        );
-        if layout.show_status_pill {
-            let right_anchor = right_cluster_start_x - ui_tokens::CHAT_HEADER_GROUP_GAP;
-            assert!(layout.status_pill_x + layout.status_pill_width <= right_anchor + 0.001);
-        }
-    }
-
-    #[test]
-    fn chat_input_row_layout_keeps_buttons_on_sides() {
-        let layout = chat_input_row_layout(420.0, ui_tokens::AGENT_INPUT_HEIGHT);
-        assert!(
-            layout.attach_x + layout.button_width + ui_tokens::CHAT_INPUT_CONTROL_GAP
-                <= layout.text_x
-        );
-        assert!(
-            layout.text_x + layout.text_width + ui_tokens::CHAT_INPUT_CONTROL_GAP <= layout.send_x
-        );
-    }
-
-    #[test]
-    fn chat_input_row_layout_avoids_overlap_on_narrow_width() {
-        let layout = chat_input_row_layout(140.0, ui_tokens::AGENT_INPUT_HEIGHT);
-        assert!(layout.text_width >= 0.0);
-        assert!(layout.attach_x + layout.button_width <= layout.send_x);
     }
 
     #[test]
@@ -2326,10 +2250,10 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
 
         let _: () = msg_send![text_label, setBezeled: false];
         let _: () = msg_send![text_label, setEditable: false];
-        let _: () = msg_send![text_label, setSelectable: true];
+        let _: () = msg_send![text_label, setSelectable: false];
         let _: () = msg_send![text_label, setDrawsBackground: false];
         let _: () = msg_send![text_label, setUsesSingleLineMode: false];
-        let _: () = msg_send![text_label, setRefusesFirstResponder: false];
+        let _: () = msg_send![text_label, setRefusesFirstResponder: true];
         let responds_attr: bool =
             msg_send![text_label, respondsToSelector: sel!(setAllowsEditingTextAttributes:)];
         if responds_attr {
@@ -2363,7 +2287,8 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         let _: () = msg_send![text_label, setTextColor: text_color];
 
         let _: () = msg_send![text_label, setFont: font];
-        let allow_markdown = matches!(config.role, BubbleRole::Assistant | BubbleRole::System);
+        let allow_markdown = !config.is_streaming
+            && matches!(config.role, BubbleRole::Assistant | BubbleRole::System);
         if !(allow_markdown && apply_markdown_to_text_field(text_label, &display_text, font)) {
             let _: () = msg_send![text_label, setStringValue: text_str];
         }
@@ -2592,7 +2517,8 @@ pub unsafe fn update_bubble_text(
             text.to_string()
         };
 
-        let allow_markdown = matches!(role, BubbleRole::Assistant | BubbleRole::System);
+        let allow_markdown =
+            !is_streaming && matches!(role, BubbleRole::Assistant | BubbleRole::System);
         // Always create a fresh monospace font instead of reading from the label.
         // After markdown parsing, text_label.font may return a system font from
         // the first attributed range, causing cascading degradation on subsequent updates.
@@ -3451,8 +3377,7 @@ pub fn create_slider(frame: CGRect, min: f64, max: f64, value: f64) -> Id {
         let _: () = msg_send![slider, setMinValue: min];
         let _: () = msg_send![slider, setMaxValue: max];
         let _: () = msg_send![slider, setDoubleValue: value];
-        // Fire action only on mouse-up to avoid spamming settings.json writes.
-        let _: () = msg_send![slider, setContinuous: false];
+        let _: () = msg_send![slider, setContinuous: true];
 
         slider
     }

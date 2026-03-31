@@ -58,6 +58,7 @@ pub struct ChatMessage {
 pub enum Tab {
     Drawer,
     Agent,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,19 +88,11 @@ pub enum ConversationModeState {
     Interrupted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DrawerEntrySource {
-    LegacyFile,
-    Thread { id: String },
-}
-
 pub struct DrawerEntry {
-    pub source: DrawerEntrySource,
     pub path: PathBuf,
     pub timestamp: SystemTime,
     pub mode: TranscriptionMode,
     pub preview: String,
-    pub search_corpus: String,
     pub is_ai_formatted: bool,
     pub is_favorite: bool,
 }
@@ -157,7 +150,7 @@ pub struct VoiceChatOverlayState {
 
     // Active tab
     pub active_tab: Tab,
-    /// Requested tab to apply after overlay is created.
+    /// Requested tab to apply after overlay is created (used for routing Settings from tray).
     pub pending_tab: Option<Tab>,
 
     // Chat state
@@ -169,17 +162,9 @@ pub struct VoiceChatOverlayState {
     pub manual_draft: String,
     pub is_sending: bool,
     pub auto_send_enabled: bool,
-    /// Last status text provided by caller before runtime-health decoration is applied.
-    pub status_base_text: String,
     pub status_text: String,
     pub status_kind: UiStatus,
     pub context_text: String,
-    /// True when agent runtime is unavailable and legacy fallback is active.
-    pub runtime_degraded: bool,
-    /// Explicit UI flag for showing persistent "fallback active" indicators.
-    pub is_agent_degraded: bool,
-    /// Optional diagnostic context for degraded runtime state.
-    pub runtime_degraded_reason: Option<String>,
     /// Best-effort app name to reactivate when performing paste actions.
     pub last_target_app: Option<String>,
 
@@ -247,13 +232,9 @@ impl Default for VoiceChatOverlayState {
             manual_draft: String::new(),
             is_sending: false,
             auto_send_enabled: true,
-            status_base_text: "Ready".to_string(),
             status_text: "Ready".to_string(),
             status_kind: UiStatus::Idle,
             context_text: String::new(),
-            runtime_degraded: false,
-            is_agent_degraded: false,
-            runtime_degraded_reason: None,
             last_target_app: None,
             conversation_state: ConversationModeState::default(),
             action_handler: None,

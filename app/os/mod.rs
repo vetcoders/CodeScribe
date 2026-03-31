@@ -8,5 +8,3 @@ pub mod notifications;
 pub mod permissions;
 #[cfg(target_os = "macos")]
 pub mod selection;
-#[cfg(target_os = "macos")]
-pub mod shortcut_registry;

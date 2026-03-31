@@ -7,14 +7,12 @@ use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, info, warn};
 
 use chrono::{DateTime, Local};
 
-use codescribe_core::agent::{Thread, ThreadIndex, ThreadStore};
 use codescribe_core::attachment::Attachment;
 
 use crate::ui::shared::status::{UiStatus, status_from_detail};
@@ -22,16 +20,16 @@ use crate::ui_helpers::{
     BubbleConfig, BubbleRole, LabelConfig, add_subview, apply_tafla_surface, button_set_action,
     button_style, chat_header_layout, color_label, color_rgba, color_secondary_label,
     create_bubble_view, create_button, create_card_view, create_label, get_text_field_string,
-    get_text_view_string, layout_region_frame_for_view, ns_string, open_file_in_editor,
-    resize_bubble_container_for_text, set_button_symbol, set_text_field_string,
-    set_text_view_string, set_tooltip, stack_view_add, stack_view_clear, ui_colors, ui_tokens,
-    update_bubble_text, window_set_alpha, window_show,
+    get_text_view_string, layout_region_frame_for_view, list_draft_files, ns_string,
+    open_file_in_editor, resize_bubble_container_for_text, set_button_symbol,
+    set_text_field_string, set_text_view_string, set_tooltip, stack_view_add, stack_view_clear,
+    ui_colors, ui_tokens, update_bubble_text, window_set_alpha, window_show,
 };
 
 use super::handlers::{clear_search_field, copy_to_clipboard};
 use super::state::{
-    ChatMessage, ChatRole, ConversationModeState, DrawerEntry, DrawerEntrySource, OVERLAY_STATE,
-    SEND_CALLBACK, Tab, TranscriptionMode, VoiceChatOverlayState,
+    ChatMessage, ChatRole, ConversationModeState, DrawerEntry, OVERLAY_STATE, SEND_CALLBACK, Tab,
+    TranscriptionMode, VoiceChatOverlayState,
 };
 
 // Type alias for Objective-C object pointers
@@ -46,14 +44,6 @@ pub fn update_voice_chat_status(status: &str) {
     let status_owned = status.to_string();
     Queue::main().exec_async(move || {
         update_voice_chat_status_impl(&status_owned);
-    });
-}
-
-/// Persist runtime degradation state used by status and tooltip rendering.
-pub fn set_voice_chat_runtime_degraded(is_degraded: bool, reason: Option<&str>) {
-    let reason_owned = reason.map(str::to_string);
-    Queue::main().exec_async(move || {
-        set_voice_chat_runtime_degraded_impl(is_degraded, reason_owned);
     });
 }
 
@@ -188,27 +178,6 @@ pub fn handoff_transcript_to_chat(transcript: &str) {
     });
 }
 
-/// Dispatch a payload through the registered chat send callback without mutating bubbles.
-///
-/// Returns `true` when a callback was found and invoked.
-pub fn dispatch_voice_chat_send(payload: &str) -> bool {
-    let payload = payload.trim();
-    if payload.is_empty() {
-        return false;
-    }
-    let handler = {
-        let guard = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
-        guard.clone()
-    };
-    if let Some(handler) = handler {
-        handler(payload.to_string());
-        true
-    } else {
-        warn!("No voice-chat send callback set; cannot dispatch runtime send request");
-        false
-    }
-}
-
 /// Submit the current draft (manual send)
 pub fn send_voice_chat_draft() {
     Queue::main().exec_async(|| {
@@ -240,45 +209,6 @@ pub fn set_voice_chat_sending(is_sending: bool) {
 pub fn clear_voice_chat_text() {
     Queue::main().exec_async(|| {
         clear_voice_chat_text_impl();
-    });
-}
-
-/// Start a fresh Agent thread by rotating backend runtime first, then clearing UI state.
-pub(super) fn start_new_thread_impl() {
-    update_voice_chat_status_impl("Starting new thread...");
-
-    std::thread::spawn(|| {
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(error) => {
-                let reason = format!("Unable to initialize async runtime for New thread: {error}");
-                Queue::main().exec_async(move || {
-                    warn!("{reason}");
-                    update_voice_chat_status_impl("Thread reset failed");
-                    add_voice_chat_error_message(&reason);
-                });
-                return;
-            }
-        };
-
-        let reset_result = rt.block_on(crate::controller::reset_agent_runtime_for_new_thread());
-        Queue::main().exec_async(move || match reset_result {
-            Ok(generation) => {
-                clear_voice_chat_text_impl();
-                update_voice_chat_status_impl("Ready");
-                info!("New thread started (generation={generation})");
-            }
-            Err(error) => {
-                warn!("Failed to start new thread: {error}");
-                update_voice_chat_status_impl("Thread reset failed");
-                add_voice_chat_error_message(&format!(
-                    "Unable to start a new thread. Continuing the current thread. {error}"
-                ));
-            }
-        });
     });
 }
 
@@ -360,7 +290,7 @@ pub fn filter_drawer(query: &str) {
     let query_owned = query.to_string();
     Queue::main().exec_async(move || {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.drawer_entries = load_drawer_entries_with_query(&query_owned);
+        state.drawer_entries = load_drawer_entries();
         render_drawer_entries(&mut state, &query_owned);
     });
 }
@@ -392,6 +322,19 @@ pub fn show_drawer_tab() {
         drop(state);
         update_active_tab_impl(Tab::Drawer);
     });
+}
+
+/// Switch to Settings tab programmatically
+pub fn show_settings_tab() {
+    Queue::main().exec_async(|| {
+        update_active_tab_impl(Tab::Settings);
+    });
+}
+
+/// Request Settings tab to be shown the next time the overlay is created.
+/// This is used when routing tray "Settings" to the overlay before it exists.
+pub fn request_settings_tab_on_open() {
+    show_settings_tab();
 }
 
 /// Set the target app name to re-activate for paste actions.
@@ -435,132 +378,22 @@ pub fn is_conversation_active() -> bool {
 // ═══════════════════════════════════════════════════════════
 
 pub fn update_active_tab_impl(tab: Tab) {
-    // DEADLOCK PREVENTION: extract widget pointers under lock, drop lock before
-    // AppKit calls (setCollapsed can animate and spin a nested run-loop).
-    let (
-        _prev_tab,
-        tab_drawer_btn,
-        tab_agent_btn,
-        tab_settings_btn,
-        sidebar_item,
-        content_item,
-        split_vc,
-        drawer_sv,
-        search_f,
-        search_l,
-        fav_btn,
-        drawer_edge,
-        agent_sv,
-        agent_bar,
-        agent_attach,
-        agent_send,
-        window_ptr,
-        agent_input_tv,
-        need_chat_update,
-    ) = {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = state.active_tab;
-        state.active_tab = tab;
-        (
-            prev, // kept to compute need_chat_update below
-            state.tab_drawer_button,
-            state.tab_agent_button,
-            state.tab_settings_button,
-            state.split_sidebar_item,
-            state.split_content_item,
-            state.split_view_controller,
-            state.drawer_scroll_view,
-            state.search_field,
-            state.search_label,
-            state.favorites_button,
-            state.drawer_edge_effect,
-            state.agent_scroll_view,
-            state.agent_input_bar,
-            state.agent_attach_button,
-            state.agent_send_button,
-            state.window,
-            state.agent_input_text_view,
-            tab == Tab::Agent && prev != Tab::Agent,
-        )
-    }; // Lock dropped.
-
-    let show_drawer = tab == Tab::Drawer;
-    let show_agent = tab == Tab::Agent;
-
-    unsafe {
-        if let Some(b) = tab_drawer_btn {
-            crate::ui_helpers::set_tab_button_active(b as Id, show_drawer);
-        }
-        if let Some(b) = tab_agent_btn {
-            crate::ui_helpers::set_tab_button_active(b as Id, show_agent);
-        }
-        if let Some(b) = tab_settings_btn {
-            crate::ui_helpers::set_tab_button_active(b as Id, false);
-        }
-        if let Some(p) = sidebar_item {
-            let _: () = msg_send![p as Id, setCollapsed: show_agent];
-        }
-        if let Some(p) = content_item {
-            let _: () = msg_send![p as Id, setCollapsed: !show_agent];
-        }
-        if let Some(p) = split_vc {
-            let split_view: Id = msg_send![p as Id, view];
-            if !split_view.is_null() {
-                crate::ui_helpers::set_hidden(split_view, false);
-            }
-        }
-        if let Some(p) = drawer_sv {
-            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
-        }
-        if let Some(p) = search_f {
-            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
-        }
-        if let Some(p) = search_l {
-            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
-        }
-        if let Some(p) = fav_btn {
-            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
-        }
-        if let Some(p) = drawer_edge {
-            crate::ui_helpers::set_hidden(p as Id, !show_drawer);
-        }
-        if let Some(p) = agent_sv {
-            crate::ui_helpers::set_hidden(p as Id, !show_agent);
-        }
-        if let Some(p) = agent_bar {
-            crate::ui_helpers::set_hidden(p as Id, !show_agent);
-        }
-        if let Some(p) = agent_attach {
-            crate::ui_helpers::set_hidden(p as Id, !show_agent);
-        }
-        if let Some(p) = agent_send {
-            crate::ui_helpers::set_hidden(p as Id, !show_agent);
-        }
-
-        // Complex agent-tab operations need full state access; re-lock briefly.
-        if show_agent {
-            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            if need_chat_update {
-                update_chat_view_with_state(&mut state, true);
-            }
-            resize_agent_input_locked(&mut state);
-        }
-
-        // Nudge first responder to agent input when window is already key.
-        if tab == Tab::Agent
-            && let (Some(w), Some(inp)) = (window_ptr, agent_input_tv)
-        {
-            let window = w as Id;
-            let is_key: bool = msg_send![window, isKeyWindow];
-            if is_key {
-                let _: bool = msg_send![window, makeFirstResponder: inp as Id];
-            }
-        }
+    if tab == Tab::Settings {
+        // Settings lives in the bootstrap/settings window; close chat first to avoid
+        // stacked windows that look like a duplicate/ghost overlay.
+        hide_voice_chat_overlay_impl();
+        crate::show_bootstrap_overlay();
+        return;
     }
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    update_active_tab_locked(&mut state, tab);
 }
 
 fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
     unsafe {
+        if tab == Tab::Settings {
+            return;
+        }
         let prev_tab = state.active_tab;
         state.active_tab = tab;
 
@@ -702,26 +535,13 @@ fn reflow_header_controls_locked(state: &mut VoiceChatOverlayState) {
             - (ui_tokens::CHAT_HEADER_BUTTON_SIZE + ui_tokens::CHAT_HEADER_BUTTON_GAP);
 
         let title_frame: CGRect = msg_send![title_label, frame];
-        let header_controls: Id = msg_send![title_label, superview];
-        let header_width = if header_controls.is_null() {
-            0.0
-        } else {
-            let bounds: CGRect = msg_send![header_controls, bounds];
-            bounds.size.width
-        };
-        let title_x = if header_width >= 620.0 {
-            ui_tokens::TRAFFIC_LIGHTS_SPACER_WIDTH + 6.0
-        } else {
-            ui_tokens::EDGE_PADDING_TIGHT
-        };
         let title_max_w =
-            (right_cluster_start_x - title_x - ui_tokens::CHAT_HEADER_GROUP_GAP * 2.0).max(56.0);
+            (right_cluster_start_x - title_frame.origin.x - ui_tokens::CHAT_HEADER_GROUP_GAP * 2.0)
+                .max(56.0);
         let title_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH.min(title_max_w);
-        if (title_w - title_frame.size.width).abs() > 0.5
-            || (title_x - title_frame.origin.x).abs() > 0.5
-        {
+        if (title_w - title_frame.size.width).abs() > 0.5 {
             let resized_title = CGRect::new(
-                &CGPoint::new(title_x, title_frame.origin.y),
+                &CGPoint::new(title_frame.origin.x, title_frame.origin.y),
                 &CGSize::new(title_w, title_frame.size.height),
             );
             let _: () = msg_send![title_label, setFrame: resized_title];
@@ -853,76 +673,11 @@ fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
 
 fn update_voice_chat_status_impl(status: &str) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let trimmed = status.trim();
-    state.status_base_text = if trimmed.is_empty() {
-        "Ready".to_string()
-    } else {
-        trimmed.to_string()
-    };
-    state.status_text = compose_runtime_status_text(
-        &state.status_base_text,
-        state.is_agent_degraded,
-        state.runtime_degraded_reason.as_deref(),
-    );
-    let next_kind = status_kind_for_runtime(&state.status_base_text, state.is_agent_degraded);
+    state.status_text = status.to_string();
+    let next_kind = status_from_detail(status);
     state.status_kind = next_kind;
     apply_status_pill(&state);
     let _ = crate::tray::update_tray_status(next_kind.to_tray());
-}
-
-fn set_voice_chat_runtime_degraded_impl(is_degraded: bool, reason: Option<String>) {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.runtime_degraded = is_degraded;
-    state.is_agent_degraded = is_degraded;
-    state.runtime_degraded_reason = if is_degraded {
-        reason.and_then(|text| {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        })
-    } else {
-        None
-    };
-    state.status_text = compose_runtime_status_text(
-        &state.status_base_text,
-        state.is_agent_degraded,
-        state.runtime_degraded_reason.as_deref(),
-    );
-    state.status_kind = status_kind_for_runtime(&state.status_base_text, state.is_agent_degraded);
-    apply_status_pill(&state);
-    let _ = crate::tray::update_tray_status(state.status_kind.to_tray());
-}
-
-fn status_kind_for_runtime(base_status: &str, runtime_degraded: bool) -> UiStatus {
-    if runtime_degraded {
-        UiStatus::Error
-    } else {
-        status_from_detail(base_status)
-    }
-}
-
-fn compose_runtime_status_text(
-    base_status: &str,
-    runtime_degraded: bool,
-    reason: Option<&str>,
-) -> String {
-    let base = base_status.trim();
-    if !runtime_degraded {
-        if base.is_empty() {
-            "Ready".to_string()
-        } else {
-            base.to_string()
-        }
-    } else if base.is_empty() {
-        "Runtime degraded (legacy fallback active)".to_string()
-    } else if let Some(reason) = reason.filter(|text| !text.trim().is_empty()) {
-        format!("{base} • Runtime degraded ({})", reason.trim())
-    } else {
-        format!("{base} • Runtime degraded (legacy fallback active)")
-    }
 }
 
 fn update_voice_chat_context_summary_impl(summary: &str) {
@@ -1665,7 +1420,7 @@ pub(super) fn update_chat_view_with_state(
         if state.messages.is_empty() {
             let empty_label = create_label(LabelConfig {
                 frame: CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(max_width, 60.0)),
-                text: "Start a conversation\nPress your configured hotkey to record \u{2022} Type to send"
+                text: "Start a conversation\nPress hotkey to record \u{2022} Type to send"
                     .to_string(),
                 font_size: base_font * zoom,
                 text_color: color_secondary_label(),
@@ -1736,20 +1491,9 @@ fn update_send_button_with_state(state: &mut VoiceChatOverlayState) {
             let btn = button_ptr as Id;
             let enabled = !state.is_sending && state.auto_send_enabled;
             let _: () = msg_send![btn, setEnabled: enabled];
-            let symbol = if state.is_sending {
-                "ellipsis.circle"
-            } else {
-                "arrow.up.circle.fill"
-            };
-            let has_symbol = crate::ui_helpers::set_button_symbol(btn, symbol);
-            let title = if has_symbol {
-                ""
-            } else if state.is_sending {
-                "…"
-            } else {
-                "Send"
-            };
-            let _: () = msg_send![btn, setTitle: ns_string(title)];
+            let title = if state.is_sending { "…" } else { ">" };
+            let title = ns_string(title);
+            let _: () = msg_send![btn, setTitle: title];
         }
     }
 }
@@ -1764,15 +1508,13 @@ pub(super) fn update_attach_button_ui(
             return;
         };
         let btn = btn_ptr as Id;
-        let has_symbol = crate::ui_helpers::set_button_symbol(btn, "paperclip");
+        let has_symbol = crate::ui_helpers::set_button_symbol(btn, "doc.badge.plus");
         let title = if count == 0 {
             if has_symbol {
                 String::new()
             } else {
                 "Attach".to_string()
             }
-        } else if has_symbol {
-            String::new()
         } else {
             count.to_string()
         };
@@ -2534,23 +2276,23 @@ fn resize_agent_input_locked(state: &mut VoiceChatOverlayState) {
         );
         let _: () = msg_send![input_bar, setFrame: new_bar_frame];
 
-        // Resize the input row (attach left, text center, send right).
-        let row_layout = crate::ui_helpers::chat_input_row_layout(bar_width, desired_h);
+        // Resize the scrollable text view inside the bar.
         let text_area_frame = CGRect::new(
-            &CGPoint::new(row_layout.text_x, row_layout.text_y),
-            &CGSize::new(row_layout.text_width, row_layout.text_height),
+            &CGPoint::new(12.0, 10.0),
+            &CGSize::new((bar_width - 140.0).max(120.0), (desired_h - 20.0).max(24.0)),
         );
         let _: () = msg_send![input_scroll, setFrame: text_area_frame];
 
         // Recenter buttons vertically.
+        let send_y = ((desired_h - 32.0) / 2.0).max(8.0);
         let attach_frame = CGRect::new(
-            &CGPoint::new(row_layout.attach_x, row_layout.attach_y),
-            &CGSize::new(row_layout.button_width, row_layout.button_height),
+            &CGPoint::new((bar_width - 120.0).max(0.0), send_y),
+            &CGSize::new(36.0, 32.0),
         );
         let _: () = msg_send![attach_btn, setFrame: attach_frame];
         let send_frame = CGRect::new(
-            &CGPoint::new(row_layout.send_x, row_layout.send_y),
-            &CGSize::new(row_layout.button_width, row_layout.button_height),
+            &CGPoint::new((bar_width - 76.0).max(0.0), send_y),
+            &CGSize::new(36.0, 32.0),
         );
         let _: () = msg_send![send_btn, setFrame: send_frame];
 
@@ -2725,35 +2467,20 @@ pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
 fn refresh_drawer_impl() {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.favorites = load_favorites_from_disk();
-    let query = drawer_query_from_state(&state);
     state.drawer_entries = load_drawer_entries();
+    let query = state
+        .search_field
+        .map(|field| unsafe { get_text_field_string(field as Id) })
+        .unwrap_or_default();
     render_drawer_entries(&mut state, &query);
 }
 
 pub fn handle_card_copy(index: usize) {
     let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = state.drawer_entries.get(index) {
-        if is_drawer_unavailable_placeholder(entry) {
-            return;
-        }
-        match &entry.source {
-            DrawerEntrySource::Thread { id } => {
-                if let Ok(store) = ThreadStore::new() {
-                    if let Ok(thread) = store.load_thread(id) {
-                        copy_to_clipboard(&thread_markdown_for_copy(&thread));
-                        return;
-                    }
-                    if let Ok(raw) = std::fs::read_to_string(&entry.path) {
-                        copy_to_clipboard(&raw);
-                    }
-                }
-            }
-            DrawerEntrySource::LegacyFile => {
-                if let Ok(contents) = std::fs::read_to_string(&entry.path) {
-                    copy_to_clipboard(&contents);
-                }
-            }
-        }
+    if let Some(entry) = state.drawer_entries.get(index)
+        && let Ok(contents) = std::fs::read_to_string(&entry.path)
+    {
+        copy_to_clipboard(&contents);
     }
 }
 
@@ -2767,9 +2494,6 @@ pub fn handle_card_edit(index: usize) {
     let Some(path) = path else {
         return;
     };
-    if path.as_os_str().is_empty() {
-        return;
-    }
 
     tracing::info!("Drawer Edit clicked: {}", path.display());
     let ok = open_file_in_editor(&path);
@@ -2838,73 +2562,30 @@ pub fn handle_card_edit(index: usize) {
 
 pub fn handle_card_delete(index: usize) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = state.drawer_entries.get(index) {
-        if is_drawer_unavailable_placeholder(entry) {
-            return;
-        }
-        let favorite_key = drawer_entry_favorite_key(entry);
-        match &entry.source {
-            DrawerEntrySource::Thread { id } => {
-                if let Ok(store) = ThreadStore::new() {
-                    if let Err(err) = store.delete_thread(id) {
-                        warn!("Failed to delete thread {id}: {err}");
-                    }
-                } else if let Err(err) = std::fs::remove_file(&entry.path) {
-                    warn!(
-                        "Failed to delete thread fallback {}: {}",
-                        entry.path.display(),
-                        err
-                    );
-                }
-            }
-            DrawerEntrySource::LegacyFile => {
-                if let Err(err) = std::fs::remove_file(&entry.path) {
-                    warn!("Failed to delete {}: {}", entry.path.display(), err);
-                }
-            }
-        }
-        state.favorites.remove(&favorite_key);
-        save_favorites_to_disk(&state.favorites);
+    if let Some(entry) = state.drawer_entries.get(index)
+        && let Err(err) = std::fs::remove_file(&entry.path)
+    {
+        warn!("Failed to delete {}: {}", entry.path.display(), err);
     }
     state.favorites = load_favorites_from_disk();
-    let query = drawer_query_from_state(&state);
-    state.drawer_entries = load_drawer_entries_with_query(&query);
-    render_drawer_entries(&mut state, &query);
+    state.drawer_entries = load_drawer_entries();
+    render_drawer_entries(&mut state, "");
 }
 
 pub fn handle_card_favorite(index: usize) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(entry) = state.drawer_entries.get_mut(index) else {
-        return;
-    };
-    if is_drawer_unavailable_placeholder(entry) {
-        return;
-    }
-
-    entry.is_favorite = !entry.is_favorite;
-    let is_favorite = entry.is_favorite;
-    let key = drawer_entry_favorite_key(entry);
-    let thread_id = match &entry.source {
-        DrawerEntrySource::Thread { id } => Some(id.clone()),
-        DrawerEntrySource::LegacyFile => None,
-    };
-
-    if is_favorite {
-        state.favorites.insert(key);
-    } else {
-        state.favorites.remove(&key);
-    }
-    save_favorites_to_disk(&state.favorites);
-
-    if let Some(id) = thread_id
-        && let Ok(store) = ThreadStore::new()
-        && let Err(err) = store.set_thread_favorite(&id, is_favorite)
-    {
-        warn!("Failed to update thread favorite {id}: {err}");
+    if let Some(entry) = state.drawer_entries.get_mut(index) {
+        entry.is_favorite = !entry.is_favorite;
+        let key = entry.path.to_string_lossy().to_string();
+        if entry.is_favorite {
+            state.favorites.insert(key);
+        } else {
+            state.favorites.remove(&key);
+        }
+        save_favorites_to_disk(&state.favorites);
     }
     update_favorites_button_with_state(&mut state);
-    let query = drawer_query_from_state(&state);
-    render_drawer_entries(&mut state, &query);
+    render_drawer_entries(&mut state, "");
 }
 
 pub(super) fn toggle_drawer_favorites_only_impl() {
@@ -2916,7 +2597,10 @@ pub(super) fn toggle_drawer_favorites_only_impl() {
 
     update_favorites_button_with_state(&mut state);
 
-    let query = drawer_query_from_state(&state);
+    let query = state
+        .search_field
+        .map(|field| unsafe { get_text_field_string(field as Id) })
+        .unwrap_or_default();
     render_drawer_entries(&mut state, &query);
 }
 
@@ -2944,40 +2628,6 @@ fn update_favorites_button_with_state(state: &mut VoiceChatOverlayState) {
     }
 }
 
-fn drawer_query_from_state(state: &VoiceChatOverlayState) -> String {
-    state
-        .search_field
-        .map(|field| unsafe { get_text_field_string(field as Id) })
-        .unwrap_or_default()
-}
-
-fn drawer_entry_matches_query(entry: &DrawerEntry, query_lower: &str) -> bool {
-    if query_lower.is_empty() {
-        return true;
-    }
-    let path = entry.path.to_string_lossy();
-    let mut haystack =
-        String::with_capacity(path.len() + entry.preview.len() + entry.search_corpus.len() + 96);
-    haystack.push_str(entry_type_label(entry));
-    haystack.push(' ');
-    haystack.push_str(mode_label(entry.mode));
-    haystack.push(' ');
-    haystack.push_str(&path);
-    haystack.push(' ');
-    if let Some(file_name) = entry.path.file_name().and_then(|name| name.to_str()) {
-        haystack.push_str(file_name);
-        haystack.push(' ');
-    }
-    if let DrawerEntrySource::Thread { id } = &entry.source {
-        haystack.push_str(id);
-        haystack.push(' ');
-    }
-    haystack.push_str(&entry.preview);
-    haystack.push(' ');
-    haystack.push_str(&entry.search_corpus);
-    haystack.to_lowercase().contains(query_lower)
-}
-
 fn filtered_drawer_entries<'a>(
     state: &'a VoiceChatOverlayState,
     query: &str,
@@ -2988,8 +2638,11 @@ fn filtered_drawer_entries<'a>(
         if state.drawer_favorites_only && !entry.is_favorite {
             continue;
         }
-        if !drawer_entry_matches_query(entry, &filter) {
-            continue;
+        if !filter.is_empty() {
+            let hay = entry.preview.to_lowercase();
+            if !hay.contains(&filter) {
+                continue;
+            }
         }
         out.push((index, entry));
     }
@@ -3034,11 +2687,6 @@ fn render_drawer_entries(state: &mut VoiceChatOverlayState, query: &str) {
 }
 
 fn create_drawer_empty_state(width: f64, handler: Option<usize>) -> Id {
-    fn overlay_hotkey_shortcuts_tooltip() -> String {
-        let (hold, toggle) = super::shortcuts_lines(crate::os::hotkeys::ModeHotkeyBindings::load());
-        format!("{hold}\n{toggle}")
-    }
-
     unsafe {
         let ns_view = Class::get("NSView").unwrap();
         let frame = CGRect::new(
@@ -3092,7 +2740,7 @@ fn create_drawer_empty_state(width: f64, handler: Option<usize>) -> Id {
                 &CGPoint::new(pad, frame.size.height - 76.0),
                 &CGSize::new(frame.size.width - pad * 2.0, 18.0),
             ),
-            text: "Need permissions or hotkeys? Open Settings.".to_string(),
+            text: "Or show the overlay to begin.".to_string(),
             font_size: ui_tokens::SMALL_FONT_SIZE,
             bold: false,
             text_color: color_secondary_label(),
@@ -3118,22 +2766,21 @@ fn create_drawer_empty_state(width: f64, handler: Option<usize>) -> Id {
                 &CGPoint::new(row_x + button_w + button_gap, pad),
                 &CGSize::new(button_w, button_h),
             ),
-            "Open Settings",
+            "Show overlay",
             button_style::ROUNDED,
         );
 
         if let Some(handler_ptr) = handler {
             let handler_id = handler_ptr as Id;
             button_set_action(start_button, handler_id, sel!(onStartRecording:));
-            button_set_action(overlay_button, handler_id, sel!(onTabSettings:));
+            button_set_action(overlay_button, handler_id, sel!(onShowOverlay:));
         }
 
-        let shortcuts_tooltip = overlay_hotkey_shortcuts_tooltip();
-        set_tooltip(start_button, &shortcuts_tooltip);
         set_tooltip(
-            overlay_button,
-            "Open Settings (permissions, hotkeys, and runtime services)",
+            start_button,
+            "Hotkey: hold Ctrl (or your configured hold keys)",
         );
+        set_tooltip(overlay_button, "Bring CodeScribe overlay to front");
         add_subview(view, start_button);
         add_subview(view, overlay_button);
 
@@ -3179,230 +2826,33 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    fn sample_drawer_entry(
-        path: &str,
-        preview: &str,
-        mode: TranscriptionMode,
-        is_ai_formatted: bool,
-        is_favorite: bool,
-    ) -> DrawerEntry {
-        let mode_label = match mode {
-            TranscriptionMode::Hold => "Ctrl+Hold",
-            TranscriptionMode::Assistive => "Shift/Cmd",
-            TranscriptionMode::Toggle => "Toggle",
-            TranscriptionMode::Conversation => "Moshi",
-        };
-        let entry_type = if is_ai_formatted { "AI" } else { "Tt" };
-        let search_corpus =
-            format!("{entry_type} {mode_label} {path} {preview}").to_ascii_lowercase();
-        DrawerEntry {
-            source: DrawerEntrySource::LegacyFile,
-            path: PathBuf::from(path),
-            timestamp: SystemTime::now(),
-            mode,
-            preview: preview.to_string(),
-            search_corpus,
-            is_ai_formatted,
-            is_favorite,
-        }
-    }
-
     #[test]
-    fn filtered_drawer_entries_matches_preview_path_and_title_case_insensitively() {
+    fn filtered_drawer_entries_respects_query_and_favorites() {
         let mut state = VoiceChatOverlayState {
             drawer_entries: vec![
-                sample_drawer_entry(
-                    "meeting_notes.md",
-                    "Follow-up from team sync",
-                    TranscriptionMode::Hold,
-                    false,
-                    false,
-                ),
-                sample_drawer_entry(
-                    "roadmap.md",
-                    "Architecture review memo",
-                    TranscriptionMode::Assistive,
-                    true,
-                    true,
-                ),
+                DrawerEntry {
+                    path: PathBuf::from("a.txt"),
+                    timestamp: SystemTime::now(),
+                    mode: TranscriptionMode::Hold,
+                    preview: "hello world".to_string(),
+                    is_ai_formatted: false,
+                    is_favorite: false,
+                },
+                DrawerEntry {
+                    path: PathBuf::from("b.txt"),
+                    timestamp: SystemTime::now(),
+                    mode: TranscriptionMode::Assistive,
+                    preview: "favorite note".to_string(),
+                    is_ai_formatted: false,
+                    is_favorite: true,
+                },
             ],
             ..Default::default()
         };
 
-        assert_eq!(filtered_drawer_entries(&state, "TEAM").len(), 1);
-        assert_eq!(filtered_drawer_entries(&state, "MEETING_NOTES").len(), 1);
-        assert_eq!(filtered_drawer_entries(&state, "shift/cmd").len(), 1);
-        assert_eq!(filtered_drawer_entries(&state, "AI").len(), 1);
-
+        assert_eq!(filtered_drawer_entries(&state, "hello").len(), 1);
         state.drawer_favorites_only = true;
         assert_eq!(filtered_drawer_entries(&state, "").len(), 1);
-    }
-
-    #[test]
-    fn filtered_drawer_entries_returns_empty_when_query_has_no_match() {
-        let state = VoiceChatOverlayState {
-            drawer_entries: vec![
-                sample_drawer_entry(
-                    "draft-a.md",
-                    "First transcript snippet",
-                    TranscriptionMode::Hold,
-                    false,
-                    false,
-                ),
-                sample_drawer_entry(
-                    "draft-b.md",
-                    "Second transcript snippet",
-                    TranscriptionMode::Toggle,
-                    false,
-                    false,
-                ),
-            ],
-            ..Default::default()
-        };
-
-        assert!(filtered_drawer_entries(&state, "missing phrase").is_empty());
-    }
-
-    #[test]
-    fn filtered_drawer_entries_clear_query_restores_full_list() {
-        let state = VoiceChatOverlayState {
-            drawer_entries: vec![
-                sample_drawer_entry("first.md", "alpha", TranscriptionMode::Hold, false, false),
-                sample_drawer_entry(
-                    "second.md",
-                    "beta",
-                    TranscriptionMode::Assistive,
-                    false,
-                    true,
-                ),
-            ],
-            ..Default::default()
-        };
-
-        assert_eq!(filtered_drawer_entries(&state, "alpha").len(), 1);
-        assert_eq!(filtered_drawer_entries(&state, "").len(), 2);
-        assert_eq!(filtered_drawer_entries(&state, "   ").len(), 2);
-    }
-
-    #[test]
-    fn filtered_drawer_entries_keeps_original_indices_for_card_actions() {
-        let state = VoiceChatOverlayState {
-            drawer_entries: vec![
-                sample_drawer_entry("first.md", "alpha", TranscriptionMode::Hold, false, false),
-                sample_drawer_entry(
-                    "second.md",
-                    "alpha",
-                    TranscriptionMode::Assistive,
-                    false,
-                    false,
-                ),
-                sample_drawer_entry("third.md", "alpha", TranscriptionMode::Toggle, false, false),
-            ],
-            ..Default::default()
-        };
-
-        let visible = filtered_drawer_entries(&state, "third");
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].0, 2);
-    }
-
-    #[test]
-    fn filtered_drawer_entries_matches_thread_message_and_note_corpus() {
-        let state = VoiceChatOverlayState {
-            drawer_entries: vec![DrawerEntry {
-                source: DrawerEntrySource::Thread {
-                    id: "t_2026-02-23_abc123".to_string(),
-                },
-                path: PathBuf::from("thread_t_2026-02-23_abc123.json"),
-                timestamp: SystemTime::now(),
-                mode: TranscriptionMode::Assistive,
-                preview: "clinical recap".to_string(),
-                search_corpus: "renal values improved call owner tomorrow".to_string(),
-                is_ai_formatted: true,
-                is_favorite: false,
-            }],
-            ..Default::default()
-        };
-
-        assert_eq!(filtered_drawer_entries(&state, "renal values").len(), 1);
-        assert_eq!(filtered_drawer_entries(&state, "call owner").len(), 1);
-        assert_eq!(filtered_drawer_entries(&state, "missing phrase").len(), 0);
-    }
-
-    #[test]
-    fn drawer_unavailable_placeholder_entry_has_expected_metadata() {
-        let entry = thread_history_unavailable_drawer_entry();
-
-        assert!(matches!(entry.source, DrawerEntrySource::LegacyFile));
-        assert!(entry.path.as_os_str().is_empty());
-        assert_eq!(entry.preview, "Thread history unavailable — storage error");
-        assert!(!entry.is_ai_formatted);
-        assert!(entry.search_corpus.contains("unavailable"));
-        assert!(entry.search_corpus.contains("error"));
-        assert!(is_drawer_unavailable_placeholder(&entry));
-        assert!(drawer_entry_matches_query(&entry, "unavailable"));
-        assert!(drawer_entry_matches_query(&entry, "error"));
-    }
-
-    #[test]
-    #[serial]
-    fn runtime_degraded_status_persists_across_status_updates() {
-        {
-            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            *state = VoiceChatOverlayState::default();
-        }
-
-        set_voice_chat_runtime_degraded_impl(
-            true,
-            Some("Legacy formatter fallback is active.".to_string()),
-        );
-        update_voice_chat_status_impl("Sending...");
-
-        {
-            let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(state.runtime_degraded);
-            assert!(state.is_agent_degraded);
-            assert_eq!(state.status_base_text, "Sending...");
-            assert_eq!(state.status_kind, UiStatus::Error);
-            assert!(state.status_text.contains("Runtime degraded"));
-        }
-
-        set_voice_chat_runtime_degraded_impl(false, None);
-
-        {
-            let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-            assert!(!state.runtime_degraded);
-            assert!(!state.is_agent_degraded);
-            assert_eq!(state.status_text, "Sending...");
-            assert_eq!(state.status_kind, UiStatus::Processing);
-        }
-
-        update_voice_chat_status_impl("AI Response:");
-
-        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(state.status_base_text, "AI Response:");
-        assert_eq!(state.status_text, "AI Response:");
-        assert_eq!(state.status_kind, UiStatus::Idle);
-    }
-
-    #[test]
-    fn drawer_entry_subtitle_marks_threadstore_index_only_when_path_missing() {
-        let entry = DrawerEntry {
-            source: DrawerEntrySource::Thread {
-                id: "t_2026-02-23_missing".to_string(),
-            },
-            path: PathBuf::from("__missing_thread_guardrail_test__.json"),
-            timestamp: SystemTime::now(),
-            mode: TranscriptionMode::Assistive,
-            preview: "summary".to_string(),
-            search_corpus: "summary".to_string(),
-            is_ai_formatted: true,
-            is_favorite: false,
-        };
-
-        let subtitle = drawer_entry_subtitle(&entry);
-        assert!(subtitle.contains("ThreadStore (index-only)"));
-        assert!(subtitle.contains("thread:t_2026-02-23_missing"));
     }
 
     #[test]
@@ -3431,10 +2881,10 @@ mod tests {
     }
 
     #[test]
-    fn update_active_tab_switches_between_drawer_and_agent() {
+    fn update_active_tab_handles_settings_without_views() {
         let mut state = VoiceChatOverlayState::default();
-        update_active_tab_locked(&mut state, Tab::Agent);
-        assert_eq!(state.active_tab, Tab::Agent);
+        update_active_tab_locked(&mut state, Tab::Settings);
+        assert_eq!(state.active_tab, Tab::Drawer);
 
         update_active_tab_locked(&mut state, Tab::Drawer);
         assert_eq!(state.active_tab, Tab::Drawer);
@@ -3497,42 +2947,6 @@ mod tests {
         let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
         *cb = None;
     }
-
-    #[test]
-    #[serial]
-    fn dispatch_voice_chat_send_returns_false_without_callback() {
-        let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
-        *cb = None;
-        drop(cb);
-
-        assert!(!dispatch_voice_chat_send("payload"));
-        assert!(!dispatch_voice_chat_send("   "));
-    }
-
-    #[test]
-    #[serial]
-    fn dispatch_voice_chat_send_invokes_callback() {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::new(Mutex::new(String::new()));
-        {
-            let count = Arc::clone(&call_count);
-            let observed = Arc::clone(&observed);
-            let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
-            *cb = Some(Arc::new(move |text: String| {
-                count.fetch_add(1, Ordering::SeqCst);
-                let mut guard = observed.lock().unwrap_or_else(|e| e.into_inner());
-                *guard = text;
-            }));
-        }
-
-        assert!(dispatch_voice_chat_send("runtime payload"));
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
-        let payload = observed.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        assert_eq!(payload, "runtime payload");
-
-        let mut cb = SEND_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
-        *cb = None;
-    }
 }
 
 fn create_drawer_card(
@@ -3552,7 +2966,7 @@ fn create_drawer_card(
             entry_type_label(entry),
             format_relative_time(entry.timestamp)
         );
-        let subtitle = drawer_entry_subtitle(entry);
+        let subtitle = format!("{} • {}", mode_label(entry.mode), entry.path.display());
         let preview = entry.preview.clone();
         let card = create_card_view(frame, &title, &subtitle, &preview);
         // Highlight matching query text in the preview field (last NSTextField subview).
@@ -3697,59 +3111,7 @@ unsafe fn apply_search_highlight(field: Id, text: &str, query: &str) {
     let _: () = msg_send![field, setAttributedStringValue: attr_str];
 }
 fn entry_type_label(entry: &DrawerEntry) -> &'static str {
-    if is_drawer_unavailable_placeholder(entry) {
-        return "Warning";
-    }
-    match entry.source {
-        DrawerEntrySource::Thread { .. } => "ThreadStore",
-        DrawerEntrySource::LegacyFile => {
-            if entry.is_ai_formatted {
-                "Legacy AI"
-            } else {
-                "Legacy Raw"
-            }
-        }
-    }
-}
-
-fn drawer_entry_source_label(entry: &DrawerEntry) -> String {
-    if is_drawer_unavailable_placeholder(entry) {
-        return "ThreadStore".to_string();
-    }
-    match entry.source {
-        DrawerEntrySource::Thread { .. } => {
-            if entry.path.exists() {
-                "ThreadStore".to_string()
-            } else {
-                "ThreadStore (index-only)".to_string()
-            }
-        }
-        DrawerEntrySource::LegacyFile => "Legacy transcript file".to_string(),
-    }
-}
-
-fn drawer_entry_subtitle(entry: &DrawerEntry) -> String {
-    if is_drawer_unavailable_placeholder(entry) {
-        return "Shift/Cmd • ThreadStore • unavailable".to_string();
-    }
-    let source_label = drawer_entry_source_label(entry);
-    match &entry.source {
-        DrawerEntrySource::Thread { id } => {
-            format!(
-                "{} • {} • thread:{id}",
-                mode_label(entry.mode),
-                source_label
-            )
-        }
-        DrawerEntrySource::LegacyFile => {
-            format!(
-                "{} • {} • {}",
-                mode_label(entry.mode),
-                source_label,
-                entry.path.display()
-            )
-        }
-    }
+    if entry.is_ai_formatted { "AI" } else { "Tt" }
 }
 
 fn mode_label(mode: TranscriptionMode) -> &'static str {
@@ -3779,283 +3141,48 @@ fn format_relative_time(timestamp: SystemTime) -> String {
 }
 
 pub fn load_drawer_entries() -> Vec<DrawerEntry> {
-    load_drawer_entries_with_query("")
-}
+    let config_dir = codescribe_core::config::Config::config_dir();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let dir = config_dir.join("transcriptions").join(today);
 
-fn load_drawer_entries_with_query(query: &str) -> Vec<DrawerEntry> {
     let favorites = load_favorites_from_disk();
-    let mut entries = load_thread_drawer_entries(&favorites);
-    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-
-    let query_lower = query.trim().to_ascii_lowercase();
-    if !query_lower.is_empty() {
-        entries.retain(|entry| drawer_entry_matches_query(entry, &query_lower));
-    }
-
-    entries
-}
-
-fn thread_history_unavailable_drawer_entry() -> DrawerEntry {
-    DrawerEntry {
-        source: DrawerEntrySource::LegacyFile,
-        path: PathBuf::from(""),
-        timestamp: SystemTime::now(),
-        mode: TranscriptionMode::Assistive,
-        preview: "Thread history unavailable — storage error".to_string(),
-        search_corpus: "thread history unavailable storage error".to_string(),
-        is_ai_formatted: false,
-        is_favorite: false,
-    }
-}
-
-fn is_drawer_unavailable_placeholder(entry: &DrawerEntry) -> bool {
-    matches!(entry.source, DrawerEntrySource::LegacyFile) && entry.path.as_os_str().is_empty()
-}
-
-fn load_thread_drawer_entries(favorites: &HashSet<String>) -> Vec<DrawerEntry> {
-    let Ok(store) = ThreadStore::new() else {
-        warn!("Drawer: failed to open ThreadStore; drawer entries unavailable");
-        return vec![thread_history_unavailable_drawer_entry()];
-    };
-    let Ok(index) = ThreadIndex::load_or_create(store.threads_dir()) else {
-        warn!("Drawer: failed to load ThreadIndex; drawer entries unavailable");
-        return vec![thread_history_unavailable_drawer_entry()];
-    };
-
-    index
-        .list(None)
+    let files = list_draft_files(&dir);
+    files
         .into_iter()
-        .map(|summary| {
-            let id = summary.id.clone();
-            let source = DrawerEntrySource::Thread { id: id.clone() };
-            let favorite_key = format!("thread:{id}");
-            let mut preview = summary
-                .latest_note
-                .as_deref()
-                .or(summary.latest_message.as_deref())
-                .or(summary.summary.as_deref())
-                .unwrap_or(summary.title.as_str())
-                .to_string();
-            let mut search_corpus = summary.search_text.clone();
-            if (search_corpus.trim().is_empty() || preview.trim().is_empty())
-                && let Ok(thread) = store.load_thread(&id)
-            {
-                if preview.trim().is_empty() {
-                    preview = thread_preview_for_drawer(&thread);
-                }
-                if search_corpus.trim().is_empty() {
-                    search_corpus = thread_search_corpus_for_drawer(&thread);
-                }
-            }
-            preview = normalize_preview(&preview, 120);
-            let path = store
-                .thread_file_path(&id)
-                .unwrap_or_else(|_| PathBuf::from(format!("thread_{id}.json")));
-            let timestamp = system_time_from_unix_millis(summary.updated_at.timestamp_millis());
-            let mode = transcription_mode_from_thread_mode(&summary.mode);
-            let mode_label = mode_label(mode);
-            if search_corpus.trim().is_empty() {
-                search_corpus = format!(
-                    "{} {} {} {}",
-                    summary.title,
-                    summary.mode,
-                    summary.summary.as_deref().unwrap_or_default(),
-                    preview
-                );
-            }
-            search_corpus = format!(
-                "threadstore source:thread {} thread:{} {}",
-                mode_label, id, search_corpus
-            )
-            .to_ascii_lowercase();
-
+        .map(|path| {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let metadata = path.metadata().ok();
+            let timestamp = metadata
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or_else(SystemTime::now);
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let preview = content.chars().take(120).collect::<String>();
+            let mode = if name.contains("conversation") || name.contains("moshi") {
+                TranscriptionMode::Conversation
+            } else if name.contains("assistive") {
+                TranscriptionMode::Assistive
+            } else if name.contains("_raw") || name.contains("raw") {
+                TranscriptionMode::Hold
+            } else {
+                TranscriptionMode::Toggle
+            };
+            let is_ai_formatted = name.contains("_ai") && !name.contains("ai-failed");
+            let is_favorite = favorites.contains(&path.to_string_lossy().to_string());
             DrawerEntry {
-                source,
                 path,
                 timestamp,
                 mode,
                 preview,
-                search_corpus,
-                is_ai_formatted: true,
-                is_favorite: summary.is_favorite || favorites.contains(&favorite_key),
+                is_ai_formatted,
+                is_favorite,
             }
         })
         .collect()
-}
-
-fn system_time_from_unix_millis(timestamp_millis: i64) -> SystemTime {
-    if timestamp_millis <= 0 {
-        return SystemTime::now();
-    }
-    UNIX_EPOCH + Duration::from_millis(timestamp_millis as u64)
-}
-
-fn transcription_mode_from_thread_mode(mode: &str) -> TranscriptionMode {
-    if mode.eq_ignore_ascii_case("conversation") || mode.eq_ignore_ascii_case("moshi") {
-        TranscriptionMode::Conversation
-    } else if mode.eq_ignore_ascii_case("assistive") || mode.eq_ignore_ascii_case("chat") {
-        TranscriptionMode::Assistive
-    } else if mode.eq_ignore_ascii_case("hold") || mode.eq_ignore_ascii_case("raw") {
-        TranscriptionMode::Hold
-    } else {
-        TranscriptionMode::Toggle
-    }
-}
-
-fn normalize_preview(text: &str, max_chars: usize) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(max_chars)
-        .collect::<String>()
-}
-
-fn thread_preview_for_drawer(thread: &Thread) -> String {
-    if let Some(summary) = &thread.summary
-        && !summary.trim().is_empty()
-    {
-        return normalize_preview(summary, 120);
-    }
-    if let Some(note) = thread
-        .notes
-        .iter()
-        .rev()
-        .find(|note| !note.text.trim().is_empty())
-    {
-        return normalize_preview(&note.text, 120);
-    }
-    for message in thread.messages.iter().rev() {
-        let text = thread_message_text_for_copy(message);
-        if !text.trim().is_empty() {
-            return normalize_preview(&text, 120);
-        }
-    }
-    normalize_preview(&thread.title, 120)
-}
-
-fn thread_search_corpus_for_drawer(thread: &Thread) -> String {
-    let mut pieces = vec![thread.title.clone(), thread.mode.clone()];
-    if let Some(summary) = &thread.summary {
-        pieces.push(summary.clone());
-    }
-    for note in &thread.notes {
-        pieces.push(note.text.clone());
-    }
-    for message in &thread.messages {
-        pieces.push(thread_message_text_for_copy(message));
-    }
-    pieces
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
-}
-
-fn drawer_entry_favorite_key(entry: &DrawerEntry) -> String {
-    match &entry.source {
-        DrawerEntrySource::Thread { id } => format!("thread:{id}"),
-        DrawerEntrySource::LegacyFile => entry.path.to_string_lossy().to_string(),
-    }
-}
-
-fn thread_markdown_for_copy(thread: &Thread) -> String {
-    let mut out = String::new();
-    let title = thread.title.trim();
-    let title = if title.is_empty() {
-        "Untitled Thread"
-    } else {
-        title
-    };
-    out.push_str("# ");
-    out.push_str(title);
-    out.push_str("\n\n");
-
-    if let Some(summary) = &thread.summary
-        && !summary.trim().is_empty()
-    {
-        out.push_str("## Summary\n");
-        out.push_str(summary.trim());
-        out.push_str("\n\n");
-    }
-
-    if !thread.notes.is_empty() {
-        out.push_str("## Notes\n");
-        for note in &thread.notes {
-            out.push_str("- ");
-            out.push_str(note.text.trim());
-            if let Some(anchor) = note.anchored_to_message {
-                out.push_str(&format!(" (anchor: #{anchor})"));
-            }
-            out.push('\n');
-        }
-        out.push('\n');
-    }
-
-    if !thread.messages.is_empty() {
-        out.push_str("## Messages\n");
-        for message in &thread.messages {
-            out.push_str("### ");
-            out.push_str(&message.role.to_ascii_uppercase());
-            out.push('\n');
-            out.push_str(thread_message_text_for_copy(message).trim());
-            out.push_str("\n\n");
-        }
-    }
-
-    out.trim_end().to_string()
-}
-
-fn thread_message_text_for_copy(message: &codescribe_core::agent::ThreadMessage) -> String {
-    let mut chunks = Vec::new();
-    for value in &message.content {
-        collect_copy_text(value, &mut chunks);
-    }
-    let text = chunks.join(" ");
-    if text.trim().is_empty() {
-        "(non-text content)".to_string()
-    } else {
-        text
-    }
-}
-
-fn collect_copy_text(value: &serde_json::Value, out: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(text) => {
-            if !text.trim().is_empty() {
-                out.push(text.to_string());
-            }
-        }
-        serde_json::Value::Array(items) => {
-            if items.iter().all(serde_json::Value::is_number) {
-                return;
-            }
-            for item in items {
-                collect_copy_text(item, out);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(serde_json::Value::as_str)
-                && !text.trim().is_empty()
-            {
-                out.push(text.to_string());
-            }
-            if let Some(content) = map.get("content") {
-                collect_copy_text(content, out);
-            }
-            if let Some(input) = map.get("input") {
-                collect_copy_text(input, out);
-            }
-            for (key, nested) in map {
-                if matches!(key.as_str(), "text" | "content" | "input" | "data") {
-                    continue;
-                }
-                collect_copy_text(nested, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -4069,7 +3196,8 @@ fn favorites_path() -> std::path::PathBuf {
     dir.join("voice_chat_favorites.json")
 }
 
-fn load_favorites_from_disk() -> HashSet<String> {
+fn load_favorites_from_disk() -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
     let path = favorites_path();
     let Ok(data) = std::fs::read_to_string(&path) else {
         return HashSet::new();
@@ -4080,7 +3208,7 @@ fn load_favorites_from_disk() -> HashSet<String> {
     file.paths.into_iter().collect()
 }
 
-fn save_favorites_to_disk(favorites: &HashSet<String>) {
+fn save_favorites_to_disk(favorites: &std::collections::HashSet<String>) {
     let path = favorites_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
