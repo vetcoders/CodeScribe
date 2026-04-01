@@ -11,10 +11,13 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 
-const BUILTIN_LEXICONS: &[(&str, &str)] = &[(
-    "programming",
-    include_str!("../../assets/programming.jsonl"),
-)];
+const BUILTIN_LEXICONS: &[(&str, &str)] = &[
+    (
+        "programming",
+        include_str!("../../assets/programming.jsonl"),
+    ),
+    ("veterinary", include_str!("../../assets/veterinary.jsonl")),
+];
 const SEED_JSONL: &str = include_str!("../../assets/seed.jsonl");
 
 const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.93;
@@ -101,16 +104,17 @@ impl Lexicon {
     fn from_builtin() -> Self {
         let t0 = Instant::now();
         let mut builtin_rules = Vec::new();
+        let mut builtin_seen = HashSet::new();
 
         let t_legacy = Instant::now();
         for (label, source) in BUILTIN_LEXICONS {
-            load_legacy_jsonl(source, label, &mut builtin_rules);
+            load_legacy_jsonl(source, label, &mut builtin_rules, &mut builtin_seen);
         }
         let legacy_ms = t_legacy.elapsed().as_millis();
         let legacy_count = builtin_rules.len();
 
         let t_seed = Instant::now();
-        let seed_count = load_seed_jsonl(SEED_JSONL, "seed", &mut builtin_rules);
+        let seed_count = load_seed_jsonl(SEED_JSONL, "seed", &mut builtin_rules, &mut builtin_seen);
         let seed_ms = t_seed.elapsed().as_millis();
 
         let custom_path = Config::config_dir().join("lexicon.custom.jsonl");
@@ -120,8 +124,11 @@ impl Lexicon {
 
         let t_custom = Instant::now();
         let mut custom_rules = Vec::new();
+        let mut custom_seen = HashSet::new();
         let custom_count = load_custom_lexicon()
-            .map(|content| load_legacy_jsonl(&content, "custom", &mut custom_rules))
+            .map(|content| {
+                load_legacy_jsonl(&content, "custom", &mut custom_rules, &mut custom_seen)
+            })
             .unwrap_or(0);
         let custom_ms = t_custom.elapsed().as_millis();
 
@@ -160,10 +167,13 @@ impl Lexicon {
             return;
         }
         self.custom_rules.clear();
+        let mut custom_seen = HashSet::new();
         let custom_count = fs::read_to_string(&self.custom_path)
             .ok()
             .filter(|c| !c.trim().is_empty())
-            .map(|content| load_legacy_jsonl(&content, "custom", &mut self.custom_rules))
+            .map(|content| {
+                load_legacy_jsonl(&content, "custom", &mut self.custom_rules, &mut custom_seen)
+            })
             .unwrap_or(0);
         self.custom_mtime = current_mtime;
         info!(
@@ -218,7 +228,12 @@ fn apply_global_lexicon(text: &str) -> String {
     lexicon.apply(text)
 }
 
-fn load_legacy_jsonl(source: &str, label: &str, rules: &mut Vec<LexiconRule>) -> usize {
+fn load_legacy_jsonl(
+    source: &str,
+    label: &str,
+    rules: &mut Vec<LexiconRule>,
+    seen: &mut HashSet<String>,
+) -> usize {
     let mut added = 0usize;
     for (idx, line) in source.lines().enumerate() {
         let line = line.trim();
@@ -251,11 +266,7 @@ fn load_legacy_jsonl(source: &str, label: &str, rules: &mut Vec<LexiconRule>) ->
                 continue;
             }
 
-            if let Some(pattern) = build_word_regex(mis) {
-                rules.push(LexiconRule {
-                    pattern,
-                    replacement: entry.term.clone(),
-                });
+            if push_lexicon_rule(rules, seen, mis, &entry.term, true, false) {
                 added += 1;
             }
         }
@@ -264,7 +275,12 @@ fn load_legacy_jsonl(source: &str, label: &str, rules: &mut Vec<LexiconRule>) ->
     added
 }
 
-fn load_seed_jsonl(source: &str, label: &str, rules: &mut Vec<LexiconRule>) -> usize {
+fn load_seed_jsonl(
+    source: &str,
+    label: &str,
+    rules: &mut Vec<LexiconRule>,
+    seen: &mut HashSet<String>,
+) -> usize {
     let mut added = 0usize;
     for (idx, line) in source.lines().enumerate() {
         let line = line.trim();
@@ -288,16 +304,14 @@ fn load_seed_jsonl(source: &str, label: &str, rules: &mut Vec<LexiconRule>) -> u
             if variant.eq_ignore_ascii_case(&entry.canonical) {
                 continue;
             }
-            let pattern = if entry.normalization.whole_word_only {
-                build_word_regex(variant)
-            } else {
-                build_plain_regex(variant, entry.normalization.case_sensitive)
-            };
-            if let Some(pattern) = pattern {
-                rules.push(LexiconRule {
-                    pattern,
-                    replacement: entry.canonical.clone(),
-                });
+            if push_lexicon_rule(
+                rules,
+                seen,
+                variant,
+                &entry.canonical,
+                entry.normalization.whole_word_only,
+                entry.normalization.case_sensitive,
+            ) {
                 added += 1;
             }
         }
@@ -305,14 +319,90 @@ fn load_seed_jsonl(source: &str, label: &str, rules: &mut Vec<LexiconRule>) -> u
     added
 }
 
-fn build_word_regex(input: &str) -> Option<Regex> {
+fn push_lexicon_rule(
+    rules: &mut Vec<LexiconRule>,
+    seen: &mut HashSet<String>,
+    input: &str,
+    replacement: &str,
+    whole_word_only: bool,
+    case_sensitive: bool,
+) -> bool {
+    let Some(rule_key) = lexicon_rule_key(input, replacement, whole_word_only, case_sensitive)
+    else {
+        return false;
+    };
+    if !seen.insert(rule_key) {
+        return false;
+    }
+
+    let pattern = if whole_word_only {
+        build_word_regex(input, case_sensitive)
+    } else {
+        build_plain_regex(input, case_sensitive)
+    };
+
+    let Some(pattern) = pattern else {
+        return false;
+    };
+
+    rules.push(LexiconRule {
+        pattern,
+        replacement: replacement.to_string(),
+    });
+    true
+}
+
+fn lexicon_rule_key(
+    input: &str,
+    replacement: &str,
+    whole_word_only: bool,
+    case_sensitive: bool,
+) -> Option<String> {
+    let normalized_input = normalize_lexicon_input_key_text(input, case_sensitive)?;
+    let normalized_replacement = normalize_lexicon_replacement_key_text(replacement)?;
+    Some(format!(
+        "{}|{}|{}|{}",
+        if whole_word_only { "word" } else { "plain" },
+        if case_sensitive { "case" } else { "nocase" },
+        normalized_input,
+        normalized_replacement
+    ))
+}
+
+fn normalize_lexicon_input_key_text(text: &str, case_sensitive: bool) -> Option<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if case_sensitive {
+        Some(normalized)
+    } else {
+        Some(normalized.to_lowercase())
+    }
+}
+
+fn normalize_lexicon_replacement_key_text(text: &str) -> Option<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(normalized)
+}
+
+fn build_word_regex(input: &str, case_sensitive: bool) -> Option<Regex> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
     }
     let escaped = regex::escape(trimmed);
     let flexible = escaped.replace(' ', r"\s+");
-    let pattern = format!(r"(?i)\b{}\b", flexible);
+    let pattern = if case_sensitive {
+        format!(r"\b{}\b", flexible)
+    } else {
+        format!(r"(?i)\b{}\b", flexible)
+    };
     Regex::new(&pattern).ok()
 }
 
@@ -665,6 +755,28 @@ fn truncate_for_embedding(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_lexicon(custom_path: PathBuf, custom_mtime: Option<SystemTime>) -> Lexicon {
+        Lexicon {
+            builtin_rules: Vec::new(),
+            custom_rules: Vec::new(),
+            custom_path,
+            custom_mtime,
+        }
+    }
+
+    fn test_lexicon_with_builtin_rules(
+        custom_path: PathBuf,
+        custom_mtime: Option<SystemTime>,
+        builtin_rules: Vec<LexiconRule>,
+    ) -> Lexicon {
+        Lexicon {
+            builtin_rules,
+            custom_rules: Vec::new(),
+            custom_path,
+            custom_mtime,
+        }
+    }
+
     #[test]
     fn test_lexicon_rewrite() {
         let mut processor = StreamPostProcessor::new();
@@ -712,14 +824,12 @@ mod tests {
         std::fs::write(&custom_path, "").unwrap();
 
         // Build a Lexicon pointing at our temp file
-        let mut lexicon = Lexicon {
-            builtin_rules: Vec::new(),
-            custom_rules: Vec::new(),
-            custom_path: custom_path.clone(),
-            custom_mtime: std::fs::metadata(&custom_path)
+        let mut lexicon = test_lexicon(
+            custom_path.clone(),
+            std::fs::metadata(&custom_path)
                 .ok()
                 .and_then(|m| m.modified().ok()),
-        };
+        );
 
         // No rules yet
         assert_eq!(lexicon.apply("foobarski"), "foobarski");
@@ -754,12 +864,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut lexicon = Lexicon {
-            builtin_rules: Vec::new(),
-            custom_rules: Vec::new(),
-            custom_path: custom_path.clone(),
-            custom_mtime: None, // Force initial load
-        };
+        let mut lexicon = test_lexicon(custom_path.clone(), None);
 
         // First reload loads the rule
         lexicon.maybe_reload();
@@ -779,23 +884,22 @@ mod tests {
         std::fs::write(&custom_path, "").unwrap();
 
         // Simulate 2 builtin rules
-        let mut lexicon = Lexicon {
-            builtin_rules: vec![
+        let mut lexicon = test_lexicon_with_builtin_rules(
+            custom_path.clone(),
+            std::fs::metadata(&custom_path)
+                .ok()
+                .and_then(|m| m.modified().ok()),
+            vec![
                 LexiconRule {
-                    pattern: build_word_regex("builtin1").unwrap(),
+                    pattern: build_word_regex("builtin1", false).unwrap(),
                     replacement: "BUILTIN1".to_string(),
                 },
                 LexiconRule {
-                    pattern: build_word_regex("builtin2").unwrap(),
+                    pattern: build_word_regex("builtin2", false).unwrap(),
                     replacement: "BUILTIN2".to_string(),
                 },
             ],
-            custom_rules: Vec::new(),
-            custom_path: custom_path.clone(),
-            custom_mtime: std::fs::metadata(&custom_path)
-                .ok()
-                .and_then(|m| m.modified().ok()),
-        };
+        );
 
         // Write custom rule
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -858,7 +962,8 @@ mod tests {
         let vet_json = r#"{"term":"Acepromazyna","ipa":"/x/","category":"drug","definition":"x","synonyms":[],"extras":{"mispronunciations":["acepromasyna","acepramazyna"]},"mispronunciations":[]}"#;
 
         let mut rules = Vec::new();
-        let count = load_legacy_jsonl(vet_json, "test-vet", &mut rules);
+        let mut seen = HashSet::new();
+        let count = load_legacy_jsonl(vet_json, "test-vet", &mut rules, &mut seen);
         assert_eq!(
             count, 2,
             "Should extract 2 rules from extras.mispronunciations"
@@ -873,9 +978,99 @@ mod tests {
         let json = r#"{"term":"Anemia","mispronunciations":["anemia"],"extras":{"mispronunciations":["abemia","amemia"]}}"#;
 
         let mut rules = Vec::new();
-        let count = load_legacy_jsonl(json, "test-merge", &mut rules);
+        let mut seen = HashSet::new();
+        let count = load_legacy_jsonl(json, "test-merge", &mut rules, &mut seen);
         // "anemia" == "Anemia" case-insensitive → skipped; "abemia" + "amemia" → 2 rules
         assert_eq!(count, 2, "Should skip case-equal + extract 2 from extras");
+    }
+
+    #[test]
+    fn test_duplicate_legacy_rules_are_deduped() {
+        let json = r#"{"term":"Docker","mispronunciations":["doker","doker"],"extras":{"mispronunciations":["Doker"]}}"#;
+
+        let mut rules = Vec::new();
+        let mut seen = HashSet::new();
+        let count = load_legacy_jsonl(json, "test-dedup", &mut rules, &mut seen);
+
+        assert_eq!(count, 1, "Expected duplicate legacy rewrites to collapse");
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn test_seed_and_legacy_duplicates_share_one_rule() {
+        let legacy_json = r#"{"term":"Acepromazyna","mispronunciations":["acepromasyna"],"extras":{"mispronunciations":[]}}"#;
+        let seed_json = r#"{"canonical":"Acepromazyna","normalization":{"enabled":true,"input_variants":["acepromasyna"],"case_sensitive":false,"whole_word_only":true}}"#;
+
+        let mut rules = Vec::new();
+        let mut seen = HashSet::new();
+
+        let legacy_count = load_legacy_jsonl(legacy_json, "legacy", &mut rules, &mut seen);
+        let seed_count = load_seed_jsonl(seed_json, "seed", &mut rules, &mut seen);
+
+        assert_eq!(legacy_count, 1);
+        assert_eq!(
+            seed_count, 0,
+            "Seed should skip duplicate rewrite already provided by legacy data"
+        );
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn test_dedup_keeps_distinct_replacement_capitalization() {
+        let primary_json = r#"{"term":"PostgreSQL","mispronunciations":["postgres"]}"#;
+        let fallback_json = r#"{"term":"postgresql","mispronunciations":["postgres"]}"#;
+
+        let mut rules = Vec::new();
+        let mut seen = HashSet::new();
+
+        let primary_count = load_legacy_jsonl(primary_json, "primary", &mut rules, &mut seen);
+        let fallback_count = load_legacy_jsonl(fallback_json, "fallback", &mut rules, &mut seen);
+
+        assert_eq!(primary_count, 1);
+        assert_eq!(
+            fallback_count, 1,
+            "replacement case differences should not be collapsed by dedupe"
+        );
+        assert_eq!(rules.len(), 2);
+
+        let mut rewritten = String::from("postgres docs");
+        for rule in &rules {
+            rewritten = rule
+                .pattern
+                .replace_all(&rewritten, rule.replacement.as_str())
+                .to_string();
+        }
+        assert_eq!(
+            rewritten, "PostgreSQL docs",
+            "first canonical spelling should remain authoritative when identical inputs disagree only by case"
+        );
+    }
+
+    #[test]
+    fn test_seed_whole_word_case_sensitive_rules_preserve_case_contract() {
+        let seed_json = r#"{"canonical":"GitHub","normalization":{"enabled":true,"input_variants":["git hub"],"case_sensitive":true,"whole_word_only":true}}"#;
+
+        let mut rules = Vec::new();
+        let mut seen = HashSet::new();
+        let count = load_seed_jsonl(seed_json, "seed", &mut rules, &mut seen);
+
+        assert_eq!(count, 1);
+        assert_eq!(rules.len(), 1);
+
+        let rewritten_exact = rules[0]
+            .pattern
+            .replace_all("git hub repo", rules[0].replacement.as_str())
+            .to_string();
+        let rewritten_mismatch = rules[0]
+            .pattern
+            .replace_all("Git Hub repo", rules[0].replacement.as_str())
+            .to_string();
+
+        assert_eq!(rewritten_exact, "GitHub repo");
+        assert_eq!(
+            rewritten_mismatch, "Git Hub repo",
+            "case-sensitive whole-word rules must ignore already-capitalized variants"
+        );
     }
 
     #[test]

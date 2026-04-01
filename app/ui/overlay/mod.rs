@@ -20,7 +20,7 @@ use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use objc2_app_kit::NSVisualEffectMaterial;
+use objc2_app_kit::NSWindowStyleMask;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -30,8 +30,9 @@ use crate::ui::shared::status::{UiStatus, status_from_detail};
 use crate::ui_helpers::{
     add_subview, animate_fade, button_set_action, button_style, clamp_overlay_position, color_rgba,
     create_borderless_tafla_window, create_button, create_label, create_scrollable_text_view,
-    create_tafla_single_shell, ns_string, set_hidden, set_text, set_text_view_string, set_tooltip,
-    style_tafla_panel, ui_colors, ui_tokens, window_close, window_set_alpha, window_show,
+    create_tafla_single_shell, ns_string, release_object, set_hidden, set_text,
+    set_text_view_string, set_tooltip, style_tafla_panel, ui_colors, ui_tokens, window_discard,
+    window_set_alpha, window_show,
 };
 use objc::declare::ClassDecl;
 use objc::runtime::Sel;
@@ -899,6 +900,7 @@ fn show_transcription_overlay_impl() {
         let window_width = OVERLAY_WINDOW_WIDTH;
         let window_height = OVERLAY_WINDOW_MIN_HEIGHT;
         let margin = 20.0;
+        let corner_radius = ui_tokens::SURFACE_RADIUS;
         let max_height =
             (visible_frame.size.height * OVERLAY_WINDOW_MAX_HEIGHT_RATIO).max(window_height);
 
@@ -939,12 +941,17 @@ fn show_transcription_overlay_impl() {
             },
         };
 
-        let window = create_borderless_tafla_window(frame, NS_FLOATING_WINDOW_LEVEL, false);
+        let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::FullSizeContentView;
+        let Some(window) = create_borderless_tafla_window(frame, style_mask, true) else {
+            warn!("Failed to init NSWindow");
+            return;
+        };
 
         // Get content view
-        let content_view: Id = msg_send![window, contentView];
-        if content_view.is_null() {
+        let window_content_view: Id = msg_send![window, contentView];
+        if window_content_view.is_null() {
             warn!("Failed to get content view");
+            discard_overlay_window(window, None);
             return;
         }
 
@@ -953,15 +960,25 @@ fn show_transcription_overlay_impl() {
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(window_width, window_height),
         );
-        let shell = create_tafla_single_shell(
-            content_view,
-            blur_frame,
-            NSVisualEffectMaterial::HUDWindow,
-            1.0,
-        );
-        let blur_view = shell.content_container;
+        let Some((blur_view, content_view)) =
+            create_tafla_single_shell(window_content_view, blur_frame)
+        else {
+            warn!("Failed to attach transcription overlay shell");
+            discard_overlay_window(window, None);
+            return;
+        };
+        let layer: Id = msg_send![blur_view, layer];
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setCornerRadius: corner_radius];
+            let _: () = msg_send![layer, setMasksToBounds: true];
+            let border = ui_colors::overlay_sheet_border();
+            let cg_border: Id = msg_send![border, CGColor];
+            let _: () = msg_send![layer, setBorderColor: cg_border];
+            let _: () = msg_send![layer, setBorderWidth: 1.0f64];
+        }
 
-        let _: () = msg_send![window, setTitle: ns_string("CodeScribe Dictation")];
+        // Add blur view as background, then mount overlay controls via glass `contentView`.
+        let _: () = msg_send![window, setTitle: ns_string(OVERLAY_HEADER_LABEL)];
 
         let padding = OVERLAY_PADDING;
         let button_height = OVERLAY_BUTTON_HEIGHT;
@@ -989,7 +1006,7 @@ fn show_transcription_overlay_impl() {
             selectable: false,
             editable: false,
         });
-        add_subview(blur_view, header_label);
+        add_subview(content_view, header_label);
 
         let status_field = create_label(crate::ui_helpers::LabelConfig {
             frame: CGRect::new(
@@ -1005,7 +1022,7 @@ fn show_transcription_overlay_impl() {
             editable: false,
         });
         let _: () = msg_send![status_field, setAlignment: 2_isize];
-        add_subview(blur_view, status_field);
+        add_subview(content_view, status_field);
 
         let auto_hide_label = create_label(crate::ui_helpers::LabelConfig {
             frame: CGRect::new(
@@ -1020,7 +1037,7 @@ fn show_transcription_overlay_impl() {
             selectable: false,
             editable: false,
         });
-        add_subview(blur_view, auto_hide_label);
+        add_subview(content_view, auto_hide_label);
         set_hidden(auto_hide_label, true);
 
         let spinner_frame = CGRect::new(
@@ -1035,7 +1052,7 @@ fn show_transcription_overlay_impl() {
         let _: () = msg_send![spinner, setStyle: NS_PROGRESS_INDICATOR_STYLE_SPINNING];
         let _: () = msg_send![spinner, setIndeterminate: true];
         let _: () = msg_send![spinner, setDisplayedWhenStopped: false];
-        add_subview(blur_view, spinner);
+        add_subview(content_view, spinner);
         set_hidden(spinner, true);
 
         // === Scrollable text view for transcription (main area) ===
@@ -1065,7 +1082,7 @@ fn show_transcription_overlay_impl() {
             let _: () = msg_send![container, setLineFragmentPadding: 0.0f64];
         }
         set_text_view_string(text_view, "");
-        add_subview(blur_view, text_scroll_view);
+        add_subview(content_view, text_scroll_view);
 
         // Create action handler instance
         let handler_class = action_handler_class();
@@ -1084,7 +1101,7 @@ fn show_transcription_overlay_impl() {
             owner: action_handler
             userInfo: std::ptr::null::<Object>()
         ];
-        let _: () = msg_send![blur_view, addTrackingArea: tracking_area];
+        let _: () = msg_send![content_view, addTrackingArea: tracking_area];
 
         // === Decision buttons (hidden during recording; show on hover) ===
         let button_width = 100.0;
@@ -1157,10 +1174,10 @@ fn show_transcription_overlay_impl() {
         button_set_action(augment_button, action_handler, sel!(onAugmentTranscript:));
         button_set_action(commit_button, action_handler, sel!(onCommitRecording:));
 
-        add_subview(blur_view, save_button);
-        add_subview(blur_view, copy_button);
-        add_subview(blur_view, augment_button);
-        add_subview(blur_view, commit_button);
+        add_subview(content_view, save_button);
+        add_subview(content_view, copy_button);
+        add_subview(content_view, augment_button);
+        add_subview(content_view, commit_button);
 
         set_hidden(save_button, true);
         set_hidden(copy_button, true);
@@ -1414,13 +1431,50 @@ pub fn hide_transcription_overlay() {
 /// Closes a window by raw pointer (used for delayed close after animation)
 fn close_window_by_ptr(window_ptr: usize) {
     unsafe {
-        window_close(window_ptr as Id);
+        window_discard(window_ptr as Id);
+    }
+}
+
+fn discard_overlay_window(window: Id, action_handler_ptr: Option<usize>) {
+    unsafe {
+        window_discard(window);
+        if let Some(ptr) = action_handler_ptr {
+            release_object(ptr as Id);
+        }
     }
 }
 
 fn hide_transcription_overlay_impl() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(window_ptr) = state.window.take() {
+    // DEADLOCK PREVENTION: extract window_ptr and clear state under lock,
+    // then drop lock before the animate_fade AppKit call.
+    let (window_ptr, action_handler_ptr) = {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let wp = state.window.take();
+        let action_handler = state.action_handler.take();
+        state.header_label = None;
+        state.text_scroll_view = None;
+        state.text_view = None;
+        state.status_field = None;
+        state.auto_hide_label = None;
+        state.blur_view = None;
+        state.copy_button = None;
+        state.augment_button = None;
+        state.save_button = None;
+        state.commit_button = None;
+        state.progress_indicator = None;
+        state.tracking_area = None;
+        state.decision_mode = false;
+        state.hover_active = false;
+        state.action_handler = None;
+        state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
+        state.last_layout_resize_at = Instant::now();
+        state.pending_layout_resize = false;
+        // Note: accumulated_text is NOT cleared here - it's needed for clipboard copy
+        (wp, action_handler)
+    }; // Lock dropped.
+
+    if let Some(window_ptr) = window_ptr {
         let window = window_ptr as Id;
 
         // Fade out animation (0.15s)
@@ -1433,31 +1487,16 @@ fn hide_transcription_overlay_impl() {
             std::thread::sleep(Duration::from_millis(200));
             Queue::main().exec_async(move || {
                 close_window_by_ptr(window_ptr);
+                if let Some(ptr) = action_handler_ptr {
+                    unsafe {
+                        release_object(ptr as Id);
+                    }
+                }
             });
         });
 
         debug!("Transcription overlay hidden");
     }
-    state.header_label = None;
-    state.text_scroll_view = None;
-    state.text_view = None;
-    state.status_field = None;
-    state.auto_hide_label = None;
-    state.blur_view = None;
-    state.copy_button = None;
-    state.augment_button = None;
-    state.save_button = None;
-    state.commit_button = None;
-    state.progress_indicator = None;
-    state.tracking_area = None;
-    state.decision_mode = false;
-    state.hover_active = false;
-    state.action_handler = None;
-    state.action_contract_mode = TranscriptionActionContractMode::Raw;
-    state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
-    state.last_layout_resize_at = Instant::now();
-    state.pending_layout_resize = false;
-    // Note: accumulated_text is NOT cleared here - it's needed for clipboard copy
 }
 
 #[cfg(test)]
@@ -1645,5 +1684,21 @@ mod tests {
     fn test_overlay_visible_text_live_mode_uses_stable_preview() {
         let text = "To jest stabilne zda";
         assert_eq!(overlay_visible_text(text, false), "To jest stabilne ");
+    }
+
+    #[test]
+    fn transcription_overlay_source_uses_shared_tafla_window_contract() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/app/ui/overlay/mod.rs"
+        ));
+        let overlay_impl = source
+            .split("fn show_transcription_overlay_impl()")
+            .nth(1)
+            .expect("transcription overlay impl present");
+        assert!(overlay_impl.contains("create_borderless_tafla_window("));
+        assert!(overlay_impl.contains("create_tafla_single_shell("));
+        assert!(!overlay_impl.contains("create_glass_effect_view_with("));
+        assert!(!overlay_impl.contains("set_glass_effect_content_view("));
     }
 }

@@ -593,11 +593,6 @@ pub struct TaflaSplitShell {
     pub split_divider: Id,
 }
 
-pub struct TaflaSingleShell {
-    pub root_glass: Id,
-    pub content_container: Id,
-}
-
 /// Attach a styled Tafla glass shell that fills the parent view.
 ///
 /// # Safety
@@ -696,40 +691,6 @@ pub unsafe fn create_tafla_split_shell(
         sidebar_container,
         content_container,
         split_divider,
-    }
-}
-
-/// Build the canonical Tafla single-pane shell used by floating overlays.
-///
-/// # Safety
-/// `parent` must be a valid `NSView`.
-pub unsafe fn create_tafla_single_shell(
-    parent: Id,
-    frame: CGRect,
-    material: NSVisualEffectMaterial,
-    alpha: f64,
-) -> TaflaSingleShell {
-    let ns_view = Class::get("NSView").unwrap();
-    let autoresize_both = 2_isize | 16_isize;
-
-    let root_glass =
-        unsafe { attach_tafla_glass_shell(parent, frame, material, alpha, autoresize_both) };
-
-    let content_frame = CGRect::new(
-        &CGPoint::new(0.0, 0.0),
-        &CGSize::new(frame.size.width, frame.size.height),
-    );
-    let content_container: Id = msg_send![ns_view, alloc];
-    let content_container: Id = msg_send![content_container, initWithFrame: content_frame];
-    let _: () = msg_send![content_container, setAutoresizingMask: autoresize_both];
-    unsafe {
-        style_tafla_section(content_container);
-        add_subview(root_glass, content_container);
-    }
-
-    TaflaSingleShell {
-        root_glass,
-        content_container,
     }
 }
 
@@ -1023,6 +984,33 @@ pub fn create_glass_effect_view_with(
         let _: () = msg_send![view, setWantsLayer: true];
         view
     }
+}
+
+unsafe fn set_content_view_or_subview(host: Id, content_view: Id) -> bool {
+    if host.is_null() || content_view.is_null() {
+        return false;
+    }
+
+    let supports_content_view: bool =
+        unsafe { msg_send![host, respondsToSelector: sel!(setContentView:)] };
+    if supports_content_view {
+        let _: () = unsafe { msg_send![host, setContentView: content_view] };
+        true
+    } else {
+        let _: () = unsafe { msg_send![host, addSubview: content_view] };
+        false
+    }
+}
+
+/// Attach content to a glass effect view using `contentView` when available.
+///
+/// Returns `true` when `setContentView:` was used, `false` when it fell back to
+/// `addSubview:` for older view implementations.
+///
+/// # Safety
+/// `glass_view` and `content_view` must be valid Objective-C view objects.
+pub unsafe fn set_glass_effect_content_view(glass_view: Id, content_view: Id) -> bool {
+    unsafe { set_content_view_or_subview(glass_view, content_view) }
 }
 
 /// # Safety
@@ -1643,10 +1631,10 @@ pub fn create_floating_window(
         // Keep the window instance alive even after close; we manage lifecycle explicitly.
         let _: () = msg_send![window, setReleasedWhenClosed: false];
 
-        // Can join all spaces
-        let collection = NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary;
-        let _: () = msg_send![window, setCollectionBehavior: collection];
+        let _: () = msg_send![
+            window,
+            setCollectionBehavior: floating_tafla_collection_behavior()
+        ];
 
         if !title.is_empty() {
             let title_str = ns_string(title);
@@ -1657,59 +1645,122 @@ pub fn create_floating_window(
     }
 }
 
-/// Create a borderless Tafla window with the shared floating/windowing defaults.
+const NSVIEW_WIDTH_SIZABLE_MASK: isize = 2;
+const NSVIEW_HEIGHT_SIZABLE_MASK: isize = 16;
+
+pub fn floating_tafla_collection_behavior() -> NSWindowCollectionBehavior {
+    NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary
+}
+
+/// Create a reusable borderless floating Tafla window.
+///
+/// Keeps the behavioral contract shared by floating windows while letting callers
+/// keep their own delegates, drag types, min/max sizes, and custom subclasses.
 ///
 /// # Safety
 /// `window_class` must be a valid `NSWindow` subclass.
 pub unsafe fn create_borderless_tafla_window_with_class(
     window_class: *const Class,
     frame: CGRect,
-    level: i64,
-    resizable: bool,
-) -> Id {
-    unsafe {
-        let ns_color = Class::get("NSColor").unwrap();
+    style_mask: NSWindowStyleMask,
+    has_shadow: bool,
+) -> Option<Id> {
+    if window_class.is_null() {
+        return None;
+    }
 
-        let mut style = NSWindowStyleMask::Borderless | NSWindowStyleMask::FullSizeContentView;
-        if resizable {
-            style |= NSWindowStyleMask::Resizable;
-        }
-
-        let window: Id = msg_send![window_class, alloc];
-        let window: Id = msg_send![
+    let window: Id = unsafe { msg_send![window_class, alloc] };
+    let window: Id = unsafe {
+        msg_send![
             window,
             initWithContentRect: frame
-            styleMask: style
+            styleMask: style_mask
             backing: NSBackingStoreType::Buffered
             defer: false
-        ];
-
-        let _: () = msg_send![window, setTitleVisibility: 1_isize];
-        let _: () = msg_send![window, setTitlebarAppearsTransparent: true];
-        let _: () = msg_send![window, setOpaque: false];
-        let clear: Id = msg_send![ns_color, clearColor];
-        let _: () = msg_send![window, setBackgroundColor: clear];
-        let _: () = msg_send![window, setMovableByWindowBackground: true];
-        let _: () = msg_send![window, setHasShadow: true];
-        let _: () = msg_send![window, setLevel: level];
-        let _: () = msg_send![window, setReleasedWhenClosed: false];
-
-        let collection = NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary;
-        let _: () = msg_send![window, setCollectionBehavior: collection];
-
-        window
+        ]
+    };
+    if window.is_null() {
+        return None;
     }
-}
 
-/// Create a borderless Tafla window using the base `NSWindow` class.
-pub fn create_borderless_tafla_window(frame: CGRect, level: i64, resizable: bool) -> Id {
     unsafe {
-        let ns_window = Class::get("NSWindow").unwrap();
-        create_borderless_tafla_window_with_class(ns_window, frame, level, resizable)
+        let _: () = msg_send![window, setTitleVisibility: 1];
+        let _: () = msg_send![window, setTitlebarAppearsTransparent: true];
+        let _: () = msg_send![window, setMovableByWindowBackground: true];
+        let _: () = msg_send![window, setOpaque: false];
+        let _: () = msg_send![window, setBackgroundColor: color_clear()];
+        let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
+        let _: () = msg_send![window, setHasShadow: has_shadow];
+        // Keep the window instance alive even after close; callers manage lifecycle explicitly.
+        let _: () = msg_send![window, setReleasedWhenClosed: false];
+        let collection_behavior = floating_tafla_collection_behavior();
+        let _: () = msg_send![window, setCollectionBehavior: collection_behavior];
+    }
+
+    Some(window)
+}
+
+/// Create a standard borderless floating Tafla window using `NSWindow`.
+///
+/// # Safety
+/// Caller must ensure AppKit main-thread usage and keep the returned window alive.
+pub unsafe fn create_borderless_tafla_window(
+    frame: CGRect,
+    style_mask: NSWindowStyleMask,
+    has_shadow: bool,
+) -> Option<Id> {
+    let window_class = Class::get("NSWindow")?;
+    unsafe {
+        create_borderless_tafla_window_with_class(window_class, frame, style_mask, has_shadow)
     }
 }
 
+/// Create the standard single-pane glass shell used by floating Tafla windows.
+///
+/// Returns `(glass_view, content_view)` so callers can still apply local styling
+/// and mount controls without bypassing the shared shell composition.
+///
+/// # Safety
+/// `parent` must be a valid `NSView` attached to a live window.
+pub unsafe fn create_tafla_single_shell(parent: Id, frame: CGRect) -> Option<(Id, Id)> {
+    if parent.is_null() {
+        return None;
+    }
+
+    let blur_view = create_glass_effect_view_with(
+        frame,
+        NSVisualEffectMaterial::HUDWindow,
+        NSVisualEffectBlendingMode::BehindWindow,
+        NSVisualEffectState::Active,
+    );
+    if blur_view.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let _: () = msg_send![
+            blur_view,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE_MASK | NSVIEW_HEIGHT_SIZABLE_MASK
+        ];
+    }
+
+    let content_view: Id = unsafe { msg_send![Class::get("NSView").unwrap(), alloc] };
+    let content_view: Id = unsafe { msg_send![content_view, initWithFrame: frame] };
+    if content_view.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let _: () = msg_send![
+            content_view,
+            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE_MASK | NSVIEW_HEIGHT_SIZABLE_MASK
+        ];
+        add_subview(parent, blur_view);
+        add_subview(blur_view, content_view);
+    }
+
+    Some((blur_view, content_view))
+}
 /// Get window's content view
 /// # Safety
 /// `window` must be a valid `NSWindow` instance.
@@ -1751,6 +1802,31 @@ pub unsafe fn window_hide(window: Id) {
 pub unsafe fn window_close(window: Id) {
     unsafe {
         let _: () = msg_send![window, close];
+    }
+}
+
+/// Release an Objective-C object retained via `alloc`/`new`.
+/// # Safety
+/// `object` must be a valid Objective-C object pointer or null.
+pub unsafe fn release_object(object: Id) {
+    if object.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![object, release];
+    }
+}
+
+/// Close and release a window that should not remain alive after closing.
+/// # Safety
+/// `window` must be a valid `NSWindow` instance or null.
+pub unsafe fn window_discard(window: Id) {
+    if window.is_null() {
+        return;
+    }
+    unsafe {
+        window_close(window);
+        release_object(window);
     }
 }
 
@@ -1815,6 +1891,29 @@ mod tests {
         let tabs_right =
             layout.tab_cluster_x + layout.tab_button_width * 3.0 + layout.tab_button_gap * 2.0;
         assert!(tabs_right <= 142.0 - ui_tokens::CHAT_HEADER_GROUP_GAP + 0.001);
+    }
+
+    #[test]
+    fn chat_header_layout_keeps_status_before_right_cluster() {
+        let right_cluster_start_x = 270.0;
+        let layout = chat_header_layout(
+            86.0,
+            ui_tokens::CHAT_TITLE_LABEL_WIDTH,
+            right_cluster_start_x,
+        );
+        if layout.show_status_pill {
+            let right_anchor = right_cluster_start_x - ui_tokens::CHAT_HEADER_GROUP_GAP;
+            assert!(layout.status_pill_x + layout.status_pill_width <= right_anchor + 0.001);
+        }
+    }
+
+    #[test]
+    fn floating_tafla_collection_behavior_keeps_fullscreen_overlay_contract() {
+        assert_eq!(
+            floating_tafla_collection_behavior(),
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+        );
     }
 
     #[test]

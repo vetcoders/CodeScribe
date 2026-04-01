@@ -16,7 +16,7 @@
 
 [meta]
 version = "1.0.0"
-updated = "2026-03-31"
+updated = "2026-04-01"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VAD (Voice Activity Detection) - Silero Neural Network
@@ -715,6 +715,13 @@ type = "bool"
 reload = "hot"
 category = "ui"
 description = "Use stable-word-only preview for live overlay text (0 = show exact live text)"
+
+[vars.CODESCRIBE_APP_AUTOMATION_MODE]
+default = "0"
+type = "bool"
+reload = "restart"
+category = "ui"
+description = "Enable native app automation mode for end-to-end UI command tests"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Clipboard
