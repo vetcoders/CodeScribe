@@ -55,13 +55,19 @@ impl CollectorSink {
     }
 
     pub fn collected(&self) -> Vec<String> {
-        self.collected.lock().unwrap().clone()
+        self.collected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
 impl DeltaSink for CollectorSink {
     fn apply(&self, delta: &TranscriptDelta) {
-        self.collected.lock().unwrap().push(delta.delta.clone());
+        self.collected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(delta.delta.clone());
     }
 }
 
@@ -98,21 +104,21 @@ impl EventSink for DeltaSinkAdapter {
     fn on_event(&self, event: &EngineEvent) {
         match event {
             EngineEvent::Preview { text, .. } => {
-                let mut last = self.last_text.lock().unwrap();
+                let mut last = self.last_text.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(delta) = TranscriptDelta::from_diff(&last, text) {
                     self.inner.apply(&delta);
                     *last = text.clone();
                 }
             }
             EngineEvent::Correction { text, .. } => {
-                let mut last = self.last_text.lock().unwrap();
+                let mut last = self.last_text.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(delta) = TranscriptDelta::from_diff(&last, text) {
                     self.inner.apply(&delta);
                     *last = text.clone();
                 }
             }
             EngineEvent::UtteranceFinal { text, .. } => {
-                let mut last = self.last_text.lock().unwrap();
+                let mut last = self.last_text.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(delta) = TranscriptDelta::from_diff(&last, text) {
                     self.inner.apply(&delta);
                 }
@@ -120,7 +126,7 @@ impl EventSink for DeltaSinkAdapter {
                 *last = String::new();
             }
             EngineEvent::NoSpeech { .. } => {
-                let mut last = self.last_text.lock().unwrap();
+                let mut last = self.last_text.lock().unwrap_or_else(|e| e.into_inner());
                 *last = String::new();
             }
             _ => {}
@@ -170,13 +176,16 @@ impl CollectorEventSink {
     }
 
     pub fn events(&self) -> Vec<EngineEvent> {
-        self.events.lock().unwrap().clone()
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn previews(&self) -> Vec<String> {
         self.events
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter_map(|e| match e {
                 EngineEvent::Preview { text, .. } => Some(text.clone()),
@@ -188,7 +197,7 @@ impl CollectorEventSink {
     pub fn drops(&self) -> Vec<(crate::pipeline::contracts::DropKind, String)> {
         self.events
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter_map(|e| match e {
                 EngineEvent::Drop { kind, text, .. } => Some((kind.clone(), text.clone())),
@@ -200,7 +209,7 @@ impl CollectorEventSink {
     pub fn finals(&self) -> Vec<String> {
         self.events
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter_map(|e| match e {
                 EngineEvent::UtteranceFinal { text, .. } => Some(text.clone()),
@@ -212,7 +221,10 @@ impl CollectorEventSink {
 
 impl EventSink for CollectorEventSink {
     fn on_event(&self, event: &EngineEvent) {
-        self.events.lock().unwrap().push(event.clone());
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event.clone());
     }
 }
 

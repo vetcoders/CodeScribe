@@ -77,6 +77,12 @@ struct NdjsonChunk {
     error: Option<String>,
 }
 
+enum NdjsonLine<'a> {
+    Payload(&'a str),
+    Done,
+    Ignore,
+}
+
 /// Audio validation error type for pre-flight checks
 #[derive(Debug, Clone)]
 pub enum AudioValidationError {
@@ -565,61 +571,20 @@ async fn transcribe_ndjson(
     let mut final_text = String::new();
     let mut partial_count = 0u32;
 
+    let mut done = false;
+
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.context("Failed to read NDJSON chunk")?;
         buffer.extend_from_slice(&bytes);
 
-        // Process complete lines
-        while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buffer.drain(..=pos).collect();
-            let line_str = String::from_utf8_lossy(&line);
-            let line_str = line_str.trim();
-
-            if line_str.is_empty() {
-                continue;
-            }
-
-            // Handle SSE format: "data: {...}" or "event: ..." or plain NDJSON
-            let json_str = if line_str.starts_with("data:") {
-                let data = line_str.strip_prefix("data:").unwrap().trim();
-                if data == "[DONE]" {
-                    debug!("[NDJSON STT] Received [DONE] marker");
-                    break;
-                }
-                data
-            } else if line_str.starts_with("event:") {
-                // Skip SSE event lines
-                continue;
-            } else {
-                // Plain NDJSON (no prefix)
-                line_str
-            };
-
-            if let Ok(chunk) = serde_json::from_str::<NdjsonChunk>(json_str) {
-                if let Some(err) = chunk.error {
-                    error!("[NDJSON STT] Error in stream: {}", err);
-                    anyhow::bail!("NDJSON STT error: {}", err);
-                }
-
-                if let Some(text) = chunk.text {
-                    if chunk.is_final.unwrap_or(false) {
-                        final_text = text;
-                        info!(
-                            "[NDJSON STT] Final: {} chars after {} partials",
-                            final_text.len(),
-                            partial_count
-                        );
-                    } else {
-                        partial_count += 1;
-                        debug!(
-                            "[NDJSON STT] partial #{}: {} chars",
-                            partial_count,
-                            text.len()
-                        );
-                    }
-                }
-            }
+        done = process_ndjson_buffer(&mut buffer, &mut final_text, &mut partial_count, false)?;
+        if done {
+            break;
         }
+    }
+
+    if !done {
+        process_ndjson_buffer(&mut buffer, &mut final_text, &mut partial_count, true)?;
     }
 
     let duration_ms = start.elapsed().as_millis();
@@ -634,6 +599,96 @@ async fn transcribe_ndjson(
     }
 
     Ok(final_text)
+}
+
+fn process_ndjson_buffer(
+    buffer: &mut Vec<u8>,
+    final_text: &mut String,
+    partial_count: &mut u32,
+    flush_tail: bool,
+) -> Result<bool> {
+    while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+        let line: Vec<u8> = buffer.drain(..=pos).collect();
+        let line_str = String::from_utf8_lossy(&line);
+        if process_ndjson_line(line_str.trim(), final_text, partial_count)? {
+            return Ok(true);
+        }
+    }
+
+    if flush_tail && !buffer.is_empty() {
+        let tail = String::from_utf8_lossy(buffer);
+        let done = process_ndjson_line(tail.trim(), final_text, partial_count)?;
+        buffer.clear();
+        return Ok(done);
+    }
+
+    Ok(false)
+}
+
+fn process_ndjson_line(
+    line: &str,
+    final_text: &mut String,
+    partial_count: &mut u32,
+) -> Result<bool> {
+    match classify_ndjson_line(line) {
+        NdjsonLine::Done => {
+            debug!("[NDJSON STT] Received [DONE] marker");
+            Ok(true)
+        }
+        NdjsonLine::Ignore => Ok(false),
+        NdjsonLine::Payload(json_str) => {
+            if let Ok(chunk) = serde_json::from_str::<NdjsonChunk>(json_str) {
+                if let Some(err) = chunk.error {
+                    error!("[NDJSON STT] Error in stream: {}", err);
+                    anyhow::bail!("NDJSON STT error: {}", err);
+                }
+
+                if let Some(text) = chunk.text {
+                    if chunk.is_final.unwrap_or(false) {
+                        *final_text = text;
+                        info!(
+                            "[NDJSON STT] Final: {} chars after {} partials",
+                            final_text.len(),
+                            partial_count
+                        );
+                    } else {
+                        *partial_count += 1;
+                        debug!(
+                            "[NDJSON STT] partial #{}: {} chars",
+                            partial_count,
+                            text.len()
+                        );
+                    }
+                }
+            } else {
+                debug!("[NDJSON STT] Ignoring non-JSON line: {}", json_str);
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn classify_ndjson_line(line: &str) -> NdjsonLine<'_> {
+    if line.is_empty() {
+        return NdjsonLine::Ignore;
+    }
+
+    if let Some(data) = line.strip_prefix("data:") {
+        let data = data.trim();
+        if data.is_empty() {
+            return NdjsonLine::Ignore;
+        }
+        if data == "[DONE]" {
+            return NdjsonLine::Done;
+        }
+        return NdjsonLine::Payload(data);
+    }
+
+    if line.starts_with("event:") {
+        return NdjsonLine::Ignore;
+    }
+
+    NdjsonLine::Payload(line)
 }
 
 // ============================================================================
@@ -835,5 +890,65 @@ mod tests {
         // 413 should not be retried - file too large is a client issue
         let error = anyhow::anyhow!("status 413: Payload Too Large");
         assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_process_ndjson_line_handles_sse_done_marker() {
+        let mut final_text = String::new();
+        let mut partial_count = 0;
+
+        let done = process_ndjson_line("data: [DONE]", &mut final_text, &mut partial_count)
+            .expect("done marker should parse");
+
+        assert!(done);
+        assert!(final_text.is_empty());
+        assert_eq!(partial_count, 0);
+    }
+
+    #[test]
+    fn test_process_ndjson_line_ignores_empty_sse_data() {
+        let mut final_text = String::new();
+        let mut partial_count = 0;
+
+        let done =
+            process_ndjson_line("data:   ", &mut final_text, &mut partial_count).expect("parse");
+
+        assert!(!done);
+        assert!(final_text.is_empty());
+        assert_eq!(partial_count, 0);
+    }
+
+    #[test]
+    fn test_process_ndjson_line_accepts_plain_ndjson_final_chunk() {
+        let mut final_text = String::new();
+        let mut partial_count = 2;
+
+        let done = process_ndjson_line(
+            r#"{"text":"hello world","is_final":true}"#,
+            &mut final_text,
+            &mut partial_count,
+        )
+        .expect("plain ndjson line should parse");
+
+        assert!(!done);
+        assert_eq!(final_text, "hello world");
+        assert_eq!(partial_count, 2);
+    }
+
+    #[test]
+    fn test_process_ndjson_buffer_flushes_tail_without_trailing_newline() {
+        let mut buffer =
+            b"data: {\"text\":\"partial\"}\ndata: {\"text\":\"final text\",\"is_final\":true}"
+                .to_vec();
+        let mut final_text = String::new();
+        let mut partial_count = 0;
+
+        let done = process_ndjson_buffer(&mut buffer, &mut final_text, &mut partial_count, true)
+            .expect("buffer should parse");
+
+        assert!(!done);
+        assert_eq!(partial_count, 1);
+        assert_eq!(final_text, "final text");
+        assert!(buffer.is_empty());
     }
 }

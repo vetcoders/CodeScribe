@@ -220,12 +220,10 @@ pub fn populate_env_from_keychain() {
         return;
     }
     POPULATE_ONCE.call_once(|| {
-        let bundle = load_bundle();
-        if bundle.is_none() {
+        let Some(bundle) = load_bundle() else {
             debug!("Keychain bundle missing; skipping population");
             return;
-        }
-        let bundle = bundle.unwrap();
+        };
         for &account in KEYCHAIN_ACCOUNTS {
             if std::env::var(account).is_err()
                 && let Some(value) = bundle.keys.get(account)
