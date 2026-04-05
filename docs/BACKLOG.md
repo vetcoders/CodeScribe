@@ -1,6 +1,6 @@
 # CodeScribe Backlog & Roadmap
 
-> Last updated: 2026-02-07
+> Last updated: 2026-04-05
 
 ---
 
@@ -36,6 +36,7 @@
 | IPC Server (Unix socket)               | ✅     | `app/ipc/server.rs`                |
 | Quality Loop (self-improvement)        | ✅     | `core/quality/quality_loop.rs`     |
 | Quality Reports (batch analysis)       | ✅     | `core/quality/quality_report.rs`   |
+| Release DMG smoke gate                 | ✅     | `.github/workflows/release.yml`    |
 | CodeScribe Core separation             | ✅     | `core/`                            |
 | Tray app with submenus                 | ✅     | `app/ui/tray/`                     |
 
@@ -87,7 +88,7 @@
 | ~~Split voice_chat_ui.rs (<1000 LOC)~~ | ✅ Done  | 4 modules created          |
 | ~~Split controller.rs (<1000 LOC)~~    | ✅ Done  | 4 modules created          |
 | ~~Move Settings to overlay~~           | ✅ Done  | Removed from tray menu     |
-| Update lexicon (Roost→Rust, etc.)      | CRITICAL | `assets/programming.jsonl` |
+| ~~Update lexicon (Roost→Rust, etc.)~~  | ✅ Done  | `assets/programming.jsonl` |
 
 ---
 
@@ -95,9 +96,9 @@
 
 | Metric                | Value                |
 | --------------------- | -------------------- |
-| Total Rust LOC        | ~15,000              |
-| codescribe-core       | ~8,000 LOC           |
-| codescribe (daemon)   | ~7,000 LOC           |
+| Total Rust LOC        | ~81,000              |
+| codescribe-core       | ~38,500 LOC          |
+| codescribe (app)      | ~32,600 LOC          |
 | Binary size (release) | ~900 MB (with model) |
 | Model size (embedded) | ~888 MB              |
 
