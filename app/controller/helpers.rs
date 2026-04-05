@@ -6,8 +6,10 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::config::Config;
+use codescribe_core::demux::{DemuxEvent, StreamingTagParser};
 
 /// Global flag for current session mode.
 /// true = assistive (chat UI), false = non-assistive (simple transcription overlay)
@@ -82,15 +84,19 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
             let use_streaming = true;
             let streamed_any_delta = Arc::new(AtomicBool::new(false));
 
-            let delta_callback = if use_streaming {
+            let response_router = if use_streaming {
                 let streamed_any_delta = Arc::clone(&streamed_any_delta);
-                Some(Arc::new(move |delta: &str| {
-                    streamed_any_delta.store(true, Ordering::SeqCst);
+                let on_visible_text = Arc::new(move |delta: &str| {
+                    if !delta.trim().is_empty() {
+                        streamed_any_delta.store(true, Ordering::SeqCst);
+                    }
                     crate::voice_chat_ui::append_voice_chat_assistant_delta(delta);
-                }) as Arc<dyn Fn(&str) + Send + Sync>)
+                }) as Arc<dyn Fn(&str) + Send + Sync>;
+                Some(AssistiveResponseRouter::new(on_visible_text, true))
             } else {
                 None
             };
+            let delta_callback = response_router.as_ref().map(|router| router.callback());
 
             let result = crate::ai_formatting::format_text_with_status_channels(
                 &text,
@@ -100,6 +106,10 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
                 None,
             )
             .await;
+
+            if let Some(router) = response_router.as_ref() {
+                router.flush();
+            }
 
             match result.status {
                 crate::ai_formatting::AiFormatStatus::Applied => {
@@ -140,7 +150,129 @@ pub fn raw_save_enabled() -> bool {
 use chrono::SecondsFormat;
 use codescribe_core::ipc::{EngineEventWire, IpcEvent, IpcEventPayload};
 use codescribe_core::pipeline::contracts::{EngineEvent, EventSink};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AssistiveStreamEvents {
+    visible_text: String,
+    spoken_segments: Vec<String>,
+}
+
+fn collect_assistive_stream_events(events: Vec<DemuxEvent>) -> AssistiveStreamEvents {
+    let mut collected = AssistiveStreamEvents::default();
+
+    for event in events {
+        match event {
+            DemuxEvent::Text(text) => collected.visible_text.push_str(&text),
+            DemuxEvent::Speak(text) => {
+                collected.visible_text.push_str(&text);
+                if !text.trim().is_empty() {
+                    collected.spoken_segments.push(text);
+                }
+            }
+            DemuxEvent::Tool { .. } | DemuxEvent::Partial(_) => {}
+        }
+    }
+
+    collected
+}
+
+fn assistive_tts_available() -> bool {
+    codescribe_core::tts::embedded::is_embedded_available()
+        || codescribe_core::tts::get_model_path().is_ok()
+}
+
+pub(crate) struct AssistiveResponseRouter {
+    parser: Arc<StdMutex<StreamingTagParser>>,
+    on_visible_text: Arc<dyn Fn(&str) + Send + Sync>,
+    speech_tx: Option<mpsc::UnboundedSender<String>>,
+}
+
+impl AssistiveResponseRouter {
+    pub(crate) fn new(on_visible_text: Arc<dyn Fn(&str) + Send + Sync>, enable_tts: bool) -> Self {
+        let speech_tx = if enable_tts && assistive_tts_available() {
+            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+            tokio::spawn(async move {
+                while let Some(chunk) = rx.recv().await {
+                    let text = chunk.trim().to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+
+                    match tokio::task::spawn_blocking(move || codescribe_core::tts::play(&text))
+                        .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => warn!("Assistive TTS playback failed: {}", error),
+                        Err(error) => warn!("Assistive TTS task join failed: {}", error),
+                    }
+                }
+            });
+            Some(tx)
+        } else {
+            if enable_tts {
+                warn!("Assistive TTS routing disabled: local TTS model is unavailable");
+            }
+            None
+        };
+
+        Self {
+            parser: Arc::new(StdMutex::new(StreamingTagParser::new())),
+            on_visible_text,
+            speech_tx,
+        }
+    }
+
+    fn dispatch(&self, events: Vec<DemuxEvent>) {
+        let collected = collect_assistive_stream_events(events);
+
+        if !collected.visible_text.is_empty() {
+            (self.on_visible_text)(&collected.visible_text);
+        }
+
+        if let Some(tx) = &self.speech_tx {
+            for segment in collected.spoken_segments {
+                if tx.send(segment).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn callback(&self) -> crate::ai_formatting::AiStreamCallback {
+        let parser = Arc::clone(&self.parser);
+        let on_visible_text = Arc::clone(&self.on_visible_text);
+        let speech_tx = self.speech_tx.clone();
+
+        Arc::new(move |chunk: &str| {
+            let events = {
+                let mut parser = parser.lock().unwrap_or_else(|e| e.into_inner());
+                parser.feed(chunk)
+            };
+            let collected = collect_assistive_stream_events(events);
+
+            if !collected.visible_text.is_empty() {
+                on_visible_text(&collected.visible_text);
+            }
+
+            if let Some(tx) = &speech_tx {
+                for segment in collected.spoken_segments {
+                    if tx.send(segment).is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    pub(crate) fn flush(&self) {
+        let events = {
+            let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
+            parser.flush()
+        };
+        self.dispatch(events);
+    }
+}
 
 /// Session-level engine stats snapshot used by controller decisions.
 #[derive(Debug, Clone, Default)]
@@ -324,5 +456,45 @@ mod tests {
         let snapshot = snapshot_session_telemetry(&shared);
         assert!(snapshot.no_speech_reason.is_none());
         assert!(snapshot.stats.is_none());
+    }
+
+    #[test]
+    fn test_collect_assistive_stream_events_keeps_visible_order_and_spoken_segments() {
+        let collected = collect_assistive_stream_events(vec![
+            DemuxEvent::Text("Ala ".to_string()),
+            DemuxEvent::Speak("ma kota".to_string()),
+            DemuxEvent::Tool {
+                name: "ignored".to_string(),
+                args: "{}".to_string(),
+            },
+            DemuxEvent::Text(".".to_string()),
+        ]);
+
+        assert_eq!(collected.visible_text, "Ala ma kota.");
+        assert_eq!(collected.spoken_segments, vec!["ma kota".to_string()]);
+    }
+
+    #[test]
+    fn test_assistive_response_router_flushes_split_speak_tag() {
+        let visible = Arc::new(StdMutex::new(String::new()));
+        let on_visible_text = {
+            let visible = Arc::clone(&visible);
+            Arc::new(move |delta: &str| {
+                let mut guard = visible.lock().unwrap_or_else(|e| e.into_inner());
+                guard.push_str(delta);
+            }) as Arc<dyn Fn(&str) + Send + Sync>
+        };
+        let router = AssistiveResponseRouter::new(on_visible_text, false);
+        let callback = router.callback();
+
+        callback("<speak>To jest");
+        callback(" test");
+        assert_eq!(*visible.lock().unwrap_or_else(|e| e.into_inner()), "");
+
+        router.flush();
+        assert_eq!(
+            *visible.lock().unwrap_or_else(|e| e.into_inner()),
+            "To jest test"
+        );
     }
 }

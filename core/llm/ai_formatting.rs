@@ -28,6 +28,7 @@ use std::time::Duration;
 use tracing::{debug, info, trace, warn};
 
 use super::responses_streaming_manager::{ResponsesStreamingManager, StreamCallbacks};
+use crate::demux::{DemuxEvent, StreamingTagParser};
 
 /// HTTP client for AI providers
 static AI_CLIENT: OnceLock<Client> = OnceLock::new();
@@ -80,6 +81,15 @@ const DEFAULT_AI_CLIENT_TIMEOUT_MS: u64 = 90_000;
 const DEFAULT_AI_CONNECT_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_AI_POOL_IDLE_TIMEOUT_MS: u64 = 90_000;
 const DEFAULT_AI_TCP_KEEPALIVE_MS: u64 = 30_000;
+const ASSISTIVE_SPEAK_TAG_INSTRUCTION: &str = r#"
+
+VOICE OUTPUT CONTRACT:
+- Wrap spoken assistant text in flat <speak>...</speak> tags so the client can route it to local TTS.
+- Keep the spoken text itself natural and concise.
+- Do not nest tags.
+- Do not put Markdown fences, tool JSON, or metadata inside <speak>.
+- Keep non-spoken metadata outside <speak>.
+"#;
 
 #[derive(Debug, Clone, Copy)]
 struct RetryPolicy {
@@ -613,6 +623,28 @@ fn extract_output_channels(output: &[OutputItem]) -> ProviderOutput {
     }
 }
 
+fn supports_assistive_tts() -> bool {
+    crate::tts::embedded::is_embedded_available() || crate::tts::get_model_path().is_ok()
+}
+
+fn sanitize_assistant_text(text: &str) -> String {
+    if !text.contains('<') {
+        return text.trim().to_string();
+    }
+
+    let mut parser = StreamingTagParser::new();
+    let mut cleaned = String::new();
+
+    for event in parser.feed(text).into_iter().chain(parser.flush()) {
+        match event {
+            DemuxEvent::Text(chunk) | DemuxEvent::Speak(chunk) => cleaned.push_str(&chunk),
+            DemuxEvent::Tool { .. } | DemuxEvent::Partial(_) => {}
+        }
+    }
+
+    cleaned.trim().to_string()
+}
+
 // No token limits - let the API decide. Tokens are cheap, lost notes are not.
 
 /// Check if output is effectively the same as input (raw-like)
@@ -856,6 +888,9 @@ pub async fn format_text_with_status_channels(
             cleaned.len()
         );
         // Select prompt based on mode
+        let request_speak_tags =
+            assistive && on_assistant_delta.is_some() && supports_assistive_tts();
+
         let mut system_prompt = if assistive {
             if attempt == 0 {
                 let model = get_assistive_model().unwrap_or_else(|_| "unknown".into());
@@ -869,6 +904,10 @@ pub async fn format_text_with_status_channels(
             }
             crate::config::prompts::get_formatting_prompt()
         };
+
+        if request_speak_tags {
+            system_prompt.push_str(ASSISTIVE_SPEAK_TAG_INSTRUCTION);
+        }
 
         // If retrying, wait and strengthen instructions
         if attempt > 0 {
@@ -987,7 +1026,7 @@ pub async fn format_text_with_status_channels(
         };
 
         if let Some(output) = result_opt {
-            let formatted = output.assistant_text;
+            let formatted = sanitize_assistant_text(&output.assistant_text);
             let reasoning_text = output.reasoning_text;
 
             // Detect AI refusal responses (OpenAI content policy)
@@ -1486,5 +1525,20 @@ mod tests {
             remove_simple_repetitions("normalny tekst bez powtórzeń"),
             "normalny tekst bez powtórzeń"
         );
+    }
+
+    #[test]
+    fn test_sanitize_assistant_text_strips_speak_tags_but_keeps_content() {
+        let text = "Hej <speak>To przeczytaj na głos.</speak> I jeszcze to.";
+        assert_eq!(
+            sanitize_assistant_text(text),
+            "Hej To przeczytaj na głos. I jeszcze to."
+        );
+    }
+
+    #[test]
+    fn test_sanitize_assistant_text_drops_tool_payloads() {
+        let text = "Start <tool name=\"save\">{\"path\":\"/tmp/x\"}</tool> koniec";
+        assert_eq!(sanitize_assistant_text(text), "Start  koniec");
     }
 }

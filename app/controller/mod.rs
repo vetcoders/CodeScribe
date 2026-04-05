@@ -59,8 +59,8 @@ use codescribe_core::tts::AudioPlayer;
 use crate::voice_chat_ui::ConversationModeState;
 
 use helpers::{
-    SharedSessionTelemetry, new_session_telemetry, raw_save_enabled, reset_session_telemetry,
-    setup_voice_chat_send_callback, snapshot_session_telemetry,
+    AssistiveResponseRouter, SharedSessionTelemetry, new_session_telemetry, raw_save_enabled,
+    reset_session_telemetry, setup_voice_chat_send_callback, snapshot_session_telemetry,
 };
 use types::ValidatedAudioPath;
 
@@ -2481,27 +2481,30 @@ impl RecordingController {
             let streamed_any_delta = Arc::new(AtomicBool::new(false));
             let reasoning_stage_seen = Arc::new(AtomicBool::new(false));
             let response_stage_seen = Arc::new(AtomicBool::new(false));
-            let delta_callback = if use_streaming && chat_active {
+            let response_router = if use_streaming && chat_active {
                 let needs_prefix = append_mode && assistant_needs_separator;
                 let prefix_sent = Arc::new(AtomicBool::new(false));
                 let assistant_has_text = self.toggle_assistant_has_text.clone();
                 let streamed_any_delta = Arc::clone(&streamed_any_delta);
                 let response_stage_seen = Arc::clone(&response_stage_seen);
-                Some(Arc::new(move |text: &str| {
+                let on_visible_text = Arc::new(move |text: &str| {
                     if needs_prefix && !prefix_sent.swap(true, Ordering::SeqCst) {
                         crate::voice_chat_ui::append_voice_chat_assistant_delta("\n\n");
                     }
-                    if !text.trim().is_empty() && !response_stage_seen.swap(true, Ordering::SeqCst)
-                    {
-                        crate::voice_chat_ui::update_voice_chat_status("Answering… (80%)");
+                    if !text.trim().is_empty() {
+                        streamed_any_delta.store(true, Ordering::SeqCst);
+                        if !response_stage_seen.swap(true, Ordering::SeqCst) {
+                            crate::voice_chat_ui::update_voice_chat_status("Answering… (80%)");
+                        }
                     }
-                    streamed_any_delta.store(true, Ordering::SeqCst);
                     crate::voice_chat_ui::append_voice_chat_assistant_delta(text);
                     assistant_has_text.store(true, Ordering::SeqCst);
-                }) as Arc<dyn Fn(&str) + Send + Sync>)
+                }) as Arc<dyn Fn(&str) + Send + Sync>;
+                Some(AssistiveResponseRouter::new(on_visible_text, true))
             } else {
                 None
             };
+            let delta_callback = response_router.as_ref().map(|router| router.callback());
             let reasoning_callback = if use_streaming && chat_active {
                 let reasoning_stage_seen = Arc::clone(&reasoning_stage_seen);
                 Some(Arc::new(move |text: &str| {
@@ -2522,6 +2525,9 @@ impl RecordingController {
                 reasoning_callback,
             )
             .await;
+            if let Some(router) = response_router.as_ref() {
+                router.flush();
+            }
             let kind = match result.status {
                 crate::ai_formatting::AiFormatStatus::Applied => {
                     if chat_active {
