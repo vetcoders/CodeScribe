@@ -43,6 +43,7 @@ path = "bin/codescribe_loop.rs"
 
 [lib]
 path = "app/lib.rs"
+doctest = false
 
 [features]
 default = ["liquid_glass"]
