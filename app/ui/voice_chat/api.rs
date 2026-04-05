@@ -9,7 +9,7 @@ use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use chrono::{DateTime, Local};
 
@@ -223,11 +223,6 @@ pub fn is_auto_send_enabled() -> bool {
 pub fn is_voice_chat_overlay_visible() -> bool {
     let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.window.is_some()
-}
-
-/// Reset the auto-hide timer (placeholder for future implementation)
-pub fn reset_voice_chat_activity() {
-    debug!("reset_voice_chat_activity called");
 }
 
 /// Hide the voice chat overlay window

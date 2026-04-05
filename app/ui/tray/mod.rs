@@ -9,7 +9,7 @@
 //! - `icons` - Icon rendering and status glyph management
 //! - `state` - Cross-thread channels for status updates
 //! - `menu` - Menu building logic
-//! - `submenus` - Submenu building functions
+//! - submenu sections live in `menu`
 //! - `handlers` - Menu action handlers
 //!
 //! ## Menu Structure
@@ -21,8 +21,7 @@
 //! Open history...
 //! Copy last transcript
 //! ─────────────
-//! Hotkeys ▸
-//! Prompts ▸
+//! Edit prompts… ▸
 //! Notes ▸
 //! Diagnostics ▸
 //! ─────────────

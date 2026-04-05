@@ -59,6 +59,7 @@ CONFIG_AUDIT.md
 /.claude
 nohup.out
 nohup.out.backup
+pico.save
 /.ai
 /.junie
 /.ai-archive
