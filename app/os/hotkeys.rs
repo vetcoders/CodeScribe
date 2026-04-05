@@ -3,7 +3,7 @@
 // Purpose: Captures global hotkeys on macOS using low-level CGEventTap
 //
 // Detects modifier-only keypresses:
-// - Hold Ctrl (or configured combo): Start recording while held, stop when released
+// - Hold Fn (or configured combo): Start recording while held, stop when released
 // - Double-tap Left Option: Toggle recording on/off (normal, AI formatting)
 // - Double-tap Right Option: Toggle assistive hands-off (AI augmentation)
 // - Double-tap Ctrl: Toggle recording on/off (raw, auto-paste)
@@ -14,7 +14,8 @@
 // not keyboard layout or key translation.
 //
 // HoldMods options:
-// - Ctrl: Ctrl key only (default)
+// - Fn: Fn/Globe key only (default)
+// - Ctrl: Ctrl key only
 // - CtrlAlt: Ctrl+Option together
 // - CtrlShift: Ctrl+Shift together
 // - CtrlCmd: Ctrl+Command together

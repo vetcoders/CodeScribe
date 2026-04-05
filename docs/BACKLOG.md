@@ -26,6 +26,7 @@
 | Settings window (Bootstrap)   | ✅     | `app/ui/bootstrap/`             |
 | Auto-send toggle              | ✅     | `app/ui/voice_chat/state.rs`    |
 | Collapsible right panel       | ✅     | `app/ui/voice_chat/mod.rs`      |
+| Attachments in chat           | ✅     | `app/ui/voice_chat/`, `core/attachment.rs` |
 
 ### Infrastructure
 
@@ -55,12 +56,16 @@
   - richer guided testing / comparison tools
 - **Priority**: High (this is the product-facing GUI we already ship)
 
-### 2. TTS Integration
+### 2. Assistive Response TTS Routing
 
-- **Status**: 📋 Not started
-- **Goal**: Text-to-Speech for assistive mode responses
+- **Status**: 🚧 Partial foundations shipped
+- **Goal**: Reuse the existing local TTS stack for assistive response playback instead of adding a second voice path
 - **Integration**: Via Libraxis Qube Protocol — `<tts>` tags in SSE stream
-- **Dependency**: Requires Libraxis Qube Protocol implementation
+- **Current truth**:
+  - local TTS engine + embedding surface already exist in `core/tts/`
+  - conversation mode already plays model audio through speaker
+  - assistive Responses/SSE path still does not route assistant text into the TTS stack
+- **Dependency**: Requires routing work, not a new TTS foundation
 
 ### 3. Libraxis Qube Protocol
 
@@ -72,12 +77,14 @@
   - Audio streaming over WebSocket
 - **Priority**: Low (current REST + SSE sufficient)
 
-### 4. Attachments in Chat
+### 4. Creator Studio Expansion
 
-- **Status**: 📋 Planned
-- **Goal**: Attach files to voice commands
-- **UI**: [📎] button in chat overlay
-- **Backend**: Multipart upload to AI provider
+- **Status**: 🚧 In progress
+- **Goal**: Keep tightening the native Creator / Voice Lab flow around guided testing and daily tuning
+- **Focus**:
+  - richer comparison workflows in Voice Lab
+  - sharper setup-to-runtime handoff inside the native shell
+  - no second desktop shell and no parallel settings surface
 
 ---
 

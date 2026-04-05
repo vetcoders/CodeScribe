@@ -34,7 +34,6 @@ flowchart TB
 
     CGEventTap --> HoldGesture
     CGEventTap --> ToggleGesture
-    CGEventTap --> ConvGesture
 
     HoldGesture --> HoldEvent
     ToggleGesture --> ToggleEvent
@@ -52,7 +51,7 @@ flowchart TB
 
 **Trigger:** Press and hold configured modifier combo
 **Behavior:** Recording starts on key down, stops on key up
-**VAD:** DISABLED - user has 100% control via key release
+**VAD:** Auto-stop is disabled, but live segmentation still runs inside the streaming pipeline.
 
 | Config                 | Keys         | Use Case                         |
 | ---------------------- | ------------ | -------------------------------- |
@@ -99,9 +98,10 @@ HotkeyInput { key_type: Toggle, action: Press, assistive: true }  // Right Optio
 
 ### 3. Conversation Mode (Moshi Full‑Duplex) — experimental
 
-Conversation mode exists in the controller, but **has no default hotkey binding** in the current release.
-If you wire a custom trigger, it runs full‑duplex audio (mic → Moshi → speaker) and uses Moshi’s internal
-turn‑taking. Requires Moshi models at `~/.codescribe/models/moshiko-q8/`.
+Conversation mode exists in the controller, but the shipped hotkey detector **does not emit a default conversation gesture**.
+To use it today, you need code-level wiring that sends `HotkeyType::Conversation`. When triggered, it runs
+full-duplex audio (mic → Moshi → speaker) and uses Moshi's internal turn-taking. Requires Moshi models at
+`~/.codescribe/models/moshiko-q8/`.
 
 ---
 
@@ -113,7 +113,7 @@ stateDiagram-v2
 
     IDLE --> REC_HOLD : Hold Down<br/>(Fn pressed)
     IDLE --> REC_TOGGLE : Toggle<br/>(Double-tap Option)
-    IDLE --> CONVERSATION : Conversation Down<br/>(custom binding)
+    IDLE --> CONVERSATION : Conversation Down<br/>(custom code-level trigger)
 
     REC_HOLD --> BUSY : Hold Up<br/>(Fn released)
     REC_HOLD --> REC_HOLD : Shift pressed<br/>(upgrade to assistive)
@@ -125,8 +125,9 @@ stateDiagram-v2
     BUSY --> IDLE : Processing complete<br/>(paste to app)
 
     note right of REC_HOLD
-        VAD: DISABLED
-        User controls via key release
+        Auto-stop: OFF
+        Internal VAD segmentation stays on
+        User controls session via key release
     end note
 
     note right of REC_TOGGLE
@@ -143,7 +144,7 @@ stateDiagram-v2
 **States:**
 
 - `IDLE` - Waiting for hotkey
-- `REC_HOLD` - Recording (hold mode, no VAD)
+- `REC_HOLD` - Recording (hold mode, manual stop; VAD still segments internally)
 - `REC_TOGGLE` - Recording (toggle mode, VAD active)
 - `BUSY` - Processing transcription/AI formatting
 - `CONVERSATION` - Moshi full-duplex active
@@ -155,8 +156,9 @@ stateDiagram-v2
 ```mermaid
 flowchart LR
     subgraph HoldMode["🎯 HOLD Mode"]
-        H_VAD["VAD: ❌ OFF"]
-        H_Control["User controls via<br/>key release"]
+        H_VAD["Auto-stop: ❌ OFF"]
+        H_Seg["Segmentation: ✅ ON"]
+        H_Control["User controls session via<br/>key release"]
     end
 
     subgraph ToggleMode["👐 TOGGLE Mode"]
@@ -170,7 +172,8 @@ flowchart LR
         C_Moshi["Moshi turn-taking"]
     end
 
-    H_VAD --> H_Control
+    H_VAD --> H_Seg
+    H_Seg --> H_Control
     T_VAD --> T_Silero
     T_Silero --> T_Config
     C_VAD --> C_Moshi
@@ -180,11 +183,11 @@ flowchart LR
     style C_VAD fill:#cce5ff
 ```
 
-| Mode             | VAD Segmentation | Reason                                                             |
-| ---------------- | ---------------- | ------------------------------------------------------------------ |
-| **Hold**         | ✅ YES           | VAD segments utterances; user controls start/stop via key release. |
-| **Toggle**       | ✅ YES           | Hands-free mode uses utterance boundaries (no stop).               |
-| **Conversation** | Internal         | Moshi handles turn-taking internally.                              |
+| Mode             | Auto-stop | VAD Segmentation | Reason                                                                       |
+| ---------------- | --------- | ---------------- | ---------------------------------------------------------------------------- |
+| **Hold**         | ❌ No     | ✅ Yes           | VAD still segments utterances, but the user owns session stop via key release. |
+| **Toggle**       | ✅ Yes    | ✅ Yes           | Hands-free mode uses utterance boundaries without stopping the recorder.      |
+| **Conversation** | Internal  | Internal         | Moshi handles turn-taking internally.                                        |
 
 ---
 
@@ -287,8 +290,8 @@ sequenceDiagram
 
 ### Conversation Mode (Moshi Full‑Duplex)
 
-Conversation mode is available in the controller but **not bound to a default hotkey** in the current release.
-Wire it manually if you need full‑duplex audio (mic → Moshi → speaker).
+Conversation mode is available in the controller, but the shipped hotkey detector does not bind it by default.
+Wire it in code if you need full-duplex audio (mic → Moshi → speaker).
 
 ---
 
