@@ -64,7 +64,7 @@ flowchart TB
 
 > **Status:** current release (see `Cargo.toml`) — embedded local STT, event-based live preview, tiered settings (`settings.json` + Keychain + optional `.env`), and quality-loop tooling.
 
-See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md) | [`docs/BACKLOG.md`](docs/BACKLOG.md) | [`docs/ARCHITECTURE_VISION.md`](docs/ARCHITECTURE_VISION.md)
+See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md) | [`docs/BACKLOG.md`](docs/BACKLOG.md) | [`docs/future/ARCHITECTURE_VISION.md`](docs/future/ARCHITECTURE_VISION.md)
 
 ## API Provider
 
@@ -451,31 +451,34 @@ Grant permissions in System Settings > Privacy & Security when prompted.
 - [x] Local Whisper STT (Metal GPU)
 - [x] Embedded model in binary (~888MB)
 - [x] Global hotkeys (CGEventTap)
+- [x] Three recording modes (Dictation / Formatting / Assistive)
+- [x] Voice Activity Detection (VAD) auto-stop on silence
+- [x] Live transcription overlay
 - [x] AI formatting (Responses API)
 - [x] Provider separation (formatting/assistive)
 - [x] Conversation chaining (previous_response_id)
+- [x] Assistive response TTS routing
 - [x] Tray app with submenus
+- [x] Settings / Creator window in the native overlay shell
 - [x] CLI transcribe command
 - [x] History with slug filenames
 - [x] Keep Audio toggle
 - [x] CodeScribe Core separation (`codescribe-core` crate)
 - [x] Quality Loop & Quality Report CLI tools
+- [x] Release DMG smoke gate
 
 ### In Progress
 
-- [ ] Voice Activity Detection (VAD) for auto-stop — _implemented but not integrated_
-- [ ] Overlay text preview — _code exists, not fully integrated_
+- [ ] Native Creator Studio / Voice Lab expansion
+- [ ] Richer guided testing and comparison flows inside the native shell
 
 ### Planned
 
-- [ ] Hands-off mode with VAD + Overlay integration
-- [ ] TTS integration for assistive mode
 - [ ] Libraxis Qube Protocol (WebSocket streaming architecture)
-- [ ] Deepen native Creator Studio with richer workflow surfaces
 - [ ] More languages for prompts
-- [ ] DMG distribution with notarization
+- [ ] Fully notarized release distribution
 
-See [`docs/BACKLOG.md`](docs/BACKLOG.md) for detailed backlog and [`docs/ARCHITECTURE_VISION.md`](docs/ARCHITECTURE_VISION.md) for future architecture.
+See [`docs/BACKLOG.md`](docs/BACKLOG.md) for detailed backlog and [`docs/future/ARCHITECTURE_VISION.md`](docs/future/ARCHITECTURE_VISION.md) for future architecture.
 
 ## License
 
