@@ -789,6 +789,19 @@ mod tests {
     }
 
     #[test]
+    fn test_lexicon_rewrites_rust_whisper_variants() {
+        let mut processor = StreamPostProcessor::new();
+        let input = "Whisper czasem myli Rust jako roost, Roosta, ruska albo rusek.";
+        let output = processor
+            .process_utterance(input)
+            .expect("expected utterance output");
+        assert_eq!(
+            output,
+            "Whisper czasem myli Rust jako Rust, Rust, Rust albo Rust."
+        );
+    }
+
+    #[test]
     fn test_cleanup_and_whitespace() {
         let mut processor = StreamPostProcessor::new();
         let input = "To jest to jest to jest   bardzo  wazny \n test systemu.";

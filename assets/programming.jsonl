@@ -34,7 +34,7 @@
 {"term": "REST", "mispronunciations": ["rest", "ar i est ti", "rast"], "category": "net"}
 {"term": "React", "mispronunciations": ["riakt"], "category": "tech"}
 {"term": "Redis", "mispronunciations": ["redis"], "category": "tech"}
-{"term": "Rust", "mispronunciations": ["rast"], "category": "tech"}
+{"term": "Rust", "mispronunciations": ["rast", "rust", "wraz", "roost", "roosta", "ruska", "rusek"], "category": "tech"}
 {"term": "SQL", "mispronunciations": ["es kju el", "sikłel"], "category": "tech"}
 {"term": "SSE", "mispronunciations": ["es es i", "eses i"], "category": "net"}
 {"term": "Serde", "mispronunciations": ["serd", "ser-de", "serde"], "category": "rust"}
@@ -122,7 +122,6 @@
 {"term": "invoke hell", "mispronunciations": ["invox hell", "invoks hel", "invox hel"], "category": "infra"}
 {"term": "Clippy", "mispronunciations": ["trippy", "klippy", "klipi"], "category": "rust"}
 {"term": "CORS", "mispronunciations": ["course", "kors", "cors"], "category": "web"}
-{"term": "Rust", "mispronunciations": ["wraz", "rast", "rust"], "category": "lang"}
 {"term": "ConfigMap", "mispronunciations": ["config map", "configmapa", "config mapa"], "category": "k8s"}
 {"term": "hook", "mispronunciations": ["hug", "huk", "hok"], "category": "react"}
 {"term": "feature branch", "mispronunciations": ["fetcher branch", "ficzer branch", "ficzer brancz"], "category": "git"}
