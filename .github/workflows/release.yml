@@ -27,6 +27,9 @@ jobs:
       - name: Build DMG artifact
         run: make dmg
 
+      - name: Smoke test DMG artifact
+        run: make smoke-dmg
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:

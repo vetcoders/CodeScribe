@@ -6,7 +6,7 @@
         bump bump-patch bump-minor bump-major version \
         lint format test test-quick test-e2e test-e2e-real test-sse test-formatting test-all \
         demo demo-raw demo-assistive check fix clean help \
-        dmg dmg-signed release-full notarize download-model download-e5 download-embedder ensure-models \
+        dmg dmg-signed smoke-dmg release-full notarize download-model download-e5 download-embedder ensure-models \
         hooks
 
 SHELL := /bin/bash
@@ -364,6 +364,7 @@ help:
 	@echo "Release & Distribution:"
 	@echo "  make dmg             Build DMG (ad-hoc signed)"
 	@echo "  make dmg-signed      Build DMG (Developer ID signed)"
+	@echo "  make smoke-dmg       Mount and validate the latest DMG artifact"
 	@echo "  make release-full    Build + sign + notarize DMG (release-ready)"
 	@echo "  make notarize        Notarize DMG with Apple"
 	@echo "  make download-model  Download Whisper model from HF"
@@ -408,6 +409,9 @@ dmg:
 
 dmg-signed:
 	@./scripts/build-dmg.sh --sign
+
+smoke-dmg:
+	@./scripts/smoke-dmg.sh "$(DMG)"
 
 release-full:
 	@./scripts/build-dmg.sh --sign --notarize
