@@ -2131,18 +2131,34 @@ impl RecordingController {
         let mut raw_text_opt = None;
         let mut cloud_text_opt = None;
         let mut cloud_handle: Option<JoinHandle<Result<String>>> = None;
+        let cloud_preview_sink = if use_local_stt {
+            None
+        } else {
+            Some(codescribe_core::pipeline::sinks::from_callback(
+                helpers::route_transcription_delta,
+            ))
+        };
 
         // Start cloud transcription in parallel (for early mismatch detection)
         if let Some((cloud_endpoint, cloud_api_key)) = cloud_config {
             if let Some(path) = &audio_path {
                 let cloud_path = path.as_path().to_path_buf();
                 let cloud_language = language_opt.map(str::to_string);
+                let cloud_preview_sink = cloud_preview_sink.clone();
+                if !use_local_stt {
+                    if chat_active {
+                        crate::voice_chat_ui::update_voice_chat_status("Transcribing… (cloud)");
+                    } else {
+                        crate::ui::overlay::update_transcription_status("Transcribing… (cloud)");
+                    }
+                }
                 cloud_handle = Some(tokio::spawn(async move {
-                    crate::client::transcribe_cloud(
+                    crate::client::transcribe_cloud_with_preview_sink(
                         &cloud_path,
                         cloud_language.as_deref(),
                         &cloud_endpoint,
                         &cloud_api_key,
+                        cloud_preview_sink,
                     )
                     .await
                 }));

@@ -12,12 +12,14 @@ use reqwest::Client;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
+
+use crate::pipeline::contracts::{DeltaSink, TranscriptDelta};
 
 /// Canonicalize path before async file operations (defense-in-depth).
 /// Uses sync std::fs::canonicalize which is fast, then async open.
@@ -81,6 +83,37 @@ enum NdjsonLine<'a> {
     Payload(&'a str),
     Done,
     Ignore,
+}
+
+struct PreviewForwarder {
+    sink: Arc<dyn DeltaSink>,
+    last_text: String,
+}
+
+impl PreviewForwarder {
+    fn new(sink: Arc<dyn DeltaSink>) -> Self {
+        Self {
+            sink,
+            last_text: String::new(),
+        }
+    }
+
+    fn on_partial(&mut self, text: &str) {
+        self.emit_diff(text);
+    }
+
+    fn on_final(&mut self, text: &str) {
+        self.emit_diff(text);
+        self.last_text.clear();
+    }
+
+    fn emit_diff(&mut self, next_text: &str) {
+        if let Some(delta) = TranscriptDelta::from_diff(&self.last_text, next_text) {
+            self.sink.apply(&delta);
+        }
+        self.last_text.clear();
+        self.last_text.push_str(next_text);
+    }
 }
 
 /// Audio validation error type for pre-flight checks
@@ -237,9 +270,23 @@ pub async fn transcribe_cloud(
     endpoint_url: &str,
     api_key: &str,
 ) -> Result<String> {
+    transcribe_cloud_with_preview_sink(path, language, endpoint_url, api_key, None).await
+}
+
+/// Transcribe audio file and optionally stream preview deltas into a sink.
+///
+/// The preview sink is honored only by streaming cloud protocols (WebSocket and
+/// `:stream` NDJSON endpoints). Multipart uploads still return only the final text.
+pub async fn transcribe_cloud_with_preview_sink(
+    path: &Path,
+    language: Option<&str>,
+    endpoint_url: &str,
+    api_key: &str,
+    preview_sink: Option<Arc<dyn DeltaSink>>,
+) -> Result<String> {
     info!("transcribe_cloud() START for path: {:?}", path);
 
-    transcribe_external(path, language, endpoint_url, api_key).await
+    transcribe_external(path, language, endpoint_url, api_key, preview_sink).await
 }
 
 /// Check if an error is retryable (network issues, timeouts, server errors)
@@ -288,6 +335,7 @@ async fn transcribe_external(
     language: Option<&str>,
     endpoint_url: &str,
     api_key: &str,
+    preview_sink: Option<Arc<dyn DeltaSink>>,
 ) -> Result<String> {
     info!("Using external STT endpoint: {}", endpoint_url);
 
@@ -317,10 +365,10 @@ async fn transcribe_external(
     // nosemgrep: javascript.lang.security.detect-insecure-websocket.detect-insecure-websocket
     if endpoint_url.starts_with("wss://") || endpoint_url.starts_with("ws://") {
         // WebSocket streaming
-        transcribe_websocket(endpoint_url, api_key, buffer, lang).await
+        transcribe_websocket(endpoint_url, api_key, buffer, lang, preview_sink).await
     } else if endpoint_url.ends_with(":stream") {
         // NDJSON streaming HTTP
-        transcribe_ndjson(endpoint_url, api_key, buffer, lang).await
+        transcribe_ndjson(endpoint_url, api_key, buffer, lang, preview_sink).await
     } else {
         // OpenAI-compatible multipart upload
         let filename = path
@@ -348,8 +396,10 @@ async fn transcribe_websocket(
     api_key: &str,
     audio_data: Vec<u8>,
     language: &str,
+    preview_sink: Option<Arc<dyn DeltaSink>>,
 ) -> Result<String> {
     let start = Instant::now();
+    let mut preview_forwarder = preview_sink.map(PreviewForwarder::new);
     info!(
         "[WS STT] Connecting to {} ({} bytes, lang={})",
         url,
@@ -408,11 +458,16 @@ async fn transcribe_websocket(
                         partial_count += 1;
                         if let Some(t) = &resp.text {
                             debug!("[WS STT] partial #{}: {} chars", partial_count, t.len());
-                            // TODO: callback for real-time UI updates
+                            if let Some(forwarder) = preview_forwarder.as_mut() {
+                                forwarder.on_partial(t);
+                            }
                         }
                     }
                     "final" => {
                         if let Some(t) = resp.text {
+                            if let Some(forwarder) = preview_forwarder.as_mut() {
+                                forwarder.on_final(&t);
+                            }
                             final_text = t;
                             info!(
                                 "[WS STT] Final: {} chars after {} partials",
@@ -474,10 +529,12 @@ async fn transcribe_ndjson(
     api_key: &str,
     audio_data: Vec<u8>,
     language: &str,
+    preview_sink: Option<Arc<dyn DeltaSink>>,
 ) -> Result<String> {
     use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
     let start = Instant::now();
+    let mut preview_forwarder = preview_sink.map(PreviewForwarder::new);
 
     // Parse WAV header to extract sample rate and PCM data
     // WAV format: RIFF header (12 bytes) + fmt chunk (24+ bytes) + data chunk
@@ -577,14 +634,26 @@ async fn transcribe_ndjson(
         let bytes = chunk.context("Failed to read NDJSON chunk")?;
         buffer.extend_from_slice(&bytes);
 
-        done = process_ndjson_buffer(&mut buffer, &mut final_text, &mut partial_count, false)?;
+        done = process_ndjson_buffer(
+            &mut buffer,
+            &mut final_text,
+            &mut partial_count,
+            &mut preview_forwarder,
+            false,
+        )?;
         if done {
             break;
         }
     }
 
     if !done {
-        process_ndjson_buffer(&mut buffer, &mut final_text, &mut partial_count, true)?;
+        process_ndjson_buffer(
+            &mut buffer,
+            &mut final_text,
+            &mut partial_count,
+            &mut preview_forwarder,
+            true,
+        )?;
     }
 
     let duration_ms = start.elapsed().as_millis();
@@ -605,19 +674,25 @@ fn process_ndjson_buffer(
     buffer: &mut Vec<u8>,
     final_text: &mut String,
     partial_count: &mut u32,
+    preview_forwarder: &mut Option<PreviewForwarder>,
     flush_tail: bool,
 ) -> Result<bool> {
     while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
         let line: Vec<u8> = buffer.drain(..=pos).collect();
         let line_str = String::from_utf8_lossy(&line);
-        if process_ndjson_line(line_str.trim(), final_text, partial_count)? {
+        if process_ndjson_line(
+            line_str.trim(),
+            final_text,
+            partial_count,
+            preview_forwarder,
+        )? {
             return Ok(true);
         }
     }
 
     if flush_tail && !buffer.is_empty() {
         let tail = String::from_utf8_lossy(buffer);
-        let done = process_ndjson_line(tail.trim(), final_text, partial_count)?;
+        let done = process_ndjson_line(tail.trim(), final_text, partial_count, preview_forwarder)?;
         buffer.clear();
         return Ok(done);
     }
@@ -629,6 +704,7 @@ fn process_ndjson_line(
     line: &str,
     final_text: &mut String,
     partial_count: &mut u32,
+    preview_forwarder: &mut Option<PreviewForwarder>,
 ) -> Result<bool> {
     match classify_ndjson_line(line) {
         NdjsonLine::Done => {
@@ -645,6 +721,9 @@ fn process_ndjson_line(
 
                 if let Some(text) = chunk.text {
                     if chunk.is_final.unwrap_or(false) {
+                        if let Some(forwarder) = preview_forwarder.as_mut() {
+                            forwarder.on_final(&text);
+                        }
                         *final_text = text;
                         info!(
                             "[NDJSON STT] Final: {} chars after {} partials",
@@ -653,6 +732,9 @@ fn process_ndjson_line(
                         );
                     } else {
                         *partial_count += 1;
+                        if let Some(forwarder) = preview_forwarder.as_mut() {
+                            forwarder.on_partial(&text);
+                        }
                         debug!(
                             "[NDJSON STT] partial #{}: {} chars",
                             partial_count,
@@ -824,6 +906,8 @@ async fn transcribe_multipart_request(url: &str, api_key: &str, form: Form) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::sinks::CollectorSink;
+    use std::sync::Arc;
 
     #[test]
     fn test_validate_audio_empty() {
@@ -896,9 +980,15 @@ mod tests {
     fn test_process_ndjson_line_handles_sse_done_marker() {
         let mut final_text = String::new();
         let mut partial_count = 0;
+        let mut preview_forwarder = None;
 
-        let done = process_ndjson_line("data: [DONE]", &mut final_text, &mut partial_count)
-            .expect("done marker should parse");
+        let done = process_ndjson_line(
+            "data: [DONE]",
+            &mut final_text,
+            &mut partial_count,
+            &mut preview_forwarder,
+        )
+        .expect("done marker should parse");
 
         assert!(done);
         assert!(final_text.is_empty());
@@ -909,9 +999,15 @@ mod tests {
     fn test_process_ndjson_line_ignores_empty_sse_data() {
         let mut final_text = String::new();
         let mut partial_count = 0;
+        let mut preview_forwarder = None;
 
-        let done =
-            process_ndjson_line("data:   ", &mut final_text, &mut partial_count).expect("parse");
+        let done = process_ndjson_line(
+            "data:   ",
+            &mut final_text,
+            &mut partial_count,
+            &mut preview_forwarder,
+        )
+        .expect("parse");
 
         assert!(!done);
         assert!(final_text.is_empty());
@@ -922,11 +1018,13 @@ mod tests {
     fn test_process_ndjson_line_accepts_plain_ndjson_final_chunk() {
         let mut final_text = String::new();
         let mut partial_count = 2;
+        let mut preview_forwarder = None;
 
         let done = process_ndjson_line(
             r#"{"text":"hello world","is_final":true}"#,
             &mut final_text,
             &mut partial_count,
+            &mut preview_forwarder,
         )
         .expect("plain ndjson line should parse");
 
@@ -942,13 +1040,53 @@ mod tests {
                 .to_vec();
         let mut final_text = String::new();
         let mut partial_count = 0;
+        let mut preview_forwarder = None;
 
-        let done = process_ndjson_buffer(&mut buffer, &mut final_text, &mut partial_count, true)
-            .expect("buffer should parse");
+        let done = process_ndjson_buffer(
+            &mut buffer,
+            &mut final_text,
+            &mut partial_count,
+            &mut preview_forwarder,
+            true,
+        )
+        .expect("buffer should parse");
 
         assert!(!done);
         assert_eq!(partial_count, 1);
         assert_eq!(final_text, "final text");
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_preview_forwarder_emits_correction_delta() {
+        let collector = Arc::new(CollectorSink::new());
+        let sink = collector.clone() as Arc<dyn DeltaSink>;
+        let mut forwarder = PreviewForwarder::new(sink);
+
+        forwarder.on_partial("No dobra ziomeczku");
+        forwarder.on_partial("No dobra, ziomeczku");
+
+        let deltas = collector.collected();
+        assert_eq!(deltas.len(), 2);
+
+        let mut text = String::new();
+        for delta in deltas {
+            TranscriptDelta::from_raw(delta).apply(&mut text);
+        }
+        assert_eq!(text, "No dobra, ziomeczku");
+    }
+
+    #[test]
+    fn test_preview_forwarder_resets_after_final() {
+        let collector = Arc::new(CollectorSink::new());
+        let sink = collector.clone() as Arc<dyn DeltaSink>;
+        let mut forwarder = PreviewForwarder::new(sink);
+
+        forwarder.on_partial("hello");
+        forwarder.on_final("hello world");
+        forwarder.on_partial("bye");
+
+        let deltas = collector.collected();
+        assert_eq!(deltas, vec!["hello", " world", "bye"]);
     }
 }
