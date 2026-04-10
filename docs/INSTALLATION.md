@@ -99,9 +99,9 @@ flowchart TD
 WHISPER_LANGUAGE=pl              # pl | en | de | fr
 USE_LOCAL_STT=1                  # 1 = keep local transcript as committed result
 
-# Hotkeys (defaults)
-HOLD_MODS=fn                     # fn | ctrl | ctrl_alt | ctrl_shift | ctrl_cmd
-TOGGLE_TRIGGER=double_option     # double_option | double_lalt | double_ralt | none
+# Hotkeys timing / behavior
+# Per-mode bindings live in Settings -> Modes & Shortcuts (settings.json)
+HOLD_EXCLUSIVE=1
 DOUBLE_TAP_INTERVAL_MS=200       # 100–450
 TOGGLE_SILENCE_SEC=5.0
 

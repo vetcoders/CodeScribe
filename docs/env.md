@@ -17,6 +17,9 @@ Ten dokument porządkuje **wszystkie zmienne środowiskowe** używane przez Code
 >
 > **Uwaga:** GUI zapisuje „regularne” ustawienia do `~/Library/Application Support/CodeScribe/settings.json`,
 > a sekrety trafiają do **macOS Keychain**. `.env` jest tylko dla power‑userów i override’ów.
+>
+> **Hotkeys truth:** per-mode bindings żyją już tylko w `settings.json` (`Settings → Modes & Shortcuts`).
+> `.env` nie ustawia już `Dictation` / `Formatting` / `Assistive` bindings.
 
 ---
 
@@ -26,9 +29,8 @@ Poniższe działają „same z siebie” — jeśli ich nie ustawisz, aplikacja 
 
 **Hotkeys / UI / zachowanie podstawowe**
 
-- `HOLD_MODS` – domyślnie `fn` (RESTART NEEDED)
+- mode bindings (`Dictation`, `Formatting`, `Assistive`) – konfigurowane w `settings.json` przez GUI
 - `HOLD_EXCLUSIVE` – domyślnie `1` (RESTART NEEDED)
-- `TOGGLE_TRIGGER` – domyślnie `double_option` (RESTART NEEDED)
 - `HOLD_START_DELAY_MS` – domyślnie `800` (RESTART NEEDED)
 - `DOUBLE_TAP_INTERVAL_MS` – domyślnie `200` (RESTART NEEDED)
 - `TOGGLE_SILENCE_SEC` – domyślnie `5.0` (RESTART NEEDED)
@@ -189,9 +191,8 @@ Wymagane **tylko jeśli** runtime nie może znaleźć Whispera przez cache / con
 
 ### Hotkeys
 
-- `HOLD_MODS` (RESTART NEEDED)
+- per-mode bindings w `settings.json` (`Settings → Modes & Shortcuts`)
 - `HOLD_EXCLUSIVE` (RESTART NEEDED)
-- `TOGGLE_TRIGGER` (RESTART NEEDED)
 - `HOLD_START_DELAY_MS` (RESTART NEEDED)
 - `DOUBLE_TAP_INTERVAL_MS` (RESTART NEEDED)
 - `TOGGLE_SILENCE_SEC` (RESTART NEEDED)

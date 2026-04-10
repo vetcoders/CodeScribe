@@ -579,40 +579,12 @@ description = "Override path to TTS model directory"
 # Hotkeys
 # ═══════════════════════════════════════════════════════════════════════════════
 
-[vars.HOLD_MODS]
-default = "fn"
-type = "string"
-reload = "restart"
-category = "hotkeys"
-description = "Hold modifier keys (fn|ctrl|ctrl_alt|ctrl_shift|ctrl_cmd)"
-
 [vars.HOLD_EXCLUSIVE]
 default = "1"
 type = "bool"
 reload = "restart"
 category = "hotkeys"
 description = "Exclusive hold mode (no other keys during hold)"
-
-[vars.TOGGLE_TRIGGER]
-default = "double_option"
-type = "string"
-reload = "restart"
-category = "hotkeys"
-description = "Toggle recording trigger"
-
-[vars.HOTKEY_DOUBLE_TAP_LEFT]
-default = "0"
-type = "bool"
-reload = "restart"
-category = "hotkeys"
-description = "Legacy left double-tap toggle (superseded by TOGGLE_TRIGGER)"
-
-[vars.HOTKEY_DOUBLE_TAP_RIGHT]
-default = "0"
-type = "bool"
-reload = "restart"
-category = "hotkeys"
-description = "Legacy right double-tap toggle (superseded by TOGGLE_TRIGGER)"
 
 [vars.HOLD_START_DELAY_MS]
 default = "800"

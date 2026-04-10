@@ -259,10 +259,12 @@ make config
 WHISPER_LANGUAGE=pl                  # pl | en | de | fr (no auto!)
 # CODESCRIBE_MODEL_PATH=             # Override runtime Whisper model lookup
 
-# Hotkeys
-HOLD_MODS=ctrl                       # ctrl | ctrl_alt | ctrl_shift | ctrl_cmd
-TOGGLE_TRIGGER=double_option         # double_option | double_ralt | none
+# Hotkeys behavior
+# Per-mode bindings live in Settings -> Modes & Shortcuts (settings.json)
+HOLD_EXCLUSIVE=1                     # ignore extra modifiers during hold
 HOLD_START_DELAY_MS=800              # Delay before recording starts
+DOUBLE_TAP_INTERVAL_MS=200           # Toggle gesture timing
+TOGGLE_SILENCE_SEC=5.0               # Auto-send after silence in toggle modes
 
 # AI Formatting
 AI_FORMATTING_ENABLED=1              # 1=format via LLM, 0=raw transcript
