@@ -321,13 +321,13 @@ fn resolve_transcription_action_contract_mode(
     force_ai: bool,
     ai_formatting_enabled: bool,
     ai_key_available: bool,
-) -> crate::transcription_overlay::TranscriptionActionContractMode {
+) -> crate::ui::overlay::TranscriptionActionContractMode {
     if force_raw {
-        crate::transcription_overlay::TranscriptionActionContractMode::Raw
+        crate::ui::overlay::TranscriptionActionContractMode::Raw
     } else if force_ai || (ai_formatting_enabled && ai_key_available) {
-        crate::transcription_overlay::TranscriptionActionContractMode::AiFormat
+        crate::ui::overlay::TranscriptionActionContractMode::AiFormat
     } else {
-        crate::transcription_overlay::TranscriptionActionContractMode::Raw
+        crate::ui::overlay::TranscriptionActionContractMode::Raw
     }
 }
 
@@ -3122,7 +3122,7 @@ impl RecordingController {
             );
             // Keep the ephemeral transcription overlay in sync with what we will paste/save.
             // This makes it easier to understand differences between streaming preview and final-pass output.
-            crate::transcription_overlay::set_transcription_action_contract(
+            crate::ui::overlay::set_transcription_action_contract(
                 &raw_text,
                 &formatted_text,
                 action_contract_mode,

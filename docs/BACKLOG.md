@@ -24,6 +24,7 @@
 | Streaming AI responses        | ✅     | `app/ui/voice_chat/api.rs`      |
 | Transcriptions tab            | ✅     | `app/ui/voice_chat/handlers.rs` |
 | Settings window (Bootstrap)   | ✅     | `app/ui/bootstrap/`             |
+| Attachments in chat           | ✅     | `app/ui/voice_chat/handlers.rs` |
 | Auto-send toggle              | ✅     | `app/ui/voice_chat/state.rs`    |
 | Collapsible right panel       | ✅     | `app/ui/voice_chat/mod.rs`      |
 
@@ -71,22 +72,13 @@
   - Audio streaming over WebSocket
 - **Priority**: Low (current REST + SSE sufficient)
 
-### 4. Attachments in Chat
-
-- **Status**: 📋 Planned
-- **Goal**: Attach files to voice commands
-- **UI**: [📎] button in chat overlay
-- **Backend**: Multipart upload to AI provider
-
----
-
 ## 🔧 Technical Debt
 
 | Item                                   | Priority | Notes                      |
 | -------------------------------------- | -------- | -------------------------- |
-| ~~Split voice_chat_ui.rs (<1000 LOC)~~ | ✅ Done  | 4 modules created          |
+| ~~Split legacy voice chat monolith~~   | ✅ Done  | `app/ui/voice_chat/*`      |
 | ~~Split controller.rs (<1000 LOC)~~    | ✅ Done  | 4 modules created          |
-| ~~Move Settings to overlay~~           | ✅ Done  | Removed from tray menu     |
+| ~~Decouple Settings from overlay~~     | ✅ Done  | Separate settings window   |
 | Update lexicon (Roost→Rust, etc.)      | CRITICAL | `assets/programming.jsonl` |
 
 ---

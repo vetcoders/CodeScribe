@@ -14,7 +14,7 @@ flowchart TB
         CTRL[controller/]
         IPC_SERVER[ipc/server.rs]
         TRAY[ui/tray/]
-        OVERLAY[ui/voice_chat/]
+        OVERLAY[ui/overlay/ + ui/voice_chat/]
         BOOTSTRAP[ui/bootstrap/]
 
         subgraph CORE[core/ (portable)]
@@ -50,8 +50,8 @@ flowchart TB
        │                                    │                     │
        │                                    ▼                     ▼
        │                            ┌──────────────┐      ┌──────────────┐
-       │                            │ voice_chat   │      │ transcription│
-       │                            │ _ui/         │      │ _overlay.rs  │
+       │                            │ ui/voice_    │      │ ui/overlay/  │
+       │                            │ chat/        │      │              │
        │                            └──────────────┘      └──────────────┘
        │
   Fn hold → Raw mode (no AI)
@@ -97,6 +97,7 @@ CodeScribe/
 │   ├── controller/               # Recording state machine
 │   ├── os/                       # Hotkeys, permissions, clipboard
 │   └── ui/
+│       ├── overlay/              # Dictation overlay window
 │       ├── voice_chat/           # Overlay UI
 │       ├── bootstrap/            # Settings window + onboarding
 │       ├── tray/                 # Menu bar UI
@@ -109,7 +110,6 @@ CodeScribe/
 │   │   └── types.rs              # MenuIds, TrayMenuEvent
 │   │
 │   ├── hotkeys.rs                # CGEventTap handler
-│   ├── transcription_overlay.rs  # Simple text overlay
 │   ├── ui.rs                     # Badge, Dock icon
 │   ├── ui_helpers.rs             # AppKit utilities
 │   ├── clipboard.rs              # Paste to active app
@@ -201,9 +201,10 @@ match (hotkey, flags) {
 | Voice Chat UI (split panel)                  | ✅     |
 | Chat bubbles (NSStackView)                   | ✅     |
 | Drafts panel with tabs                       | ✅     |
-| Settings in overlay                          | ✅     |
+| Settings window from tray + overlay          | ✅     |
 | AI formatting (Responses API)                | ✅     |
 | Streaming AI responses                       | ✅     |
+| Attachments in chat                          | ✅     |
 | Tray app with submenus                       | ✅     |
 | History with slug filenames                  | ✅     |
 | IPC server (runtime interface)               | ✅     |
