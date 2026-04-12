@@ -3247,6 +3247,7 @@ mod tests {
                 Ok(RawTranscript {
                     text: format!("job-{id}"),
                     segments: Vec::new(),
+                    ..Default::default()
                 })
             },
         );
@@ -3426,6 +3427,7 @@ mod tests {
                 Ok(RawTranscript {
                     text: format!("job-{id}"),
                     segments: Vec::new(),
+                    ..Default::default()
                 })
             },
         );

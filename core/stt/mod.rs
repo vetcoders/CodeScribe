@@ -189,6 +189,7 @@ pub(crate) fn transcribe_long_with_segments(
         SttEngine::Onnx => Ok(RawTranscript {
             text: onnx_adapter::transcribe_long(audio, sample_rate, language)?,
             segments: Vec::new(),
+            ..Default::default()
         }),
         SttEngine::Apple => run_apple_or_whisper(
             "transcribe_long_with_segments",

@@ -49,6 +49,12 @@ pub struct RawTranscript {
     pub text: String,
     /// Per-segment breakdown, if the engine provides it.
     pub segments: Vec<TranscriptSegment>,
+    /// Average log-probability across decoded tokens (lower = less confident).
+    pub avg_logprob: Option<f32>,
+    /// Compression ratio of the decoded text (high = repetitive/hallucinated).
+    pub compression_ratio: Option<f32>,
+    /// True when the quality gate (logprob + compression) dropped this result.
+    pub quality_gate_dropped: bool,
 }
 
 /// A single segment from the STT engine (optional granularity).
@@ -57,6 +63,58 @@ pub struct TranscriptSegment {
     pub text: String,
     pub start_ts: f32,
     pub end_ts: f32,
+}
+
+// ═══════════════════════════════════════════════════════════
+// File-level transcription verdict
+// ═══════════════════════════════════════════════════════════
+
+/// Structured verdict from file-level transcription.
+///
+/// Carries the full truth the engine knows: text, VAD stats, confidence,
+/// and provenance. Consumers decide what to expose; nothing is hidden.
+#[derive(Debug, Clone)]
+pub struct TranscriptionVerdict {
+    pub text: String,
+    pub raw: RawTranscript,
+    pub vad: Option<VadVerdict>,
+    pub source: TranscriptionSource,
+}
+
+/// VAD analysis results preserved as data.
+#[derive(Debug, Clone)]
+pub struct VadVerdict {
+    /// Percentage of audio classified as speech (0–100).
+    pub speech_pct: f32,
+    pub speech_windows: usize,
+    pub total_windows: usize,
+    /// True when VAD found no speech at all.
+    pub no_speech: bool,
+}
+
+/// Where the transcription text came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionSource {
+    /// Final-pass local Whisper on saved WAV file.
+    LocalFinalPass,
+    /// Live streaming transcription (draft).
+    Streaming,
+    /// Cloud STT provider.
+    Cloud,
+    /// Degraded fallback path (cloud failed, streaming used).
+    Fallback,
+}
+
+impl std::fmt::Display for TranscriptionSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LocalFinalPass => write!(f, "local_final_pass"),
+            Self::Streaming => write!(f, "streaming"),
+            Self::Cloud => write!(f, "cloud"),
+            Self::Fallback => write!(f, "fallback"),
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -634,5 +692,99 @@ mod tests {
         } else {
             panic!("Expected UtteranceFinal variant");
         }
+    }
+
+    // ── RawTranscript confidence metadata ──
+
+    #[test]
+    fn raw_transcript_default_has_no_confidence() {
+        let rt = RawTranscript::default();
+        assert!(rt.avg_logprob.is_none());
+        assert!(rt.compression_ratio.is_none());
+        assert!(!rt.quality_gate_dropped);
+    }
+
+    #[test]
+    fn raw_transcript_carries_confidence_metadata() {
+        let rt = RawTranscript {
+            text: "test".to_string(),
+            avg_logprob: Some(-0.35),
+            compression_ratio: Some(1.2),
+            quality_gate_dropped: false,
+            ..Default::default()
+        };
+        assert_eq!(rt.avg_logprob, Some(-0.35));
+        assert_eq!(rt.compression_ratio, Some(1.2));
+        assert!(!rt.quality_gate_dropped);
+    }
+
+    #[test]
+    fn raw_transcript_quality_gate_dropped_preserves_metadata() {
+        let rt = RawTranscript {
+            avg_logprob: Some(-1.5),
+            compression_ratio: Some(4.0),
+            quality_gate_dropped: true,
+            ..Default::default()
+        };
+        assert!(rt.text.is_empty());
+        assert!(rt.quality_gate_dropped);
+        assert!(rt.avg_logprob.unwrap() < -1.0);
+    }
+
+    // ── TranscriptionVerdict ──
+
+    #[test]
+    fn verdict_no_speech_carries_vad_truth() {
+        let verdict = TranscriptionVerdict {
+            text: String::new(),
+            raw: RawTranscript::default(),
+            vad: Some(VadVerdict {
+                speech_pct: 0.0,
+                speech_windows: 0,
+                total_windows: 60,
+                no_speech: true,
+            }),
+            source: TranscriptionSource::LocalFinalPass,
+        };
+        assert!(verdict.text.is_empty());
+        assert!(verdict.vad.as_ref().unwrap().no_speech);
+        assert_eq!(verdict.vad.as_ref().unwrap().total_windows, 60);
+        assert_eq!(verdict.source, TranscriptionSource::LocalFinalPass);
+    }
+
+    #[test]
+    fn verdict_with_speech_carries_full_truth() {
+        let verdict = TranscriptionVerdict {
+            text: "Cześć".to_string(),
+            raw: RawTranscript {
+                text: "Cześć".to_string(),
+                avg_logprob: Some(-0.25),
+                compression_ratio: Some(1.1),
+                quality_gate_dropped: false,
+                ..Default::default()
+            },
+            vad: Some(VadVerdict {
+                speech_pct: 85.0,
+                speech_windows: 17,
+                total_windows: 20,
+                no_speech: false,
+            }),
+            source: TranscriptionSource::LocalFinalPass,
+        };
+        assert_eq!(verdict.text, "Cześć");
+        assert!(!verdict.vad.as_ref().unwrap().no_speech);
+        assert_eq!(verdict.raw.avg_logprob, Some(-0.25));
+        assert!(!verdict.raw.quality_gate_dropped);
+    }
+
+    #[test]
+    fn transcription_source_display() {
+        assert_eq!(
+            TranscriptionSource::LocalFinalPass.to_string(),
+            "local_final_pass"
+        );
+        assert_eq!(TranscriptionSource::Streaming.to_string(), "streaming");
+        assert_eq!(TranscriptionSource::Cloud.to_string(), "cloud");
+        assert_eq!(TranscriptionSource::Fallback.to_string(), "fallback");
     }
 }

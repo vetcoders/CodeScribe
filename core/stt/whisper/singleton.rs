@@ -19,7 +19,9 @@ use tracing::{info, warn};
 use crate::config::Config;
 use crate::config::models::ModelManager;
 use crate::hf_cache;
-use crate::pipeline::contracts::RawTranscript;
+use crate::pipeline::contracts::{
+    RawTranscript, TranscriptionSource, TranscriptionVerdict, VadVerdict,
+};
 
 use super::engine::LocalWhisperEngine;
 use super::params::DecodingParams;
@@ -198,13 +200,14 @@ pub fn transcribe_streaming<'a>(
     engine.transcribe_long_streaming(samples, sample_rate, language, callback)
 }
 
-/// Transcribe a file (VAD-filtered: only speech regions are sent to Whisper)
-pub fn transcribe_file(path: &std::path::Path, language: Option<&str>) -> Result<String> {
+/// Transcribe a file with full structured verdict (VAD stats, confidence, provenance).
+pub fn transcribe_file_verdict(
+    path: &std::path::Path,
+    language: Option<&str>,
+) -> Result<TranscriptionVerdict> {
     let (samples, sample_rate) =
         crate::audio::load_audio_file(path).context("Failed to load audio file")?;
 
-    // Run Silero VAD to strip silence — without this, Whisper hallucinates on
-    // long recordings that are mostly silence (e.g. 4% speech / 96% silence).
     let (speech_samples, stats) = crate::vad::extract_speech(&samples, sample_rate);
     let total_sec = samples.len() as f32 / sample_rate as f32;
     let speech_sec = speech_samples.len() as f32 / sample_rate as f32;
@@ -213,12 +216,38 @@ pub fn transcribe_file(path: &std::path::Path, language: Option<&str>) -> Result
         speech_sec, total_sec, stats.speech_pct
     );
 
-    if speech_samples.is_empty() {
-        info!("transcribe_file: no speech detected after VAD; returning empty transcript");
-        return Ok(String::new());
+    let no_speech = speech_samples.is_empty();
+    let vad = VadVerdict {
+        speech_pct: stats.speech_pct,
+        speech_windows: stats.speech_windows,
+        total_windows: stats.total_windows,
+        no_speech,
+    };
+
+    if no_speech {
+        info!("transcribe_file: no speech detected after VAD; returning empty verdict");
+        return Ok(TranscriptionVerdict {
+            text: String::new(),
+            raw: RawTranscript::default(),
+            vad: Some(vad),
+            source: TranscriptionSource::LocalFinalPass,
+        });
     }
 
-    transcribe(&speech_samples, sample_rate, language)
+    let raw = transcribe_with_segments(&speech_samples, sample_rate, language)?;
+    let text = raw.text.clone();
+
+    Ok(TranscriptionVerdict {
+        text,
+        raw,
+        vad: Some(vad),
+        source: TranscriptionSource::LocalFinalPass,
+    })
+}
+
+/// Transcribe a file — backward-compatible wrapper returning plain text.
+pub fn transcribe_file(path: &std::path::Path, language: Option<&str>) -> Result<String> {
+    Ok(transcribe_file_verdict(path, language)?.text)
 }
 
 /// Detect language from audio samples

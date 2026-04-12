@@ -439,6 +439,7 @@ impl LocalWhisperEngine {
         Ok(RawTranscript {
             text: dedup_repetitions(out.trim()),
             segments: all_segments,
+            ..Default::default()
         })
     }
 
@@ -903,16 +904,28 @@ impl LocalWhisperEngine {
                 avg_logprob,
                 final_ratio
             );
-            return Ok(RawTranscript::default());
+            return Ok(RawTranscript {
+                avg_logprob,
+                compression_ratio: Some(final_ratio),
+                quality_gate_dropped: true,
+                ..Default::default()
+            });
         }
 
         if final_text.is_empty() {
-            return Ok(RawTranscript::default());
+            return Ok(RawTranscript {
+                avg_logprob,
+                compression_ratio: Some(final_ratio),
+                ..Default::default()
+            });
         }
 
         Ok(RawTranscript {
             text: final_text,
             segments: final_segments,
+            avg_logprob,
+            compression_ratio: Some(final_ratio),
+            quality_gate_dropped: false,
         })
     }
 }

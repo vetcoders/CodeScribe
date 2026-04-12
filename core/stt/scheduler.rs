@@ -213,6 +213,7 @@ async fn scheduler_worker(
                         return Ok(RawTranscript {
                             text: String::new(),
                             segments: Vec::new(),
+                            ..Default::default()
                         });
                     }
                     tracing::debug!(
@@ -345,6 +346,7 @@ mod tests {
         RawTranscript {
             text: format!("job-{id}"),
             segments: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -503,6 +505,7 @@ mod tests {
                 Ok(RawTranscript {
                     text: "should-not-run".to_string(),
                     segments: Vec::new(),
+                    ..Default::default()
                 })
             },
         );
@@ -551,6 +554,7 @@ mod tests {
                 Ok(RawTranscript {
                     text: format!("len-{}", samples.len()),
                     segments: Vec::new(),
+                    ..Default::default()
                 })
             },
         );
@@ -609,6 +613,7 @@ mod tests {
                 Ok(RawTranscript {
                     text: format!("len-{}", samples.len()),
                     segments: Vec::new(),
+                    ..Default::default()
                 })
             },
         );

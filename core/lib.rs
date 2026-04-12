@@ -58,8 +58,8 @@ pub mod stt_api {
         EmbeddedModel, get_embedded_data, is_embedded_available,
     };
     pub use crate::stt::whisper::{
-        detect_language, get_model_path, init, transcribe, transcribe_file, transcribe_streaming,
-        transcribe_with_segments,
+        detect_language, get_model_path, init, transcribe, transcribe_file,
+        transcribe_file_verdict, transcribe_streaming, transcribe_with_segments,
     };
 }
 

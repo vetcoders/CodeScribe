@@ -221,6 +221,7 @@ fn transcribe_via_bridge(
     Ok(RawTranscript {
         text: response.text.trim().to_string(),
         segments,
+        ..Default::default()
     })
 }
 

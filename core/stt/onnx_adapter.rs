@@ -529,6 +529,7 @@ impl OnnxEngine {
         Ok(RawTranscript {
             text: text.trim().to_string(),
             segments,
+            ..Default::default()
         })
     }
 
@@ -603,6 +604,7 @@ impl OnnxEngine {
         Ok(RawTranscript {
             text: crate::stt::whisper::dedup_repetitions(trimmed),
             segments: all_segments,
+            ..Default::default()
         })
     }
 }
