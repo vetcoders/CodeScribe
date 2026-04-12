@@ -151,6 +151,7 @@ pub struct HotkeyInput {
 pub enum RecordingTranscriptSource {
     LocalFinalPass,
     CloudPrimary,
+    CloudFallback,
     Streaming,
     StreamingFallback,
 }
@@ -160,6 +161,7 @@ impl RecordingTranscriptSource {
         match self {
             Self::LocalFinalPass => "Final-pass local",
             Self::CloudPrimary => "Cloud primary",
+            Self::CloudFallback => "Cloud fallback",
             Self::Streaming => "Streaming transcript",
             Self::StreamingFallback => "Streaming fallback",
         }

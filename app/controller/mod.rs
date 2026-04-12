@@ -341,13 +341,36 @@ fn adjudicate_recording_truth(
                 None
             };
 
+            let raw_text = if no_speech_reason.is_some() {
+                None
+            } else {
+                non_empty_transcript(Some(verdict.text))
+            };
+
             return build_truth_verdict(
-                non_empty_transcript(Some(verdict.text)),
+                raw_text,
                 Some(RecordingTranscriptSource::LocalFinalPass),
                 fallback_class,
                 no_speech_reason,
                 speech_pct,
                 avg_logprob,
+                confidence_flags,
+            );
+        }
+
+        let mut confidence_flags = Vec::new();
+        if local_final_pass_attempted {
+            push_truth_flag(&mut confidence_flags, "local_final_pass_unavailable");
+        }
+
+        if let Some(text) = cloud_text {
+            return build_truth_verdict(
+                Some(text),
+                Some(RecordingTranscriptSource::CloudFallback),
+                Some(RecordingFallbackClass::Acceptable),
+                None,
+                None,
+                None,
                 confidence_flags,
             );
         }
@@ -358,10 +381,6 @@ fn adjudicate_recording_truth(
             } else {
                 None
             };
-            let mut confidence_flags = Vec::new();
-            if local_final_pass_attempted {
-                push_truth_flag(&mut confidence_flags, "local_final_pass_unavailable");
-            }
 
             return build_truth_verdict(
                 Some(text),
@@ -377,30 +396,32 @@ fn adjudicate_recording_truth(
                 confidence_flags,
             );
         }
-    } else if let Some(text) = cloud_text {
-        return build_truth_verdict(
-            Some(text),
-            Some(RecordingTranscriptSource::CloudPrimary),
-            None,
-            None,
-            None,
-            None,
-            Vec::new(),
-        );
-    }
+    } else {
+        if let Some(text) = cloud_text {
+            return build_truth_verdict(
+                Some(text),
+                Some(RecordingTranscriptSource::CloudPrimary),
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+            );
+        }
 
-    if let Some(text) = streaming_text {
-        let mut confidence_flags = Vec::new();
-        push_truth_flag(&mut confidence_flags, "cloud_primary_missing");
-        return build_truth_verdict(
-            Some(text),
-            Some(RecordingTranscriptSource::StreamingFallback),
-            Some(RecordingFallbackClass::Degraded),
-            None,
-            None,
-            None,
-            confidence_flags,
-        );
+        if let Some(text) = streaming_text {
+            let mut confidence_flags = Vec::new();
+            push_truth_flag(&mut confidence_flags, "cloud_primary_missing");
+            return build_truth_verdict(
+                Some(text),
+                Some(RecordingTranscriptSource::StreamingFallback),
+                Some(RecordingFallbackClass::Degraded),
+                None,
+                None,
+                None,
+                confidence_flags,
+            );
+        }
     }
 
     build_truth_verdict(
@@ -479,6 +500,7 @@ fn truth_engine_label(source: Option<RecordingTranscriptSource>) -> Option<Strin
     source.map(|source| match source {
         RecordingTranscriptSource::LocalFinalPass => "local_whisper".to_string(),
         RecordingTranscriptSource::CloudPrimary => "cloud_stt".to_string(),
+        RecordingTranscriptSource::CloudFallback => "cloud_stt".to_string(),
         RecordingTranscriptSource::Streaming => "streaming_whisper".to_string(),
         RecordingTranscriptSource::StreamingFallback => "streaming_whisper".to_string(),
     })
