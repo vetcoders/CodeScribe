@@ -135,6 +135,7 @@ struct TranscriptionOverlayState {
     hover_active: bool,
     action_handler: Option<usize>,
     action_contract_mode: TranscriptionActionContractMode,
+    display_status: String,
     raw_text: String,
     last_pass_text: String,
     accumulated_text: String,
@@ -165,6 +166,7 @@ lazy_static::lazy_static! {
         hover_active: false,
         action_handler: None,
         action_contract_mode: TranscriptionActionContractMode::Raw,
+        display_status: String::new(),
         raw_text: String::new(),
         last_pass_text: String::new(),
         accumulated_text: String::new(),
@@ -205,6 +207,7 @@ struct OverlaySnapshot {
     save_button: Option<usize>,
     commit_button: Option<usize>,
     progress_indicator: Option<usize>,
+    display_status: String,
     window_width: f64,
     min_height: f64,
     max_height: f64,
@@ -226,6 +229,7 @@ impl OverlaySnapshot {
             save_button: state.save_button,
             commit_button: state.commit_button,
             progress_indicator: state.progress_indicator,
+            display_status: state.display_status.clone(),
             window_width: state.window_width,
             min_height: state.min_height,
             max_height: state.max_height,
@@ -423,11 +427,23 @@ fn augment_action_tooltip(mode: TranscriptionActionContractMode) -> &'static str
     }
 }
 
-fn decision_hint_text(mode: TranscriptionActionContractMode, include_auto_hide: bool) -> String {
-    let base = format!(
-        "Dictation overlay | Source: {} | Save closes | Augment -> Agent",
-        action_contract_source_label(mode)
-    );
+fn decision_hint_text(
+    mode: TranscriptionActionContractMode,
+    display_status: &str,
+    include_auto_hide: bool,
+) -> String {
+    let mode_label = action_contract_source_label(mode);
+    let base = if display_status.is_empty() {
+        format!(
+            "Dictation overlay | {} | Save closes | Augment -> Agent",
+            mode_label
+        )
+    } else {
+        format!(
+            "Dictation overlay | {} | {} | Save closes | Augment -> Agent",
+            mode_label, display_status
+        )
+    };
     if include_auto_hide {
         format!("{base} | Auto-hide {}s", auto_hide_delay_secs())
     } else {
@@ -462,7 +478,7 @@ fn refresh_action_contract_ui_unlocked(
     if let Some(label_ptr) = snap.auto_hide_label {
         unsafe {
             if include_auto_hide_hint {
-                let hint = decision_hint_text(mode, true);
+                let hint = decision_hint_text(mode, &snap.display_status, true);
                 set_text(label_ptr as Id, &hint);
                 set_tooltip(label_ptr as Id, "Transcription overlay action contract");
                 set_hidden(label_ptr as Id, false);
@@ -1133,7 +1149,7 @@ fn show_transcription_overlay_impl() {
                 &CGPoint::new(OVERLAY_PADDING, info_y),
                 &CGSize::new(window_width - OVERLAY_PADDING * 2.0, OVERLAY_INFO_HEIGHT),
             ),
-            text: decision_hint_text(TranscriptionActionContractMode::Raw, true),
+            text: decision_hint_text(TranscriptionActionContractMode::Raw, "", true),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             bold: false,
             text_color: ui_colors::overlay_hint_text(),
@@ -1436,6 +1452,7 @@ pub fn set_transcription_action_contract(
     raw_text: &str,
     last_pass_text: &str,
     mode: TranscriptionActionContractMode,
+    display_status: String,
 ) {
     let raw_text_owned = raw_text.to_string();
     let last_pass_owned = last_pass_text.to_string();
@@ -1446,6 +1463,7 @@ pub fn set_transcription_action_contract(
             state.raw_text = raw_text_owned;
             state.last_pass_text = last_pass_owned;
             state.action_contract_mode = mode_copy;
+            state.display_status = display_status;
             let visible = display_text_for_state(&state);
             let dm = state.decision_mode;
             let snap = OverlaySnapshot::from_state(&state);

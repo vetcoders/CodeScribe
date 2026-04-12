@@ -3,6 +3,8 @@
 //! Contains type definitions for the recording controller state machine.
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// A validated audio file path that is guaranteed to be within allowed directories.
@@ -144,6 +146,87 @@ pub struct HotkeyInput {
     pub force_ai: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingTranscriptSource {
+    LocalFinalPass,
+    CloudPrimary,
+    Streaming,
+    StreamingFallback,
+}
+
+impl RecordingTranscriptSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LocalFinalPass => "Final-pass local",
+            Self::CloudPrimary => "Cloud primary",
+            Self::Streaming => "Streaming transcript",
+            Self::StreamingFallback => "Streaming fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingFallbackClass {
+    Acceptable,
+    Degraded,
+    Unsafe,
+}
+
+impl RecordingFallbackClass {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Acceptable => "acceptable fallback",
+            Self::Degraded => "degraded fallback",
+            Self::Unsafe => "unsafe fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RecordingTruthMetadata {
+    pub source: Option<RecordingTranscriptSource>,
+    pub engine: Option<String>,
+    pub mode: Option<String>,
+    pub fallback_class: Option<RecordingFallbackClass>,
+    pub fallback_used: bool,
+    pub vad_speech_pct: Option<f32>,
+    pub no_speech_reason: Option<String>,
+    pub avg_logprob: Option<f32>,
+    #[serde(default)]
+    pub confidence_flags: Vec<String>,
+    pub commit_trigger: Option<String>,
+    pub display_status: Option<String>,
+}
+
+pub fn truth_sidecar_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}.truth.json"))
+        .unwrap_or_else(|| "artifact.truth.json".to_string());
+    path.with_file_name(file_name)
+}
+
+pub fn write_truth_sidecar(path: &Path, metadata: &RecordingTruthMetadata) -> Result<PathBuf> {
+    let sidecar_path = truth_sidecar_path(path);
+    let payload =
+        serde_json::to_vec_pretty(metadata).context("Failed to serialize truth sidecar")?;
+    fs::write(&sidecar_path, payload)
+        .with_context(|| format!("Failed to write truth sidecar {}", sidecar_path.display()))?;
+    Ok(sidecar_path)
+}
+
+#[cfg(test)]
+pub fn read_truth_sidecar(path: &Path) -> Result<RecordingTruthMetadata> {
+    let sidecar_path = truth_sidecar_path(path);
+    let payload = fs::read(&sidecar_path)
+        .with_context(|| format!("Failed to read truth sidecar {}", sidecar_path.display()))?;
+    serde_json::from_slice(&payload)
+        .with_context(|| format!("Failed to parse truth sidecar {}", sidecar_path.display()))
+}
+
 /// Parameters for the transcript text pipeline.
 ///
 /// Groups all inputs for `process_transcript_text_pipeline` to avoid
@@ -161,6 +244,14 @@ pub struct TranscriptPipelineParams {
     pub audio_path: Option<ValidatedAudioPath>,
     pub cloud_text_opt: Option<String>,
     pub cloud_handle: Option<tokio::task::JoinHandle<anyhow::Result<String>>>,
+    pub transcript_source: Option<RecordingTranscriptSource>,
+    pub truth_fallback_class: Option<RecordingFallbackClass>,
+    pub truth_no_speech_reason: Option<String>,
+    pub truth_speech_pct: Option<f32>,
+    pub truth_avg_logprob: Option<f32>,
+    pub truth_confidence_flags: Vec<String>,
+    pub truth_commit_trigger: Option<String>,
+    pub truth_display_status: String,
     pub append_mode: bool,
     /// True when processing happens while an active stream is still running
     /// (e.g., toggle-mode utterance callback). In this mode, prefer delta-only
@@ -178,4 +269,37 @@ pub struct TranscriptPipelineParams {
 pub struct TranscriptProcessOutcome {
     /// Why manual commit/decision mode should be shown (if required).
     pub commit_trigger: Option<String>,
+    pub final_status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truth_sidecar_roundtrip_preserves_metadata() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let transcript_path = temp_dir.path().join("sample_raw.txt");
+        fs::write(&transcript_path, "hello").expect("write transcript");
+
+        let metadata = RecordingTruthMetadata {
+            source: Some(RecordingTranscriptSource::StreamingFallback),
+            engine: Some("streaming_whisper".to_string()),
+            mode: Some("toggle".to_string()),
+            fallback_class: Some(RecordingFallbackClass::Degraded),
+            fallback_used: true,
+            vad_speech_pct: Some(42.0),
+            no_speech_reason: None,
+            avg_logprob: Some(-0.25),
+            confidence_flags: vec!["cloud_primary_missing".to_string()],
+            commit_trigger: Some("cloud_failed_fallback".to_string()),
+            display_status: Some("Streaming fallback".to_string()),
+        };
+
+        let sidecar_path = write_truth_sidecar(&transcript_path, &metadata).expect("write sidecar");
+        assert_eq!(sidecar_path, truth_sidecar_path(&transcript_path));
+
+        let restored = read_truth_sidecar(&transcript_path).expect("read sidecar");
+        assert_eq!(restored, metadata);
+    }
 }

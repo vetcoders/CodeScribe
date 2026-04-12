@@ -235,56 +235,125 @@ fn test_action_contract_mode_uses_raw_for_toggle_without_ai() {
     );
 }
 
+fn make_final_pass_verdict(
+    text: &str,
+    speech_pct: f32,
+    avg_logprob: Option<f32>,
+    no_speech: bool,
+) -> codescribe_core::pipeline::contracts::TranscriptionVerdict {
+    codescribe_core::pipeline::contracts::TranscriptionVerdict {
+        text: text.to_string(),
+        raw: codescribe_core::pipeline::contracts::RawTranscript {
+            text: text.to_string(),
+            segments: Vec::new(),
+            avg_logprob,
+            compression_ratio: None,
+            quality_gate_dropped: false,
+        },
+        vad: Some(codescribe_core::pipeline::contracts::VadVerdict {
+            speech_pct,
+            speech_windows: if no_speech { 0 } else { 4 },
+            total_windows: 10,
+            no_speech,
+        }),
+        source: codescribe_core::pipeline::contracts::TranscriptionSource::LocalFinalPass,
+    }
+}
+
 #[test]
-fn test_select_recording_transcript_prefers_local_final_pass_for_local_backend() {
-    let (raw_text, cloud_text, source) = select_recording_transcript(
+fn test_adjudicate_recording_truth_blocks_local_no_speech() {
+    let session = SessionTelemetrySnapshot {
+        no_speech_reason: Some("vad_no_speech_detected".to_string()),
+        stats: None,
+    };
+
+    let verdict = adjudicate_recording_truth(
         true,
-        Some("local final".to_string()),
-        "streaming fallback".to_string(),
+        true,
+        Some(make_final_pass_verdict("", 0.0, None, true)),
+        "preview text".to_string(),
         None,
+        &session,
     );
 
-    assert_eq!(raw_text.as_deref(), Some("local final"));
-    assert_eq!(cloud_text, None);
-    assert_eq!(source, Some(RecordingTranscriptSource::LocalFinalPass));
+    assert!(verdict.raw_text.is_none());
+    assert_eq!(
+        verdict.transcript_source,
+        Some(RecordingTranscriptSource::LocalFinalPass)
+    );
+    assert_eq!(
+        verdict.no_speech_reason.as_deref(),
+        Some("vad_no_speech_detected")
+    );
+    assert_eq!(
+        verdict.commit_trigger.as_deref(),
+        Some("no_reliable_speech")
+    );
+    assert_eq!(verdict.display_status, "No reliable speech detected");
 }
 
 #[test]
-fn test_select_recording_transcript_prefers_cloud_for_cloud_backend() {
-    let (raw_text, cloud_text, source) = select_recording_transcript(
+fn test_adjudicate_recording_truth_marks_cloud_fallback_as_degraded() {
+    let verdict = adjudicate_recording_truth(
+        false,
         false,
         None,
         "streaming fallback".to_string(),
-        Some("cloud final".to_string()),
+        None,
+        &SessionTelemetrySnapshot::default(),
     );
 
-    assert_eq!(raw_text.as_deref(), Some("cloud final"));
-    assert_eq!(cloud_text.as_deref(), Some("cloud final"));
-    assert_eq!(source, Some(RecordingTranscriptSource::CloudPrimary));
+    assert_eq!(verdict.raw_text.as_deref(), Some("streaming fallback"));
+    assert_eq!(
+        verdict.transcript_source,
+        Some(RecordingTranscriptSource::StreamingFallback)
+    );
+    assert_eq!(
+        verdict.fallback_class,
+        Some(RecordingFallbackClass::Degraded)
+    );
+    assert!(
+        verdict
+            .confidence_flags
+            .iter()
+            .any(|flag| flag == "cloud_primary_missing")
+    );
+    assert_eq!(verdict.commit_trigger.as_deref(), Some("degraded_fallback"));
+    assert_eq!(verdict.display_status, "Streaming fallback");
 }
 
 #[test]
-fn test_select_recording_transcript_falls_back_to_streaming_when_cloud_missing() {
-    let (raw_text, cloud_text, source) =
-        select_recording_transcript(false, None, "streaming fallback".to_string(), None);
-
-    assert_eq!(raw_text.as_deref(), Some("streaming fallback"));
-    assert_eq!(cloud_text, None);
-    assert_eq!(source, Some(RecordingTranscriptSource::StreamingFallback));
-}
-
-#[test]
-fn test_select_recording_transcript_ignores_empty_candidates() {
-    let (raw_text, cloud_text, source) = select_recording_transcript(
-        false,
-        Some("   ".to_string()),
-        "  ".to_string(),
-        Some("".to_string()),
+fn test_adjudicate_recording_truth_marks_low_logprob_as_unsafe() {
+    let verdict = adjudicate_recording_truth(
+        true,
+        true,
+        Some(make_final_pass_verdict(
+            "niepewna transkrypcja",
+            28.0,
+            Some(-1.2),
+            false,
+        )),
+        "preview text".to_string(),
+        None,
+        &SessionTelemetrySnapshot::default(),
     );
 
-    assert_eq!(raw_text, None);
-    assert_eq!(cloud_text, None);
-    assert_eq!(source, None);
+    assert_eq!(
+        verdict.transcript_source,
+        Some(RecordingTranscriptSource::LocalFinalPass)
+    );
+    assert_eq!(verdict.fallback_class, Some(RecordingFallbackClass::Unsafe));
+    assert!(
+        verdict
+            .confidence_flags
+            .iter()
+            .any(|flag| flag == "possible_hallucination_logprob")
+    );
+    assert_eq!(
+        verdict.commit_trigger.as_deref(),
+        Some("possible_hallucination_logprob")
+    );
+    assert_eq!(verdict.display_status, "Possible hallucination");
 }
 
 #[test]
@@ -820,12 +889,14 @@ fn test_delta_first_guards_allow_full_rewrite_offline() {
 
 #[test]
 fn test_process_recording_outcome_no_speech_is_soft() {
-    let outcome = ProcessRecordingOutcome::no_speech("vad_no_speech_detected");
+    let outcome =
+        ProcessRecordingOutcome::no_speech("vad_no_speech_detected", "No reliable speech detected");
     assert_eq!(
         outcome.no_speech_reason.as_deref(),
         Some("vad_no_speech_detected")
     );
     assert!(outcome.commit_trigger.is_none());
+    assert_eq!(outcome.final_status, "No reliable speech detected");
 }
 
 #[tokio::test]

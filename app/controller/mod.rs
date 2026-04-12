@@ -60,14 +60,17 @@ use codescribe_core::tts::AudioPlayer;
 
 // UI state for conversation mode
 use crate::ui::voice_chat::ConversationModeState;
+use codescribe_core::pipeline::contracts::TranscriptionVerdict;
 
 use helpers::{
-    SharedSessionTelemetry, new_session_telemetry, raw_save_enabled,
+    SessionTelemetrySnapshot, SharedSessionTelemetry, new_session_telemetry, raw_save_enabled,
     reset_agent_runtime_for_new_thread as reset_agent_runtime_for_new_thread_impl,
     reset_session_telemetry, send_assistive_with_agent_runtime, setup_voice_chat_send_callback,
     snapshot_session_telemetry,
 };
-use types::ValidatedAudioPath;
+use types::{
+    RecordingFallbackClass, RecordingTranscriptSource, RecordingTruthMetadata, ValidatedAudioPath,
+};
 
 static OVERLAY_CONTROLLER: OnceLock<Arc<RecordingController>> = OnceLock::new();
 
@@ -163,13 +166,6 @@ fn apply_runtime_transcription_profile(config: &Config, assistive: bool) -> bool
     overlay_enabled
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecordingTranscriptSource {
-    LocalFinalPass,
-    CloudPrimary,
-    StreamingFallback,
-}
-
 fn non_empty_transcript(text: Option<String>) -> Option<String> {
     text.and_then(|text| {
         if text.trim().is_empty() {
@@ -180,45 +176,318 @@ fn non_empty_transcript(text: Option<String>) -> Option<String> {
     })
 }
 
-fn select_recording_transcript(
+const VERY_LOW_SPEECH_PCT: f32 = 6.0;
+const POSSIBLE_HALLUCINATION_LOGPROB: f32 = -1.0;
+
+#[derive(Debug, Clone, Default)]
+struct RecordingTruthVerdict {
+    raw_text: Option<String>,
+    transcript_source: Option<RecordingTranscriptSource>,
+    fallback_class: Option<RecordingFallbackClass>,
+    no_speech_reason: Option<String>,
+    speech_pct: Option<f32>,
+    avg_logprob: Option<f32>,
+    confidence_flags: Vec<String>,
+    commit_trigger: Option<String>,
+    display_status: String,
+}
+
+fn push_truth_flag(flags: &mut Vec<String>, flag: &str) {
+    if !flags.iter().any(|existing| existing == flag) {
+        flags.push(flag.to_string());
+    }
+}
+
+fn truth_review_trigger(
+    fallback_class: Option<RecordingFallbackClass>,
+    no_speech_reason: Option<&str>,
+    confidence_flags: &[String],
+) -> Option<String> {
+    if no_speech_reason.is_some() {
+        return Some("no_reliable_speech".to_string());
+    }
+
+    if confidence_flags
+        .iter()
+        .any(|flag| flag == "possible_hallucination_logprob")
+    {
+        return Some("possible_hallucination_logprob".to_string());
+    }
+
+    if confidence_flags
+        .iter()
+        .any(|flag| flag == "very_low_speech")
+    {
+        return Some("very_low_speech".to_string());
+    }
+
+    match fallback_class {
+        Some(RecordingFallbackClass::Acceptable) | None => None,
+        Some(RecordingFallbackClass::Degraded) => Some("degraded_fallback".to_string()),
+        Some(RecordingFallbackClass::Unsafe) => Some("unsafe_fallback".to_string()),
+    }
+}
+
+fn truth_display_status(
+    source: Option<RecordingTranscriptSource>,
+    fallback_class: Option<RecordingFallbackClass>,
+    no_speech_reason: Option<&str>,
+    confidence_flags: &[String],
+) -> String {
+    if no_speech_reason.is_some() {
+        return "No reliable speech detected".to_string();
+    }
+
+    if confidence_flags
+        .iter()
+        .any(|flag| flag == "possible_hallucination_logprob")
+    {
+        return "Possible hallucination".to_string();
+    }
+
+    if confidence_flags
+        .iter()
+        .any(|flag| flag == "very_low_speech")
+    {
+        return "Very low speech".to_string();
+    }
+
+    match (source, fallback_class) {
+        (Some(RecordingTranscriptSource::StreamingFallback), _) => "Streaming fallback".to_string(),
+        (Some(source), Some(fallback_class)) => {
+            format!("{} ({})", source.label(), fallback_class.label())
+        }
+        (Some(source), None) => source.label().to_string(),
+        (None, Some(fallback_class)) => fallback_class.label().to_string(),
+        (None, None) => "Transcript ready".to_string(),
+    }
+}
+
+fn build_truth_verdict(
+    raw_text: Option<String>,
+    transcript_source: Option<RecordingTranscriptSource>,
+    fallback_class: Option<RecordingFallbackClass>,
+    no_speech_reason: Option<String>,
+    speech_pct: Option<f32>,
+    avg_logprob: Option<f32>,
+    confidence_flags: Vec<String>,
+) -> RecordingTruthVerdict {
+    let commit_trigger = truth_review_trigger(
+        fallback_class,
+        no_speech_reason.as_deref(),
+        &confidence_flags,
+    );
+    let display_status = truth_display_status(
+        transcript_source,
+        fallback_class,
+        no_speech_reason.as_deref(),
+        &confidence_flags,
+    );
+
+    RecordingTruthVerdict {
+        raw_text,
+        transcript_source,
+        fallback_class,
+        no_speech_reason,
+        speech_pct,
+        avg_logprob,
+        confidence_flags,
+        commit_trigger,
+        display_status,
+    }
+}
+
+fn adjudicate_recording_truth(
     use_local_stt: bool,
-    local_final_pass_text: Option<String>,
+    local_final_pass_attempted: bool,
+    local_final_pass_verdict: Option<TranscriptionVerdict>,
     streaming_text: String,
     cloud_text: Option<String>,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<RecordingTranscriptSource>,
-) {
-    let local_final_pass_text = non_empty_transcript(local_final_pass_text);
+    session_telemetry: &SessionTelemetrySnapshot,
+) -> RecordingTruthVerdict {
     let streaming_text = non_empty_transcript(Some(streaming_text));
     let cloud_text = non_empty_transcript(cloud_text);
 
     if use_local_stt {
-        if let Some(text) = local_final_pass_text {
-            return (
-                Some(text),
-                cloud_text,
+        if let Some(verdict) = local_final_pass_verdict {
+            let speech_pct = verdict.vad.as_ref().map(|vad| vad.speech_pct);
+            let avg_logprob = verdict.raw.avg_logprob;
+            let mut confidence_flags = Vec::new();
+            let mut fallback_class = None;
+
+            if speech_pct.is_some_and(|pct| pct <= VERY_LOW_SPEECH_PCT) {
+                push_truth_flag(&mut confidence_flags, "very_low_speech");
+                fallback_class = Some(RecordingFallbackClass::Unsafe);
+            }
+
+            if avg_logprob.is_some_and(|avg| avg <= POSSIBLE_HALLUCINATION_LOGPROB) {
+                push_truth_flag(&mut confidence_flags, "possible_hallucination_logprob");
+                fallback_class = Some(RecordingFallbackClass::Unsafe);
+            }
+
+            if verdict.raw.quality_gate_dropped {
+                push_truth_flag(&mut confidence_flags, "quality_gate_dropped");
+                fallback_class = Some(RecordingFallbackClass::Unsafe);
+            }
+
+            let no_speech_reason = if verdict.vad.as_ref().is_some_and(|vad| vad.no_speech) {
+                Some(
+                    session_telemetry
+                        .no_speech_reason
+                        .clone()
+                        .unwrap_or_else(|| "vad_no_speech_detected".to_string()),
+                )
+            } else {
+                None
+            };
+
+            return build_truth_verdict(
+                non_empty_transcript(Some(verdict.text)),
                 Some(RecordingTranscriptSource::LocalFinalPass),
+                fallback_class,
+                no_speech_reason,
+                speech_pct,
+                avg_logprob,
+                confidence_flags,
             );
         }
-    } else if let Some(text) = cloud_text.clone() {
-        return (
+
+        if let Some(text) = streaming_text {
+            let fallback_class = if local_final_pass_attempted {
+                Some(RecordingFallbackClass::Degraded)
+            } else {
+                None
+            };
+            let mut confidence_flags = Vec::new();
+            if local_final_pass_attempted {
+                push_truth_flag(&mut confidence_flags, "local_final_pass_unavailable");
+            }
+
+            return build_truth_verdict(
+                Some(text),
+                Some(if local_final_pass_attempted {
+                    RecordingTranscriptSource::StreamingFallback
+                } else {
+                    RecordingTranscriptSource::Streaming
+                }),
+                fallback_class,
+                None,
+                None,
+                None,
+                confidence_flags,
+            );
+        }
+    } else if let Some(text) = cloud_text {
+        return build_truth_verdict(
             Some(text),
-            cloud_text,
             Some(RecordingTranscriptSource::CloudPrimary),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
         );
     }
 
     if let Some(text) = streaming_text {
-        return (
+        let mut confidence_flags = Vec::new();
+        push_truth_flag(&mut confidence_flags, "cloud_primary_missing");
+        return build_truth_verdict(
             Some(text),
-            cloud_text,
             Some(RecordingTranscriptSource::StreamingFallback),
+            Some(RecordingFallbackClass::Degraded),
+            None,
+            None,
+            None,
+            confidence_flags,
         );
     }
 
-    (None, cloud_text, None)
+    build_truth_verdict(
+        None,
+        None,
+        None,
+        Some(
+            session_telemetry
+                .no_speech_reason
+                .clone()
+                .unwrap_or_else(|| "empty_transcript_without_no_speech_event".to_string()),
+        ),
+        None,
+        None,
+        Vec::new(),
+    )
+}
+
+fn recording_mode_label(
+    assistive: bool,
+    hold_mode: HoldMode,
+    force_raw: bool,
+    force_ai: bool,
+) -> &'static str {
+    if assistive {
+        match hold_mode {
+            HoldMode::Chat => "chat",
+            HoldMode::Selection => "selection",
+            HoldMode::Raw => "assistive",
+        }
+    } else if force_raw {
+        "raw"
+    } else if force_ai {
+        "format"
+    } else {
+        "toggle"
+    }
+}
+
+fn transcript_output_category(output_kind: crate::state::history::TranscriptKind) -> &'static str {
+    match output_kind {
+        crate::state::history::TranscriptKind::Raw => "Transcript",
+        crate::state::history::TranscriptKind::Cloud => "Cloud transcript",
+        crate::state::history::TranscriptKind::Ai => "Formatted transcript",
+        crate::state::history::TranscriptKind::AiFailed => "AI failed, raw preserved",
+        crate::state::history::TranscriptKind::Failed => "Failed transcript",
+    }
+}
+
+fn compose_final_status(
+    display_status: &str,
+    output_kind: crate::state::history::TranscriptKind,
+) -> String {
+    if display_status.trim().is_empty() {
+        return transcript_output_category(output_kind).to_string();
+    }
+
+    match output_kind {
+        crate::state::history::TranscriptKind::Raw
+        | crate::state::history::TranscriptKind::Cloud
+        | crate::state::history::TranscriptKind::Failed => display_status.to_string(),
+        _ => format!(
+            "{} • {}",
+            display_status,
+            transcript_output_category(output_kind)
+        ),
+    }
+}
+
+fn truth_engine_label(source: Option<RecordingTranscriptSource>) -> Option<String> {
+    source.map(|source| match source {
+        RecordingTranscriptSource::LocalFinalPass => "local_whisper".to_string(),
+        RecordingTranscriptSource::CloudPrimary => "cloud_stt".to_string(),
+        RecordingTranscriptSource::Streaming => "streaming_whisper".to_string(),
+        RecordingTranscriptSource::StreamingFallback => "streaming_whisper".to_string(),
+    })
+}
+
+fn write_truth_sidecar_logged(path: &std::path::Path, metadata: &RecordingTruthMetadata) {
+    match types::write_truth_sidecar(path, metadata) {
+        Ok(sidecar_path) => debug!("Truth sidecar saved: {}", sidecar_path.display()),
+        Err(error) => warn!(
+            "Failed to write truth sidecar for {}: {}",
+            path.display(),
+            error
+        ),
+    }
 }
 
 const QUALITY_GATE_MIN_CHARS: usize = 24;
@@ -259,14 +528,16 @@ struct ProcessRecordingOutcome {
     no_speech_reason: Option<String>,
     commit_trigger: Option<String>,
     transcript_present: bool,
+    final_status: String,
 }
 
 impl ProcessRecordingOutcome {
-    fn no_speech(reason: impl Into<String>) -> Self {
+    fn no_speech(reason: impl Into<String>, final_status: impl Into<String>) -> Self {
         Self {
             no_speech_reason: Some(reason.into()),
             commit_trigger: None,
             transcript_present: false,
+            final_status: final_status.into(),
         }
     }
 }
@@ -2005,6 +2276,7 @@ impl RecordingController {
                 if overlay_enabled {
                     crate::ui::overlay::show_transcription_overlay();
                     crate::ui::overlay::enter_recording_mode();
+                    crate::ui::overlay::update_transcription_status("Recording • Live preview");
                 } else {
                     crate::ui::overlay::hide_transcription_overlay();
                 }
@@ -2216,6 +2488,7 @@ impl RecordingController {
             if overlay_enabled {
                 crate::ui::overlay::show_transcription_overlay();
                 crate::ui::overlay::enter_recording_mode();
+                crate::ui::overlay::update_transcription_status("Recording • Live preview");
             } else {
                 crate::ui::overlay::hide_transcription_overlay();
             }
@@ -2294,6 +2567,14 @@ impl RecordingController {
                 audio_path: None,
                 cloud_text_opt: None,
                 cloud_handle: None,
+                transcript_source: Some(RecordingTranscriptSource::Streaming),
+                truth_fallback_class: None,
+                truth_no_speech_reason: None,
+                truth_speech_pct: None,
+                truth_avg_logprob: None,
+                truth_confidence_flags: Vec::new(),
+                truth_commit_trigger: None,
+                truth_display_status: RecordingTranscriptSource::Streaming.label().to_string(),
                 append_mode: false,
                 live_stream_session: true,
                 user_needs_separator,
@@ -2438,7 +2719,12 @@ impl RecordingController {
         // Update tray icon based on result
         match &result {
             Ok(outcome) => {
-                crate::ui::voice_chat::update_voice_chat_status("Ready");
+                let final_status = if outcome.final_status.trim().is_empty() {
+                    "Ready"
+                } else {
+                    outcome.final_status.as_str()
+                };
+                crate::ui::voice_chat::update_voice_chat_status(final_status);
                 info!("Processing finished successfully. State reset to IDLE.");
 
                 if let Some(reason) = outcome.no_speech_reason.as_deref() {
@@ -2450,7 +2736,8 @@ impl RecordingController {
                         if opened {
                             crate::ui::voice_chat::hide_voice_chat_overlay();
                         }
-                        crate::ui::overlay::hide_transcription_overlay();
+                        crate::ui::overlay::update_transcription_status(final_status);
+                        crate::ui::overlay::schedule_auto_hide();
                     }
                 } else if !assistive {
                     let cfg = self.config.read().await.clone();
@@ -2466,6 +2753,7 @@ impl RecordingController {
                     }
 
                     if show_decision_overlay {
+                        crate::ui::overlay::update_transcription_status(final_status);
                         let reason = outcome
                             .commit_trigger
                             .as_deref()
@@ -2572,9 +2860,10 @@ impl RecordingController {
         let chat_active = assistive;
         let assistive_loop = assistive && self.assistive_loop_active.load(Ordering::SeqCst);
 
-        let mut local_final_pass_text = None;
+        let mut local_final_pass_verdict = None;
         let mut cloud_text_opt = None;
         let mut cloud_handle: Option<JoinHandle<Result<String>>> = None;
+        let mut local_final_pass_attempted = false;
 
         // Start cloud transcription in parallel (for early mismatch detection)
         if let Some((cloud_endpoint, cloud_api_key)) = cloud_config {
@@ -2597,18 +2886,16 @@ impl RecordingController {
             warn!("Cloud STT disabled: STT_ENDPOINT/STT_API_KEY missing");
         }
 
-        // Optional "final pass" local STT:
-        // Streaming is the source of truth for live UX and final output by default.
-        // Enable this only when explicitly requested for diagnostics/experiments.
-        //
-        // Default: disabled (set CODESCRIBE_LOCAL_STT_FINAL_PASS=1 to enable).
+        // Make saved-WAV adjudication the default local truth path. Preview stays live,
+        // but final verdict comes from the artifact when we have one.
         let local_final_pass_enabled = std::env::var("CODESCRIBE_LOCAL_STT_FINAL_PASS")
             .ok()
-            .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
+            .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"))
+            .unwrap_or(true);
 
         if use_local_stt && local_final_pass_enabled {
             if let Some(path) = &audio_path {
+                local_final_pass_attempted = true;
                 let wav_path = path.as_path().to_path_buf();
                 let lang = language_opt.map(str::to_string);
 
@@ -2617,20 +2904,24 @@ impl RecordingController {
                 }
 
                 info!(
-                    "Running final-pass local STT from audio file (overrides streaming): {}",
+                    "Running final-pass local STT adjudicator: {}",
                     wav_path.display()
                 );
 
                 match tokio::task::spawn_blocking(move || {
-                    crate::whisper::transcribe_file(&wav_path, lang.as_deref())
+                    crate::whisper::transcribe_file_verdict(&wav_path, lang.as_deref())
                 })
                 .await
                 {
-                    Ok(Ok(text)) if !text.trim().is_empty() => {
-                        info!("Final-pass transcription captured ({} chars)", text.len());
-                        local_final_pass_text = Some(text);
+                    Ok(Ok(verdict)) => {
+                        info!(
+                            "Final-pass verdict captured ({} chars, speech_pct={:?}, avg_logprob={:?})",
+                            verdict.text.len(),
+                            verdict.vad.as_ref().map(|vad| vad.speech_pct),
+                            verdict.raw.avg_logprob
+                        );
+                        local_final_pass_verdict = Some(verdict);
                     }
-                    Ok(Ok(_)) => warn!("Final-pass transcription returned empty text"),
                     Ok(Err(e)) => warn!("Final-pass transcription failed: {}", e),
                     Err(e) => warn!("Final-pass transcription task failed: {}", e),
                 }
@@ -2652,49 +2943,34 @@ impl RecordingController {
             }
         }
 
-        let (raw_text_opt, cloud_text_opt, transcript_source) = select_recording_transcript(
+        let session_telemetry = snapshot_session_telemetry(&self.session_telemetry);
+        let truth_verdict = adjudicate_recording_truth(
             use_local_stt,
-            local_final_pass_text,
+            local_final_pass_attempted,
+            local_final_pass_verdict,
             streaming_text,
-            cloud_text_opt,
+            cloud_text_opt.clone(),
+            &session_telemetry,
         );
-        match transcript_source {
-            Some(RecordingTranscriptSource::LocalFinalPass) => {
-                if let Some(text) = raw_text_opt.as_ref() {
-                    info!(
-                        "Using final-pass local transcription result ({} chars)",
-                        text.len()
-                    );
-                }
-            }
-            Some(RecordingTranscriptSource::CloudPrimary) => {
-                if let Some(text) = raw_text_opt.as_ref() {
-                    info!(
-                        "Using cloud transcription result as selected backend ({} chars)",
-                        text.len()
-                    );
-                }
-            }
-            Some(RecordingTranscriptSource::StreamingFallback) => {
-                if !use_local_stt {
-                    warn!("Cloud backend unavailable; using streaming transcript fallback");
-                }
-                if let Some(text) = raw_text_opt.as_ref() {
-                    info!(
-                        "Using streaming transcription result ({} chars)",
-                        text.len()
-                    );
-                }
-            }
-            None => {
-                if use_local_stt {
-                    warn!("Streaming returned empty text");
-                }
+        if let Some(source) = truth_verdict.transcript_source {
+            if let Some(text) = truth_verdict.raw_text.as_ref() {
+                info!(
+                    "Adjudicated transcript source={} chars={} fallback={:?} flags={:?}",
+                    source.label(),
+                    text.len(),
+                    truth_verdict.fallback_class,
+                    truth_verdict.confidence_flags
+                );
+            } else {
+                info!(
+                    "Adjudicated transcript source={} without final text (status={})",
+                    source.label(),
+                    truth_verdict.display_status
+                );
             }
         }
-        let session_telemetry = snapshot_session_telemetry(&self.session_telemetry);
 
-        let raw_text = match raw_text_opt {
+        let raw_text = match truth_verdict.raw_text.clone() {
             Some(text) if !text.trim().is_empty() => text,
             Some(_) | None => {
                 let reason = session_telemetry
@@ -2729,7 +3005,57 @@ impl RecordingController {
                     }
                     warn!("NoSpeech in assistive loop; continuing hands-off listening");
                 }
-                return Ok(ProcessRecordingOutcome::no_speech(reason));
+
+                let final_status = if truth_verdict.display_status.trim().is_empty() {
+                    "No reliable speech detected".to_string()
+                } else {
+                    truth_verdict.display_status.clone()
+                };
+                let mode_label =
+                    recording_mode_label(assistive, hold_mode, force_raw, force_ai).to_string();
+                let truth_metadata = RecordingTruthMetadata {
+                    source: truth_verdict.transcript_source,
+                    engine: truth_engine_label(truth_verdict.transcript_source),
+                    mode: Some(mode_label),
+                    fallback_class: truth_verdict.fallback_class,
+                    fallback_used: truth_verdict.fallback_class.is_some()
+                        || matches!(
+                            truth_verdict.transcript_source,
+                            Some(RecordingTranscriptSource::StreamingFallback)
+                        ),
+                    vad_speech_pct: truth_verdict.speech_pct,
+                    no_speech_reason: Some(reason.clone()),
+                    avg_logprob: truth_verdict.avg_logprob,
+                    confidence_flags: truth_verdict.confidence_flags.clone(),
+                    commit_trigger: truth_verdict.commit_trigger.clone(),
+                    display_status: Some(final_status.clone()),
+                };
+
+                let failed_entry = crate::state::history::save_entry_with_timestamp_and_slug(
+                    &final_status,
+                    Some(recording_timestamp),
+                    crate::state::history::TranscriptKind::Failed,
+                    Some("no-speech"),
+                );
+                write_truth_sidecar_logged(&failed_entry.path, &truth_metadata);
+
+                if config.dump_audio_logs
+                    && let Some(path) = &audio_path
+                    && let Some(audio_saved_path) = crate::state::history::save_audio(
+                        path.as_path(),
+                        recording_timestamp,
+                        Some("no-speech"),
+                        crate::state::history::TranscriptKind::Failed,
+                    )
+                {
+                    write_truth_sidecar_logged(&audio_saved_path, &truth_metadata);
+                }
+
+                if !assistive {
+                    crate::ui::overlay::update_transcription_status(&final_status);
+                }
+
+                return Ok(ProcessRecordingOutcome::no_speech(reason, final_status));
             }
         };
 
@@ -2751,6 +3077,14 @@ impl RecordingController {
                 audio_path,
                 cloud_text_opt,
                 cloud_handle,
+                transcript_source: truth_verdict.transcript_source,
+                truth_fallback_class: truth_verdict.fallback_class,
+                truth_no_speech_reason: truth_verdict.no_speech_reason.clone(),
+                truth_speech_pct: truth_verdict.speech_pct,
+                truth_avg_logprob: truth_verdict.avg_logprob,
+                truth_confidence_flags: truth_verdict.confidence_flags.clone(),
+                truth_commit_trigger: truth_verdict.commit_trigger.clone(),
+                truth_display_status: truth_verdict.display_status.clone(),
                 append_mode: false,
                 live_stream_session: false,
                 user_needs_separator: false,
@@ -2763,6 +3097,7 @@ impl RecordingController {
             no_speech_reason: None,
             commit_trigger: pipeline_outcome.commit_trigger,
             transcript_present,
+            final_status: pipeline_outcome.final_status,
         })
     }
 
@@ -2783,6 +3118,14 @@ impl RecordingController {
             audio_path,
             cloud_text_opt,
             cloud_handle,
+            transcript_source,
+            truth_fallback_class,
+            truth_no_speech_reason,
+            truth_speech_pct,
+            truth_avg_logprob,
+            truth_confidence_flags,
+            truth_commit_trigger,
+            truth_display_status,
             append_mode,
             live_stream_session,
             user_needs_separator,
@@ -2813,7 +3156,7 @@ impl RecordingController {
             postprocess_stats.lexicon_rewrites
         );
 
-        if raw_save_enabled {
+        let raw_entry_path = if raw_save_enabled {
             let raw_entry = crate::state::history::save_entry_with_timestamp_and_slug(
                 &raw_text,
                 Some(recording_timestamp),
@@ -2822,7 +3165,10 @@ impl RecordingController {
             );
             info!("Raw transcript saved: {}", raw_entry.path.display());
             crate::ui::voice_chat::update_drawer_after_save(raw_entry.path.as_path());
-        }
+            Some(raw_entry.path)
+        } else {
+            None
+        };
 
         // Check for repetition loops (Whisper hallucination like "Wielki, Wielki, Wielki...")
         let has_repetition = crate::ai_formatting::has_repetition_loop(&clean_text);
@@ -3062,19 +3408,8 @@ impl RecordingController {
             }
         };
 
-        let mode_label = if assistive {
-            match effective_hold_mode {
-                HoldMode::Chat => "chat",
-                HoldMode::Selection => "selection",
-                HoldMode::Raw => "assistive",
-            }
-        } else if force_raw {
-            "raw"
-        } else if force_ai {
-            "format"
-        } else {
-            "toggle"
-        };
+        let mode_label =
+            recording_mode_label(assistive, effective_hold_mode, force_raw, force_ai).to_string();
         info!(
             "Final transcript ready ({} chars, mode={})",
             formatted_text.len(),
@@ -3092,9 +3427,14 @@ impl RecordingController {
             quality_probe.correction_ratio,
             quality_probe.drop_ratio
         );
-        let commit_trigger = if !assistive && !live_stream_session {
+        let quality_commit_trigger = if !assistive && !live_stream_session {
             evaluate_quality_commit_trigger(force_raw, &quality_probe, output_kind)
                 .map(str::to_string)
+        } else {
+            None
+        };
+        let commit_trigger = if !assistive && !live_stream_session {
+            truth_commit_trigger.clone().or(quality_commit_trigger)
         } else {
             None
         };
@@ -3109,6 +3449,37 @@ impl RecordingController {
             );
         } else if !assistive && !live_stream_session {
             info!("COMMIT decision: not required by quality gate (mode={mode_label})");
+        }
+
+        if truth_no_speech_reason.is_some() || commit_trigger.is_some() {
+            should_auto_paste = false;
+        }
+
+        let final_status = compose_final_status(&truth_display_status, output_kind);
+        let truth_metadata = RecordingTruthMetadata {
+            source: transcript_source,
+            engine: truth_engine_label(transcript_source),
+            mode: Some(mode_label.clone()),
+            fallback_class: truth_fallback_class,
+            fallback_used: truth_fallback_class.is_some()
+                || matches!(
+                    transcript_source,
+                    Some(RecordingTranscriptSource::StreamingFallback)
+                ),
+            vad_speech_pct: truth_speech_pct,
+            no_speech_reason: truth_no_speech_reason.clone(),
+            avg_logprob: truth_avg_logprob,
+            confidence_flags: truth_confidence_flags.clone(),
+            commit_trigger: commit_trigger.clone(),
+            display_status: Some(final_status.clone()),
+        };
+
+        if let Some(path) = raw_entry_path.as_deref() {
+            write_truth_sidecar_logged(path, &truth_metadata);
+        }
+
+        if !assistive {
+            crate::ui::overlay::update_transcription_status(&final_status);
         }
 
         if should_apply_transcription_action_contract(assistive, live_stream_session)
@@ -3126,6 +3497,7 @@ impl RecordingController {
                 &raw_text,
                 &formatted_text,
                 action_contract_mode,
+                truth_display_status.clone(),
             );
         } else if !assistive {
             debug!(
@@ -3170,13 +3542,14 @@ impl RecordingController {
         // Save audio to transcriptions folder if enabled (pair with RAW for reports)
         if config.dump_audio_logs
             && let Some(path) = &audio_path
-        {
-            crate::state::history::save_audio(
+            && let Some(audio_saved_path) = crate::state::history::save_audio(
                 path.as_path(),
                 recording_timestamp,
                 Some(&raw_text),
                 crate::state::history::TranscriptKind::Raw,
-            );
+            )
+        {
+            write_truth_sidecar_logged(&audio_saved_path, &truth_metadata);
         }
 
         if cfg!(test) {
@@ -3202,6 +3575,7 @@ impl RecordingController {
                 Some(&raw_text),
             );
             info!("Transcript saved: {}", entry.path.display());
+            write_truth_sidecar_logged(&entry.path, &truth_metadata);
             crate::ui::voice_chat::refresh_drawer();
         } else if assistive {
             info!(
@@ -3219,9 +3593,28 @@ impl RecordingController {
                 Some(&raw_text),
             );
             info!("Cloud transcript saved: {}", entry.path.display());
+            write_truth_sidecar_logged(
+                &entry.path,
+                &RecordingTruthMetadata {
+                    source: Some(RecordingTranscriptSource::CloudPrimary),
+                    engine: truth_engine_label(Some(RecordingTranscriptSource::CloudPrimary)),
+                    mode: Some(mode_label.clone()),
+                    fallback_class: None,
+                    fallback_used: false,
+                    vad_speech_pct: None,
+                    no_speech_reason: None,
+                    avg_logprob: None,
+                    confidence_flags: Vec::new(),
+                    commit_trigger: None,
+                    display_status: Some(
+                        RecordingTranscriptSource::CloudPrimary.label().to_string(),
+                    ),
+                },
+            );
         } else if let Some(handle) = cloud_handle {
             let slug_hint = raw_text.clone();
             let timestamp = recording_timestamp;
+            let mode_label = mode_label.clone();
             tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(text)) => {
@@ -3232,6 +3625,26 @@ impl RecordingController {
                             Some(&slug_hint),
                         );
                         info!("Cloud transcript saved: {}", entry.path.display());
+                        write_truth_sidecar_logged(
+                            &entry.path,
+                            &RecordingTruthMetadata {
+                                source: Some(RecordingTranscriptSource::CloudPrimary),
+                                engine: truth_engine_label(Some(
+                                    RecordingTranscriptSource::CloudPrimary,
+                                )),
+                                mode: Some(mode_label),
+                                fallback_class: None,
+                                fallback_used: false,
+                                vad_speech_pct: None,
+                                no_speech_reason: None,
+                                avg_logprob: None,
+                                confidence_flags: Vec::new(),
+                                commit_trigger: None,
+                                display_status: Some(
+                                    RecordingTranscriptSource::CloudPrimary.label().to_string(),
+                                ),
+                            },
+                        );
                     }
                     Ok(Err(e)) => error!("Cloud transcription failed: {}", e),
                     Err(e) => error!("Cloud transcription task failed: {}", e),
@@ -3239,7 +3652,10 @@ impl RecordingController {
             });
         }
 
-        Ok(types::TranscriptProcessOutcome { commit_trigger })
+        Ok(types::TranscriptProcessOutcome {
+            commit_trigger,
+            final_status,
+        })
     }
 
     /// Force reset to IDLE state without stopping recorder.
