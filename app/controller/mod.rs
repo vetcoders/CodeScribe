@@ -218,6 +218,20 @@ fn truth_review_trigger(
         return Some("very_low_speech".to_string());
     }
 
+    if confidence_flags
+        .iter()
+        .any(|flag| flag == "streaming_preview_used_as_verdict")
+    {
+        return Some("streaming_preview_used_as_verdict".to_string());
+    }
+
+    if confidence_flags
+        .iter()
+        .any(|flag| flag == "cloud_fallback_used")
+    {
+        return Some("cloud_fallback_used".to_string());
+    }
+
     match fallback_class {
         Some(RecordingFallbackClass::Acceptable) | None => None,
         Some(RecordingFallbackClass::Degraded) => Some("degraded_fallback".to_string()),
@@ -305,49 +319,47 @@ fn adjudicate_recording_truth(
     let streaming_text = non_empty_transcript(Some(streaming_text));
     let cloud_text = non_empty_transcript(cloud_text);
 
-    if use_local_stt {
-        if let Some(verdict) = local_final_pass_verdict {
-            let speech_pct = verdict.vad.as_ref().map(|vad| vad.speech_pct);
-            let avg_logprob = verdict.raw.avg_logprob;
-            let fallback_class = if verdict.confidence_flags.iter().any(|flag| {
-                matches!(
-                    flag,
-                    TranscriptionConfidenceFlag::VeryLowSpeech
-                        | TranscriptionConfidenceFlag::PossibleHallucinationLogprob
-                        | TranscriptionConfidenceFlag::QualityGateDropped
-                )
-            }) {
-                Some(RecordingFallbackClass::Unsafe)
-            } else {
-                None
-            };
+    if use_local_stt && let Some(verdict) = local_final_pass_verdict {
+        let speech_pct = verdict.vad.as_ref().map(|vad| vad.speech_pct);
+        let avg_logprob = verdict.raw.avg_logprob;
+        let fallback_class = if verdict.confidence_flags.iter().any(|flag| {
+            matches!(
+                flag,
+                TranscriptionConfidenceFlag::VeryLowSpeech
+                    | TranscriptionConfidenceFlag::PossibleHallucinationLogprob
+                    | TranscriptionConfidenceFlag::QualityGateDropped
+            )
+        }) {
+            Some(RecordingFallbackClass::Unsafe)
+        } else {
+            None
+        };
 
-            let confidence_flags = verdict
-                .confidence_flags
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-            let no_speech_reason = verdict
-                .vad
-                .as_ref()
-                .and_then(|vad| vad.no_speech_reason.clone());
+        let confidence_flags = verdict
+            .confidence_flags
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let no_speech_reason = verdict
+            .vad
+            .as_ref()
+            .and_then(|vad| vad.no_speech_reason.clone());
 
-            let raw_text = if no_speech_reason.is_some() {
-                None
-            } else {
-                non_empty_transcript(Some(verdict.text))
-            };
+        let raw_text = if no_speech_reason.is_some() {
+            None
+        } else {
+            non_empty_transcript(Some(verdict.text))
+        };
 
-            return build_truth_verdict(
-                raw_text,
-                Some(RecordingTranscriptSource::LocalFinalPass),
-                fallback_class,
-                no_speech_reason,
-                speech_pct,
-                avg_logprob,
-                confidence_flags,
-            );
-        }
+        return build_truth_verdict(
+            raw_text,
+            Some(RecordingTranscriptSource::LocalFinalPass),
+            fallback_class,
+            no_speech_reason,
+            speech_pct,
+            avg_logprob,
+            confidence_flags,
+        );
     }
 
     if let Some(reason) = &session_telemetry.no_speech_reason {
@@ -369,36 +381,30 @@ fn adjudicate_recording_truth(
         }
 
         if let Some(text) = cloud_text {
+            let mut fallback_flags = confidence_flags.clone();
+            push_truth_flag(&mut fallback_flags, "cloud_fallback_used");
             return build_truth_verdict(
                 Some(text),
                 Some(RecordingTranscriptSource::CloudFallback),
-                Some(RecordingFallbackClass::Acceptable),
+                Some(RecordingFallbackClass::Degraded), // cloud fallback is no longer "Acceptable" (silent), it must be explicit
                 None,
                 None,
                 None,
-                confidence_flags,
+                fallback_flags,
             );
         }
 
         if let Some(text) = streaming_text {
-            let fallback_class = if local_final_pass_attempted {
-                Some(RecordingFallbackClass::Degraded)
-            } else {
-                None
-            };
-
+            let mut fallback_flags = confidence_flags.clone();
+            push_truth_flag(&mut fallback_flags, "streaming_preview_used_as_verdict");
             return build_truth_verdict(
                 Some(text),
-                Some(if local_final_pass_attempted {
-                    RecordingTranscriptSource::StreamingFallback
-                } else {
-                    RecordingTranscriptSource::Streaming
-                }),
-                fallback_class,
+                Some(RecordingTranscriptSource::StreamingFallback),
+                Some(RecordingFallbackClass::Degraded), // streaming is always degraded as a final verdict
                 None,
                 None,
                 None,
-                confidence_flags,
+                fallback_flags,
             );
         }
     } else {
@@ -490,9 +496,7 @@ fn compose_final_status(
     }
 
     match output_kind {
-        crate::state::history::TranscriptKind::Raw
-        | crate::state::history::TranscriptKind::Cloud
-        | crate::state::history::TranscriptKind::Failed => display_status.to_string(),
+        crate::state::history::TranscriptKind::Failed => display_status.to_string(),
         _ => format!(
             "{} • {}",
             display_status,
@@ -3331,7 +3335,7 @@ impl RecordingController {
             // Agent runtime path persists full conversation in ThreadStore.
             (
                 clean_text.clone(),
-                crate::state::history::TranscriptKind::Raw,
+                crate::state::history::TranscriptKind::AssistantInterpretation,
                 false,
             )
         } else if force_raw {
