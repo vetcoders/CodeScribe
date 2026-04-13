@@ -176,7 +176,11 @@ impl TranscriptionVerdict {
         source: TranscriptionSource,
         final_pass: Option<FinalPassVerdict>,
     ) -> Self {
-        let confidence_flags = collect_confidence_flags(vad.as_ref(), &raw);
+        let confidence_flags = collect_confidence_flags(
+            vad.as_ref().map(|vad| vad.speech_pct),
+            raw.avg_logprob,
+            raw.quality_gate_dropped,
+        );
         Self {
             text,
             raw,
@@ -226,24 +230,22 @@ impl std::fmt::Display for TranscriptionSource {
     }
 }
 
-fn collect_confidence_flags(
-    vad: Option<&VadVerdict>,
-    raw: &RawTranscript,
+pub(crate) fn collect_confidence_flags(
+    vad_speech_pct: Option<f32>,
+    avg_logprob: Option<f32>,
+    quality_gate_dropped: bool,
 ) -> Vec<TranscriptionConfidenceFlag> {
     let mut flags = Vec::new();
 
-    if vad.is_some_and(|vad| vad.speech_pct <= VERY_LOW_SPEECH_PCT) {
+    if vad_speech_pct.is_some_and(|speech_pct| speech_pct <= VERY_LOW_SPEECH_PCT) {
         flags.push(TranscriptionConfidenceFlag::VeryLowSpeech);
     }
 
-    if raw
-        .avg_logprob
-        .is_some_and(|avg| avg <= POSSIBLE_HALLUCINATION_LOGPROB)
-    {
+    if avg_logprob.is_some_and(|avg| avg <= POSSIBLE_HALLUCINATION_LOGPROB) {
         flags.push(TranscriptionConfidenceFlag::PossibleHallucinationLogprob);
     }
 
-    if raw.quality_gate_dropped {
+    if quality_gate_dropped {
         flags.push(TranscriptionConfidenceFlag::QualityGateDropped);
     }
 
@@ -455,6 +457,10 @@ pub enum EngineEvent {
     ///
     /// - Emitted once per VAD-bounded speech segment (or on session flush).
     /// - `text` is the final post-processed utterance text.
+    /// - `vad_speech_pct` preserves how much of the utterance Silero classified
+    ///   as speech, so consumers do not have to reverse-engineer silence risk.
+    /// - `confidence_flags` carries the engine-owned truth derived from VAD
+    ///   speech ratio plus Whisper quality-gate metadata.
     /// - After this event, the engine clears its internal accumulated_text.
     /// - Sinks must reset `last_preview` to empty (next Preview starts fresh).
     /// - In toggle mode, the utterance callback processes this text (AI/clipboard).
@@ -467,9 +473,11 @@ pub enum EngineEvent {
         start_ts: f32,
         end_ts: f32,
         segments: Vec<TranscriptSegment>,
+        vad_speech_pct: Option<f32>,
         avg_logprob: Option<f32>,
         compression_ratio: Option<f32>,
         quality_gate_dropped: bool,
+        confidence_flags: Vec<TranscriptionConfidenceFlag>,
     },
 
     /// Content dropped by engine intelligence.
@@ -809,9 +817,11 @@ mod tests {
                 start_ts: 1.5,
                 end_ts: 3.2,
             }],
+            vad_speech_pct: Some(84.0),
             avg_logprob: Some(-0.35),
             compression_ratio: Some(1.2),
             quality_gate_dropped: false,
+            confidence_flags: Vec::new(),
         };
         if let EngineEvent::UtteranceFinal {
             utterance_id,
@@ -820,9 +830,11 @@ mod tests {
             start_ts,
             end_ts,
             segments,
+            vad_speech_pct,
             avg_logprob,
             compression_ratio,
             quality_gate_dropped,
+            confidence_flags,
         } = event
         {
             assert_eq!(utterance_id, 42);
@@ -831,9 +843,11 @@ mod tests {
             assert!((start_ts - 1.5).abs() < f32::EPSILON);
             assert!((end_ts - 3.2).abs() < f32::EPSILON);
             assert_eq!(segments.len(), 1);
+            assert_eq!(vad_speech_pct, Some(84.0));
             assert_eq!(avg_logprob, Some(-0.35));
             assert_eq!(compression_ratio, Some(1.2));
             assert!(!quality_gate_dropped);
+            assert!(confidence_flags.is_empty());
         } else {
             panic!("Expected UtteranceFinal variant");
         }
@@ -1034,23 +1048,38 @@ mod tests {
             start_ts: 0.0,
             end_ts: 1.0,
             segments: Vec::new(),
+            vad_speech_pct: Some(4.0),
             avg_logprob: Some(-0.85),
             compression_ratio: Some(2.5),
             quality_gate_dropped: false,
+            confidence_flags: vec![
+                TranscriptionConfidenceFlag::VeryLowSpeech,
+                TranscriptionConfidenceFlag::PossibleHallucinationLogprob,
+            ],
         };
         if let EngineEvent::UtteranceFinal {
+            vad_speech_pct,
             avg_logprob,
             compression_ratio,
             quality_gate_dropped,
+            confidence_flags,
             ..
         } = event
         {
+            assert_eq!(vad_speech_pct, Some(4.0));
             assert!(avg_logprob.unwrap() < -0.5, "low confidence must survive");
             assert!(
                 compression_ratio.unwrap() > 2.0,
                 "high compression must survive"
             );
             assert!(!quality_gate_dropped);
+            assert_eq!(
+                confidence_flags,
+                vec![
+                    TranscriptionConfidenceFlag::VeryLowSpeech,
+                    TranscriptionConfidenceFlag::PossibleHallucinationLogprob,
+                ]
+            );
         }
     }
 
@@ -1063,18 +1092,35 @@ mod tests {
             start_ts: 0.0,
             end_ts: 1.0,
             segments: Vec::new(),
+            vad_speech_pct: Some(3.0),
             avg_logprob: Some(-1.5),
             compression_ratio: Some(4.0),
             quality_gate_dropped: true,
+            confidence_flags: vec![
+                TranscriptionConfidenceFlag::VeryLowSpeech,
+                TranscriptionConfidenceFlag::PossibleHallucinationLogprob,
+                TranscriptionConfidenceFlag::QualityGateDropped,
+            ],
         };
         if let EngineEvent::UtteranceFinal {
+            vad_speech_pct,
             quality_gate_dropped,
             avg_logprob,
+            confidence_flags,
             ..
         } = event
         {
+            assert_eq!(vad_speech_pct, Some(3.0));
             assert!(quality_gate_dropped, "gate drop must be visible in event");
             assert!(avg_logprob.unwrap() < -1.0);
+            assert_eq!(
+                confidence_flags,
+                vec![
+                    TranscriptionConfidenceFlag::VeryLowSpeech,
+                    TranscriptionConfidenceFlag::PossibleHallucinationLogprob,
+                    TranscriptionConfidenceFlag::QualityGateDropped,
+                ]
+            );
         }
     }
 }

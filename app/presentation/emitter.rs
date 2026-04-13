@@ -539,9 +539,11 @@ mod tests {
             start_ts: 0.0,
             end_ts: 1.0,
             segments: Vec::new(),
+            vad_speech_pct: Some(100.0),
             avg_logprob: None,
             compression_ratio: None,
             quality_gate_dropped: false,
+            confidence_flags: Vec::new(),
         });
         emitter.on_event(&EngineEvent::Preview {
             rev: 2,
@@ -589,9 +591,11 @@ mod tests {
             start_ts: 0.0,
             end_ts: 1.0,
             segments: Vec::new(),
+            vad_speech_pct: Some(5.0),
             avg_logprob: None,
             compression_ratio: None,
             quality_gate_dropped: false,
+            confidence_flags: Vec::new(),
         });
         emitter.on_event(&EngineEvent::UtteranceFinal {
             utterance_id: 7,
@@ -600,9 +604,11 @@ mod tests {
             start_ts: 0.0,
             end_ts: 1.0,
             segments: Vec::new(),
+            vad_speech_pct: Some(5.0),
             avg_logprob: None,
             compression_ratio: None,
             quality_gate_dropped: false,
+            confidence_flags: Vec::new(),
         });
 
         let delivered = delivered.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -625,9 +631,11 @@ mod tests {
             start_ts: 0.0,
             end_ts: 1.0,
             segments: Vec::new(),
+            vad_speech_pct: Some(100.0),
             avg_logprob: None,
             compression_ratio: None,
             quality_gate_dropped: false,
+            confidence_flags: Vec::new(),
         });
         emitter.on_event(&EngineEvent::Preview {
             rev: 2,
