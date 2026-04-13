@@ -23,7 +23,7 @@
 //!
 //! ## Architecture
 //!
-//! - **whisper** - Runtime-managed local Whisper with optional experimental embedding hooks
+//! - **whisper** - Embedded-first local Whisper with runtime fallback when embedding is disabled
 //! - **tts** - Text-to-speech with optional embedded assets depending on build policy
 //! - **vad** - Voice activity detection using Silero VAD neural network
 //! - **embedder** - Text embeddings using MiniLM model (offline)
@@ -61,7 +61,7 @@ pub use stt::whisper;
 // Public API - Whisper (STT main interface)
 // ═══════════════════════════════════════════════════════════
 
-/// Initialize and transcribe with the runtime Whisper path.
+/// Initialize and transcribe with the embedded-first Whisper path.
 pub mod stt_api {
     pub use crate::pipeline::contracts::{FileTranscriptionOptions, FinalPassMode};
     pub use crate::stt::whisper::embedded::{

@@ -1,8 +1,9 @@
-//! Model management for Whisper models.
+//! Runtime fallback model management for Whisper models.
 //!
-//! This module provides utilities for listing available models.
-//! For actual transcription, use `whisper::singleton` which provides
-//! a pre-loaded engine.
+//! This module provides utilities for listing and resolving filesystem models
+//! when the embedded Whisper payload is disabled or unavailable. For actual
+//! transcription, use `whisper::singleton`, which owns the embedded-first
+//! engine policy.
 //!
 //! Created by M&K (c)2026 VetCoders
 
@@ -10,7 +11,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
-/// Default bundled model name
+/// Default Whisper model name used for runtime fallback lookup.
 pub const DEFAULT_MODEL: &str = "whisper-large-v3-turbo-mlx-q8";
 
 pub struct ModelManager {
@@ -18,9 +19,9 @@ pub struct ModelManager {
 }
 
 impl ModelManager {
-    /// Create a new ModelManager.
+    /// Create a new ModelManager for runtime fallback lookup.
     ///
-    /// Resolves the models directory:
+    /// Resolves the runtime models directory:
     /// 1. Bundled .app: Contents/Resources/models/
     /// 2. Development: ./models/ relative to executable
     /// 3. Fallback: ~/.codescribe/models/

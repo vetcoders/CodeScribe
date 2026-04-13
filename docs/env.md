@@ -106,7 +106,8 @@ Wymagane **tylko jeśli** `AI_FORMATTING_ENABLED=1` i chcesz LLM:
   - albo tryb‑specyficzne: `LLM_FORMATTING_*` i/lub `LLM_ASSISTIVE_*` (HOT RELOADED)
 
 **3) Brak lokalnego modelu w ścieżkach runtime**
-Wymagane **tylko jeśli** runtime nie może znaleźć Whispera przez cache / config:
+Wymagane **tylko jeśli** build działa bez embedded Whispera (`CODESCRIBE_NO_EMBED=1` albo brak modelu przy buildzie)
+i runtime nie może znaleźć Whispera przez cache / config:
 
 - `CODESCRIBE_MODEL_PATH` (RESTART NEEDED)
 
@@ -124,7 +125,7 @@ Wymagane **tylko jeśli** runtime nie może znaleźć Whispera przez cache / con
 **Model lokalny**
 
 - `CODESCRIBE_MODEL_PATH` **nadpisuje runtime lookup** (RESTART NEEDED)
-- `CODESCRIBE_NO_EMBED=1` (build‑time) wyłącza opcjonalne embedy innych komponentów, ale Whisper i tak pozostaje runtime-managed
+- `CODESCRIBE_NO_EMBED=1` (build‑time) wyłącza opcjonalne embedy, w tym Whisper; wtedy `CODESCRIBE_MODEL_PATH` lub HF cache stają się fallbackiem runtime
 
 **STT endpointy**
 

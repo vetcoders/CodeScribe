@@ -1,7 +1,10 @@
-//! Optional embedded Whisper model bytes.
+//! Embedded Whisper model bytes.
 //!
-//! The current build policy disables Whisper embedding, so these helpers
-//! usually report unavailable. They remain for experimental builds and tests.
+//! The default product build embeds Whisper when the model is available at
+//! build time. These helpers expose that payload to the singleton. When the
+//! build is produced with `CODESCRIBE_NO_EMBED=1` or without a complete model
+//! snapshot, the payload is intentionally absent and runtime lookup must take
+//! over.
 //!
 //! Created by M&K (c)2026 VetCoders
 
@@ -58,16 +61,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_embedded_availability() {
-        let available = is_embedded_available();
-        println!("Embedded model available: {}", available);
+    #[cfg(embed_model)]
+    fn embedded_payload_is_available_when_compiled_in() {
+        assert!(is_embedded_available());
+        let model = get_embedded_data().expect("embedded payload must exist");
+        assert!(!model.config.is_empty());
+        assert!(!model.tokenizer.is_empty());
+        assert!(!model.mel_filters.is_empty());
+        assert!(!model.weights.is_empty());
+        assert!(model.total_size() > 0);
+    }
 
-        if available {
-            let model = get_embedded_data().unwrap();
-            println!(
-                "Model size: {:.1} MB",
-                model.total_size() as f64 / 1_000_000.0
-            );
-        }
+    #[test]
+    #[cfg(not(embed_model))]
+    fn embedded_payload_is_absent_when_not_compiled_in() {
+        assert!(!is_embedded_available());
+        assert!(get_embedded_data().is_none());
     }
 }

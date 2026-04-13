@@ -1,34 +1,34 @@
-# WHISPER LIVE (Runtime Model + Streaming Transcription)
+# WHISPER LIVE (Embedded Whisper + Streaming Transcription)
 
 > **Status:** DONE ✅ (2026-01-16)
 >
-> **Tagline:** Whisper stays local, loads at runtime, and transcription happens _during recording_.
+> **Tagline:** Whisper stays local, ships embedded by default, and transcription happens _during recording_.
 
 ## TL;DR
 
 CodeScribe’s core power-up is:
 
-1. **Runtime-managed Whisper model** (`whisper-large-v3-turbo-mlx-q8` by default)
-   - build policy disables Whisper embedding
-   - runtime resolves the model from `CODESCRIBE_MODEL_PATH`, configured model dirs, bundled app resources, or the Hugging Face cache
+1. **Embedded-first Whisper model** (`whisper-large-v3-turbo-mlx-q8` by default)
+   - build policy embeds Whisper whenever the model is available at build time
+   - runtime lookup from `CODESCRIBE_MODEL_PATH`, configured model dirs, bundled app resources, or the Hugging Face cache is a fallback path for `CODESCRIBE_NO_EMBED=1` builds or recovery
 2. **Live (streaming) transcription** while the user is recording
    - Audio is chunked and transcribed in the background
    - On `stop()` we only “close” the last fragment → **near-instant time-to-paste**
 
 ## What we shipped
 
-### 1) Runtime Whisper (Current Policy)
+### 1) Embedded Whisper (Current Policy)
 
-- **Runtime-managed:** `core/build.rs` hard-disables Whisper embedding.
-  - Prefer `CODESCRIBE_MODEL_PATH` when explicitly set.
-  - Otherwise resolve from configured model dirs, app resources, or HF cache.
-  - The local path still stays on-device and uses Metal once loaded.
+- **Embedded-first:** `core/build.rs` embeds Whisper by default when a complete model snapshot is available.
+  - Prefer the embedded payload for shipped behavior.
+  - If embedding is disabled with `CODESCRIBE_NO_EMBED=1` or the model is absent at build time, resolve from `CODESCRIBE_MODEL_PATH`, configured model dirs, app resources, or HF cache.
+  - Both paths stay local and use Metal once loaded.
 - **Global Singleton:** A process-wide engine instance loads once and stays resident.
 
 Key behavior:
 
-- **Shipped build:** runtime model lookup is the canonical path.
-- **Experimental builds:** optional embedded helpers still exist, but they are not the product default.
+- **Shipped build:** embedded Whisper is the canonical path.
+- **Fallback build/runtime:** runtime model lookup remains available when embedding is intentionally unavailable.
 
 ### 2) Streaming transcription (during recording)
 
@@ -79,10 +79,10 @@ flowchart TD
 
 ## Where in the code
 
-### Runtime lookup + singleton engine
+### Embedded payload + singleton engine
 
-- `core/stt/whisper/embedded.rs` — optional embedded hooks (normally unavailable in current builds)
-- `core/stt/whisper/singleton.rs` — global engine singleton (resolves runtime model and exposes `transcribe*()`)
+- `core/stt/whisper/embedded.rs` — embedded Whisper payload exposed to the engine when compiled in
+- `core/stt/whisper/singleton.rs` — global engine singleton (prefers embedded payload, falls back to runtime model lookup)
 - `core/stt/whisper/engine.rs` — Candle/Whisper inference, chunking, overlap dedup (`append_with_overlap_dedup`)
 
 ### Live streaming recorder
@@ -102,7 +102,7 @@ flowchart TD
 
 ## Build & distribution
 
-### Install from source (runtime Whisper)
+### Install from source (embedded-first Whisper)
 
 ```bash
 make install          # ensures runtime model/cache availability and installs the CLI
@@ -117,8 +117,8 @@ make dmg-signed
 
 Notes:
 
-- DMG / app builds still rely on runtime Whisper lookup.
-- `make install-no-embed` disables optional non-Whisper embedded support assets and requires `CODESCRIBE_MODEL_PATH`.
+- DMG / app builds now prefer embedded Whisper when the model is available in the build context.
+- `make install-no-embed` or `CODESCRIBE_NO_EMBED=1` disables optional embedding and requires runtime Whisper lookup.
 
 ## Troubleshooting / FAQ
 
@@ -129,6 +129,12 @@ Checklist:
 - set `CODESCRIBE_MODEL_PATH` to a valid Whisper directory, or
 - warm the HF cache with `make install` / `make download-model`
 - verify the resolved path has `config.json`, `tokenizer.json`, `mel_filters.npz`, and safetensors weights
+
+### “How do I know which provisioning path I’m on?”
+
+- Default build with model available: embedded Whisper payload
+- Explicit `CODESCRIBE_NO_EMBED=1`: runtime lookup
+- Missing model during build: runtime lookup fallback for that artifact
 
 ### “Why does streaming care about actual sample rate?”
 

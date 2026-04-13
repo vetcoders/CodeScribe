@@ -3,12 +3,12 @@
 //! Exports embedded model data and configuration.
 //! Generates embedded_tts_data.rs / embedded_embedder_data.rs / embedded_vad_data.rs in OUT_DIR.
 //!
-//! Whisper embedding is hard-disabled (runtime model loading only).
+//! Whisper embedding is enabled by default when the model is available at build time.
 //! Release builds still embed Silero VAD + MiniLM embedder by default.
 //! Opt-out with CODESCRIBE_NO_EMBED=1 to skip optional embedding (except Silero).
 //! TTS requires opt-in via CODESCRIBE_EMBED_TTS.
 //!
-//! ⚠ Binary size stays lower with runtime Whisper loading.
+//! ⚠ Embedded Whisper materially increases artifact size.
 //!   TTS can still increase artifact size significantly — test before shipping!
 //!
 //! Created by M&K (c)2026 VetCoders
@@ -73,7 +73,54 @@ fn main() {
             && model_path.join("mel_filters.npz").exists()
             && weights_path.exists();
         if model_exists {
-            println!("cargo:rerun-if-changed={}", model_path.display());
+            println!(
+                "cargo:rerun-if-changed={}",
+                model_path.join("config.json").display()
+            );
+            println!(
+                "cargo:rerun-if-changed={}",
+                model_path.join("tokenizer.json").display()
+            );
+            println!(
+                "cargo:rerun-if-changed={}",
+                model_path.join("mel_filters.npz").display()
+            );
+            println!("cargo:rerun-if-changed={}", weights_path.display());
+        }
+
+        // Whisper model embedding (default unless explicitly disabled).
+        let whisper_dest_path = Path::new(&out_dir).join("embedded_model_data.rs");
+        let whisper_embedded = !no_embed && model_exists;
+        if whisper_embedded {
+            println!(
+                "cargo:warning=Embedding Whisper model from: {}",
+                model_path.display()
+            );
+            let whisper_content = format!(
+                r#"
+                pub static CONFIG: &[u8] = include_bytes!(r"{}");
+                pub static TOKENIZER: &[u8] = include_bytes!(r"{}");
+                pub static MEL_FILTERS: &[u8] = include_bytes!(r"{}");
+                pub static WEIGHTS: &[u8] = include_bytes!(r"{}");
+                "#,
+                model_path.join("config.json").display(),
+                model_path.join("tokenizer.json").display(),
+                model_path.join("mel_filters.npz").display(),
+                weights_path.display(),
+            );
+            fs::write(&whisper_dest_path, whisper_content)
+                .expect("Failed to write embedded_model_data.rs");
+            println!("cargo:rustc-cfg=embed_model");
+        } else if !no_embed && !model_exists {
+            println!(
+                "cargo:warning=Whisper model not found for embedding: {}",
+                model_path.display()
+            );
+            println!(
+                "cargo:warning=Download with: hf download {}",
+                DEFAULT_WHISPER_REPO
+            );
+            println!("cargo:warning=Falling back to runtime Whisper lookup for this build");
         }
 
         // TTS model embedding (optional, via CODESCRIBE_EMBED_TTS=1)
@@ -194,22 +241,19 @@ fn main() {
             );
         }
 
-        // Whisper embedding is intentionally disabled (runtime loading only).
-        // We keep model discovery for diagnostics in build logs.
-        if is_release {
-            println!(
-                "cargo:warning=Whisper embedding is disabled by policy; using runtime model loading"
-            );
-            if !model_exists {
-                println!(
-                    "cargo:warning=Whisper model not found in build context (OK; resolve via CODESCRIBE_MODEL_PATH/HF cache at runtime)"
-                );
-            }
+        if is_release && whisper_embedded {
+            println!("cargo:warning=Whisper build policy: embedded by default");
         }
         println!("cargo:rustc-env=CODESCRIBE_MODEL_DIR=");
 
         // Summary (single line for build logs)
-        let whisper_summary = "runtime_only";
+        let whisper_summary = if whisper_embedded {
+            "embedded_default"
+        } else if no_embed {
+            "runtime_fallback_no_embed"
+        } else {
+            "runtime_fallback_missing_model"
+        };
         let embedder_summary = if !no_embed && embedder_model_exists {
             "embedded"
         } else if no_embed {
