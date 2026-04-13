@@ -262,6 +262,7 @@ pub fn transcribe_file_verdict(
         total_windows: stats.total_windows,
         no_speech,
         no_speech_reason: stats.no_speech_reason.clone(),
+        sparkline: stats.sparkline.clone(),
     };
 
     if no_speech {

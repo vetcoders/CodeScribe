@@ -43,7 +43,7 @@ impl SpeechUtterance {
 // ═══════════════════════════════════════════════════════════
 
 /// Raw output from a speech-to-text engine (Whisper or future providers).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RawTranscript {
     /// The transcribed text (untouched by postprocessing).
     pub text: String,
@@ -158,7 +158,7 @@ impl std::fmt::Display for TranscriptionConfidenceFlag {
 /// Carries the full truth the engine knows: text, VAD stats, explicit
 /// no-speech reason, confidence flags, and provenance. Consumers decide what
 /// to expose; nothing is hidden.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionVerdict {
     pub text: String,
     pub raw: RawTranscript,
@@ -195,7 +195,7 @@ impl TranscriptionVerdict {
 }
 
 /// VAD analysis results preserved as data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadVerdict {
     /// Percentage of audio classified as speech (0–100).
     pub speech_pct: f32,
@@ -205,6 +205,9 @@ pub struct VadVerdict {
     pub no_speech: bool,
     /// Structured reason preserved when VAD concluded with no usable speech.
     pub no_speech_reason: Option<String>,
+    /// Sparkline visualisation of speech distribution (one char per 500ms window).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sparkline: String,
 }
 
 /// Where the transcription text came from.
@@ -911,6 +914,7 @@ mod tests {
                 total_windows: 60,
                 no_speech: true,
                 no_speech_reason: Some("vad_no_speech_detected".to_string()),
+                sparkline: String::new(),
             }),
             TranscriptionSource::LocalFinalPass,
             None,
@@ -946,6 +950,7 @@ mod tests {
                 total_windows: 20,
                 no_speech: false,
                 no_speech_reason: None,
+                sparkline: "▁▃▅▇█▇▅▃▁▁▃▅▇█▇▅▃▁▁".to_string(),
             }),
             TranscriptionSource::LocalFinalPass,
             Some(FinalPassVerdict {
@@ -1025,6 +1030,7 @@ mod tests {
                 total_windows: 20,
                 no_speech: false,
                 no_speech_reason: None,
+                sparkline: String::new(),
             }),
             TranscriptionSource::LocalFinalPass,
             None,
@@ -1125,5 +1131,115 @@ mod tests {
                 ]
             );
         }
+    }
+
+    // ── Truth QA: Serialization roundtrip ──
+
+    #[test]
+    fn verdict_serialization_roundtrip_preserves_all_truth() {
+        let verdict = TranscriptionVerdict::from_parts(
+            "Cześć, jak się masz".to_string(),
+            RawTranscript {
+                text: "Cześć, jak się masz".to_string(),
+                segments: vec![TranscriptSegment {
+                    text: "Cześć, jak się masz".to_string(),
+                    start_ts: 0.0,
+                    end_ts: 2.5,
+                }],
+                avg_logprob: Some(-0.35),
+                compression_ratio: Some(1.2),
+                quality_gate_dropped: false,
+            },
+            Some(VadVerdict {
+                speech_pct: 78.0,
+                speech_windows: 15,
+                total_windows: 20,
+                no_speech: false,
+                no_speech_reason: None,
+                sparkline: "▁▃▅▇█▇▅▃▁▁▃▅▇█▇▅▃▁▁".to_string(),
+            }),
+            TranscriptionSource::LocalFinalPass,
+            Some(FinalPassVerdict {
+                mode: FinalPassMode::EmbeddedLexiconCleanup,
+                disposition: FinalPassDisposition::Changed,
+                reason: None,
+                lexicon_rewrites: 2,
+                repetition_cleanups: 1,
+            }),
+        );
+
+        let json = serde_json::to_string(&verdict).expect("verdict must serialize");
+        let restored: TranscriptionVerdict =
+            serde_json::from_str(&json).expect("verdict must deserialize");
+
+        assert_eq!(restored.text, verdict.text);
+        assert_eq!(restored.source, verdict.source);
+        assert_eq!(restored.confidence_flags, verdict.confidence_flags);
+
+        let vad = restored.vad.as_ref().unwrap();
+        assert_eq!(vad.speech_pct, 78.0);
+        assert_eq!(vad.sparkline, "▁▃▅▇█▇▅▃▁▁▃▅▇█▇▅▃▁▁");
+        assert!(!vad.no_speech);
+
+        assert_eq!(restored.raw.avg_logprob, Some(-0.35));
+        assert_eq!(restored.raw.segments.len(), 1);
+
+        let fp = restored.final_pass.as_ref().unwrap();
+        assert_eq!(fp.mode, FinalPassMode::EmbeddedLexiconCleanup);
+        assert_eq!(fp.disposition, FinalPassDisposition::Changed);
+        assert_eq!(fp.lexicon_rewrites, 2);
+    }
+
+    #[test]
+    fn verdict_no_speech_serialization_omits_empty_sparkline() {
+        let verdict = TranscriptionVerdict::from_parts(
+            String::new(),
+            RawTranscript::default(),
+            Some(VadVerdict {
+                speech_pct: 0.0,
+                speech_windows: 0,
+                total_windows: 30,
+                no_speech: true,
+                no_speech_reason: Some("vad_no_speech_detected".to_string()),
+                sparkline: String::new(),
+            }),
+            TranscriptionSource::LocalFinalPass,
+            None,
+        );
+
+        let json = serde_json::to_string(&verdict).expect("verdict must serialize");
+        assert!(
+            !json.contains("sparkline"),
+            "empty sparkline should be omitted from JSON"
+        );
+
+        let restored: TranscriptionVerdict =
+            serde_json::from_str(&json).expect("verdict must deserialize without sparkline");
+        assert!(restored.vad.as_ref().unwrap().sparkline.is_empty());
+        assert!(restored.vad.as_ref().unwrap().no_speech);
+    }
+
+    #[test]
+    fn verdict_sparkline_preserved_through_vad() {
+        let sparkline = "▁▁▃▅▇████▇▅▃▁▁▁";
+        let verdict = TranscriptionVerdict::from_parts(
+            "tekst".to_string(),
+            RawTranscript {
+                text: "tekst".to_string(),
+                ..Default::default()
+            },
+            Some(VadVerdict {
+                speech_pct: 60.0,
+                speech_windows: 6,
+                total_windows: 16,
+                no_speech: false,
+                no_speech_reason: None,
+                sparkline: sparkline.to_string(),
+            }),
+            TranscriptionSource::LocalFinalPass,
+            None,
+        );
+
+        assert_eq!(verdict.vad.as_ref().unwrap().sparkline, sparkline);
     }
 }

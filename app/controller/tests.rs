@@ -260,6 +260,7 @@ fn make_final_pass_verdict(
             } else {
                 None
             },
+            sparkline: String::new(),
         }),
         codescribe_core::pipeline::contracts::TranscriptionSource::LocalFinalPass,
         None,
