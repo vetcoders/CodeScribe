@@ -35,8 +35,12 @@ pub use engine::append_with_overlap_dedup;
 pub(crate) use engine::dedup_repetitions;
 pub use params::DecodingParams; // Kept for params config if needed
 
-// Re-export singleton functions at module level (main API)
+// Re-export singleton functions at module level (main API).
+//
+// File-level transcription stays structured on purpose: callers should use
+// `transcribe_file_verdict` so VAD, confidence, and final-pass provenance do
+// not collapse back into plain text.
 pub use singleton::{
-    detect_language, get_model_path, init, is_initialized, transcribe, transcribe_file,
-    transcribe_file_verdict, transcribe_streaming, transcribe_with_segments,
+    detect_language, get_model_path, init, is_initialized, transcribe, transcribe_file_verdict,
+    transcribe_streaming, transcribe_with_segments,
 };

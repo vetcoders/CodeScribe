@@ -253,11 +253,6 @@ pub fn transcribe_file_verdict(
     ))
 }
 
-/// Transcribe a file — backward-compatible wrapper returning plain text.
-pub fn transcribe_file(path: &std::path::Path, language: Option<&str>) -> Result<String> {
-    Ok(transcribe_file_verdict(path, language, FileTranscriptionOptions::default())?.text)
-}
-
 /// Detect language from audio samples
 pub fn detect_language(samples: &[f32], sample_rate: u32) -> Result<String> {
     let engine_mutex = engine()?;

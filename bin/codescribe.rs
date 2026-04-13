@@ -662,16 +662,6 @@ async fn run_daemon() -> Result<()> {
     Ok(())
 }
 
-fn env_bool(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(default)
-}
-
 fn emit_stdout(text: &str) -> Result<()> {
     use std::io::Write;
 
