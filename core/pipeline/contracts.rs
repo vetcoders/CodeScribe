@@ -99,6 +99,7 @@ pub enum FinalPassDisposition {
     Skipped,
     Unchanged,
     Changed,
+    Rejected,
     Dropped,
 }
 
@@ -108,6 +109,7 @@ impl std::fmt::Display for FinalPassDisposition {
             Self::Skipped => write!(f, "skipped"),
             Self::Unchanged => write!(f, "unchanged"),
             Self::Changed => write!(f, "changed"),
+            Self::Rejected => write!(f, "rejected"),
             Self::Dropped => write!(f, "dropped"),
         }
     }
@@ -990,6 +992,7 @@ mod tests {
         assert_eq!(FinalPassDisposition::Skipped.to_string(), "skipped");
         assert_eq!(FinalPassDisposition::Unchanged.to_string(), "unchanged");
         assert_eq!(FinalPassDisposition::Changed.to_string(), "changed");
+        assert_eq!(FinalPassDisposition::Rejected.to_string(), "rejected");
         assert_eq!(FinalPassDisposition::Dropped.to_string(), "dropped");
         assert_eq!(
             TranscriptionConfidenceFlag::VeryLowSpeech.to_string(),

@@ -21,6 +21,7 @@ const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.93;
 const DEFAULT_NOVELTY_THRESHOLD: f32 = 0.12;
 const MAX_EMBED_CHARS: usize = 512;
 const MAX_DROPS_IN_ROW: u8 = 2;
+const FINAL_PASS_ARTIFACT_TOKENS: &[&str] = &["going", "use"];
 
 lazy_static! {
     // Whisper sometimes emits trailing emoticon artifacts like ":D", ":-D", "::D", often repeated.
@@ -653,6 +654,38 @@ fn is_suspicious(text: &str) -> bool {
     ratio < 0.5 || crate::ai_formatting::has_repetition_loop(text)
 }
 
+fn introduced_artifact_tokens(raw: &str, candidate: &str) -> Vec<String> {
+    let raw_tokens: HashSet<String> = tokenize(raw).into_iter().collect();
+    let mut introduced = HashSet::new();
+
+    for token in tokenize(candidate) {
+        if !raw_tokens.contains(&token) && FINAL_PASS_ARTIFACT_TOKENS.contains(&token.as_str()) {
+            introduced.insert(token);
+        }
+    }
+
+    let mut introduced: Vec<String> = introduced.into_iter().collect();
+    introduced.sort();
+    introduced
+}
+
+pub(crate) fn final_pass_guardrail_reason(raw: &str, candidate: &str) -> Option<String> {
+    if candidate == raw {
+        return None;
+    }
+
+    if is_suspicious(candidate) && !is_suspicious(raw) {
+        return Some("candidate_became_suspicious".to_string());
+    }
+
+    let introduced = introduced_artifact_tokens(raw, candidate);
+    if introduced.len() >= 2 {
+        return Some(format!("artifact_token_drift:{}", introduced.join(",")));
+    }
+
+    None
+}
+
 fn truncate_for_embedding(text: &str) -> String {
     if text.len() <= MAX_EMBED_CHARS {
         return text.to_string();
@@ -699,6 +732,23 @@ mod tests {
         assert!(!is_suspicious(
             "To jest normalny tekst bez powtorzen i z roznymi slowami."
         ));
+    }
+
+    #[test]
+    fn test_final_pass_guardrail_rejects_artifact_token_drift() {
+        let raw = "Co będę robił? Ja chyba coś nagrywam? Ja coś się... Może zhulać, ale w tym momencie myślę, że kwestia";
+        let candidate = "Co będę robił? Ja chyba coś nagrywam? Ja coś going... Może zhulać, ale w tym momencie myślę, use kwestia";
+
+        let reason = final_pass_guardrail_reason(raw, candidate).expect("expected guardrail");
+        assert_eq!(reason, "artifact_token_drift:going,use");
+    }
+
+    #[test]
+    fn test_final_pass_guardrail_allows_expected_lexicon_cleanup() {
+        let raw = "Uzywam doker do github";
+        let candidate = "Uzywam Docker do GitHub";
+
+        assert_eq!(final_pass_guardrail_reason(raw, candidate), None);
     }
 
     #[test]

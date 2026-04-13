@@ -20,7 +20,9 @@ use crate::pipeline::contracts::{
     FileTranscriptionOptions, FinalPassDisposition, FinalPassMode, FinalPassVerdict, RawTranscript,
     TranscriptionSource, TranscriptionVerdict, VadVerdict,
 };
-use crate::pipeline::stream_postprocess::StreamPostProcessor;
+use crate::pipeline::stream_postprocess::{
+    StreamPostProcessStats, StreamPostProcessor, final_pass_guardrail_reason,
+};
 
 use super::engine::LocalWhisperEngine;
 use super::params::DecodingParams;
@@ -152,6 +154,53 @@ fn skipped_final_pass(options: FileTranscriptionOptions, reason: &str) -> Option
     }
 }
 
+fn finalize_requested_final_pass(
+    raw_text: &str,
+    candidate_text: String,
+    mode: FinalPassMode,
+    stats: StreamPostProcessStats,
+) -> (String, FinalPassVerdict) {
+    let lexicon_rewrites = stats.lexicon_rewrites;
+    let repetition_cleanups = stats.repetition_cleanups;
+
+    if candidate_text == raw_text {
+        return (
+            candidate_text,
+            FinalPassVerdict {
+                mode,
+                disposition: FinalPassDisposition::Unchanged,
+                reason: None,
+                lexicon_rewrites,
+                repetition_cleanups,
+            },
+        );
+    }
+
+    if let Some(reason) = final_pass_guardrail_reason(raw_text, &candidate_text) {
+        return (
+            raw_text.to_string(),
+            FinalPassVerdict {
+                mode,
+                disposition: FinalPassDisposition::Rejected,
+                reason: Some(reason),
+                lexicon_rewrites,
+                repetition_cleanups,
+            },
+        );
+    }
+
+    (
+        candidate_text,
+        FinalPassVerdict {
+            mode,
+            disposition: FinalPassDisposition::Changed,
+            reason: None,
+            lexicon_rewrites,
+            repetition_cleanups,
+        },
+    )
+}
+
 fn apply_requested_final_pass(
     raw: &RawTranscript,
     options: FileTranscriptionOptions,
@@ -163,22 +212,13 @@ fn apply_requested_final_pass(
             match processor.process_utterance(&raw.text) {
                 Some(text) => {
                     let stats = processor.stats();
-                    let disposition = if text == raw.text {
-                        FinalPassDisposition::Unchanged
-                    } else {
-                        FinalPassDisposition::Changed
-                    };
-
-                    (
+                    let (text, verdict) = finalize_requested_final_pass(
+                        &raw.text,
                         text,
-                        Some(FinalPassVerdict {
-                            mode: FinalPassMode::EmbeddedLexiconCleanup,
-                            disposition,
-                            reason: None,
-                            lexicon_rewrites: stats.lexicon_rewrites,
-                            repetition_cleanups: stats.repetition_cleanups,
-                        }),
-                    )
+                        FinalPassMode::EmbeddedLexiconCleanup,
+                        stats,
+                    );
+                    (text, Some(verdict))
                 }
                 None => {
                     let stats = processor.stats();
@@ -301,6 +341,29 @@ mod tests {
 
         assert_eq!(final_pass.disposition, FinalPassDisposition::Skipped);
         assert_eq!(final_pass.reason.as_deref(), Some("vad_no_speech_detected"));
+    }
+
+    #[test]
+    fn requested_final_pass_rejects_artifact_token_drift_and_keeps_raw() {
+        let raw = "zastanawiam się co ośreda, że ta funkcja już teoretycznie obsolesi legacy";
+        let candidate =
+            "zastanawiam going co ośreda, use ta funkcja już teoretycznie obsolesi legacy"
+                .to_string();
+        let stats = StreamPostProcessStats::default();
+
+        let (text, final_pass) = finalize_requested_final_pass(
+            raw,
+            candidate,
+            FinalPassMode::EmbeddedLexiconCleanup,
+            stats,
+        );
+
+        assert_eq!(text, raw);
+        assert_eq!(final_pass.disposition, FinalPassDisposition::Rejected);
+        assert_eq!(
+            final_pass.reason.as_deref(),
+            Some("artifact_token_drift:going,use")
+        );
     }
 
     #[test]
