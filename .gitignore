@@ -4,6 +4,7 @@ dist/
 *.spec
 *.dmg
 *.app/
+target-noembed/
 __pycache__/
 *.pyc
 .venv/

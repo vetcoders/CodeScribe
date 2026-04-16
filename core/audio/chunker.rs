@@ -1129,15 +1129,14 @@ pub(crate) fn hardcoded_utterance_gate_config() -> GateConfig {
 }
 
 pub(crate) fn init_silero_vad(sample_rate: u32, config: &vad::VadConfig) -> Option<vad::SileroVad> {
-    let model_path = vad::default_model_path();
-    match vad::SileroVad::new(&model_path, config.clone()) {
+    match vad::SileroVad::new_embedded(config.clone()) {
         Ok(mut vad) => {
             vad.set_input_sample_rate(sample_rate);
-            tracing::info!("Silero VAD ready (model: {})", model_path.display());
+            tracing::info!("Silero VAD ready (embedded model, zero I/O)");
             Some(vad)
         }
         Err(e) => {
-            tracing::warn!("Silero VAD init failed ({}): {}", model_path.display(), e);
+            tracing::warn!("Silero VAD embedded init failed: {}", e);
             None
         }
     }

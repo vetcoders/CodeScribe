@@ -16,6 +16,10 @@ use tracing::{debug, info, trace};
 use super::config::VadConfig;
 use crate::hf_cache;
 
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded_vad_data.rs"));
+}
+
 /// Silero VAD sample rate (always 16kHz)
 pub const VAD_SAMPLE_RATE: u32 = 16000;
 
@@ -92,7 +96,7 @@ pub struct SileroVad {
 }
 
 impl SileroVad {
-    /// Load Silero VAD model from path
+    /// Load Silero VAD model from path (legacy: dev/test override only).
     pub fn new(model_path: &Path, config: VadConfig) -> Result<Self> {
         info!("Loading Silero VAD model from: {}", model_path.display());
         let session = Session::builder()?
@@ -101,6 +105,28 @@ impl SileroVad {
             .context("Failed to load Silero VAD ONNX model")?;
 
         debug!("Silero VAD model loaded successfully");
+
+        Ok(Self {
+            session,
+            state: ArrayD::zeros(STATE_SHAPE.as_slice()),
+            context: vec![0.0; CONTEXT_SIZE],
+            config,
+            resampler: None,
+        })
+    }
+
+    /// Load Silero VAD model from embedded bytes (production path, zero I/O).
+    pub fn new_embedded(config: VadConfig) -> Result<Self> {
+        info!(
+            "Loading Silero VAD model from embedded bytes ({} bytes)",
+            embedded::MODEL.len()
+        );
+        let session = Session::builder()?
+            .with_intra_threads(1)?
+            .commit_from_memory(embedded::MODEL)
+            .context("Failed to load embedded Silero VAD ONNX model")?;
+
+        debug!("Silero VAD model loaded successfully (embedded)");
 
         Ok(Self {
             session,
@@ -232,7 +258,7 @@ pub struct AccumulatingVad {
 }
 
 impl AccumulatingVad {
-    /// Create with explicit model path and config.
+    /// Create with explicit model path and config (legacy: dev/test override only).
     pub fn with_config(model_path: &Path, config: VadConfig, sample_rate: u32) -> Result<Self> {
         let vad = SileroVad::new(model_path, config)?;
         let resampler = if sample_rate != VAD_SAMPLE_RATE {
@@ -248,9 +274,25 @@ impl AccumulatingVad {
         })
     }
 
-    /// Create using default model path and config.
+    /// Create using embedded model bytes and given config (production path).
+    pub fn with_config_embedded(config: VadConfig, sample_rate: u32) -> Result<Self> {
+        let vad = SileroVad::new_embedded(config)?;
+        let resampler = if sample_rate != VAD_SAMPLE_RATE {
+            Some(Resampler::new(sample_rate))
+        } else {
+            None
+        };
+        Ok(Self {
+            vad,
+            resampler,
+            accumulator: Vec::with_capacity(CHUNK_SIZE * 4),
+            last_prob: 0.0,
+        })
+    }
+
+    /// Create using embedded model and default config (production path, zero I/O).
     pub fn new(sample_rate: u32) -> Result<Self> {
-        Self::with_config(&default_model_path(), VadConfig::default(), sample_rate)
+        Self::with_config_embedded(VadConfig::default(), sample_rate)
     }
 
     /// Feed audio samples (at the sample_rate given at construction).
