@@ -7,17 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Config loader test parity verified** — both `test_load_prefers_settings_json_over_promoted_env_file_values` and `test_runtime_env_does_not_persist_into_settings_during_migration` pass on this branch; closes the L1 marble flag carried forward from `0.9.2`.
+
 ### Planned
 
 - **Settings Creator (resume-friendly onboarding)** — replace 1× first-run onboarding with always-available, step-by-step Setup Assistant. State machine persisted in `settings.json` under `onboarding.state` (`NotStarted | InProgress { steps, last_activity } | Completed { at, version }`). Each step (Permissions, Microphone, Hotkeys, Language, LLM endpoint, API key → Keychain, Formatting/Assistive model, UI prefs, Qube daemon autostart) is self-contained with skip-friendly + remind-later semantics. Eliminates "first-run lie" pattern.
 - **Sparkle auto-update infrastructure** — replace manual DMG drag-drop with in-place updates via `appcast.xml` hosted on `dragon:8077`. Zero TCC re-grant after first install. Target: 0.9.3 milestone — "last manual install" for all consumers.
-- **Config loader test parity** — close 2 known-broken tests (`test_load_prefers_settings_json_over_promoted_env_file_values`, `test_runtime_env_does_not_persist_into_settings_during_migration`) flagged by L1 marble; finish the loader priority contract (`settings.json > promoted env > defaults`).
 - **0.9.3 truth-gaps research follow-through** — implement remaining research-syntethesis items: Q5 stream_postprocess guardrail integration in app, Q11 `UnverifiedStream` typed flag, Q13 `transcribe_cloud → CloudTranscriptionVerdict` typed verdict, Q17 `qube_report → transcribe_long_with_segments` migration, Q15 overlay sticky `hide_transcription_overlay()` in `stop_toggle_recording`.
 - **Focus Ring Polish** — removed default macOS focus rings from settings buttons for a cleaner UI _(carried over from pre-0.9.0 backlog)_.
 
 ## [v0.9.2] – 2026-04-18
 
-> Patch release. Big-ticket items (typed transcription flags, toggle final-pass adjudication, short-text formatting truth guard) hardened from `0.9.1`. L2 config loader rewrite landed but ships with 2 known-failing tests scheduled for closure in `0.9.3`.
+> Patch release. Big-ticket items (typed transcription flags, toggle final-pass adjudication, short-text formatting truth guard) hardened from `0.9.1`. L2 config loader rewrite landed in `0.9.2`; the follow-up parity work in `0.9.3` certifies the already-green loader tests and corrects the shipped changelog narrative.
 
 ### Added
 
@@ -27,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Config loader rewrite** ([0a9bd99](https://github.com/VetCoders/CodeScribe/commit/0a9bd99)) — `core/config/{loader,migrate,mod}.rs` substantively refactored to enforce priority `settings.json > promoted env > defaults`. Lays infrastructure for upcoming Settings Creator. **Known regressions**: 2 tests still red — `test_load_prefers_settings_json_over_promoted_env_file_values`, `test_runtime_env_does_not_persist_into_settings_during_migration`. Functional impact for end users with clean `~/.codescribe/` and no `.env`: none. Edge case: users with stale `~/.codescribe/.env` may see unexpected env→settings synthesis. Closure scheduled for `0.9.3`.
+- **Config loader rewrite** ([0a9bd99](https://github.com/VetCoders/CodeScribe/commit/0a9bd99)) — `core/config/{loader,migrate,mod}.rs` substantively refactored to enforce priority `settings.json > promoted env > defaults`. Lays infrastructure for upcoming Settings Creator. **Test parity** (verified `0.9.3`): both `test_load_prefers_settings_json_over_promoted_env_file_values` and `test_runtime_env_does_not_persist_into_settings_during_migration` pass on this commit. The L1 marble that flagged them was already converged by `0a9bd99` (inject_file_env_for_runtime skips promoted keys) and `43d67d1` (migrate_if_needed early-returns when `.env` snapshot is absent or empty); the CHANGELOG-as-shipped lagged the actual fix state. Functional impact: none.
 - **Sort + collapsible match hygiene** (clippy) — `sort_by(|a,b| b.x.cmp(&a.x))` → `sort_by_key(|b| std::cmp::Reverse(b.x))` across `core/agent/thread_index.rs`, `core/quality/qube_daemon.rs`, `app/ui/shared/helpers.rs`, `app/ui/voice_chat/api.rs`. Collapsible `match` → guard pattern in `core/agent/thread_index.rs`, `app/controller/helpers.rs`, `app/ui/voice_chat/api.rs`. Zero behavior change, idiomatic Rust 2024.
 
 ### Fixed
@@ -36,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
-- **Marbles convergence loops** — L1 codex marble closed `0.9.2` short-text quality gate gap. L2 codex marble in-flight on config loader test parity (carries to `0.9.3`).
+- **Marbles convergence loops** — L1 codex marble closed `0.9.2` short-text quality gate gap. Config loader parity is now certified green; `0.9.3` closes the documentation lag and adds defense-in-depth regression coverage.
 - **Build pipeline parity** — `release-codescribe` (embedded models) + `release-qube` (`CODESCRIBE_NO_EMBED=1`, isolated `target-noembed/`) split preserved from `0.9.1`. DMG slim ~1.3 GB (vs `0.9.0` legacy ~3.7 GB).
 
 ## [v0.9.1] – 2026-04-16

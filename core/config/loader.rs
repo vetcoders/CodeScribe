@@ -1112,6 +1112,8 @@ mod tests {
     #[serial]
     fn test_load_prefers_settings_json_over_promoted_env_file_values() {
         let _tmp = setup_isolated_data_dir();
+        let previous = std::env::var("AI_FORMATTING_ENABLED").ok();
+        remove_env_for_test("AI_FORMATTING_ENABLED");
 
         let mut settings = UserSettings::load();
         settings.ai_formatting_enabled = Some(false);
@@ -1126,6 +1128,12 @@ mod tests {
             !config.ai_formatting_enabled,
             ".env should not override promoted settings.json keys"
         );
+        assert!(
+            std::env::var("AI_FORMATTING_ENABLED").is_err(),
+            "promoted .env key must not be injected into process env"
+        );
+
+        restore_env_for_test("AI_FORMATTING_ENABLED", previous);
     }
 
     #[test]
@@ -1145,6 +1153,10 @@ mod tests {
     #[serial]
     fn test_runtime_env_does_not_persist_into_settings_during_migration() {
         let _tmp = setup_isolated_data_dir();
+        let env_path = Config::env_path();
+        if env_path.exists() {
+            fs::remove_file(&env_path).expect("scrub stale .env");
+        }
 
         set_env_for_test("AI_FORMATTING_ENABLED", "1");
 
@@ -1153,6 +1165,11 @@ mod tests {
         assert!(
             !UserSettings::settings_path().exists(),
             "explicit runtime env should not synthesize settings.json"
+        );
+        let reloaded = UserSettings::load();
+        assert_eq!(
+            reloaded.ai_formatting_enabled, None,
+            "runtime env must not be persisted into settings.json on subsequent load"
         );
 
         remove_env_for_test("AI_FORMATTING_ENABLED");

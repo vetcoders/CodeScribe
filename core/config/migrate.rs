@@ -232,4 +232,32 @@ mod tests {
 
         remove_env_for_test("CODESCRIBE_DATA_DIR");
     }
+
+    #[test]
+    #[serial]
+    fn migrate_does_not_persist_runtime_env_when_env_file_lacks_key() {
+        let _tmp = setup_isolated_data_dir();
+        let mut file_env = HashMap::new();
+        file_env.insert("WHISPER_LANGUAGE".to_string(), "en".to_string());
+
+        set_env_for_test("AI_FORMATTING_ENABLED", "1");
+        migrate_if_needed(Some(&file_env));
+        remove_env_for_test("AI_FORMATTING_ENABLED");
+
+        let path = UserSettings::settings_path();
+        assert!(path.exists(), "non-empty .env snapshot triggers migration");
+
+        let persisted = UserSettings::load();
+        assert_eq!(
+            persisted.whisper_language.as_deref(),
+            Some("en"),
+            ".env-supplied promoted key migrates"
+        );
+        assert_eq!(
+            persisted.ai_formatting_enabled, None,
+            "runtime env value must not leak into migrated settings.json"
+        );
+
+        remove_env_for_test("CODESCRIBE_DATA_DIR");
+    }
 }
