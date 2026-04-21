@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Config loader test parity verified** — both `test_load_prefers_settings_json_over_promoted_env_file_values` and `test_runtime_env_does_not_persist_into_settings_during_migration` pass on this commit; closes the L1 marble flag carried from `0.9.2`.
+- **Quality daemon autostart now matches runtime truth** — `QUBE_DAEMON_AUTOSTART=1` now starts bundled `qube-daemon --daemon` on CodeScribe launch when the binary is installed. Settings/docs copy was aligned so missing binaries fall back to explicit launchd/shell workflows instead of implying silent automation.
 
 ### Planned
 
-- **Settings Creator (resume-friendly onboarding)** — replace 1× first-run onboarding with always-available, step-by-step Setup Assistant. State machine persisted in `settings.json` under `onboarding.state` (`NotStarted | InProgress { steps, last_activity } | Completed { at, version }`). Each step (Permissions, Microphone, Hotkeys, Language, LLM endpoint, API key → Keychain, Formatting/Assistive model, UI prefs, Qube daemon autostart) is self-contained with skip-friendly + remind-later semantics. Eliminates "first-run lie" pattern.
+- **Setup Assistant convergence** — current runtime already ships resumable onboarding via `setup_done` + `onboarding_progress` plus tray-level `Continue Onboarding...`. This item now tracks only a future unification into an always-available Setup Assistant backed by `settings.json`, not a missing first-run flow.
 - **Sparkle auto-update infrastructure** — replace manual DMG drag-drop with in-place updates via `appcast.xml` hosted on `dragon:8077`. Zero TCC re-grant after first install. Target: 0.9.3 milestone — "last manual install" for all consumers.
 - **0.9.3 truth-gaps research follow-through** — implement remaining research-syntethesis items: Q5 stream_postprocess guardrail integration in app, Q11 `UnverifiedStream` typed flag, Q13 `transcribe_cloud → CloudTranscriptionVerdict` typed verdict, Q17 `qube_report → transcribe_long_with_segments` migration, Q15 overlay sticky `hide_transcription_overlay()` in `stop_toggle_recording`.
 - **Focus Ring Polish** — removed default macOS focus rings from settings buttons for a cleaner UI _(carried over from pre-0.9.0 backlog)_.

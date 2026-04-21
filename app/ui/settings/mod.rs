@@ -3981,12 +3981,13 @@ unsafe fn build_quality_tab(
             field_w,
             secondary,
             ToggleRowSpec {
-                title: "Auto-tune transcription quality (external daemon)",
+                title: "Start quality daemon on app launch",
                 checked: quality_on,
                 action: sel!(onQubeDaemonToggled:),
                 description: Some(
-                    "Sets QUBE_DAEMON_AUTOSTART=1 so an external `qube-daemon --daemon` honors the preference. \
-                     The tray app does not spawn the daemon itself — run it via launchd or a shell.",
+                    "Starts bundled `qube-daemon --daemon` on CodeScribe launch when the binary is installed. \
+                     If the daemon binary is missing, the preference still persists as `QUBE_DAEMON_AUTOSTART=1` \
+                     for custom launchd or shell workflows.",
                 ),
                 tag: None,
                 gap,

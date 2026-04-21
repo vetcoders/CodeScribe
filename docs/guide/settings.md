@@ -16,7 +16,7 @@ Configuration still lives in three layers:
 
 Most users should stay inside the Settings window. The `.env` file is for overrides and automation-heavy workflows.
 
-For the product semantics behind preview, verdict, fallback, and AI categories, see [Truth Contract](./truth-contract.md).
+For the product semantics behind preview, verdict, fallback, and AI categories, see [Truth Contract](../truth-contract.md).
 
 ## Open Settings
 
@@ -46,7 +46,7 @@ This tab owns the transcript pipeline itself:
   - `AI Formatting`
   - `Formatting level`
 - **Quality Automation**
-  - quality daemon toggle
+  - app-launch quality daemon toggle
   - latest report / availability / pending mismatch state
 
 ### Current runtime truth

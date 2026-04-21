@@ -775,7 +775,7 @@ default = "0"
 type = "bool"
 reload = "restart"
 category = "quality"
-description = "Auto-start quality daemon on app launch"
+description = "Start bundled qube-daemon on app launch when available; otherwise preserve the preference for external launchd/shell automation"
 
 [vars.QUBE_DAEMON_USE_CLOUD_STT]
 default = "0"
