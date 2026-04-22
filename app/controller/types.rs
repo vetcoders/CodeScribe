@@ -404,6 +404,41 @@ mod tests {
     }
 
     #[test]
+    fn truth_sidecar_roundtrip_preserves_toggle_session_adjudicated_source() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let transcript_path = temp_dir.path().join("toggle_raw.txt");
+        fs::write(&transcript_path, "hello").expect("write transcript");
+
+        let metadata = RecordingTruthMetadata {
+            source: Some(RecordingTranscriptSource::ToggleSessionAdjudicated),
+            engine: Some("local_whisper".to_string()),
+            mode: Some("toggle".to_string()),
+            fallback_class: None,
+            fallback_used: false,
+            vad_speech_pct: Some(64.0),
+            no_speech_reason: None,
+            avg_logprob: Some(-0.22),
+            confidence_flags: vec![
+                TranscriptionConfidenceFlag::StreamingPreviewUsedAsVerdict,
+                TranscriptionConfidenceFlag::UnverifiedStream,
+            ],
+            sparkline: Some("▁▂▄▆█▇▅▂".to_string()),
+            final_pass_disposition: Some(FinalPassDisposition::Changed),
+            commit_trigger: Some("high_drop_ratio".to_string()),
+            display_status: Some("Toggle session adjudicated".to_string()),
+        };
+
+        write_truth_sidecar(&transcript_path, &metadata).expect("write sidecar");
+        let restored = read_truth_sidecar(&transcript_path).expect("read sidecar");
+
+        assert_eq!(restored, metadata);
+        assert_eq!(
+            restored.source,
+            Some(RecordingTranscriptSource::ToggleSessionAdjudicated)
+        );
+    }
+
+    #[test]
     fn truth_sidecar_legacy_string_flags_still_deserialize() {
         // Sidecars written before 0.9.3 encoded `confidence_flags` as bare
         // strings. The deserializer must accept them and map known tokens

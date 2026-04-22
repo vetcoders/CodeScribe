@@ -557,7 +557,12 @@ fn recording_mode_label(
 fn toggle_final_pass_enabled() -> bool {
     std::env::var("CODESCRIBE_TOGGLE_FINAL_PASS")
         .ok()
-        .map(|v| !matches!(v.to_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "no" | "off"
+            )
+        })
         .unwrap_or(true)
 }
 

@@ -259,7 +259,7 @@ fn test_toggle_final_pass_enabled_defaults_true_and_honors_falsey_values() {
     }
     assert!(toggle_final_pass_enabled());
 
-    for falsey in ["0", "false", "FALSE", "no", "off"] {
+    for falsey in ["0", "false", "FALSE", "no", "off", " off ", "   "] {
         unsafe {
             std::env::set_var("CODESCRIBE_TOGGLE_FINAL_PASS", falsey);
         }
