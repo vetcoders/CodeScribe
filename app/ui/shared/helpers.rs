@@ -1620,6 +1620,15 @@ mod tests {
     }
 
     #[test]
+    fn native_markdown_is_bypassed_for_tables() {
+        let table = "# Report\n\n| Name | Value |\n| ---- | ----- |\n| A | 1 |";
+        assert!(!should_apply_native_markdown(table));
+
+        let inline_markdown = "**bold** `code`";
+        assert!(should_apply_native_markdown(inline_markdown));
+    }
+
+    #[test]
     fn clamp_overlay_position_keeps_window_inside_frame() {
         let visible = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(100.0, 100.0));
         let (x, y) = clamp_overlay_position(visible, 60.0, 60.0, 10.0, 1000.0, -1000.0);
@@ -1987,7 +1996,15 @@ fn looks_like_markdown_table(text: &str) -> bool {
     })
 }
 
-fn markdown_options_with_base_font(text: &str, font: Id) -> Option<Id> {
+fn should_apply_native_markdown(text: &str) -> bool {
+    // AppKit's native Markdown importer does not render Markdown tables as tables in
+    // NSTextField. It strips the pipe/separator structure and concatenates cells, which
+    // makes table-heavy assistant answers unreadable. Keep table Markdown raw until we
+    // replace chat bubbles with a real block Markdown renderer.
+    !looks_like_markdown_table(text)
+}
+
+fn markdown_options_with_base_font(_text: &str, font: Id) -> Option<Id> {
     unsafe {
         let options_cls = Class::get("NSAttributedStringMarkdownParsingOptions")?;
         let options: Id = msg_send![options_cls, alloc];
@@ -1999,17 +2016,13 @@ fn markdown_options_with_base_font(text: &str, font: Id) -> Option<Id> {
         if responds_base && !font.is_null() {
             let _: () = msg_send![options, setBaseFont: font];
         }
-        // Use full markdown mode when table syntax is detected; otherwise keep the
-        // inline-preserving mode to avoid whitespace regressions in regular bubbles.
+        // Keep inline-preserving mode for chat bubbles. Table Markdown is intentionally
+        // bypassed before this point because AppKit collapses tables in NSTextField.
         let responds_syntax: bool =
             msg_send![options, respondsToSelector: sel!(setInterpretedSyntax:)];
         if responds_syntax {
             // 0 = .full, 1 = .inlineOnly, 2 = .inlineOnlyPreservingWhitespace
-            let syntax: isize = if looks_like_markdown_table(text) {
-                0
-            } else {
-                2
-            };
+            let syntax: isize = 2;
             let _: () = msg_send![options, setInterpretedSyntax: syntax];
         }
         Some(options)
@@ -2364,7 +2377,10 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
 
         let _: () = msg_send![text_label, setFont: font];
         let allow_markdown = matches!(config.role, BubbleRole::Assistant | BubbleRole::System);
-        if !(allow_markdown && apply_markdown_to_text_field(text_label, &display_text, font)) {
+        if !(allow_markdown
+            && should_apply_native_markdown(&display_text)
+            && apply_markdown_to_text_field(text_label, &display_text, font))
+        {
             let _: () = msg_send![text_label, setStringValue: text_str];
         }
         let _: () = msg_send![text_label, setLineBreakMode: 0_isize]; // NSLineBreakByWordWrapping
@@ -2611,7 +2627,10 @@ pub unsafe fn update_bubble_text(
             jb_font
         };
         let _: () = msg_send![text_label, setFont: font];
-        if !(allow_markdown && apply_markdown_to_text_field(text_label, &display_text, font)) {
+        if !(allow_markdown
+            && should_apply_native_markdown(&display_text)
+            && apply_markdown_to_text_field(text_label, &display_text, font))
+        {
             let text_str = ns_string(&display_text);
             let _: () = msg_send![text_label, setStringValue: text_str];
         }

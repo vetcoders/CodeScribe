@@ -22,6 +22,8 @@ use serde_json::json;
 /// true = assistive (chat UI), false = non-assistive (simple transcription overlay)
 /// This is set before recording starts and checked by the delta callback.
 static IS_ASSISTIVE_SESSION: AtomicBool = AtomicBool::new(false);
+const CHAT_FINAL_FALLBACK_CHARS_PER_TICK: usize = 24;
+const CHAT_FINAL_FALLBACK_TICK_MS: u64 = 18;
 
 /// Global flag for conversation mode (full-duplex Moshi).
 /// When true, audio is routed to ConversationEngine instead of Whisper.
@@ -282,7 +284,36 @@ fn build_agent_stream_options(ai_assistive_max_tokens: i32) -> StreamOptions {
     }
 }
 
-fn apply_agent_ui_event(event: AgentUiEvent, overlay_state: &mut AgentUiOverlayState) {
+fn chunk_text_for_local_chat_stream(text: &str, max_chars: usize) -> Vec<String> {
+    let max_chars = max_chars.max(1);
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        current.push(ch);
+        if current.chars().count() >= max_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
+}
+
+async fn stream_final_text_to_chat_locally(text: &str) {
+    for chunk in chunk_text_for_local_chat_stream(text, CHAT_FINAL_FALLBACK_CHARS_PER_TICK) {
+        crate::ui::voice_chat::append_voice_chat_assistant_delta(&chunk);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            CHAT_FINAL_FALLBACK_TICK_MS,
+        ))
+        .await;
+    }
+}
+
+async fn apply_agent_ui_event(event: AgentUiEvent, overlay_state: &mut AgentUiOverlayState) {
     match event {
         AgentUiEvent::TextDelta(delta) => {
             if delta.is_empty() {
@@ -296,7 +327,9 @@ fn apply_agent_ui_event(event: AgentUiEvent, overlay_state: &mut AgentUiOverlayS
         }
         AgentUiEvent::TextDone(text) => {
             if !overlay_state.streamed_any_delta && !text.trim().is_empty() {
-                crate::ui::voice_chat::set_voice_chat_text(&text);
+                overlay_state.streamed_any_delta = true;
+                crate::ui::voice_chat::update_voice_chat_status("Answering... (final stream)");
+                stream_final_text_to_chat_locally(&text).await;
             }
         }
         AgentUiEvent::ReasoningDelta(delta) => {
@@ -528,7 +561,7 @@ async fn run_agent_send_path(
                 result = &mut send_future => break result,
                 maybe_event = ui_rx.recv() => {
                     match maybe_event {
-                        Some(event) => apply_agent_ui_event(event, &mut overlay_state),
+                        Some(event) => apply_agent_ui_event(event, &mut overlay_state).await,
                         None => break Err(anyhow::anyhow!("Agent UI event channel closed")),
                     }
                 }
@@ -536,7 +569,7 @@ async fn run_agent_send_path(
         };
 
         while let Ok(event) = ui_rx.try_recv() {
-            apply_agent_ui_event(event, &mut overlay_state);
+            apply_agent_ui_event(event, &mut overlay_state).await;
         }
 
         result
@@ -884,6 +917,14 @@ mod tests {
     use async_trait::async_trait;
     use codescribe_core::agent::{AgentEvent, AgentProvider, ToolDefinition};
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn local_chat_stream_chunks_preserve_unicode_and_order() {
+        let chunks = chunk_text_for_local_chat_stream("Zażółć gęślą jaźń", 4);
+
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 4));
+        assert_eq!(chunks.concat(), "Zażółć gęślą jaźń");
+    }
 
     struct NoopTestProvider;
 
