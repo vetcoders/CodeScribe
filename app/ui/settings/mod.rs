@@ -33,9 +33,9 @@ use crate::ui_helpers::{
     LabelConfig, add_subview, button_set_action, button_style, create_button,
     create_glass_effect_view_with, create_label, create_scrollable_text_view,
     create_secure_text_input, create_slider, create_text_input, create_toggle,
-    get_text_view_string, layout_region_frame_for_view, ns_string, set_glass_effect_content_view,
-    set_text_field_string, set_text_view_string, ui_colors, ui_tokens, window_close,
-    window_content_view,
+    get_text_view_string, layout_region_frame_for_view, ns_string, present_shared_shell_panel,
+    set_glass_effect_content_view, set_text_field_string, set_text_view_string, ui_colors,
+    ui_tokens, window_close, window_content_view,
 };
 
 mod handlers;
@@ -750,20 +750,7 @@ fn clear_settings_ui_state(state: &mut SettingsWindowState) {
 static SHOW_SETTINGS_WINDOW_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 unsafe fn present_settings_window(window: Id) {
-    if let Some(ns_app) = Class::get("NSApplication") {
-        let shared_app: Id = msg_send![ns_app, sharedApplication];
-        if !shared_app.is_null() {
-            let supports_activate: bool = msg_send![shared_app, respondsToSelector: sel!(activate)];
-            if supports_activate {
-                let _: () = msg_send![shared_app, activate];
-            } else {
-                let _: () = msg_send![shared_app, activateIgnoringOtherApps: true];
-            }
-        }
-    }
-    let nil: *mut Object = std::ptr::null_mut();
-    let _: () = msg_send![window, makeKeyAndOrderFront: nil];
-    let _: () = msg_send![window, orderFrontRegardless];
+    unsafe { present_shared_shell_panel(window) };
 }
 
 /// Show the persistent Settings window.

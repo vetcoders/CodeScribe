@@ -29,10 +29,7 @@ use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use objc2_app_kit::{
-    NSBackingStoreType, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
-};
+use objc2_app_kit::{NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -41,12 +38,14 @@ use crate::config::ShortcutBinding;
 use crate::os::hotkeys::ModeHotkeyBindings;
 
 use crate::ui_helpers::{
-    LabelConfig, NS_FLOATING_WINDOW_LEVEL, add_subview, apply_tafla_surface, button_set_action,
-    button_style, chat_header_layout, chat_input_row_layout, color_clear, color_label,
-    create_button, create_flipped_vertical_stack_view, create_glass_effect_view_with, create_label,
+    LabelConfig, add_subview, agent_chat_shell_frame, agent_chat_shell_panel_policy,
+    apply_shared_shell_panel_policy, apply_tafla_surface, button_set_action, button_style,
+    chat_header_layout, chat_input_row_layout, color_clear, color_label, create_button,
+    create_flipped_vertical_stack_view, create_glass_effect_view_with, create_label,
     create_scrollable_text_view, create_vertical_stack_view, layout_region_frame_for_view,
-    ns_string, set_button_symbol, set_focus_ring, set_glass_effect_content_view, set_hidden,
-    set_tooltip, style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha, window_show,
+    main_screen_visible_frame, ns_string, present_shared_shell_panel, set_button_symbol,
+    set_focus_ring, set_glass_effect_content_view, set_hidden, set_tooltip,
+    style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha,
 };
 
 use api::update_active_tab_impl;
@@ -131,11 +130,12 @@ fn show_voice_chat_overlay_impl() {
                     let blur_ptr = state.blur_view;
                     drop(state);
 
-                    let _: () = msg_send![window, orderFrontRegardless];
+                    if let Some(visible_frame) = main_screen_visible_frame() {
+                        let shell_policy = agent_chat_shell_panel_policy(visible_frame);
+                        apply_shared_shell_panel_policy(window, &shell_policy);
+                    }
+                    present_shared_shell_panel(window);
                     let _: () = msg_send![window, setAlphaValue: 1.0f64];
-                    let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
-                        | NSWindowCollectionBehavior::FullScreenAuxiliary;
-                    let _: () = msg_send![window, setCollectionBehavior: collection_behavior];
 
                     if let Some(blur_ptr) = blur_ptr {
                         let blur_view = blur_ptr as Id;
@@ -156,14 +156,15 @@ fn show_voice_chat_overlay_impl() {
         } // OVERLAY_STATE released — UI construction below is lock-free.
 
         // Phase 2 — build the entire overlay UI without holding OVERLAY_STATE.
-        let ns_screen = Class::get("NSScreen").unwrap();
         let config = VoiceChatOverlayConfig::default();
         let window_width = config.width;
         let window_height = config.height;
         let margin = 20.0;
 
-        let main_screen: Id = msg_send![ns_screen, mainScreen];
-        let visible_frame: CGRect = msg_send![main_screen, visibleFrame];
+        let Some(visible_frame) = main_screen_visible_frame() else {
+            warn!("No NSScreen available for voice chat overlay");
+            return;
+        };
 
         let (raw_x, raw_y) = match Config::load().overlay_position_mode {
             OverlayPositionMode::SnappedTopRight => {
@@ -187,7 +188,7 @@ fn show_voice_chat_overlay_impl() {
             }
         };
 
-        let (x, y) = crate::ui_helpers::clamp_overlay_position(
+        let frame = agent_chat_shell_frame(
             visible_frame,
             window_width,
             window_height,
@@ -198,54 +199,22 @@ fn show_voice_chat_overlay_impl() {
 
         info!(
             "Voice chat overlay frame x={:.1} y={:.1} w={:.1} h={:.1}",
-            x, y, window_width, window_height
+            frame.origin.x, frame.origin.y, window_width, window_height
         );
 
-        let frame = CGRect {
-            origin: CGPoint { x, y },
-            size: CGSize {
-                width: window_width,
-                height: window_height,
-            },
-        };
-
+        let shell_policy = agent_chat_shell_panel_policy(visible_frame);
         let overlay_window_class = overlay_window_class();
         let window: Id = msg_send![overlay_window_class, alloc];
-        let style_mask = NSWindowStyleMask::Borderless
-            | NSWindowStyleMask::FullSizeContentView
-            | NSWindowStyleMask::Resizable;
-        let backing = NSBackingStoreType::Buffered;
         let window: Id = msg_send![
             window,
             initWithContentRect: frame
-            styleMask: style_mask
-            backing: backing
+            styleMask: shell_policy.style_mask
+            backing: shell_policy.backing_store
             defer: false
         ];
 
-        let _: () = msg_send![window, setTitleVisibility: 1];
-        let _: () = msg_send![window, setTitlebarAppearsTransparent: true];
-        let _: () = msg_send![window, setMovableByWindowBackground: true];
-        let _: () = msg_send![window, setOpaque: false];
-        let _: () = msg_send![window, setBackgroundColor: color_clear()];
-        let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
-        // Keep the window instance alive even after close; we manage lifecycle explicitly.
-        let _: () = msg_send![window, setReleasedWhenClosed: false];
-        let _: () = msg_send![window, setContentMinSize: CGSize::new(380.0, 360.0)];
-        // Cap at sensible max: width 1000px (chat bubbles don't need more),
-        // height = screen visible height (scrolling handles overflow).
-        let ns_screen = Class::get("NSScreen").unwrap();
-        let screen: Id = msg_send![ns_screen, mainScreen];
-        if !screen.is_null() {
-            let visible: CGRect = msg_send![screen, visibleFrame];
-            let max_w = visible.size.width.min(1000.0);
-            let _: () =
-                msg_send![window, setContentMaxSize: CGSize::new(max_w, visible.size.height)];
-        }
-        // Make sure the overlay shows up even when the user is in a fullscreen Space.
-        let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary;
-        let _: () = msg_send![window, setCollectionBehavior: collection_behavior];
+        let _: () = msg_send![window, setTitle: ns_string("CodeScribe")];
+        apply_shared_shell_panel_policy(window, &shell_policy);
 
         let delegate_class = window_delegate_class();
         let window_delegate: Id = msg_send![delegate_class, new];
@@ -386,8 +355,6 @@ fn show_voice_chat_overlay_impl() {
         let header_btn_y = ((header_height - btn_h) / 2.0).max(0.0);
 
         let mut x = header_frame.size.width - right_pad - btn_w;
-        let close_button_x = x;
-        x -= gap + btn_w;
         let more_button_x = x;
         x -= gap + btn_w;
         let help_button_x = x;
@@ -621,7 +588,7 @@ fn show_voice_chat_overlay_impl() {
 
         let close_button = create_button(
             CGRect::new(
-                &CGPoint::new(close_button_x, header_btn_y),
+                &CGPoint::new(header_frame.size.width + btn_w, header_btn_y),
                 &CGSize::new(btn_w, btn_h),
             ),
             "",
@@ -634,6 +601,7 @@ fn show_voice_chat_overlay_impl() {
         style_toolbar_icon_button(close_button);
         button_set_action(close_button, action_handler, sel!(onClose:));
         set_tooltip(close_button, "Close window");
+        let _: () = msg_send![close_button, setHidden: true];
         let _: () = msg_send![
             close_button,
             setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
@@ -1095,7 +1063,7 @@ fn show_voice_chat_overlay_impl() {
 
         // Phase 4 — show window (no lock held; avoids nested-runloop deadlock).
         window_set_alpha(window, 0.0);
-        window_show(window);
+        present_shared_shell_panel(window);
         crate::ui_helpers::animate_fade(window, 1.0, 0.2);
         let is_visible: bool = msg_send![window, isVisible];
         let alpha: f64 = msg_send![window, alphaValue];
@@ -1123,7 +1091,7 @@ fn show_voice_chat_overlay_impl() {
                     return;
                 }
                 let _: () = msg_send![window, setAlphaValue: 1.0f64];
-                let _: () = msg_send![window, orderFrontRegardless];
+                present_shared_shell_panel(window);
             });
         });
 
