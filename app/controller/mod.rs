@@ -574,6 +574,11 @@ fn should_use_toggle_adjudicated_stop(
     current_state == State::RecToggle && !assistive && toggle_final_pass
 }
 
+fn should_apply_incoming_mode_flags(current_state: State, event: &HotkeyInput) -> bool {
+    matches!(event.action, HotkeyAction::Down | HotkeyAction::Press)
+        && !(event.key_type == HotkeyType::Toggle && current_state == State::RecToggle)
+}
+
 fn transcript_output_category(output_kind: crate::state::history::TranscriptKind) -> &'static str {
     match output_kind {
         crate::state::history::TranscriptKind::Raw => "Transcript",
@@ -1621,7 +1626,9 @@ impl RecordingController {
         );
 
         // Update mode flags from event (supports mid-hold mode changes via Press events).
-        if matches!(event.action, HotkeyAction::Down | HotkeyAction::Press) {
+        // A toggle press while already in RecToggle means "stop this session"; it must not
+        // rewrite the active session identity with the key that happened to stop it.
+        if should_apply_incoming_mode_flags(current_state, &event) {
             match event.key_type {
                 HotkeyType::Hold => {
                     *self.hold_mode.write().await = event.hold_mode;
@@ -1734,6 +1741,14 @@ impl RecordingController {
                     *self.force_ai_mode.write().await = false;
                 }
             }
+        } else if matches!(event.action, HotkeyAction::Press)
+            && event.key_type == HotkeyType::Toggle
+            && current_state == State::RecToggle
+        {
+            debug!(
+                "Preserving active toggle session flags during stop event (event assistive={} force_raw={} force_ai={})",
+                event.assistive, event.force_raw, event.force_ai
+            );
         }
 
         // Ignore all hotkeys when busy

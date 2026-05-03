@@ -308,6 +308,26 @@ fn test_should_use_toggle_adjudicated_stop_only_for_raw_toggle_when_enabled() {
     ));
 }
 
+#[test]
+fn test_toggle_stop_event_preserves_active_session_identity() {
+    let right_option_stop = HotkeyInput {
+        key_type: HotkeyType::Toggle,
+        action: HotkeyAction::Press,
+        assistive: true,
+        hold_mode: HoldMode::Raw,
+        force_raw: false,
+        force_ai: false,
+    };
+    assert!(
+        !should_apply_incoming_mode_flags(State::RecToggle, &right_option_stop),
+        "A stop key must not smear its assistive/formatting flags onto the active toggle session"
+    );
+    assert!(
+        should_apply_incoming_mode_flags(State::Idle, &right_option_stop),
+        "The same key still defines a new session when no toggle session is active"
+    );
+}
+
 fn make_final_pass_verdict(
     text: &str,
     speech_pct: f32,
