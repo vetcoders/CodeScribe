@@ -807,7 +807,10 @@ fn create_typed_glass_effect_view(frame: CGRect, material: NSVisualEffectMateria
     );
     let view = NSGlassEffectView::initWithFrame(mtm.alloc(), frame);
     view.setStyle(glass_effect_style_for_material(material));
-    let view: Id = Retained::into_raw(view).cast::<Object>();
+    // Hand the +1 retain to the autorelease pool so the parent's `addSubview:`
+    // (which adds its own retain) becomes the sole owner. Without this, the
+    // initial alloc/init retain leaked one NSGlassEffectView per call.
+    let view: Id = Retained::autorelease_return(view).cast::<Object>();
     unsafe {
         let _: () = msg_send![view, setWantsLayer: true];
         let supports_corner_radius: bool =
