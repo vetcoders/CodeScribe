@@ -1,3 +1,29 @@
+//! Native AppKit Settings window.
+//!
+//! # Safety
+//!
+//! Every `unsafe` block / function in this module shares one invariant matrix:
+//!
+//! 1. **Main-thread affinity.** AppKit objects (`NSWindow`, `NSView`, `NSButton`,
+//!    etc.) MUST only be addressed from the main thread. All entry points here
+//!    are reached either directly from the main runloop or via
+//!    `Queue::main().exec_async(...)`, which trampolines onto the main thread
+//!    before the closure body executes.
+//! 2. **Object validity.** `Id = *mut Object` parameters and the values returned
+//!    by `[cls new]` / `[cls alloc] init...]` are non-null retained pointers
+//!    obtained on the main thread and not yet released. Subviews/controls owned
+//!    by their parent window/view live as long as the parent.
+//! 3. **Selector / message arity.** `msg_send!` invocations bind to documented
+//!    AppKit / Foundation selectors with matching argument types. The
+//!    `extern_class!`-style declarations in `objc2_app_kit` provide the source
+//!    of truth for selector signatures.
+//! 4. **Environment mutation.** `std::env::remove_var` / `set_var` calls in this
+//!    module run synchronously on the main thread before any worker spawns; no
+//!    parallel reader is in flight (Rust 2024 soundness contract).
+//!
+//! Per-block `// SAFETY:` annotations call out additional invariants where the
+//! pattern deviates (e.g. raw FFI, retain-count balancing, cross-thread hops).
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -12,30 +38,27 @@ use dispatch::Queue;
 use lazy_static::lazy_static;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use objc2_app_kit::{
-    NSBackingStoreType, NSVisualEffectMaterial, NSWindowButton, NSWindowCollectionBehavior,
-    NSWindowStyleMask, NSWindowToolbarStyle,
-};
+use objc2_app_kit::{NSVisualEffectMaterial, NSWindowButton, NSWindowToolbarStyle};
 use tracing::{info, warn};
 
 use crate::config::{Config, ShortcutBinding, UserSettings, WorkMode, keychain};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::permissions::PermissionStatus;
 use crate::os::{hotkeys, shortcut_registry};
-use crate::ui::bootstrap::handlers::{
-    action_handler_class, toolbar_delegate_class, window_delegate_class,
-};
 use crate::ui::onboarding::{
     PERMISSION_ORDER, PermissionKind, open_permission_settings, permission_status,
     reconcile_permission_runtime_after_grant, request_permission,
 };
+use crate::ui::settings::handlers::{
+    action_handler_class, toolbar_delegate_class, window_delegate_class,
+};
 use crate::ui_helpers::{
-    LabelConfig, add_subview, button_set_action, button_style, create_button,
-    create_glass_effect_view_with, create_label, create_scrollable_text_view,
+    LabelConfig, add_subview, apply_shared_shell_panel_policy, button_set_action, button_style,
+    create_button, create_glass_effect_view_with, create_label, create_scrollable_text_view,
     create_secure_text_input, create_slider, create_text_input, create_toggle,
-    get_text_view_string, layout_region_frame_for_view, ns_string, set_glass_effect_content_view,
-    set_text_field_string, set_text_view_string, ui_colors, ui_tokens, window_close,
-    window_content_view,
+    get_text_view_string, layout_region_frame_for_view, ns_string, present_shared_shell_panel,
+    set_glass_effect_content_view, set_text_field_string, set_text_view_string,
+    settings_shell_panel_policy, ui_colors, ui_tokens, window_close, window_content_view,
 };
 
 mod handlers;
@@ -46,8 +69,6 @@ type Id = *mut Object;
 const SIDEBAR_WIDTH: f64 = 216.0;
 const SETTINGS_WINDOW_WIDTH: f64 = 840.0;
 const SETTINGS_WINDOW_HEIGHT: f64 = 700.0;
-// Keep Settings readable while restoring stronger system glass.
-const SETTINGS_MAX_OPACITY: f64 = ui_tokens::SETTINGS_WINDOW_OPACITY;
 const SETTINGS_CONTENT_INSET_X: f64 = 20.0;
 const SETTINGS_CONTENT_INSET_Y: f64 = 20.0;
 const TAB_BUTTON_HEIGHT: f64 = 34.0;
@@ -113,6 +134,7 @@ fn settings_titlebar_safe_inset(view: Id, fallback: f64) -> f64 {
         return fallback;
     }
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let bounds: CGRect = msg_send![view, bounds];
         if let Some(layout_frame) = layout_region_frame_for_view(view) {
@@ -146,13 +168,6 @@ struct SliderSettingRowSpec<'a> {
     current: f64,
     action: objc::runtime::Sel,
     gap: f64,
-}
-
-unsafe fn intensify_settings_glass(view: Id) {
-    let supports_emphasized: bool = msg_send![view, respondsToSelector: sel!(setEmphasized:)];
-    if supports_emphasized {
-        let _: () = msg_send![view, setEmphasized: true];
-    }
 }
 
 fn parse_env_bool(v: &str) -> bool {
@@ -434,6 +449,7 @@ unsafe fn add_tafla_header_separator(container: Id, x: f64, y: f64, width: f64) 
         ..Default::default()
     });
     let _: () = msg_send![separator, setAlphaValue: 0.9f64];
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         add_subview(container, separator);
     }
@@ -456,6 +472,7 @@ unsafe fn add_slider_setting_row(
         text_color: secondary,
         ..Default::default()
     });
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         add_subview(container, label);
     }
@@ -470,6 +487,7 @@ unsafe fn add_slider_setting_row(
         text_color: secondary,
         ..Default::default()
     });
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         add_subview(container, value_label);
     }
@@ -484,6 +502,7 @@ unsafe fn add_slider_setting_row(
         spec.current,
     );
     let _: () = msg_send![slider, setContinuous: true];
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         button_set_action(slider, action_handler, spec.action);
         add_subview(container, slider);
@@ -598,6 +617,7 @@ unsafe fn add_toggle_row(
         text_color: crate::ui_helpers::color_label(),
         ..Default::default()
     });
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         add_subview(container, title_label);
     }
@@ -612,6 +632,7 @@ unsafe fn add_toggle_row(
     if let Some(tag) = spec.tag {
         let _: () = msg_send![toggle, setTag: tag];
     }
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         button_set_action(toggle, action_handler, spec.action);
         add_subview(container, toggle);
@@ -631,6 +652,7 @@ unsafe fn add_toggle_row(
             text_color: secondary,
             ..Default::default()
         });
+        // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
         unsafe {
             add_subview(container, desc_label);
         }
@@ -641,9 +663,10 @@ unsafe fn add_toggle_row(
 }
 
 #[derive(Default)]
-struct BootstrapState {
+struct SettingsWindowState {
     window: Option<usize>,
     window_delegate: Option<usize>,
+    action_handler: Option<usize>,
     root_view: Option<usize>,
     step_labels: [Option<usize>; 3],
     tab_buttons: [Option<usize>; TAB_COUNT],
@@ -667,12 +690,12 @@ struct BootstrapState {
     permission_action_buttons: [Option<usize>; 5],
     permission_requested: [bool; 5],
     permission_polling: bool,
-    quality_daemon_checkbox: Option<usize>,
+    qube_daemon_checkbox: Option<usize>,
     ultra_quality_checkbox: Option<usize>,
     quality_available_label: Option<usize>,
     quality_pending_label: Option<usize>,
     quality_last_check_label: Option<usize>,
-    quality_report_label: Option<usize>,
+    qube_report_label: Option<usize>,
     quality_open_report_button: Option<usize>,
     llm_endpoint_field: Option<usize>,
     llm_model_field: Option<usize>,
@@ -695,10 +718,11 @@ struct BootstrapState {
 }
 
 lazy_static! {
-    static ref BOOTSTRAP_STATE: Mutex<BootstrapState> = Mutex::new(BootstrapState::default());
+    static ref SETTINGS_WINDOW_STATE: Mutex<SettingsWindowState> =
+        Mutex::new(SettingsWindowState::default());
 }
 
-fn clear_bootstrap_ui_state(state: &mut BootstrapState) {
+fn clear_settings_ui_state(state: &mut SettingsWindowState) {
     state.step_labels = [None, None, None];
     state.tab_buttons = [None; TAB_COUNT];
     state.content_views = [None; TAB_COUNT];
@@ -719,12 +743,12 @@ fn clear_bootstrap_ui_state(state: &mut BootstrapState) {
     state.permission_action_buttons = [None, None, None, None, None];
     state.permission_requested = [false; 5];
     state.permission_polling = false;
-    state.quality_daemon_checkbox = None;
+    state.qube_daemon_checkbox = None;
     state.ultra_quality_checkbox = None;
     state.quality_available_label = None;
     state.quality_pending_label = None;
     state.quality_last_check_label = None;
-    state.quality_report_label = None;
+    state.qube_report_label = None;
     state.quality_open_report_button = None;
     state.llm_endpoint_field = None;
     state.llm_model_field = None;
@@ -746,30 +770,20 @@ fn clear_bootstrap_ui_state(state: &mut BootstrapState) {
     state.diagnostics_status_label = None;
 }
 
-static SHOW_OVERLAY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static SHOW_SETTINGS_WINDOW_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 unsafe fn present_settings_window(window: Id) {
-    if let Some(ns_app) = Class::get("NSApplication") {
-        let shared_app: Id = msg_send![ns_app, sharedApplication];
-        if !shared_app.is_null() {
-            let supports_activate: bool = msg_send![shared_app, respondsToSelector: sel!(activate)];
-            if supports_activate {
-                let _: () = msg_send![shared_app, activate];
-            } else {
-                let _: () = msg_send![shared_app, activateIgnoringOtherApps: true];
-            }
-        }
-    }
-    let nil: *mut Object = std::ptr::null_mut();
-    let _: () = msg_send![window, makeKeyAndOrderFront: nil];
-    let _: () = msg_send![window, orderFrontRegardless];
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe { present_shared_shell_panel(window) };
 }
 
 /// Show the persistent Settings window.
 pub fn show_settings_window() {
     // Fast path: if window already exists, just show it on main thread.
     {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(ptr) = state.window {
             drop(state);
             Queue::main().exec_async(move || unsafe {
@@ -783,28 +797,33 @@ pub fn show_settings_window() {
     }
 
     // Slow path: need to create window — guard against concurrent thread spawns.
-    if SHOW_OVERLAY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+    if SHOW_SETTINGS_WINDOW_IN_FLIGHT.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(|| {
         let config = Config::load();
         Queue::main().exec_async(move || {
-            SHOW_OVERLAY_IN_FLIGHT.store(false, Ordering::SeqCst);
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            SHOW_SETTINGS_WINDOW_IN_FLIGHT.store(false, Ordering::SeqCst);
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.config_cache = Some(config);
             drop(state);
-            show_bootstrap_overlay_impl();
+            show_settings_window_impl();
         });
     });
 }
 
-fn show_bootstrap_overlay_impl() {
+fn show_settings_window_impl() {
     // Keep Settings as a standalone window.
     // It should not depend on the voice chat overlay being available.
     // (This also avoids deadlocks when the overlay is mid-layout.)
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let reuse_window = {
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(window_ptr) = state.window {
                 let ns_window = objc_class("NSWindow");
                 let window = window_ptr as Id;
@@ -842,30 +861,22 @@ fn show_bootstrap_overlay_impl() {
             &CGSize::new(window_width, window_height),
         );
 
+        let fixed_size = CGSize::new(window_width, window_height);
+        let shell_policy = settings_shell_panel_policy(fixed_size);
         let ns_window = objc_class("NSWindow");
         let window: Id = msg_send![ns_window, alloc];
-        let style = NSWindowStyleMask::Titled
-            | NSWindowStyleMask::Closable
-            | NSWindowStyleMask::Miniaturizable
-            | NSWindowStyleMask::FullSizeContentView;
         let window: Id = msg_send![
             window,
             initWithContentRect: frame
-            styleMask: style
-            backing: NSBackingStoreType::Buffered
+            styleMask: shell_policy.style_mask
+            backing: shell_policy.backing_store
             defer: false
         ];
 
-        // Keep Settings glass/opacity aligned with chat + transcription overlays while
-        // using a conventional AppKit preferences shell.
+        // Keep Settings on a conventional AppKit preferences shell. The content
+        // panes use semantic NSVisualEffect materials; the window itself stays native.
         let _: () = msg_send![window, setTitle: ns_string("Settings")];
-        let _: () = msg_send![window, setTitlebarAppearsTransparent: true];
-        let _: () = msg_send![window, setOpaque: false];
-        let _: () = msg_send![window, setBackgroundColor: crate::ui_helpers::color_clear()];
-        let _: () = msg_send![window, setReleasedWhenClosed: false];
-        let _: () = msg_send![window, setMovableByWindowBackground: true];
-        let _: () = msg_send![window, setAlphaValue: SETTINGS_MAX_OPACITY];
-        let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
+        apply_shared_shell_panel_policy(window, &shell_policy);
         let toolbar_delegate_class = toolbar_delegate_class();
         let toolbar_delegate: Id = msg_send![toolbar_delegate_class, new];
         let ns_toolbar = objc_class("NSToolbar");
@@ -886,13 +897,7 @@ fn show_bootstrap_overlay_impl() {
         if supports_toolbar_button {
             let _: () = msg_send![window, setShowsToolbarButton: false];
         }
-        // Disallow fullscreen/zoom to avoid triggering AppKit fullscreen snapshots that can crash.
-        let _: () =
-            msg_send![window, setCollectionBehavior: NSWindowCollectionBehavior::FullScreenNone];
         // Hard lock the size (no resize handles, no zoom).
-        let fixed_size = CGSize::new(window_width, window_height);
-        let _: () = msg_send![window, setContentMinSize: fixed_size];
-        let _: () = msg_send![window, setContentMaxSize: fixed_size];
         let zoom_btn: Id = msg_send![window, standardWindowButton: NSWindowButton::ZoomButton];
         if !zoom_btn.is_null() {
             let _: () = msg_send![zoom_btn, setEnabled: false];
@@ -905,7 +910,9 @@ fn show_bootstrap_overlay_impl() {
         let _ = attach_settings_view(content_view, bounds);
 
         {
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.window = Some(window as usize);
             state.window_delegate = Some(window_delegate as usize);
         } // Release lock before AppKit call to avoid nested-runloop deadlock.
@@ -921,9 +928,12 @@ fn show_bootstrap_overlay_impl() {
 /// # Safety
 /// `parent` must be a valid `NSView` instance owned by AppKit.
 unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRect) -> Option<Id> {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let (config, existing_root) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 state.config_cache.clone().unwrap_or_else(Config::load),
                 state.root_view,
@@ -953,13 +963,6 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
             root,
             setAutoresizingMask: 2_isize | 16_isize // NSViewWidthSizable | NSViewHeightSizable
         ];
-        let _: () = msg_send![root, setWantsLayer: true];
-        let root_layer: Id = msg_send![root, layer];
-        if !root_layer.is_null() {
-            let _: () = msg_send![root_layer, setCornerRadius: ui_tokens::SURFACE_RADIUS];
-            let _: () = msg_send![root_layer, setMasksToBounds: true];
-            let _: () = msg_send![root_layer, setBorderWidth: 0.0f64];
-        }
         add_subview(parent, root);
 
         let action_handler_class = action_handler_class();
@@ -972,9 +975,11 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
             &config,
         );
 
-        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.root_view = Some(root as usize);
-        state.window = None;
+        state.action_handler = Some(action_handler as usize);
         state.step_labels = built_state.step_labels;
         state.tab_buttons = built_state.tab_buttons;
         state.content_views = built_state.content_views;
@@ -996,12 +1001,12 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         state.permission_action_buttons = built_state.permission_action_buttons;
         state.permission_requested = built_state.permission_requested;
         state.permission_polling = built_state.permission_polling;
-        state.quality_daemon_checkbox = built_state.quality_daemon_checkbox;
+        state.qube_daemon_checkbox = built_state.qube_daemon_checkbox;
         state.ultra_quality_checkbox = built_state.ultra_quality_checkbox;
         state.quality_available_label = built_state.quality_available_label;
         state.quality_pending_label = built_state.quality_pending_label;
         state.quality_last_check_label = built_state.quality_last_check_label;
-        state.quality_report_label = built_state.quality_report_label;
+        state.qube_report_label = built_state.qube_report_label;
         state.quality_open_report_button = built_state.quality_open_report_button;
         state.llm_endpoint_field = built_state.llm_endpoint_field;
         state.llm_model_field = built_state.llm_model_field;
@@ -1081,7 +1086,9 @@ fn open_system_settings_security() {
 fn handle_permission_action(kind: PermissionKind) {
     let idx = kind.index();
     let already_requested = {
-        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let was_requested = state.permission_requested[idx];
         state.permission_requested[idx] = true;
         was_requested
@@ -1157,6 +1164,7 @@ fn formatting_key_is_set() -> bool {
 
 unsafe fn update_key_status_indicator(indicator: Id, is_set: bool) {
     let _ =
+        // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
         unsafe { crate::ui_helpers::set_button_symbol(indicator, key_status_symbol_name(is_set)) };
     let supports_tint: bool = msg_send![indicator, respondsToSelector: sel!(setContentTintColor:)];
     if supports_tint {
@@ -1171,6 +1179,7 @@ unsafe fn create_key_status_indicator(frame: CGRect, is_set: bool) -> Id {
     let _: () = msg_send![indicator, setBordered: false];
     let _: () = msg_send![indicator, setEnabled: false];
     let _: () = msg_send![indicator, setTitle: ns_string("")];
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         update_key_status_indicator(indicator, is_set);
     }
@@ -1179,7 +1188,9 @@ unsafe fn create_key_status_indicator(frame: CGRect, is_set: bool) -> Id {
 
 fn update_keychain_status_labels() {
     let (llm_icon, llm_label, assist_icon, assist_label) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.llm_key_status_icon,
             state.llm_key_status_label,
@@ -1187,6 +1198,7 @@ fn update_keychain_status_labels() {
             state.assistive_key_status_label,
         )
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         if let Some(ptr) = llm_icon {
             let is_set = formatting_key_is_set();
@@ -1217,8 +1229,10 @@ fn clear_keychain_entry(account: &str, field_ptr: Option<usize>) {
     } else {
         info!("Deleted {account} from Keychain");
     }
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe { std::env::remove_var(account) };
     if let Some(ptr) = field_ptr {
+        // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
         unsafe { set_text_field_string(ptr as Id, "") };
     }
     update_keychain_status_labels();
@@ -1226,7 +1240,9 @@ fn clear_keychain_entry(account: &str, field_ptr: Option<usize>) {
 
 fn start_permission_polling() {
     let should_start = {
-        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if state.permission_polling {
             false
         } else {
@@ -1243,7 +1259,9 @@ fn start_permission_polling() {
         loop {
             thread::sleep(Duration::from_secs(2));
             let keep_running = {
-                let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let state = SETTINGS_WINDOW_STATE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 state.permission_polling
             };
             if !keep_running {
@@ -1257,7 +1275,9 @@ fn start_permission_polling() {
 pub(super) fn refresh_permission_indicators() {
     Queue::main().exec_async(move || unsafe {
         let (labels, action_buttons, requested) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 state.permission_labels,
                 state.permission_action_buttons,
@@ -1300,11 +1320,12 @@ unsafe fn build_settings_ui(
     settings_height: f64,
     action_handler: Id,
     config: &Config,
-) -> BootstrapState {
+) -> SettingsWindowState {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         use core_graphics::geometry::{CGPoint, CGRect, CGSize};
         let ns_view = objc_class("NSView");
-        let mut state = BootstrapState::default();
+        let mut state = SettingsWindowState::default();
 
         let settings_width = settings_width.max(SIDEBAR_WIDTH + 240.0);
         let settings_height = settings_height.max(280.0);
@@ -1330,11 +1351,9 @@ unsafe fn build_settings_ui(
         let sidebar_glass = create_glass_effect_view_with(
             sidebar_frame,
             NSVisualEffectMaterial::Sidebar,
-            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
-            objc2_app_kit::NSVisualEffectState::Active,
+            objc2_app_kit::NSVisualEffectBlendingMode::WithinWindow,
+            objc2_app_kit::NSVisualEffectState::FollowsWindowActiveState,
         );
-        let _: () = msg_send![sidebar_glass, setAlphaValue: SETTINGS_MAX_OPACITY];
-        intensify_settings_glass(sidebar_glass);
         let _: () = msg_send![
             sidebar_glass,
             setAutoresizingMask: 16_isize | 4_isize // Height | MaxXMargin
@@ -1366,12 +1385,10 @@ unsafe fn build_settings_ui(
         );
         let content_glass = create_glass_effect_view_with(
             content_bg_frame,
-            NSVisualEffectMaterial::FullScreenUI,
-            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
-            objc2_app_kit::NSVisualEffectState::Active,
+            NSVisualEffectMaterial::ContentBackground,
+            objc2_app_kit::NSVisualEffectBlendingMode::WithinWindow,
+            objc2_app_kit::NSVisualEffectState::FollowsWindowActiveState,
         );
-        let _: () = msg_send![content_glass, setAlphaValue: SETTINGS_MAX_OPACITY];
-        intensify_settings_glass(content_glass);
         let _: () = msg_send![
             content_glass,
             setAutoresizingMask: 2_isize | 16_isize // Width | Height
@@ -1543,6 +1560,7 @@ unsafe fn create_sidebar_tab_button(
     title: &str,
     active: bool,
 ) -> Id {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_button = objc_class("NSButton");
         let ns_font = objc_class("NSFont");
@@ -1613,7 +1631,9 @@ unsafe fn create_sidebar_tab_button(
 pub(super) fn switch_tab(index: usize) {
     Queue::main().exec_async(move || unsafe {
         let (content_views, tab_buttons) = {
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if index >= TAB_COUNT || state.active_tab == index {
                 return;
             }
@@ -1680,7 +1700,7 @@ pub(super) fn handle_test_mic() {
     update_step_status(STEP_TEST_MIC, "recording\u{2026}");
 
     if let Err(e) = send_ipc(IpcCommand::StartRecording { assistive: false }) {
-        warn!("Bootstrap test mic failed to start: {}", e);
+        warn!("Settings test mic failed to start: {}", e);
         update_step_status(STEP_TEST_MIC, "failed");
         return;
     }
@@ -1693,9 +1713,9 @@ pub(super) fn handle_test_mic() {
 }
 
 pub(super) fn handle_show_overlay() {
-    crate::show_voice_chat_overlay();
-    crate::show_agent_tab();
-    crate::voice_chat_ui::update_voice_chat_status("Listening...");
+    crate::ui::voice_chat::show_voice_chat_overlay();
+    crate::ui::voice_chat::show_agent_tab();
+    crate::ui::voice_chat::update_voice_chat_status("Listening...");
     update_step_status(STEP_SHOW_OVERLAY, "done");
 }
 
@@ -1703,29 +1723,46 @@ pub(super) fn handle_hotkey_done() {
     update_step_status(STEP_PRESS_HOTKEY, "done");
 }
 
-pub(super) fn handle_bootstrap_window_closed() {
-    let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.window = None;
-    state.window_delegate = None;
-    state.root_view = None;
-    clear_bootstrap_ui_state(&mut state);
-    state.config_cache = None;
+pub(super) fn handle_settings_window_closed() {
+    let (delegate_ptr, handler_ptr, window_ptr) = {
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let delegate_ptr = state.window_delegate.take();
+        let handler_ptr = state.action_handler.take();
+        let window_ptr = state.window.take();
+        state.root_view = None;
+        clear_settings_ui_state(&mut state);
+        state.config_cache = None;
+        (delegate_ptr, handler_ptr, window_ptr)
+    };
+
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        if let Some(ptr) = delegate_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = handler_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = window_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+    }
 }
 
-pub fn hide_bootstrap_overlay() {
+pub fn hide_settings_surface() {
     Queue::main().exec_async(|| unsafe {
         let (window_ptr, root_ptr) = {
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.permission_polling = false;
-            let window_ptr = state.window.take();
-            if window_ptr.is_some() {
-                state.window_delegate = None;
-                state.root_view = None;
-                clear_bootstrap_ui_state(&mut state);
-                (window_ptr, None)
-            } else {
-                (None, state.root_view)
-            }
+            // Do NOT take ownership of window/delegate/action_handler here.
+            // The `windowWillClose:` notification fires `handle_settings_window_closed`,
+            // which drains and releases all three. Releasing twice would crash.
+            // For the embedded (root-only, no window) path, the parent owns lifecycle.
+            (state.window, state.root_view)
         };
 
         if let Some(window_ptr) = window_ptr {
@@ -1741,25 +1778,43 @@ pub fn hide_bootstrap_overlay() {
 
 /// Alias: Settings window close.
 pub fn hide_settings_window() {
-    hide_bootstrap_overlay();
+    hide_settings_surface();
 }
 
 /// Reset embedded Settings view state when the overlay is destroyed.
-pub fn reset_embedded_bootstrap_state() {
-    let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if state.window.is_some() {
-        return;
+pub fn reset_embedded_settings_state() {
+    let (delegate_ptr, handler_ptr) = {
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if state.window.is_some() {
+            return;
+        }
+        let delegate_ptr = state.window_delegate.take();
+        let handler_ptr = state.action_handler.take();
+        state.root_view = None;
+        state.config_cache = None;
+        clear_settings_ui_state(&mut state);
+        (delegate_ptr, handler_ptr)
+    };
+
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        if let Some(ptr) = delegate_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = handler_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
     }
-    state.root_view = None;
-    state.window_delegate = None;
-    state.config_cache = None;
-    clear_bootstrap_ui_state(&mut state);
 }
 
 fn update_step_status(index: usize, text: &str) {
     let text = text.to_string();
     Queue::main().exec_async(move || unsafe {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(label) = state.step_labels.get(index).and_then(|v| *v) {
             set_text_field_string(label as Id, &text);
         }
@@ -1793,12 +1848,15 @@ fn mode_label_slot(mode: WorkMode) -> usize {
 
 fn set_mode_recorder_hint(text: &str, is_error: bool) {
     let hint_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.keys_recorder_hint_label
     };
     let Some(hint_ptr) = hint_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let hint_label = hint_ptr as Id;
         set_text_field_string(hint_label, text);
@@ -1813,7 +1871,9 @@ fn set_mode_recorder_hint(text: &str, is_error: bool) {
 
 fn refresh_mode_binding_labels() {
     let settings = UserSettings::load();
-    let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = SETTINGS_WINDOW_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     for mode in [
         WorkMode::Dictation,
         WorkMode::Formatting,
@@ -1821,6 +1881,7 @@ fn refresh_mode_binding_labels() {
     ] {
         if let Some(label_ptr) = state.keys_mode_binding_labels[mode_label_slot(mode)] {
             let text = settings.mode_binding_for(mode).label().to_string();
+            // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
             unsafe {
                 set_text_field_string(label_ptr as Id, &text);
             }
@@ -2000,6 +2061,7 @@ fn handle_mode_binding_recorder_event(event: Id) -> Id {
         return event;
     };
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let event_type: u64 = msg_send![event, type];
         let keycode: u16 = msg_send![event, keyCode];
@@ -2037,6 +2099,7 @@ fn ensure_mode_binding_recorder_monitor() -> bool {
         return true;
     }
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_event = objc_class("NSEvent");
         let mask: u64 = (1_u64 << 10) | (1_u64 << 12); // keyDown + flagsChanged
@@ -2087,10 +2150,7 @@ fn hotkey_conflicts(_config: &Config) -> Vec<shortcut_registry::HotkeyConflict> 
 
 fn hotkey_conflict_status_from(conflicts: &[shortcut_registry::HotkeyConflict]) -> (String, bool) {
     if conflicts.is_empty() {
-        return (
-            "Mode shortcuts: no conflicts in macOS Keyboard Shortcuts registry.".to_string(),
-            false,
-        );
+        return ("Mode shortcuts: clear.".to_string(), false);
     }
 
     let first = &conflicts[0];
@@ -2103,7 +2163,7 @@ fn hotkey_conflict_status_from(conflicts: &[shortcut_registry::HotkeyConflict]) 
 
     (
         format!(
-            "Conflict: {} -> {}{}",
+            "Review shortcut: {} -> {}{}",
             first.gesture.label(),
             first.message,
             suffix
@@ -2123,7 +2183,7 @@ fn hotkey_conflict_details_text(conflicts: &[shortcut_registry::HotkeyConflict])
     }
 
     let mut lines = vec![
-        "CodeScribe detected conflicts with macOS/global shortcuts:".to_string(),
+        "CodeScribe detected shortcuts that may overlap current mode bindings:".to_string(),
         String::new(),
     ];
     for (index, conflict) in conflicts.iter().enumerate() {
@@ -2135,7 +2195,7 @@ fn hotkey_conflict_details_text(conflicts: &[shortcut_registry::HotkeyConflict])
         ));
     }
     lines.push(String::new());
-    lines.push("Recommendation: change the conflicting mode binding or disable that mode shortcut in Settings.".to_string());
+    lines.push("Recommendation: change that mode binding only if the gesture does not behave correctly at runtime.".to_string());
     lines.join("\n")
 }
 
@@ -2143,6 +2203,7 @@ fn set_hotkey_conflict_details_button_enabled(button_ptr: Option<usize>, enabled
     let Some(button_ptr) = button_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let button = button_ptr as Id;
         let _: () = msg_send![button, setEnabled: enabled];
@@ -2152,7 +2213,9 @@ fn set_hotkey_conflict_details_button_enabled(button_ptr: Option<usize>, enabled
 fn refresh_hotkey_conflict_indicator() {
     let config = Config::load();
     let (label_ptr, button_ptr) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.keys_conflict_label,
             state.keys_conflict_details_button,
@@ -2173,6 +2236,7 @@ fn apply_hotkey_conflict_indicator(
     let Some(label_ptr) = label_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let label = label_ptr as Id;
         set_text_field_string(label, &text);
@@ -2195,10 +2259,13 @@ fn show_hotkey_conflicts_sheet() {
     };
     let details = hotkey_conflict_details_text(&conflicts);
     let window_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.window
     };
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_alert = objc_class("NSAlert");
         let alert: Id = msg_send![ns_alert, new];
@@ -2239,12 +2306,15 @@ fn prompt_display_name(prompt_type: &str) -> &'static str {
 
 fn selected_prompt_type() -> &'static str {
     let popup_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.prompt_type_popup
     };
     let Some(popup_ptr) = popup_ptr else {
         return "formatting";
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let popup = popup_ptr as Id;
         let idx: isize = msg_send![popup, indexOfSelectedItem];
@@ -2334,12 +2404,15 @@ fn reset_prompt_content(prompt_type: &str) -> Result<(), String> {
 
 fn set_prompt_editor_content(text: &str) {
     let text_view_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.prompt_editor_text_view
     };
     let Some(text_view_ptr) = text_view_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         set_text_view_string(text_view_ptr as Id, text);
     }
@@ -2347,23 +2420,29 @@ fn set_prompt_editor_content(text: &str) {
 
 fn read_prompt_editor_content() -> String {
     let text_view_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.prompt_editor_text_view
     };
     let Some(text_view_ptr) = text_view_ptr else {
         return String::new();
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe { get_text_view_string(text_view_ptr as Id) }
 }
 
 fn set_prompt_editor_status(text: &str, is_error: bool) {
     let status_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.prompt_status_label
     };
     let Some(status_ptr) = status_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let label = status_ptr as Id;
         set_text_field_string(label, text);
@@ -2388,7 +2467,9 @@ fn refresh_transcription_preview_panel() {
         summary_label,
         preview_text_view,
     ) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.preview_buffer_delay_value_label,
             state.preview_typing_cps_value_label,
@@ -2399,6 +2480,7 @@ fn refresh_transcription_preview_panel() {
         )
     };
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         if let Some(ptr) = buffer_delay_label {
             set_text_field_string(ptr as Id, &format!("{} ms", model.buffer_delay_ms));
@@ -2434,7 +2516,9 @@ fn refresh_transcription_preview_panel() {
 fn refresh_prompt_editor_labels() {
     Queue::main().exec_async(move || unsafe {
         let (path_ptr, status_ptr) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (state.prompt_path_label, state.prompt_status_label)
         };
         let prompt_type = selected_prompt_type();
@@ -2481,31 +2565,27 @@ fn compute_prompt_editor_layout(y: f64, gap: f64) -> PromptEditorLayout {
 fn refresh_quality_dashboard() {
     Queue::main().exec_async(move || unsafe {
         let (available_label, pending_label, last_check_label, report_label, open_report_button) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 state.quality_available_label,
                 state.quality_pending_label,
                 state.quality_last_check_label,
-                state.quality_report_label,
+                state.qube_report_label,
                 state.quality_open_report_button,
             )
         };
 
-        let daemon_state = crate::quality_loop::read_daemon_state();
+        let snapshot = crate::qube_lifecycle::dashboard_snapshot();
+        let daemon_state = &snapshot.daemon_state;
 
         if let Some(ptr) = available_label {
             let label = ptr as Id;
-            set_text_field_string(
-                label,
-                if daemon_state.available {
-                    "Available"
-                } else {
-                    "Unavailable"
-                },
-            );
+            set_text_field_string(label, snapshot.availability_label());
             let _: () = msg_send![
                 label,
-                setTextColor: if daemon_state.available {
+                setTextColor: if snapshot.available {
                     ui_colors::status_granted()
                 } else {
                     ui_colors::status_warning()
@@ -2534,11 +2614,11 @@ fn refresh_quality_dashboard() {
         }
 
         if let Some(ptr) = report_label {
-            set_text_field_string(ptr as Id, &quality_report_text(&daemon_state));
+            set_text_field_string(ptr as Id, &qube_report_text(daemon_state));
         }
 
         if let Some(ptr) = open_report_button {
-            let _: () = msg_send![ptr as Id, setEnabled: quality_report_exists(&daemon_state)];
+            let _: () = msg_send![ptr as Id, setEnabled: qube_report_exists(daemon_state)];
         }
     });
 }
@@ -2546,7 +2626,9 @@ fn refresh_quality_dashboard() {
 fn refresh_diagnostics_dashboard() {
     Queue::main().exec_async(move || unsafe {
         let (permission_labels, conflict_label, conflict_button, status_label) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 state.diagnostics_permission_labels,
                 state.diagnostics_conflict_label,
@@ -2585,9 +2667,10 @@ unsafe fn build_modes_shortcuts_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     config: &Config,
-    state: &mut BootstrapState,
+    state: &mut SettingsWindowState,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
 
@@ -2629,7 +2712,7 @@ unsafe fn build_modes_shortcuts_tab(
 
         let usage_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 28.0)),
-            text: "Usage: hold bindings record while held (release to send). Double-tap bindings are hands-free: pause to auto-send an utterance, double-tap again to stop.".to_string(),
+            text: "Hold records while pressed. Double-tap records hands-free; repeat the gesture to stop.".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -2747,6 +2830,18 @@ unsafe fn build_modes_shortcuts_tab(
         });
         add_subview(container, recorder_hint);
         y -= 16.0 + gap;
+
+        if let Some(fn_note) = shortcut_registry::fn_tap_intercept_note(&settings_snapshot) {
+            let fn_note_label = create_label(LabelConfig {
+                frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 28.0)),
+                text: fn_note.to_string(),
+                font_size: ui_tokens::MICRO_FONT_SIZE,
+                text_color: secondary,
+                ..Default::default()
+            });
+            add_subview(container, fn_note_label);
+            y -= 28.0 + gap;
+        }
 
         let (conflict_text, has_conflict) = hotkey_conflict_status(config);
         let conflict_label = create_label(LabelConfig {
@@ -2914,9 +3009,10 @@ unsafe fn build_ai_prompts_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     _config: &Config,
-    state: &mut BootstrapState,
+    state: &mut SettingsWindowState,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
         let ns_popup = objc_class("NSPopUpButton");
@@ -3333,6 +3429,7 @@ unsafe fn build_audio_input_tab(
     config: &Config,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
         let ns_popup = objc_class("NSPopUpButton");
@@ -3506,7 +3603,7 @@ fn quality_last_check_text(last_check: &str) -> String {
     }
 }
 
-fn quality_report_exists(state: &crate::quality_loop::QualityDaemonState) -> bool {
+fn qube_report_exists(state: &crate::qube_daemon::QubeDaemonState) -> bool {
     state
         .latest_report
         .as_ref()
@@ -3514,7 +3611,7 @@ fn quality_report_exists(state: &crate::quality_loop::QualityDaemonState) -> boo
         .unwrap_or(false)
 }
 
-fn quality_report_text(state: &crate::quality_loop::QualityDaemonState) -> String {
+fn qube_report_text(state: &crate::qube_daemon::QubeDaemonState) -> String {
     match state.latest_report.as_ref() {
         Some(dir) => {
             let html_path = PathBuf::from(dir).join("index.html");
@@ -3532,9 +3629,10 @@ unsafe fn build_quality_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     _config: &Config,
-    state: &mut BootstrapState,
+    state: &mut SettingsWindowState,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
         let container: Id = msg_send![ns_view, alloc];
@@ -3566,7 +3664,7 @@ unsafe fn build_quality_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Backend, final-pass, and quality controls for what happens when capture leaves the live overlay."
+            text: "Choose the backend for the committed transcript. Overlay preview stays local and provisional."
                 .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
@@ -3577,7 +3675,7 @@ unsafe fn build_quality_tab(
 
         let engine_header = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
-            text: "Transcription Backend".to_string(),
+            text: "Final Transcript Path".to_string(),
             font_size: ui_tokens::SMALL_FONT_SIZE,
             bold: true,
             text_color: primary,
@@ -3588,7 +3686,7 @@ unsafe fn build_quality_tab(
 
         let provider_label = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(92.0, 18.0)),
-            text: "Provider:".to_string(),
+            text: "Commit with:".to_string(),
             font_size: ui_tokens::SMALL_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -3601,8 +3699,8 @@ unsafe fn build_quality_tab(
             CGRect::new(&CGPoint::new(pad + 96.0, y - 2.0), &CGSize::new(220.0, 24.0))
             pullsDown: false
         ];
-        let _: () = msg_send![provider_popup, addItemWithTitle: ns_string("Local Whisper")];
-        let _: () = msg_send![provider_popup, addItemWithTitle: ns_string("Cloud STT")];
+        let _: () = msg_send![provider_popup, addItemWithTitle: ns_string("Local final verdict")];
+        let _: () = msg_send![provider_popup, addItemWithTitle: ns_string("Cloud final verdict")];
         let provider_index: isize = if _config.use_local_stt { 0 } else { 1 };
         let _: () = msg_send![provider_popup, selectItemAtIndex: provider_index];
         button_set_action(provider_popup, action_handler, sel!(onSttProviderChanged:));
@@ -3610,13 +3708,15 @@ unsafe fn build_quality_tab(
         y -= 24.0 + gap;
 
         let backend_note = if _config.use_local_stt {
-            "Current mode: local live preview plus optional local file-based final pass."
+            "Current mode: preview stays local, then the local verdict becomes the committed transcript. File-based final pass can strengthen that verdict or surface weak-truth warnings before paste/save."
         } else {
-            "Current mode: cloud transcript after capture. Endpoints ending with :stream use NDJSON and fit long buffered runs better."
+            "Current mode: preview stays local, then cloud STT becomes the committed verdict. If cloud does not return a reliable result, the app marks any surviving fallback as degraded and blocks silent auto-paste."
         };
         let provider_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: format!("{backend_note} Live overlay preview is still local in this build."),
+            text: format!(
+                "{backend_note} Endpoints ending with :stream use NDJSON and fit long buffered runs better."
+            ),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -3630,7 +3730,7 @@ unsafe fn build_quality_tab(
                 &CGPoint::new(pad, y),
                 &CGSize::new(content_w, SETTINGS_INPUT_HEIGHT),
             ),
-            "Cloud endpoint (multipart or ...:stream for NDJSON)",
+            "Cloud final-verdict endpoint (multipart or ...:stream for NDJSON)",
             &stt_endpoint_val,
         );
         style_paper_input(stt_endpoint_field);
@@ -3648,7 +3748,7 @@ unsafe fn build_quality_tab(
                 &CGPoint::new(pad, y),
                 &CGSize::new(content_w, SETTINGS_INPUT_HEIGHT),
             ),
-            "Cloud STT API key (stored in Keychain; erase field to remove)",
+            "Cloud final-verdict API key (stored in Keychain; erase field to remove)",
         );
         style_paper_input(stt_key_field);
         let _: () = msg_send![stt_key_field, setFont: mono_font_input];
@@ -3672,7 +3772,7 @@ unsafe fn build_quality_tab(
 
         let preview_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "These controls shape partial publish cadence and overlay emission. Buffer delay only applies after the first visible partial."
+            text: "Live preview cadence. Buffer delay applies after the first visible partial."
                 .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
@@ -3818,7 +3918,7 @@ unsafe fn build_quality_tab(
                 checked: ultra_on,
                 action: sel!(onUltraQualityToggled:),
                 description: Some(
-                    "Re-runs local Whisper on the saved audio after capture ends. Best lever when live preview looks right but final submit degrades.",
+                    "Re-runs local Whisper on the saved audio after capture ends. Best lever when preview looks fine but the committed verdict should be upgraded, downgraded, or blocked before paste/save.",
                 ),
                 tag: None,
                 gap,
@@ -3838,7 +3938,7 @@ unsafe fn build_quality_tab(
                 checked: _config.ai_formatting_enabled,
                 action: sel!(onFormattingToggled:),
                 description: Some(
-                    "Uses the formatting model to clean up the final transcript before paste/send.",
+                    "Uses the formatting model to clean up the committed transcript. If formatting fails, the raw transcript is preserved and labeled as a formatting fallback.",
                 ),
                 tag: None,
                 gap,
@@ -3908,9 +4008,9 @@ unsafe fn build_quality_tab(
         y -= 18.0 + gap;
 
         let quality_on = UserSettings::load()
-            .quality_daemon_autostart
+            .qube_daemon_autostart
             .unwrap_or_else(|| {
-                std::env::var("CODESCRIBE_AUTOSTART_QUALITY_DAEMON")
+                std::env::var("QUBE_DAEMON_AUTOSTART")
                     .map(|v| parse_env_bool(&v))
                     .unwrap_or(false)
             });
@@ -3922,15 +4022,18 @@ unsafe fn build_quality_tab(
             field_w,
             secondary,
             ToggleRowSpec {
-                title: "Auto-tune transcription quality (recommended)",
+                title: "Start quality daemon automatically",
                 checked: quality_on,
-                action: sel!(onQualityDaemonToggled:),
-                description: Some("Runs quality analysis every 30 minutes in the background."),
+                action: sel!(onQubeDaemonToggled:),
+                description: Some(
+                    "Starts bundled `qube-daemon --daemon` immediately and on next CodeScribe launch when the binary is installed. \
+                     Turning it off stops the daemon only when CodeScribe owns that process; externally managed launchd or shell runs remain untouched.",
+                ),
                 tag: None,
                 gap,
             },
         );
-        state.quality_daemon_checkbox = Some(quality_check as usize);
+        state.qube_daemon_checkbox = Some(quality_check as usize);
 
         let automation_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
@@ -3964,7 +4067,8 @@ unsafe fn build_quality_tab(
         add_subview(container, dashboard_header);
         y -= 18.0 + gap;
 
-        let daemon_state = crate::quality_loop::read_daemon_state();
+        let snapshot = crate::qube_lifecycle::dashboard_snapshot();
+        let daemon_state = &snapshot.daemon_state;
 
         let add_metric_row = |container: Id,
                               y: &mut f64,
@@ -3999,12 +4103,8 @@ unsafe fn build_quality_tab(
             value_view as usize
         };
 
-        let available_text = if daemon_state.available {
-            "Available"
-        } else {
-            "Unavailable"
-        };
-        let available_color = if daemon_state.available {
+        let available_text = snapshot.availability_label();
+        let available_color = if snapshot.available {
             ui_colors::status_granted()
         } else {
             ui_colors::status_warning()
@@ -4043,11 +4143,11 @@ unsafe fn build_quality_tab(
             pad,
             gap,
         ));
-        state.quality_report_label = Some(add_metric_row(
+        state.qube_report_label = Some(add_metric_row(
             container,
             &mut y,
             "Latest report:",
-            &quality_report_text(&daemon_state),
+            &qube_report_text(daemon_state),
             secondary,
             content_w,
             pad,
@@ -4071,7 +4171,7 @@ unsafe fn build_quality_tab(
             button_style::GLASS,
         );
         button_set_action(open_report_btn, action_handler, sel!(onOpenQualityReport:));
-        let _: () = msg_send![open_report_btn, setEnabled: quality_report_exists(&daemon_state)];
+        let _: () = msg_send![open_report_btn, setEnabled: qube_report_exists(daemon_state)];
         add_subview(container, open_report_btn);
         state.quality_open_report_button = Some(open_report_btn as usize);
 
@@ -4103,9 +4203,10 @@ unsafe fn build_diagnostics_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     config: &Config,
-    state: &mut BootstrapState,
+    state: &mut SettingsWindowState,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
         let container: Id = msg_send![ns_view, alloc];
@@ -4134,8 +4235,7 @@ unsafe fn build_diagnostics_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Permission matrix, hotkey conflict clarity, and one-click diagnostics copy."
-                .to_string(),
+            text: "Permissions, shortcut overlap, and one-click diagnostics copy.".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -4303,6 +4403,7 @@ pub(super) extern "C" fn on_mode_binding_change(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let tag: isize = msg_send![sender, tag];
         if mode_from_double_ctrl_tag(tag) {
@@ -4328,6 +4429,7 @@ pub(super) extern "C" fn on_show_hotkey_conflicts(
 }
 
 pub(super) extern "C" fn on_language_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
         let lang = match idx {
@@ -4346,6 +4448,7 @@ pub(super) extern "C" fn on_formatting_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4360,6 +4463,7 @@ pub(super) extern "C" fn on_formatting_level_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
         let level = match idx {
@@ -4379,6 +4483,7 @@ pub(super) extern "C" fn on_llm_endpoint_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4394,6 +4499,7 @@ pub(super) extern "C" fn on_llm_model_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4405,6 +4511,7 @@ pub(super) extern "C" fn on_llm_model_changed(
 }
 
 pub(super) extern "C" fn on_llm_key_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4420,7 +4527,9 @@ pub(super) extern "C" fn on_llm_key_changed(_this: &Object, _cmd: objc::runtime:
 
 pub(super) extern "C" fn on_clear_llm_key(_this: &Object, _cmd: objc::runtime::Sel, _sender: Id) {
     let field_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.llm_key_field
     };
     clear_keychain_entry("LLM_FORMATTING_API_KEY", field_ptr);
@@ -4432,7 +4541,9 @@ pub(super) extern "C" fn on_save_api_settings(
     _sender: Id,
 ) {
     let (llm_endpoint, llm_model, llm_key, assist_endpoint, assist_model, assist_key) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.llm_endpoint_field,
             state.llm_model_field,
@@ -4444,6 +4555,7 @@ pub(super) extern "C" fn on_save_api_settings(
     };
 
     let mut entries: Vec<(&str, String)> = Vec::new();
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         if let Some(ptr) = llm_endpoint {
             let value = crate::ui_helpers::get_text_field_string(ptr as Id);
@@ -4479,6 +4591,7 @@ pub(super) extern "C" fn on_save_api_settings(
         let borrowed: Vec<(&str, &str)> = entries.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let _ = config.save_to_env_many(&borrowed);
     }
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         if let Some(ptr) = llm_key {
             set_text_field_string(ptr as Id, "");
@@ -4568,12 +4681,12 @@ pub(super) extern "C" fn on_quality_refresh(_this: &Object, _cmd: objc::runtime:
     refresh_quality_dashboard();
 }
 
-pub(super) extern "C" fn on_open_quality_report(
+pub(super) extern "C" fn on_open_qube_report(
     _this: &Object,
     _cmd: objc::runtime::Sel,
     _sender: Id,
 ) {
-    if !crate::quality_loop::open_latest_report() {
+    if !crate::qube_daemon::open_latest_report() {
         warn!("Settings: no quality report available");
     }
     refresh_quality_dashboard();
@@ -4595,7 +4708,9 @@ pub(super) extern "C" fn on_copy_diagnostics(
 ) {
     let report = crate::os::permissions::diagnostics_report();
     let (status_ptr, secondary) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.diagnostics_status_label,
             crate::ui_helpers::color_secondary_label(),
@@ -4604,6 +4719,7 @@ pub(super) extern "C" fn on_copy_diagnostics(
     match crate::os::clipboard::set_clipboard(&report) {
         Ok(()) => {
             if let Some(ptr) = status_ptr {
+                // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
                 unsafe {
                     let label = ptr as Id;
                     set_text_field_string(label, "Diagnostics copied to clipboard.");
@@ -4613,6 +4729,7 @@ pub(super) extern "C" fn on_copy_diagnostics(
         }
         Err(err) => {
             if let Some(ptr) = status_ptr {
+                // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
                 unsafe {
                     let label = ptr as Id;
                     set_text_field_string(label, &format!("Failed to copy diagnostics: {err}"));
@@ -4624,6 +4741,7 @@ pub(super) extern "C" fn on_copy_diagnostics(
 }
 
 pub(super) extern "C" fn on_delay_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         let ms = value.round() as u64;
@@ -4634,7 +4752,9 @@ pub(super) extern "C" fn on_delay_changed(_this: &Object, _cmd: objc::runtime::S
         runtime_config.hold_start_delay_ms = ms;
         hotkeys::apply_hotkey_runtime_config(runtime_config);
         let label_ptr = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.hold_delay_value_label
         };
         if let Some(ptr) = label_ptr {
@@ -4649,6 +4769,7 @@ pub(super) extern "C" fn on_double_tap_interval_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         let ms = value.round() as u64;
@@ -4659,7 +4780,9 @@ pub(super) extern "C" fn on_double_tap_interval_changed(
         runtime_config.double_tap_interval_ms = ms;
         hotkeys::apply_hotkey_runtime_config(runtime_config);
         let label_ptr = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.double_tap_value_label
         };
         if let Some(ptr) = label_ptr {
@@ -4670,6 +4793,7 @@ pub(super) extern "C" fn on_double_tap_interval_changed(
 }
 
 pub(super) extern "C" fn on_beep_toggled(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4685,6 +4809,7 @@ pub(super) extern "C" fn on_enter_send_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4699,6 +4824,7 @@ pub(super) extern "C" fn on_show_dock_icon_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4714,6 +4840,7 @@ pub(super) extern "C" fn on_transcription_overlay_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4725,7 +4852,7 @@ pub(super) extern "C" fn on_transcription_overlay_toggled(
         );
         sync_runtime_config_via_ipc();
         if !enabled {
-            crate::hide_transcription_overlay();
+            crate::ui::overlay::hide_transcription_overlay();
         }
         refresh_transcription_preview_panel();
     }
@@ -4736,6 +4863,7 @@ pub(super) extern "C" fn on_preview_buffer_delay_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         let ms = value.round() as u64;
@@ -4752,6 +4880,7 @@ pub(super) extern "C" fn on_preview_typing_cps_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         let cps = value.max(5.0) as f32;
@@ -4768,6 +4897,7 @@ pub(super) extern "C" fn on_preview_emit_words_max_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         let words = value.round().clamp(1.0, 10.0) as u64;
@@ -4784,6 +4914,7 @@ pub(super) extern "C" fn on_preview_interim_cadence_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         let secs = value.clamp(1.0, 12.0) as f32;
@@ -4800,11 +4931,12 @@ pub(super) extern "C" fn on_stt_provider_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let selected_idx: isize = msg_send![sender, indexOfSelectedItem];
         let use_local_stt = selected_idx == 0;
         info!(
-            "Settings: transcription provider -> {}",
+            "Settings: final transcript path -> {}",
             if use_local_stt { "local" } else { "cloud" }
         );
         let config = Config::load();
@@ -4818,6 +4950,7 @@ pub(super) extern "C" fn on_stt_endpoint_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4833,6 +4966,7 @@ pub(super) extern "C" fn on_stt_endpoint_changed(
 }
 
 pub(super) extern "C" fn on_stt_key_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4856,6 +4990,7 @@ pub(super) extern "C" fn on_stt_key_changed(_this: &Object, _cmd: objc::runtime:
 }
 
 pub(super) extern "C" fn on_volume_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         info!("Settings: sound volume -> {:.2}", value);
@@ -4874,6 +5009,7 @@ pub(super) extern "C" fn on_assistive_endpoint_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4889,6 +5025,7 @@ pub(super) extern "C" fn on_assistive_model_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4904,6 +5041,7 @@ pub(super) extern "C" fn on_assistive_key_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4923,27 +5061,33 @@ pub(super) extern "C" fn on_clear_assistive_key(
     _sender: Id,
 ) {
     let field_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.assistive_key_field
     };
     clear_keychain_entry("LLM_ASSISTIVE_API_KEY", field_ptr);
 }
 
-pub(super) extern "C" fn on_quality_daemon_toggled(
+pub(super) extern "C" fn on_qube_daemon_toggled(
     _this: &Object,
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
         info!("Settings: quality daemon autostart -> {}", enabled);
         let config = Config::load();
-        let _ = config.save_to_env(
-            "CODESCRIBE_AUTOSTART_QUALITY_DAEMON",
-            if enabled { "1" } else { "0" },
-        );
+        let _ = config.save_to_env("QUBE_DAEMON_AUTOSTART", if enabled { "1" } else { "0" });
+        if enabled {
+            let _ = crate::qube_lifecycle::start_managed();
+        } else {
+            let _ = crate::qube_lifecycle::stop_managed();
+        }
         refresh_quality_dashboard();
+        crate::ui::tray::update_quality_label();
     }
 }
 
@@ -4952,6 +5096,7 @@ pub(super) extern "C" fn on_ultra_quality_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4970,6 +5115,7 @@ pub(super) extern "C" fn on_permission_action(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let tag: isize = msg_send![sender, tag];
         if let Some(kind) = permission_kind_from_tag(tag) {
@@ -5212,6 +5358,7 @@ mod tests {
         if std::env::var("CODESCRIBE_UI_TESTS").is_err() {
             return;
         }
+        // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
         unsafe {
             let ns_view = objc_class("NSView");
             let parent: Id = msg_send![ns_view, alloc];
@@ -5230,8 +5377,10 @@ mod tests {
             let view = attach_settings_view(parent, frame);
             assert!(view.is_some());
 
-            reset_embedded_bootstrap_state();
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            reset_embedded_settings_state();
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             assert!(state.root_view.is_none());
         }
     }

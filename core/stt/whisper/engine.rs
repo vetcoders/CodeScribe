@@ -29,7 +29,14 @@ use tokenizers::Tokenizer;
 use super::model::Whisper as Model;
 use super::timestamps::{self, TimestampRange};
 use crate::audio::loader as audio_loader;
-use crate::pipeline::contracts::RawTranscript;
+use crate::pipeline::contracts::{
+    FileTranscriptionOptions, FinalPassDisposition, FinalPassMode, FinalPassVerdict, RawTranscript,
+    TranscriptionEngineMode, TranscriptionEngineVerdict, TranscriptionSource, TranscriptionVerdict,
+    VadVerdict,
+};
+use crate::pipeline::stream_postprocess::{
+    StreamPostProcessStats, StreamPostProcessor, final_pass_guardrail_reason,
+};
 use crate::safe_path;
 
 use super::embedded::EmbeddedModel;
@@ -38,6 +45,103 @@ use super::params::DecodingParams;
 /// Callback for streaming chunk results (called after each chunk is transcribed)
 pub type ChunkCallback<'a> = &'a dyn Fn(&str);
 
+fn skipped_final_pass(options: FileTranscriptionOptions, reason: &str) -> Option<FinalPassVerdict> {
+    match options.final_pass {
+        FinalPassMode::None => None,
+        mode => Some(FinalPassVerdict {
+            mode,
+            disposition: FinalPassDisposition::Skipped,
+            reason: Some(reason.to_string()),
+            lexicon_rewrites: 0,
+            repetition_cleanups: 0,
+        }),
+    }
+}
+
+fn finalize_requested_final_pass(
+    raw_text: &str,
+    candidate_text: String,
+    mode: FinalPassMode,
+    stats: StreamPostProcessStats,
+) -> (String, FinalPassVerdict) {
+    let lexicon_rewrites = stats.lexicon_rewrites;
+    let repetition_cleanups = stats.repetition_cleanups;
+
+    if candidate_text == raw_text {
+        return (
+            candidate_text,
+            FinalPassVerdict {
+                mode,
+                disposition: FinalPassDisposition::Unchanged,
+                reason: None,
+                lexicon_rewrites,
+                repetition_cleanups,
+            },
+        );
+    }
+
+    if let Some(reason) = final_pass_guardrail_reason(raw_text, &candidate_text) {
+        return (
+            raw_text.to_string(),
+            FinalPassVerdict {
+                mode,
+                disposition: FinalPassDisposition::Rejected,
+                reason: Some(reason),
+                lexicon_rewrites,
+                repetition_cleanups,
+            },
+        );
+    }
+
+    (
+        candidate_text,
+        FinalPassVerdict {
+            mode,
+            disposition: FinalPassDisposition::Changed,
+            reason: None,
+            lexicon_rewrites,
+            repetition_cleanups,
+        },
+    )
+}
+
+fn apply_requested_final_pass(
+    raw: &RawTranscript,
+    options: FileTranscriptionOptions,
+) -> (String, Option<FinalPassVerdict>) {
+    match options.final_pass {
+        FinalPassMode::None => (raw.text.clone(), None),
+        FinalPassMode::EmbeddedLexiconCleanup => {
+            let mut processor = StreamPostProcessor::new();
+            match processor.process_utterance(&raw.text) {
+                Some(text) => {
+                    let stats = processor.stats();
+                    let (text, verdict) = finalize_requested_final_pass(
+                        &raw.text,
+                        text,
+                        FinalPassMode::EmbeddedLexiconCleanup,
+                        stats,
+                    );
+                    (text, Some(verdict))
+                }
+                None => {
+                    let stats = processor.stats();
+                    (
+                        String::new(),
+                        Some(FinalPassVerdict {
+                            mode: FinalPassMode::EmbeddedLexiconCleanup,
+                            disposition: FinalPassDisposition::Dropped,
+                            reason: Some("empty_after_cleanup".to_string()),
+                            lexicon_rewrites: stats.lexicon_rewrites,
+                            repetition_cleanups: stats.repetition_cleanups,
+                        }),
+                    )
+                }
+            }
+        }
+    }
+}
+
 pub struct LocalWhisperEngine {
     model: Model,
     tokenizer: Tokenizer,
@@ -45,6 +149,7 @@ pub struct LocalWhisperEngine {
     config: Config,
     mel_filters: Vec<f32>,
     ts_range: Option<TimestampRange>,
+    engine_provenance: TranscriptionEngineVerdict,
     pub decoding_params: DecodingParams,
 }
 
@@ -204,6 +309,9 @@ impl LocalWhisperEngine {
             config,
             mel_filters,
             ts_range,
+            engine_provenance: TranscriptionEngineVerdict::whisper(
+                TranscriptionEngineMode::RuntimeFallback,
+            ),
             decoding_params: DecodingParams::default(),
         })
     }
@@ -277,6 +385,9 @@ impl LocalWhisperEngine {
             config,
             mel_filters,
             ts_range,
+            engine_provenance: TranscriptionEngineVerdict::whisper(
+                TranscriptionEngineMode::EmbeddedDefault,
+            ),
             decoding_params: DecodingParams::default(),
         })
     }
@@ -297,7 +408,8 @@ impl LocalWhisperEngine {
         &mut self,
         path: &Path,
         language: Option<&str>,
-    ) -> Result<String> {
+        options: FileTranscriptionOptions,
+    ) -> Result<TranscriptionVerdict> {
         let (samples, sample_rate) =
             audio_loader::load_audio_file(path).context("Failed to load audio file")?;
 
@@ -310,8 +422,92 @@ impl LocalWhisperEngine {
             duration_secs
         );
 
-        // Use chunking for all files - handles both short and long audio
-        self.transcribe_long_with_language(&samples, sample_rate, language)
+        let (speech_samples, stats) = crate::vad::extract_speech(&samples, sample_rate);
+        let speech_sec = speech_samples.len() as f32 / sample_rate as f32;
+        tracing::info!(
+            "transcribe_file VAD: {:.1}s speech / {:.1}s total ({:.0}% speech)",
+            speech_sec,
+            duration_secs,
+            stats.speech_pct
+        );
+
+        let no_speech = speech_samples.is_empty();
+        let vad = VadVerdict {
+            speech_pct: stats.speech_pct,
+            speech_windows: stats.speech_windows,
+            total_windows: stats.total_windows,
+            no_speech,
+            no_speech_reason: stats.no_speech_reason.clone(),
+            sparkline: stats.sparkline.clone(),
+        };
+
+        if no_speech {
+            tracing::info!(
+                "transcribe_file: no speech detected after VAD; returning empty verdict"
+            );
+            return Ok(TranscriptionVerdict::from_parts(
+                String::new(),
+                RawTranscript::default(),
+                Some(vad),
+                TranscriptionSource::LocalFinalPass,
+                self.engine_provenance,
+                skipped_final_pass(
+                    options,
+                    stats
+                        .no_speech_reason
+                        .as_deref()
+                        .unwrap_or("vad_no_speech_detected"),
+                ),
+            ));
+        }
+
+        tracing::debug!(
+            "transcribe_file: speech detected; preserving full-audio decode path and using VAD as telemetry/no-speech gate only"
+        );
+
+        // Keep file transcription semantically honest: VAD contributes verdict
+        // metadata and an explicit no-speech short-circuit, but the raw STT
+        // result still comes from the full recording. Trimming down to
+        // `speech_samples` changed the behavior of the historical "raw file
+        // transcription" path and regressed canonical transcripts.
+        let raw = self.transcribe_long_with_language_segments(&samples, sample_rate, language)?;
+        let vad_config = crate::vad::VadConfig::default();
+        let timeline = crate::vad::classify_windows(&stats.probabilities, &vad_config);
+
+        let (raw_for_final_pass, tail_drop_count) = if raw.segments.is_empty() {
+            (raw.clone(), 0u32)
+        } else {
+            let outcome = crate::stt::whisper::map_whisper_segments_to_silero(
+                &raw.segments,
+                &timeline,
+                &vad_config,
+            );
+            if outcome.dropped_count > 0 {
+                tracing::info!(
+                    target: "tail_silence_filter",
+                    dropped_count = outcome.dropped_count,
+                    dropped_samples = ?outcome.dropped_text_samples,
+                    "Silero dropped Whisper tail segment(s)"
+                );
+            }
+
+            let mut filtered = raw.clone();
+            filtered.text = outcome.text;
+            filtered.segments = outcome.segments;
+            (filtered, outcome.dropped_count)
+        };
+
+        let (text, final_pass) = apply_requested_final_pass(&raw_for_final_pass, options);
+
+        Ok(TranscriptionVerdict::from_parts_with_silero_drops(
+            text,
+            raw_for_final_pass,
+            Some(vad),
+            TranscriptionSource::LocalFinalPass,
+            self.engine_provenance,
+            final_pass,
+            tail_drop_count,
+        ))
     }
 
     pub fn detect_language_file(&mut self, path: &Path) -> Result<String> {
@@ -320,8 +516,12 @@ impl LocalWhisperEngine {
         self.detect_language(&samples, sample_rate)
     }
 
-    pub fn transcribe_file(&mut self, path: &Path) -> Result<String> {
-        self.transcribe_file_with_language(path, None)
+    pub fn transcribe_file(
+        &mut self,
+        path: &Path,
+        options: FileTranscriptionOptions,
+    ) -> Result<TranscriptionVerdict> {
+        self.transcribe_file_with_language(path, None, options)
     }
 
     pub fn transcribe_with_language(
@@ -369,21 +569,6 @@ impl LocalWhisperEngine {
         self.transcribe_samples_16k_raw(&samples, language, debug_tokens)
     }
 
-    pub fn transcribe_long(&mut self, audio: &[f32], sample_rate: u32) -> Result<String> {
-        self.transcribe_long_with_language(audio, sample_rate, None)
-    }
-
-    pub fn transcribe_long_with_language(
-        &mut self,
-        audio: &[f32],
-        sample_rate: u32,
-        language: Option<&str>,
-    ) -> Result<String> {
-        Ok(self
-            .transcribe_long_with_language_segments(audio, sample_rate, language)?
-            .text)
-    }
-
     pub fn transcribe_long_with_language_segments(
         &mut self,
         audio: &[f32],
@@ -417,12 +602,29 @@ impl LocalWhisperEngine {
         let mut out = String::new();
         let mut all_segments = Vec::new();
         let mut offset = 0usize;
+        let mut logprob_sum = 0.0_f32;
+        let mut logprob_count = 0_u32;
+        let mut worst_compression = 0.0_f32;
+        let mut any_quality_gate_dropped = false;
 
         while offset < samples.len() {
             let end = (offset + chunk_samples).min(samples.len());
             let chunk = &samples[offset..end];
             let transcript = self.transcribe_samples_16k_raw(chunk, language, debug_tokens)?;
             append_with_overlap_dedup(&mut out, &transcript.text);
+
+            if let Some(lp) = transcript.avg_logprob {
+                logprob_sum += lp;
+                logprob_count += 1;
+            }
+            if let Some(cr) = transcript.compression_ratio
+                && cr > worst_compression
+            {
+                worst_compression = cr;
+            }
+            if transcript.quality_gate_dropped {
+                any_quality_gate_dropped = true;
+            }
 
             if !transcript.segments.is_empty() {
                 let offset_sec = offset as f32 / 16_000.0;
@@ -439,7 +641,30 @@ impl LocalWhisperEngine {
         Ok(RawTranscript {
             text: dedup_repetitions(out.trim()),
             segments: all_segments,
+            avg_logprob: if logprob_count > 0 {
+                Some(logprob_sum / logprob_count as f32)
+            } else {
+                None
+            },
+            compression_ratio: if worst_compression > 0.0 {
+                Some(worst_compression)
+            } else {
+                None
+            },
+            quality_gate_dropped: any_quality_gate_dropped,
         })
+    }
+
+    /// Legacy convenience wrapper kept for direct engine callers and tests.
+    pub fn transcribe_long_with_language(
+        &mut self,
+        audio: &[f32],
+        sample_rate: u32,
+        language: Option<&str>,
+    ) -> Result<String> {
+        Ok(self
+            .transcribe_long_with_language_segments(audio, sample_rate, language)?
+            .text)
     }
 
     /// Transcribe long audio with streaming callback
@@ -903,16 +1128,28 @@ impl LocalWhisperEngine {
                 avg_logprob,
                 final_ratio
             );
-            return Ok(RawTranscript::default());
+            return Ok(RawTranscript {
+                avg_logprob,
+                compression_ratio: Some(final_ratio),
+                quality_gate_dropped: true,
+                ..Default::default()
+            });
         }
 
         if final_text.is_empty() {
-            return Ok(RawTranscript::default());
+            return Ok(RawTranscript {
+                avg_logprob,
+                compression_ratio: Some(final_ratio),
+                ..Default::default()
+            });
         }
 
         Ok(RawTranscript {
             text: final_text,
             segments: final_segments,
+            avg_logprob,
+            compression_ratio: Some(final_ratio),
+            quality_gate_dropped: false,
         })
     }
 }
@@ -1427,5 +1664,63 @@ mod dedup_tests {
         assert!(!should_drop_for_quality_gate(Some(-0.2), 3.0, &params));
         assert!(!should_drop_for_quality_gate(Some(-3.0), 1.4, &params));
         assert!(should_drop_for_quality_gate(Some(-3.0), 3.0, &params));
+    }
+
+    #[test]
+    fn requested_final_pass_reports_embedded_lexicon_changes() {
+        let raw = RawTranscript {
+            text: "doker".to_string(),
+            ..Default::default()
+        };
+
+        let (text, final_pass) = apply_requested_final_pass(
+            &raw,
+            FileTranscriptionOptions {
+                final_pass: FinalPassMode::EmbeddedLexiconCleanup,
+            },
+        );
+
+        assert_eq!(text, "Docker");
+        let final_pass = final_pass.expect("expected final-pass provenance");
+        assert_eq!(final_pass.mode, FinalPassMode::EmbeddedLexiconCleanup);
+        assert_eq!(final_pass.disposition, FinalPassDisposition::Changed);
+        assert_eq!(final_pass.lexicon_rewrites, 1);
+    }
+
+    #[test]
+    fn requested_final_pass_skips_when_no_speech_already_known() {
+        let final_pass = skipped_final_pass(
+            FileTranscriptionOptions {
+                final_pass: FinalPassMode::EmbeddedLexiconCleanup,
+            },
+            "vad_no_speech_detected",
+        )
+        .expect("expected skipped final-pass provenance");
+
+        assert_eq!(final_pass.disposition, FinalPassDisposition::Skipped);
+        assert_eq!(final_pass.reason.as_deref(), Some("vad_no_speech_detected"));
+    }
+
+    #[test]
+    fn requested_final_pass_rejects_artifact_token_drift_and_keeps_raw() {
+        let raw = "zastanawiam się co ośreda, że ta funkcja już teoretycznie obsolesi legacy";
+        let candidate =
+            "zastanawiam going co ośreda, use ta funkcja już teoretycznie obsolesi legacy"
+                .to_string();
+        let stats = StreamPostProcessStats::default();
+
+        let (text, final_pass) = finalize_requested_final_pass(
+            raw,
+            candidate,
+            FinalPassMode::EmbeddedLexiconCleanup,
+            stats,
+        );
+
+        assert_eq!(text, raw);
+        assert_eq!(final_pass.disposition, FinalPassDisposition::Rejected);
+        assert_eq!(
+            final_pass.reason.as_deref(),
+            Some("artifact_token_drift:going,use")
+        );
     }
 }

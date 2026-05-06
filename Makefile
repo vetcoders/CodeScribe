@@ -1,7 +1,7 @@
 # CodeScribe - Pure Rust Build System
 # Speech-to-text tray app for macOS
 
-.PHONY: all build release install install-no-embed config bundle install-app \
+.PHONY: all build release release-codescribe release-qube install install-no-embed config bundle install-app \
         start stop restart status logs logs-follow \
         bump bump-patch bump-minor bump-major version \
         lint format test test-quick test-e2e test-e2e-real test-sse test-formatting test-all \
@@ -60,12 +60,18 @@ build:
 	@echo "Building (debug)..."
 	@cargo build
 
-release:
-	@echo "Building (release)..."
-	@cargo build --release
+release-codescribe:
+	@echo "Building codescribe (release, embedded models)..."
+	@cargo build --release --bin codescribe
+
+release-qube:
+	@echo "Building qube-* (release, runtime model resolve from HF cache)..."
+	@CODESCRIBE_NO_EMBED=1 cargo build --release --target-dir target-noembed --bin qube-daemon --bin qube-report
+
+release: release-codescribe release-qube
 
 install:
-	@echo "Installing CodeScribe (with embedded model)..."
+	@echo "Installing CodeScribe (embedded-first Whisper + embedded support assets)..."
 	@./scripts/ensure-models.sh
 	@cargo install --path . --force
 	@mkdir -p ~/.codescribe
@@ -73,7 +79,7 @@ install:
 	@echo "Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
 
 install-no-embed:
-	@echo "Installing CodeScribe (no embedded model)..."
+	@echo "Installing CodeScribe (runtime Whisper fallback + no optional embedded support assets)..."
 	@./scripts/ensure-models.sh
 	@CODESCRIBE_NO_EMBED=1 cargo install --path . --force
 	@mkdir -p ~/.codescribe
@@ -94,8 +100,8 @@ bundle: ensure-models release
 	@rm -rf bundle/$(CODESCRIBE_APP_NAME).app
 	@mkdir -p bundle/$(CODESCRIBE_APP_NAME).app/Contents/{MacOS,Resources}
 	@cp target/release/codescribe bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/
-	@cp target/release/codescribe-loop bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/ 2>/dev/null || true
-	@cp target/release/codescribe-quality bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/ 2>/dev/null || true
+	@cp target-noembed/release/qube-daemon bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/ 2>/dev/null || true
+	@cp target-noembed/release/qube-report bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/ 2>/dev/null || true
 	@cp assets/AppIcon.icns bundle/$(CODESCRIBE_APP_NAME).app/Contents/Resources/ 2>/dev/null || true
 	@VERSION=$$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*"\(.*\)"/\1/'); \
 	printf '%s\n' \
@@ -354,9 +360,9 @@ help:
 	@echo ""
 	@echo "Build & Install:"
 	@echo "  make build           Build debug binary"
-	@echo "  make release         Build release binary (with embedded model)"
-	@echo "  make install         Install CLI (~888MB with embedded model)"
-	@echo "  make install-no-embed Install without model (needs CODESCRIBE_MODEL_PATH)"
+	@echo "  make release         Build release binary (embedded-first Whisper + embedded support assets)"
+	@echo "  make install         Install CLI with embedded-first Whisper"
+	@echo "  make install-no-embed Install without optional embedded assets (needs CODESCRIBE_MODEL_PATH)"
 	@echo "  make config          Edit ~/.codescribe/.env"
 	@echo "  make bundle          Create CodeScribe.app bundle"
 	@echo "  make install-app     Install to /Applications"

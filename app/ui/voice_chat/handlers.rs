@@ -1035,7 +1035,7 @@ extern "C" fn on_tab_agent(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_tab_settings(_this: &Object, _cmd: Sel, _sender: Id) {
-    crate::show_settings_window();
+    crate::ui::settings::show_settings_window();
     info!("Settings window opened from chat overlay");
 }
 
@@ -1205,16 +1205,16 @@ extern "C" fn on_start_recording(_this: &Object, _cmd: Sel, _sender: Id) {
 
 extern "C" fn on_header_record(_this: &Object, _cmd: Sel, _sender: Id) {
     // Header record button is chat-native: keep the session in assistive/chat mode.
-    crate::hide_transcription_overlay();
+    crate::ui::overlay::hide_transcription_overlay();
     crate::controller::request_toggle_recording_start(true);
     info!("Header CTA: toggle assistive recording");
 }
 
 extern "C" fn on_show_overlay(_this: &Object, _cmd: Sel, _sender: Id) {
     if !super::api::is_voice_chat_overlay_visible() {
-        crate::show_voice_chat_overlay();
+        crate::ui::voice_chat::show_voice_chat_overlay();
     }
-    crate::voice_chat_ui::show_agent_tab();
+    crate::ui::voice_chat::show_agent_tab();
     info!("CTA: show/focus overlay");
 }
 
@@ -1353,12 +1353,12 @@ extern "C" fn on_show_shortcuts(_this: &Object, _cmd: Sel, _sender: Id) {
         info!("Ignored shortcuts action while overlay hidden");
         return;
     }
-    crate::voice_chat_ui::show_agent_tab();
-    crate::voice_chat_ui::add_voice_chat_system_message(&format!(
+    crate::ui::voice_chat::show_agent_tab();
+    crate::ui::voice_chat::add_voice_chat_system_message(&format!(
         "Keyboard shortcuts:\n{}\n{}",
         hold, toggle
     ));
-    crate::voice_chat_ui::update_voice_chat_status("Shortcuts");
+    crate::ui::voice_chat::update_voice_chat_status("Shortcuts");
     info!("Displayed keyboard shortcuts inline (non-modal)");
 }
 

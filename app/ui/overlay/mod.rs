@@ -7,7 +7,7 @@
 //! - Auto-hides after recording completion
 //!
 //! Use this for: Ctrl hold (raw), Left ⌥⌥ toggle (normal)
-//! For agent chat conversations, use voice_chat_ui overlay.
+//! For agent chat conversations, use the `ui::voice_chat` overlay.
 //!
 //! Design: macOS Tahoe Liquid Glass (NSVisualEffectView, HudWindow material)
 
@@ -135,6 +135,7 @@ struct TranscriptionOverlayState {
     hover_active: bool,
     action_handler: Option<usize>,
     action_contract_mode: TranscriptionActionContractMode,
+    display_status: String,
     raw_text: String,
     last_pass_text: String,
     accumulated_text: String,
@@ -165,6 +166,7 @@ lazy_static::lazy_static! {
         hover_active: false,
         action_handler: None,
         action_contract_mode: TranscriptionActionContractMode::Raw,
+        display_status: String::new(),
         raw_text: String::new(),
         last_pass_text: String::new(),
         accumulated_text: String::new(),
@@ -205,6 +207,7 @@ struct OverlaySnapshot {
     save_button: Option<usize>,
     commit_button: Option<usize>,
     progress_indicator: Option<usize>,
+    display_status: String,
     window_width: f64,
     min_height: f64,
     max_height: f64,
@@ -226,6 +229,7 @@ impl OverlaySnapshot {
             save_button: state.save_button,
             commit_button: state.commit_button,
             progress_indicator: state.progress_indicator,
+            display_status: state.display_status.clone(),
             window_width: state.window_width,
             min_height: state.min_height,
             max_height: state.max_height,
@@ -328,9 +332,9 @@ extern "C" fn on_augment_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
     if text.is_empty() {
         return;
     }
-    crate::show_voice_chat_overlay();
-    crate::show_agent_tab();
-    crate::voice_chat_ui::handoff_transcript_to_chat(&text);
+    crate::ui::voice_chat::show_voice_chat_overlay();
+    crate::ui::voice_chat::show_agent_tab();
+    crate::ui::voice_chat::handoff_transcript_to_chat(&text);
     hide_transcription_overlay();
 }
 
@@ -423,11 +427,23 @@ fn augment_action_tooltip(mode: TranscriptionActionContractMode) -> &'static str
     }
 }
 
-fn decision_hint_text(mode: TranscriptionActionContractMode, include_auto_hide: bool) -> String {
-    let base = format!(
-        "Dictation overlay | Source: {} | Save closes | Augment -> Agent",
-        action_contract_source_label(mode)
-    );
+fn decision_hint_text(
+    mode: TranscriptionActionContractMode,
+    display_status: &str,
+    include_auto_hide: bool,
+) -> String {
+    let mode_label = action_contract_source_label(mode);
+    let base = if display_status.is_empty() {
+        format!(
+            "Dictation overlay | {} | Save closes | Augment -> Agent",
+            mode_label
+        )
+    } else {
+        format!(
+            "Dictation overlay | {} | {} | Save closes | Augment -> Agent",
+            mode_label, display_status
+        )
+    };
     if include_auto_hide {
         format!("{base} | Auto-hide {}s", auto_hide_delay_secs())
     } else {
@@ -462,7 +478,7 @@ fn refresh_action_contract_ui_unlocked(
     if let Some(label_ptr) = snap.auto_hide_label {
         unsafe {
             if include_auto_hide_hint {
-                let hint = decision_hint_text(mode, true);
+                let hint = decision_hint_text(mode, &snap.display_status, true);
                 set_text(label_ptr as Id, &hint);
                 set_tooltip(label_ptr as Id, "Transcription overlay action contract");
                 set_hidden(label_ptr as Id, false);
@@ -1133,7 +1149,7 @@ fn show_transcription_overlay_impl() {
                 &CGPoint::new(OVERLAY_PADDING, info_y),
                 &CGSize::new(window_width - OVERLAY_PADDING * 2.0, OVERLAY_INFO_HEIGHT),
             ),
-            text: decision_hint_text(TranscriptionActionContractMode::Raw, true),
+            text: decision_hint_text(TranscriptionActionContractMode::Raw, "", true),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             bold: false,
             text_color: ui_colors::overlay_hint_text(),
@@ -1436,6 +1452,7 @@ pub fn set_transcription_action_contract(
     raw_text: &str,
     last_pass_text: &str,
     mode: TranscriptionActionContractMode,
+    display_status: String,
 ) {
     let raw_text_owned = raw_text.to_string();
     let last_pass_owned = last_pass_text.to_string();
@@ -1443,9 +1460,11 @@ pub fn set_transcription_action_contract(
     Queue::main().exec_async(move || {
         let (visible_text, snap, decision_mode) = {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.accumulated_text.clear();
             state.raw_text = raw_text_owned;
             state.last_pass_text = last_pass_owned;
             state.action_contract_mode = mode_copy;
+            state.display_status = display_status;
             let visible = display_text_for_state(&state);
             let dm = state.decision_mode;
             let snap = OverlaySnapshot::from_state(&state);
@@ -1609,19 +1628,27 @@ pub fn hide_transcription_overlay() {
     });
 }
 
-/// Closes a window by raw pointer (used for delayed close after animation)
+/// Closes a window by raw pointer (used for delayed close after animation).
+///
+/// Sends `release` after `close` because the shared shell policy sets
+/// `released_when_closed = false`, so AppKit no longer auto-releases the
+/// initial alloc/init retain. Without this the NSWindow itself would leak.
 fn close_window_by_ptr(window_ptr: usize) {
     unsafe {
-        window_close(window_ptr as Id);
+        let window = window_ptr as Id;
+        window_close(window);
+        let _: () = msg_send![window, release];
     }
 }
 
 fn hide_transcription_overlay_impl() {
-    // DEADLOCK PREVENTION: extract window_ptr and clear state under lock,
+    // DEADLOCK PREVENTION: extract handles and clear state under lock,
     // then drop lock before the animate_fade AppKit call.
-    let window_ptr = {
+    let (window_ptr, tracking_area_ptr, action_handler_ptr) = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let wp = state.window.take();
+        let tap = state.tracking_area.take();
+        let ahp = state.action_handler.take();
         state.header_label = None;
         state.text_scroll_view = None;
         state.text_view = None;
@@ -1633,16 +1660,14 @@ fn hide_transcription_overlay_impl() {
         state.save_button = None;
         state.commit_button = None;
         state.progress_indicator = None;
-        state.tracking_area = None;
         state.decision_mode = false;
         state.hover_active = false;
-        state.action_handler = None;
         state.action_contract_mode = TranscriptionActionContractMode::Raw;
         state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
         state.last_layout_resize_at = Instant::now();
         state.pending_layout_resize = false;
         // Note: accumulated_text is NOT cleared here - it's needed for clipboard copy
-        wp
+        (wp, tap, ahp)
     }; // Lock dropped.
 
     if let Some(window_ptr) = window_ptr {
@@ -1653,7 +1678,28 @@ fn hide_transcription_overlay_impl() {
             animate_fade(window, 0.0, 0.15);
         }
 
-        // Close window after brief delay for animation
+        // Release the tracking area and the action target before the window
+        // tears down. Detach the tracking area from the content view first so
+        // no further mouse events can fire on a freed pointer. The content
+        // view itself is owned by the window and will be released when the
+        // delayed close runs.
+        unsafe {
+            if let Some(ta_ptr) = tracking_area_ptr {
+                let ta = ta_ptr as Id;
+                let content_view: Id = msg_send![window, contentView];
+                if !content_view.is_null() {
+                    let _: () = msg_send![content_view, removeTrackingArea: ta];
+                }
+                let _: () = msg_send![ta, release];
+            }
+            if let Some(ah_ptr) = action_handler_ptr {
+                let _: () = msg_send![ah_ptr as Id, release];
+            }
+        }
+
+        // Close window after brief delay for animation. `close_window_by_ptr`
+        // sends `release` after `close` to balance the alloc/init retain
+        // (released_when_closed = false in the shared shell policy).
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
             Queue::main().exec_async(move || {
@@ -1764,6 +1810,10 @@ mod tests {
     }
 
     fn reset_overlay_state_for_test() {
+        // Test fixture: pointers may be invalid (tests don't always wire a
+        // real AppKit window), so we intentionally do NOT send `release` for
+        // window / tracking_area / action_handler here. Production teardown
+        // lives in `hide_transcription_overlay_impl` + `close_window_by_ptr`.
         AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
         AUTO_HIDE_GENERATION.store(0, Ordering::SeqCst);
 
@@ -2031,14 +2081,49 @@ mod tests {
         assert_eq!(stable_overlay_preview_text("partial"), "partial");
     }
 
+    /// Scoped env var guard — saves the prior value and restores it on Drop.
+    ///
+    /// Required because `CODESCRIBE_OVERLAY_STABLE_PREVIEW` is read by
+    /// `overlay_live_preview_uses_stable_text()` as process-global state, so
+    /// parallel tests without isolation can observe values left over by siblings.
+    struct OverlayStablePreviewEnvGuard {
+        prev: Option<String>,
+    }
+
+    impl OverlayStablePreviewEnvGuard {
+        fn unset() -> Self {
+            let prev = std::env::var("CODESCRIBE_OVERLAY_STABLE_PREVIEW").ok();
+            // SAFETY: `#[serial]` on every caller enforces single-threaded access to
+            // this env var for the duration of the test, and Drop restores the prior
+            // value before any other test resumes.
+            unsafe { std::env::remove_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW") };
+            Self { prev }
+        }
+    }
+
+    impl Drop for OverlayStablePreviewEnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                // SAFETY: see OverlayStablePreviewEnvGuard::unset — serial test scope.
+                Some(v) => unsafe { std::env::set_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW", v) },
+                // SAFETY: see OverlayStablePreviewEnvGuard::unset — serial test scope.
+                None => unsafe { std::env::remove_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW") },
+            }
+        }
+    }
+
     #[test]
+    #[serial]
     fn test_overlay_visible_text_decision_mode_uses_exact_text() {
+        let _guard = OverlayStablePreviewEnvGuard::unset();
         let text = "pełny tekst kontraktu bez trimowania";
         assert_eq!(overlay_visible_text(text, true), text);
     }
 
     #[test]
+    #[serial]
     fn test_overlay_visible_text_live_mode_defaults_to_exact_text() {
+        let _guard = OverlayStablePreviewEnvGuard::unset();
         let text = "To jest stabilne zda";
         assert_eq!(overlay_visible_text(text, false), text);
     }

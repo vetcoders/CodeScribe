@@ -7,19 +7,20 @@ use crate::ui_helpers::ns_string;
 
 use super::{
     TAB_AI_PROMPTS, TAB_AUDIO_INPUT, TAB_DIAGNOSTICS, TAB_MODES_SHORTCUTS, TAB_TRANSCRIPTION,
-    handle_bootstrap_window_closed, handle_hotkey_done, handle_show_overlay, handle_test_mic,
+    handle_hotkey_done, handle_settings_window_closed, handle_show_overlay, handle_test_mic,
     on_assistive_endpoint_changed, on_assistive_key_changed, on_assistive_model_changed,
     on_beep_toggled, on_clear_assistive_key, on_clear_llm_key, on_copy_diagnostics,
     on_delay_changed, on_diagnostics_refresh, on_double_tap_interval_changed,
     on_enter_send_toggled, on_formatting_level_changed, on_formatting_toggled, on_language_changed,
     on_llm_endpoint_changed, on_llm_key_changed, on_llm_model_changed, on_mode_binding_change,
-    on_open_quality_report, on_open_system_settings, on_permission_action,
+    on_open_qube_report, on_open_system_settings, on_permission_action,
     on_preview_buffer_delay_changed, on_preview_emit_words_max_changed,
     on_preview_interim_cadence_changed, on_preview_typing_cps_changed, on_prompt_load,
-    on_prompt_reset, on_prompt_save, on_prompt_type_changed, on_quality_daemon_toggled,
-    on_quality_refresh, on_refresh_permissions, on_save_api_settings, on_show_dock_icon_toggled,
-    on_show_hotkey_conflicts, on_stt_endpoint_changed, on_stt_key_changed, on_stt_provider_changed,
-    on_transcription_overlay_toggled, on_ultra_quality_toggled, on_volume_changed, switch_tab,
+    on_prompt_reset, on_prompt_save, on_prompt_type_changed, on_quality_refresh,
+    on_qube_daemon_toggled, on_refresh_permissions, on_save_api_settings,
+    on_show_dock_icon_toggled, on_show_hotkey_conflicts, on_stt_endpoint_changed,
+    on_stt_key_changed, on_stt_provider_changed, on_transcription_overlay_toggled,
+    on_ultra_quality_toggled, on_volume_changed, switch_tab,
 };
 
 pub type Id = *mut Object;
@@ -34,10 +35,12 @@ static mut TOOLBAR_DELEGATE_CLASS: *const Class = std::ptr::null();
 const NSTOOLBAR_FLEXIBLE_SPACE_ITEM_IDENTIFIER: &str = "NSToolbarFlexibleSpaceItem";
 
 pub fn action_handler_class() -> *const Class {
+    // SAFETY: `ACTION_HANDLER_INIT` serializes the one-time registration, and the
+    // Objective-C runtime keeps the registered class pointer alive for the process lifetime.
     unsafe {
         ACTION_HANDLER_INIT.call_once(|| {
             let superclass = Class::get("NSObject").expect("NSObject not found");
-            let mut decl = ClassDecl::new("BootstrapOverlayActionHandler", superclass)
+            let mut decl = ClassDecl::new("SettingsWindowActionHandler", superclass)
                 .expect("Failed to declare handler class");
 
             // Transcription tab actions
@@ -216,8 +219,8 @@ pub fn action_handler_class() -> *const Class {
 
             // Quality daemon toggle
             decl.add_method(
-                sel!(onQualityDaemonToggled:),
-                on_quality_daemon_toggled as extern "C" fn(&Object, Sel, Id),
+                sel!(onQubeDaemonToggled:),
+                on_qube_daemon_toggled as extern "C" fn(&Object, Sel, Id),
             );
             decl.add_method(
                 sel!(onUltraQualityToggled:),
@@ -229,7 +232,7 @@ pub fn action_handler_class() -> *const Class {
             );
             decl.add_method(
                 sel!(onOpenQualityReport:),
-                on_open_quality_report as extern "C" fn(&Object, Sel, Id),
+                on_open_qube_report as extern "C" fn(&Object, Sel, Id),
             );
 
             // Permission refresh
@@ -262,10 +265,12 @@ pub fn action_handler_class() -> *const Class {
 }
 
 pub fn window_delegate_class() -> *const Class {
+    // SAFETY: `WINDOW_DELEGATE_INIT` guarantees exactly-once registration before we
+    // publish the cached class pointer, which remains valid for the process lifetime.
     unsafe {
         WINDOW_DELEGATE_INIT.call_once(|| {
             let superclass = Class::get("NSObject").expect("NSObject not found");
-            let mut decl = ClassDecl::new("BootstrapWindowDelegate", superclass)
+            let mut decl = ClassDecl::new("SettingsWindowDelegate", superclass)
                 .expect("Failed to declare window delegate class");
             decl.add_method(
                 sel!(windowWillClose:),
@@ -279,10 +284,12 @@ pub fn window_delegate_class() -> *const Class {
 }
 
 pub fn toolbar_delegate_class() -> *const Class {
+    // SAFETY: `TOOLBAR_DELEGATE_INIT` serializes registration and the Objective-C
+    // runtime owns the class object after `register`, so later reads are stable.
     unsafe {
         TOOLBAR_DELEGATE_INIT.call_once(|| {
             let superclass = Class::get("NSObject").expect("NSObject not found");
-            let mut decl = ClassDecl::new("BootstrapToolbarDelegate", superclass)
+            let mut decl = ClassDecl::new("SettingsToolbarDelegate", superclass)
                 .expect("Failed to declare toolbar delegate class");
             decl.add_method(
                 sel!(toolbarAllowedItemIdentifiers:),
@@ -300,6 +307,19 @@ pub fn toolbar_delegate_class() -> *const Class {
         });
 
         TOOLBAR_DELEGATE_CLASS
+    }
+}
+
+fn toolbar_identifier_array() -> Id {
+    // SAFETY: `NSMutableArray::array` returns an autoreleased mutable array owned by
+    // the current Cocoa autorelease pool, and we only append a known AppKit identifier.
+    unsafe {
+        let ns_mutable_array = Class::get("NSMutableArray").unwrap();
+        let ids: Id = msg_send![ns_mutable_array, array];
+        // AppKit exposes flexible-space as a global identifier constant, not a class selector.
+        let flexible_space: Id = ns_string(NSTOOLBAR_FLEXIBLE_SPACE_ITEM_IDENTIFIER);
+        let _: () = msg_send![ids, addObject: flexible_space];
+        ids
     }
 }
 
@@ -336,28 +356,15 @@ extern "C" fn on_tab_diagnostics(_this: &Object, _sel: Sel, _sender: Id) {
 }
 
 extern "C" fn on_window_will_close(_this: &Object, _sel: Sel, _notification: Id) {
-    handle_bootstrap_window_closed();
+    handle_settings_window_closed();
 }
 
 extern "C" fn toolbar_allowed_item_identifiers(_this: &Object, _sel: Sel, _toolbar: Id) -> Id {
-    unsafe {
-        let ns_mutable_array = Class::get("NSMutableArray").unwrap();
-        let ids: Id = msg_send![ns_mutable_array, array];
-        // AppKit exposes flexible-space as a global identifier constant, not a class selector.
-        let flexible_space: Id = ns_string(NSTOOLBAR_FLEXIBLE_SPACE_ITEM_IDENTIFIER);
-        let _: () = msg_send![ids, addObject: flexible_space];
-        ids
-    }
+    toolbar_identifier_array()
 }
 
 extern "C" fn toolbar_default_item_identifiers(_this: &Object, _sel: Sel, _toolbar: Id) -> Id {
-    unsafe {
-        let ns_mutable_array = Class::get("NSMutableArray").unwrap();
-        let ids: Id = msg_send![ns_mutable_array, array];
-        let flexible_space: Id = ns_string(NSTOOLBAR_FLEXIBLE_SPACE_ITEM_IDENTIFIER);
-        let _: () = msg_send![ids, addObject: flexible_space];
-        ids
-    }
+    toolbar_identifier_array()
 }
 
 extern "C" fn toolbar_item_for_identifier(
@@ -367,6 +374,8 @@ extern "C" fn toolbar_item_for_identifier(
     item_identifier: Id,
     _will_be_inserted: bool,
 ) -> Id {
+    // SAFETY: `NSToolbarItem` instances are created through the documented alloc/init
+    // pair, and `item_identifier` comes from AppKit's toolbar delegate callback.
     unsafe {
         let ns_toolbar_item = Class::get("NSToolbarItem").unwrap();
         let item: Id = msg_send![ns_toolbar_item, alloc];
@@ -379,10 +388,12 @@ mod tests {
     use super::*;
 
     fn assert_selector_registered(class: *const Class, selector: Sel, label: &str) {
+        // SAFETY: we only query selector presence on classes we registered in this module,
+        // so the Objective-C runtime receives a valid class object and selector.
         let responds: bool = unsafe { msg_send![class, instancesRespondToSelector: selector] };
         assert!(
             responds,
-            "BootstrapOverlayActionHandler missing selector `{label}`"
+            "SettingsWindowActionHandler missing selector `{label}`"
         );
     }
 
@@ -391,7 +402,7 @@ mod tests {
         let class = action_handler_class();
         assert!(
             !class.is_null(),
-            "BootstrapOverlayActionHandler class should be registered"
+            "SettingsWindowActionHandler class should be registered"
         );
 
         assert_selector_registered(class, sel!(onTabTranscription:), "onTabTranscription:");

@@ -204,7 +204,7 @@ fn test_action_contract_mode_prefers_raw_when_forced() {
     let mode = resolve_transcription_action_contract_mode(true, false, true, true);
     assert_eq!(
         mode,
-        crate::transcription_overlay::TranscriptionActionContractMode::Raw
+        crate::ui::overlay::TranscriptionActionContractMode::Raw
     );
 }
 
@@ -213,7 +213,7 @@ fn test_action_contract_mode_uses_ai_format_when_force_ai_enabled() {
     let mode = resolve_transcription_action_contract_mode(false, true, false, false);
     assert_eq!(
         mode,
-        crate::transcription_overlay::TranscriptionActionContractMode::AiFormat
+        crate::ui::overlay::TranscriptionActionContractMode::AiFormat
     );
 }
 
@@ -222,7 +222,7 @@ fn test_action_contract_mode_uses_ai_format_for_toggle_ai_path() {
     let mode = resolve_transcription_action_contract_mode(false, false, true, true);
     assert_eq!(
         mode,
-        crate::transcription_overlay::TranscriptionActionContractMode::AiFormat
+        crate::ui::overlay::TranscriptionActionContractMode::AiFormat
     );
 }
 
@@ -231,60 +231,273 @@ fn test_action_contract_mode_uses_raw_for_toggle_without_ai() {
     let mode = resolve_transcription_action_contract_mode(false, false, true, false);
     assert_eq!(
         mode,
-        crate::transcription_overlay::TranscriptionActionContractMode::Raw
+        crate::ui::overlay::TranscriptionActionContractMode::Raw
     );
 }
 
 #[test]
-fn test_select_recording_transcript_prefers_local_final_pass_for_local_backend() {
-    let (raw_text, cloud_text, source) = select_recording_transcript(
+fn test_truth_engine_label_maps_toggle_session_adjudicated_to_local_whisper() {
+    assert_eq!(
+        truth_engine_label(Some(RecordingTranscriptSource::ToggleSessionAdjudicated)).as_deref(),
+        Some("local_whisper")
+    );
+}
+
+#[test]
+fn test_toggle_session_adjudicated_label_is_user_facing() {
+    assert_eq!(
+        RecordingTranscriptSource::ToggleSessionAdjudicated.label(),
+        "Toggle session adjudicated"
+    );
+}
+
+#[test]
+#[serial]
+fn test_toggle_final_pass_enabled_defaults_true_and_honors_falsey_values() {
+    unsafe {
+        std::env::remove_var("CODESCRIBE_TOGGLE_FINAL_PASS");
+    }
+    assert!(toggle_final_pass_enabled());
+
+    for falsey in ["0", "false", "FALSE", "no", "off", " off ", "   "] {
+        unsafe {
+            std::env::set_var("CODESCRIBE_TOGGLE_FINAL_PASS", falsey);
+        }
+        assert!(
+            !toggle_final_pass_enabled(),
+            "expected {falsey:?} to disable toggle final pass"
+        );
+    }
+
+    unsafe {
+        std::env::set_var("CODESCRIBE_TOGGLE_FINAL_PASS", "1");
+    }
+    assert!(toggle_final_pass_enabled());
+
+    unsafe {
+        std::env::remove_var("CODESCRIBE_TOGGLE_FINAL_PASS");
+    }
+}
+
+#[test]
+fn test_should_use_toggle_adjudicated_stop_only_for_raw_toggle_when_enabled() {
+    assert!(should_use_toggle_adjudicated_stop(
+        State::RecToggle,
+        false,
+        true
+    ));
+    assert!(!should_use_toggle_adjudicated_stop(
+        State::RecToggle,
         true,
-        Some("local final".to_string()),
-        "streaming fallback".to_string(),
-        None,
-    );
-
-    assert_eq!(raw_text.as_deref(), Some("local final"));
-    assert_eq!(cloud_text, None);
-    assert_eq!(source, Some(RecordingTranscriptSource::LocalFinalPass));
+        true
+    ));
+    assert!(!should_use_toggle_adjudicated_stop(
+        State::RecToggle,
+        false,
+        false
+    ));
+    assert!(!should_use_toggle_adjudicated_stop(
+        State::RecHold,
+        false,
+        true
+    ));
+    assert!(!should_use_toggle_adjudicated_stop(
+        State::Busy,
+        false,
+        true
+    ));
 }
 
 #[test]
-fn test_select_recording_transcript_prefers_cloud_for_cloud_backend() {
-    let (raw_text, cloud_text, source) = select_recording_transcript(
+fn test_toggle_stop_event_preserves_active_session_identity() {
+    let right_option_stop = HotkeyInput {
+        key_type: HotkeyType::Toggle,
+        action: HotkeyAction::Press,
+        assistive: true,
+        hold_mode: HoldMode::Raw,
+        force_raw: false,
+        force_ai: false,
+    };
+    assert!(
+        !should_apply_incoming_mode_flags(State::RecToggle, &right_option_stop),
+        "A stop key must not smear its assistive/formatting flags onto the active toggle session"
+    );
+    assert!(
+        should_apply_incoming_mode_flags(State::Idle, &right_option_stop),
+        "The same key still defines a new session when no toggle session is active"
+    );
+}
+
+fn make_final_pass_verdict(
+    text: &str,
+    speech_pct: f32,
+    avg_logprob: Option<f32>,
+    no_speech: bool,
+) -> codescribe_core::pipeline::contracts::TranscriptionVerdict {
+    codescribe_core::pipeline::contracts::TranscriptionVerdict::from_parts(
+        text.to_string(),
+        codescribe_core::pipeline::contracts::RawTranscript {
+            text: text.to_string(),
+            segments: Vec::new(),
+            avg_logprob,
+            compression_ratio: None,
+            quality_gate_dropped: false,
+        },
+        Some(codescribe_core::pipeline::contracts::VadVerdict {
+            speech_pct,
+            speech_windows: if no_speech { 0 } else { 4 },
+            total_windows: 10,
+            no_speech,
+            no_speech_reason: if no_speech {
+                Some("vad_no_speech_detected".to_string())
+            } else {
+                None
+            },
+            sparkline: String::new(),
+        }),
+        codescribe_core::pipeline::contracts::TranscriptionSource::LocalFinalPass,
+        codescribe_core::pipeline::contracts::TranscriptionEngineVerdict::whisper(
+            codescribe_core::pipeline::contracts::TranscriptionEngineMode::EmbeddedDefault,
+        ),
+        None,
+    )
+}
+
+fn make_cloud_verdict(text: &str) -> crate::client::CloudTranscriptionVerdict {
+    crate::client::CloudTranscriptionVerdict {
+        text: text.to_string(),
+        source: codescribe_core::pipeline::contracts::TranscriptionSource::Cloud,
+        confidence_flags: Vec::new(),
+        latency_ms: Some(120),
+        model_name: Some("mock-cloud".to_string()),
+    }
+}
+
+#[test]
+fn test_adjudicate_recording_truth_blocks_local_no_speech() {
+    let session = SessionTelemetrySnapshot {
+        no_speech_reason: Some("telemetry_should_not_override_core".to_string()),
+        stats: None,
+    };
+
+    let verdict = adjudicate_recording_truth(
+        true,
+        true,
+        Some(make_final_pass_verdict("", 0.0, None, true)),
+        "preview text".to_string(),
+        None,
+        &session,
+    );
+
+    assert!(verdict.raw_text.is_none());
+    assert_eq!(
+        verdict.transcript_source,
+        Some(RecordingTranscriptSource::LocalFinalPass)
+    );
+    assert_eq!(
+        verdict.no_speech_reason.as_deref(),
+        Some("vad_no_speech_detected")
+    );
+    assert_eq!(
+        verdict.commit_trigger.as_deref(),
+        Some("no_reliable_speech")
+    );
+    assert_eq!(verdict.display_status, "No reliable speech detected");
+}
+
+#[test]
+fn test_adjudicate_recording_truth_marks_cloud_fallback_as_degraded() {
+    let verdict = adjudicate_recording_truth(
+        false,
         false,
         None,
         "streaming fallback".to_string(),
-        Some("cloud final".to_string()),
+        None,
+        &SessionTelemetrySnapshot::default(),
     );
 
-    assert_eq!(raw_text.as_deref(), Some("cloud final"));
-    assert_eq!(cloud_text.as_deref(), Some("cloud final"));
-    assert_eq!(source, Some(RecordingTranscriptSource::CloudPrimary));
+    assert_eq!(verdict.raw_text.as_deref(), Some("streaming fallback"));
+    assert_eq!(
+        verdict.transcript_source,
+        Some(RecordingTranscriptSource::StreamingFallback)
+    );
+    assert_eq!(
+        verdict.fallback_class,
+        Some(RecordingFallbackClass::Degraded)
+    );
+    assert!(
+        verdict
+            .confidence_flags
+            .contains(&TranscriptionConfidenceFlag::CloudPrimaryMissing)
+    );
+    assert!(
+        verdict
+            .confidence_flags
+            .contains(&TranscriptionConfidenceFlag::UnverifiedStream)
+    );
+    assert!(
+        verdict
+            .confidence_flags
+            .contains(&TranscriptionConfidenceFlag::StreamingPreviewUsedAsVerdict)
+    );
+    assert_eq!(
+        verdict.commit_trigger.as_deref(),
+        Some("streaming_preview_used_as_verdict")
+    );
+    assert_eq!(verdict.display_status, "Streaming fallback");
 }
 
 #[test]
-fn test_select_recording_transcript_falls_back_to_streaming_when_cloud_missing() {
-    let (raw_text, cloud_text, source) =
-        select_recording_transcript(false, None, "streaming fallback".to_string(), None);
-
-    assert_eq!(raw_text.as_deref(), Some("streaming fallback"));
-    assert_eq!(cloud_text, None);
-    assert_eq!(source, Some(RecordingTranscriptSource::StreamingFallback));
-}
-
-#[test]
-fn test_select_recording_transcript_ignores_empty_candidates() {
-    let (raw_text, cloud_text, source) = select_recording_transcript(
+fn test_adjudicate_recording_truth_uses_typed_cloud_primary_verdict() {
+    let verdict = adjudicate_recording_truth(
         false,
-        Some("   ".to_string()),
-        "  ".to_string(),
-        Some("".to_string()),
+        false,
+        None,
+        "preview text".to_string(),
+        Some(make_cloud_verdict("cloud primary")),
+        &SessionTelemetrySnapshot::default(),
     );
 
-    assert_eq!(raw_text, None);
-    assert_eq!(cloud_text, None);
-    assert_eq!(source, None);
+    assert_eq!(verdict.raw_text.as_deref(), Some("cloud primary"));
+    assert_eq!(
+        verdict.transcript_source,
+        Some(RecordingTranscriptSource::CloudPrimary)
+    );
+    assert!(verdict.confidence_flags.is_empty());
+    assert_eq!(verdict.display_status, "Cloud primary");
+}
+
+#[test]
+fn test_adjudicate_recording_truth_marks_low_logprob_as_unsafe() {
+    let verdict = adjudicate_recording_truth(
+        true,
+        true,
+        Some(make_final_pass_verdict(
+            "niepewna transkrypcja",
+            28.0,
+            Some(-1.2),
+            false,
+        )),
+        "preview text".to_string(),
+        None,
+        &SessionTelemetrySnapshot::default(),
+    );
+
+    assert_eq!(
+        verdict.transcript_source,
+        Some(RecordingTranscriptSource::LocalFinalPass)
+    );
+    assert_eq!(verdict.fallback_class, Some(RecordingFallbackClass::Unsafe));
+    assert!(
+        verdict
+            .confidence_flags
+            .contains(&TranscriptionConfidenceFlag::PossibleHallucinationLogprob)
+    );
+    assert_eq!(
+        verdict.commit_trigger.as_deref(),
+        Some("possible_hallucination_logprob")
+    );
+    assert_eq!(verdict.display_status, "Possible hallucination");
 }
 
 #[test]
@@ -325,6 +538,227 @@ fn test_backend_recovery_message_uses_settings_language() {
     assert!(message.contains("Open Settings"));
     assert!(!message.contains("Setup"));
     assert!(message.contains("Cloud endpoint timed out"));
+}
+
+// ── Pure-function unit tests for truth helpers (push_typed_flag,
+//    truth_review_trigger, truth_display_status). These guard the
+//    truth-surface adjudicator primitives so regressions in precedence or
+//    dedup logic fail loudly instead of leaking through integration tests.
+
+#[test]
+fn test_push_typed_flag_appends_new_flag() {
+    let mut flags: Vec<TranscriptionConfidenceFlag> = Vec::new();
+    push_typed_flag(&mut flags, TranscriptionConfidenceFlag::CloudFallbackUsed);
+    assert_eq!(flags, vec![TranscriptionConfidenceFlag::CloudFallbackUsed]);
+}
+
+#[test]
+fn test_push_typed_flag_deduplicates_existing_flag() {
+    let mut flags = vec![TranscriptionConfidenceFlag::CloudFallbackUsed];
+    push_typed_flag(&mut flags, TranscriptionConfidenceFlag::CloudFallbackUsed);
+    assert_eq!(flags.len(), 1);
+}
+
+#[test]
+fn test_push_typed_flag_preserves_order_when_adding_distinct_flags() {
+    let mut flags: Vec<TranscriptionConfidenceFlag> = Vec::new();
+    push_typed_flag(
+        &mut flags,
+        TranscriptionConfidenceFlag::LocalFinalPassUnavailable,
+    );
+    push_typed_flag(&mut flags, TranscriptionConfidenceFlag::CloudFallbackUsed);
+    push_typed_flag(
+        &mut flags,
+        TranscriptionConfidenceFlag::LocalFinalPassUnavailable,
+    ); // dup
+    assert_eq!(
+        flags,
+        vec![
+            TranscriptionConfidenceFlag::LocalFinalPassUnavailable,
+            TranscriptionConfidenceFlag::CloudFallbackUsed,
+        ]
+    );
+}
+
+#[test]
+fn test_apply_ai_noop_signal_sets_flag_and_commit_trigger() {
+    let mut flags = vec![TranscriptionConfidenceFlag::CloudFallbackUsed];
+    let mut commit_trigger = Some("high_rewrite_ratio".to_string());
+
+    apply_ai_noop_signal(false, true, &mut flags, &mut commit_trigger);
+
+    assert_eq!(
+        flags,
+        vec![
+            TranscriptionConfidenceFlag::CloudFallbackUsed,
+            TranscriptionConfidenceFlag::AiNoopDetected,
+        ]
+    );
+    assert_eq!(commit_trigger.as_deref(), Some("ai_noop"));
+}
+
+#[test]
+fn test_apply_ai_noop_signal_is_noop_for_assistive_sessions() {
+    let mut flags = vec![TranscriptionConfidenceFlag::CloudFallbackUsed];
+    let mut commit_trigger = Some("high_rewrite_ratio".to_string());
+
+    apply_ai_noop_signal(true, true, &mut flags, &mut commit_trigger);
+
+    assert_eq!(flags, vec![TranscriptionConfidenceFlag::CloudFallbackUsed]);
+    assert_eq!(commit_trigger.as_deref(), Some("high_rewrite_ratio"));
+}
+
+#[test]
+fn test_truth_review_trigger_no_speech_short_circuits_all_other_signals() {
+    let flags = vec![
+        TranscriptionConfidenceFlag::PossibleHallucinationLogprob,
+        TranscriptionConfidenceFlag::CloudFallbackUsed,
+    ];
+    let trigger = truth_review_trigger(
+        Some(RecordingFallbackClass::Unsafe),
+        Some("vad_no_speech_detected"),
+        &flags,
+    );
+    assert_eq!(trigger.as_deref(), Some("no_reliable_speech"));
+}
+
+#[test]
+fn test_truth_review_trigger_hallucination_wins_over_degraded_fallback() {
+    let flags = vec![TranscriptionConfidenceFlag::PossibleHallucinationLogprob];
+    let trigger = truth_review_trigger(Some(RecordingFallbackClass::Degraded), None, &flags);
+    assert_eq!(trigger.as_deref(), Some("possible_hallucination_logprob"));
+}
+
+#[test]
+fn test_truth_review_trigger_very_low_speech_wins_over_streaming_preview() {
+    let flags = vec![
+        TranscriptionConfidenceFlag::VeryLowSpeech,
+        TranscriptionConfidenceFlag::StreamingPreviewUsedAsVerdict,
+    ];
+    let trigger = truth_review_trigger(None, None, &flags);
+    assert_eq!(trigger.as_deref(), Some("very_low_speech"));
+}
+
+#[test]
+fn test_truth_review_trigger_streaming_preview_wins_over_cloud_fallback() {
+    let flags = vec![
+        TranscriptionConfidenceFlag::StreamingPreviewUsedAsVerdict,
+        TranscriptionConfidenceFlag::CloudFallbackUsed,
+    ];
+    let trigger = truth_review_trigger(None, None, &flags);
+    assert_eq!(
+        trigger.as_deref(),
+        Some("streaming_preview_used_as_verdict")
+    );
+}
+
+#[test]
+fn test_truth_review_trigger_cloud_fallback_flag_wins_over_acceptable_class() {
+    let flags = vec![TranscriptionConfidenceFlag::CloudFallbackUsed];
+    let trigger = truth_review_trigger(Some(RecordingFallbackClass::Acceptable), None, &flags);
+    assert_eq!(trigger.as_deref(), Some("cloud_fallback_used"));
+}
+
+#[test]
+fn test_truth_review_trigger_degraded_fallback_when_no_confidence_flags() {
+    let trigger = truth_review_trigger(Some(RecordingFallbackClass::Degraded), None, &[]);
+    assert_eq!(trigger.as_deref(), Some("degraded_fallback"));
+}
+
+#[test]
+fn test_truth_review_trigger_unsafe_fallback_when_no_confidence_flags() {
+    let trigger = truth_review_trigger(Some(RecordingFallbackClass::Unsafe), None, &[]);
+    assert_eq!(trigger.as_deref(), Some("unsafe_fallback"));
+}
+
+#[test]
+fn test_truth_review_trigger_acceptable_class_returns_none() {
+    assert!(truth_review_trigger(Some(RecordingFallbackClass::Acceptable), None, &[]).is_none());
+    assert!(truth_review_trigger(None, None, &[]).is_none());
+}
+
+#[test]
+fn test_truth_review_trigger_ignores_silero_tail_drop_flag() {
+    let flags = vec![TranscriptionConfidenceFlag::SileroDroppedTailHallucinations { count: 5 }];
+    assert!(truth_review_trigger(None, None, &flags).is_none());
+}
+
+#[test]
+fn test_truth_display_status_no_speech_is_user_facing_english() {
+    let status = truth_display_status(
+        Some(RecordingTranscriptSource::LocalFinalPass),
+        Some(RecordingFallbackClass::Unsafe),
+        Some("vad_no_speech_detected"),
+        &[TranscriptionConfidenceFlag::PossibleHallucinationLogprob],
+    );
+    assert_eq!(status, "No reliable speech detected");
+}
+
+#[test]
+fn test_truth_display_status_hallucination_wins_over_source_label() {
+    let status = truth_display_status(
+        Some(RecordingTranscriptSource::LocalFinalPass),
+        None,
+        None,
+        &[TranscriptionConfidenceFlag::PossibleHallucinationLogprob],
+    );
+    assert_eq!(status, "Possible hallucination");
+}
+
+#[test]
+fn test_truth_display_status_very_low_speech_wins_over_fallback_class() {
+    let status = truth_display_status(
+        Some(RecordingTranscriptSource::LocalFinalPass),
+        Some(RecordingFallbackClass::Degraded),
+        None,
+        &[TranscriptionConfidenceFlag::VeryLowSpeech],
+    );
+    assert_eq!(status, "Very low speech");
+}
+
+#[test]
+fn test_truth_display_status_streaming_fallback_short_circuits_fallback_label() {
+    let status = truth_display_status(
+        Some(RecordingTranscriptSource::StreamingFallback),
+        Some(RecordingFallbackClass::Degraded),
+        None,
+        &[],
+    );
+    assert_eq!(status, "Streaming fallback");
+}
+
+#[test]
+fn test_truth_display_status_composes_source_and_fallback_labels() {
+    let status = truth_display_status(
+        Some(RecordingTranscriptSource::LocalFinalPass),
+        Some(RecordingFallbackClass::Degraded),
+        None,
+        &[],
+    );
+    assert_eq!(status, "Final-pass local (degraded fallback)");
+}
+
+#[test]
+fn test_truth_display_status_source_only_uses_source_label() {
+    let status = truth_display_status(
+        Some(RecordingTranscriptSource::CloudPrimary),
+        None,
+        None,
+        &[],
+    );
+    assert_eq!(status, "Cloud primary");
+}
+
+#[test]
+fn test_truth_display_status_fallback_only_uses_fallback_label() {
+    let status = truth_display_status(None, Some(RecordingFallbackClass::Unsafe), None, &[]);
+    assert_eq!(status, "unsafe fallback");
+}
+
+#[test]
+fn test_truth_display_status_defaults_to_ready_when_no_signals() {
+    let status = truth_display_status(None, None, None, &[]);
+    assert_eq!(status, "Transcript ready");
 }
 
 #[tokio::test]
@@ -799,9 +1233,25 @@ fn test_quality_gate_triggers_commit_when_ai_failed() {
     let trigger = evaluate_quality_commit_trigger(
         false,
         &probe,
-        crate::state::history::TranscriptKind::AiFailed,
+        crate::state::history::TranscriptKind::FormattingFailed,
     );
     assert_eq!(trigger, Some("ai_failed_fallback"));
+}
+
+#[test]
+fn test_quality_gate_catches_short_ai_rewrites_in_danger_zone() {
+    let stats = crate::stream_postprocess::StreamPostProcessStats {
+        input_chunks: 4,
+        dropped_chunks: 0,
+        ..Default::default()
+    };
+    let probe = ActionQualityProbe::from_transcripts("abcdefghijk", "qrstuvwxyz!", &stats);
+    let trigger = evaluate_quality_commit_trigger(
+        false,
+        &probe,
+        crate::state::history::TranscriptKind::FormattedTranscript,
+    );
+    assert_eq!(trigger, Some("high_rewrite_ratio"));
 }
 
 #[test]
@@ -820,12 +1270,14 @@ fn test_delta_first_guards_allow_full_rewrite_offline() {
 
 #[test]
 fn test_process_recording_outcome_no_speech_is_soft() {
-    let outcome = ProcessRecordingOutcome::no_speech("vad_no_speech_detected");
+    let outcome =
+        ProcessRecordingOutcome::no_speech("vad_no_speech_detected", "No reliable speech detected");
     assert_eq!(
         outcome.no_speech_reason.as_deref(),
         Some("vad_no_speech_detected")
     );
     assert!(outcome.commit_trigger.is_none());
+    assert_eq!(outcome.final_status, "No reliable speech detected");
 }
 
 #[tokio::test]

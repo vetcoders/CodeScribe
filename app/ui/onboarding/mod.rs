@@ -20,8 +20,9 @@ use objc2_app_kit::{
     NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::{ErrorKind, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::thread;
@@ -173,7 +174,7 @@ fn onboarding_done_path() -> PathBuf {
     Config::config_dir().join("onboarding_done")
 }
 
-fn bootstrap_done_path() -> PathBuf {
+fn legacy_bootstrap_done_path() -> PathBuf {
     Config::config_dir().join("bootstrap_done")
 }
 
@@ -216,6 +217,11 @@ fn mode_api_key_configured() -> bool {
         })
 }
 
+/// Best-effort liveness probe for a PID via `kill(pid, 0)`.
+///
+/// Retained for diagnostics and possible future tooling: the current lock
+/// path uses `flock(2)` and no longer relies on PID liveness to gate access.
+#[allow(dead_code)]
 fn process_is_alive(pid: u32) -> bool {
     let result = unsafe { libc::kill(pid as i32, 0) };
     if result == 0 {
@@ -225,73 +231,116 @@ fn process_is_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Holds the open `File` for the onboarding lock for the lifetime of the
+/// process. Dropping the `File` closes the fd, which atomically releases the
+/// `flock(2)` advisory lock — so we MUST keep it parked here.
+static ONBOARDING_LOCK_FILE: Mutex<Option<File>> = Mutex::new(None);
+
+/// Acquire an exclusive, non-blocking advisory lock on the onboarding session
+/// file using `flock(2)`. Returns `true` iff this process now holds the lock.
+///
+/// Contract:
+/// - Two simultaneous launches: exactly one wins, the other gets `false`.
+/// - The lock is released automatically when the process exits (kernel closes
+///   the fd) OR when [`release_onboarding_lock`] is called explicitly.
+/// - The PID written to the file is informational only (for `ps`/log triage);
+///   correctness comes from `flock`, not from the PID contents.
+/// - Replaces an earlier check-then-create scheme that had a TOCTOU window
+///   between liveness check and re-create — two launches could both pass and
+///   both create the file. `flock` closes that window at the kernel level.
 fn acquire_onboarding_lock() -> bool {
     let path = onboarding_lock_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
 
-    let pid = std::process::id();
-
-    let try_create = || -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)?;
-        let _ = write!(file, "{pid}");
-        Ok(())
-    };
-
-    match try_create() {
-        Ok(()) => return true,
-        Err(e) if e.kind() != ErrorKind::AlreadyExists => {
-            warn!("Onboarding: failed to acquire lock: {e}");
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            warn!("Onboarding: failed to open lock file: {e}");
             return false;
         }
-        Err(_) => {}
-    }
+    };
 
-    let existing_pid = fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-
-    if existing_pid > 0 && existing_pid != pid && process_is_alive(existing_pid) {
-        warn!(
-            "Onboarding: lock is held by live process pid={existing_pid}, skipping duplicate wizard"
-        );
+    // Non-blocking exclusive advisory lock. If another process holds it,
+    // `flock` returns -1 with errno EWOULDBLOCK and we bail out cleanly.
+    // SAFETY: `file.as_raw_fd()` is a valid borrowed fd for the lifetime of
+    // `file`, which outlives the `flock(2)` syscall. The flag bitmask is
+    // composed of libc-provided constants. No memory is read or written.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            // Try to read the holder PID for a useful diagnostic. Best-effort.
+            let holder_pid = fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok());
+            match holder_pid {
+                Some(pid) => warn!(
+                    "Onboarding: lock is held by live process pid={pid}, skipping duplicate wizard"
+                ),
+                None => {
+                    warn!("Onboarding: lock is held by another process, skipping duplicate wizard")
+                }
+            }
+        } else {
+            warn!("Onboarding: failed to acquire lock via flock: {err}");
+        }
         return false;
     }
 
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => {
-            warn!("Onboarding: failed to remove stale lock: {e}");
-            return false;
-        }
-    }
+    // We own the lock. Refresh the PID record for human diagnostics. Failures
+    // here do not affect correctness — the lock is what gates concurrency.
+    let pid = std::process::id();
+    let _ = file.set_len(0);
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = write!(file, "{pid}");
+    let _ = file.flush();
 
-    match try_create() {
-        Ok(()) => true,
-        Err(e) => {
-            warn!("Onboarding: failed to acquire lock: {e}");
-            false
-        }
-    }
+    // Park the file so the fd stays open and the lock persists for the
+    // process lifetime. Dropping the file would close the fd and release
+    // the kernel-level lock immediately.
+    let mut guard = match ONBOARDING_LOCK_FILE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = Some(file);
+    true
 }
 
 fn release_onboarding_lock() {
+    let mut guard = match ONBOARDING_LOCK_FILE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(file) = guard.take() {
+        // Explicit unlock first; dropping the File closes the fd which would
+        // release the lock anyway, but explicit `LOCK_UN` is cheap insurance.
+        // SAFETY: `file.as_raw_fd()` is a valid borrowed fd for the lifetime
+        // of `file`, which is held until the explicit `drop(file)` below.
+        // `LOCK_UN` is a single libc constant. No memory is read or written.
+        let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        drop(file);
+    }
+    // Best-effort cleanup so a stale lock file does not linger between runs.
     let _ = fs::remove_file(onboarding_lock_path());
 }
 
-fn migrate_legacy_setup_sentinel() {
+fn migrate_legacy_setup_done_marker() {
     let setup_done = setup_done_path();
     if setup_done.exists() {
         return;
     }
 
-    if onboarding_done_path().exists() && bootstrap_done_path().exists() {
+    // Older builds tracked onboarding and settings completion separately.
+    // The current runtime only needs one canonical setup marker.
+    if onboarding_done_path().exists() && legacy_bootstrap_done_path().exists() {
         if let Some(parent) = setup_done.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -300,18 +349,17 @@ fn migrate_legacy_setup_sentinel() {
 }
 
 pub fn should_show_onboarding() -> bool {
-    migrate_legacy_setup_sentinel();
+    migrate_legacy_setup_done_marker();
     !setup_done_path().exists()
 }
 
 fn mark_onboarding_done() {
     clear_onboarding_progress();
-    for path in [onboarding_done_path(), setup_done_path()] {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(path, "done");
+    let setup_done = setup_done_path();
+    if let Some(parent) = setup_done.parent() {
+        let _ = fs::create_dir_all(parent);
     }
+    let _ = fs::write(setup_done, "done");
 }
 
 pub fn show_onboarding_wizard() {
@@ -1045,7 +1093,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Welcome to CodeScribe");
             set_text_if_present(
                 ui.description_label,
-                "We will guide you through permissions and setup so CodeScribe works perfectly from first launch.",
+                "We will wire permissions, choose your transcript defaults, and show how live preview, committed verdict, and AI help stay honest from first launch.",
             );
             set_button_title_if_present(ui.primary_button, "Get Started");
         }
@@ -1107,7 +1155,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Choose Language");
             set_text_if_present(
                 ui.description_label,
-                "Select the default transcription language. You can change it later in Settings.",
+                "Select the default transcript language. Live preview stays provisional, and the committed verdict will use this language unless you change it later in Settings.",
             );
             set_hidden_if_present(ui.language_view, false);
             set_button_title_if_present(ui.primary_button, "Continue");
@@ -1117,7 +1165,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Add API Key (Optional)");
             set_text_if_present(
                 ui.description_label,
-                "Use your LLM API key for AI formatting and assistant features.",
+                "Optional. Your LLM API key unlocks formatted transcript and assistant features, while raw transcript truth stays preserved whenever AI is skipped, rejected, or unavailable.",
             );
             set_hidden_if_present(ui.api_view, false);
             set_button_title_if_present(ui.primary_button, "Save & Continue");
@@ -1129,7 +1177,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Customize Mode Shortcuts");
             set_text_if_present(
                 ui.description_label,
-                "Mode first, keys second. Pick a starter profile now; you can refine each mode shortcut later in Settings.",
+                "Mode first, keys second. Dictation aims for a committed transcript verdict, Formatting upgrades text only when safe, and Assistive stays in the chat overlay instead of silent paste.",
             );
             set_hidden_if_present(ui.hotkey_view, false);
             set_button_title_if_present(ui.primary_button, "Continue");
@@ -1139,7 +1187,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "You're All Set");
             set_text_if_present(
                 ui.description_label,
-                "Review your setup. You can always adjust these settings later.",
+                "Review the truth model below. You can always adjust these settings later, but the runtime should already be telling the same story as the UI.",
             );
             set_hidden_if_present(ui.summary_view, false);
             set_hidden_if_present(ui.skip_button, true);
@@ -1972,7 +2020,7 @@ fn update_summary_view(
     set_text_if_present(
         ui.summary_config_label,
         &format!(
-            "Language: {}\nAPI key: {}\nMode profile: {}",
+            "Language: {}\nAPI key: {}\nMode profile: {}\nTruth model: Live preview stays local and provisional. CodeScribe only commits a final verdict after capture, and degraded fallback blocks silent auto-paste.",
             language.label(),
             api_status,
             hotkey_mode.label()
@@ -2112,8 +2160,8 @@ mod tests {
         save_onboarding_progress(4);
         mark_onboarding_done();
 
-        assert!(Config::config_dir().join("onboarding_done").exists());
         assert!(Config::config_dir().join("setup_done").exists());
+        assert!(!Config::config_dir().join("onboarding_done").exists());
         assert!(!Config::config_dir().join("onboarding_progress").exists());
         assert!(!should_show_onboarding());
     }

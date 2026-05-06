@@ -57,6 +57,7 @@ lazy_static! {
 
 use crate::pipeline::contracts::{
     DeltaSink, DropKind, EngineEvent, EventSink, TranscriptDelta, TranscriptSegment,
+    collect_confidence_flags,
 };
 
 // ── Unified session config ───────────────────────────────────────────────────
@@ -183,6 +184,24 @@ pub(crate) fn should_drop_silence_chunk(
 
 fn silero_vad_samples_to_ms(samples: u64) -> u64 {
     samples.saturating_mul(1_000) / u64::from(vad::VAD_SAMPLE_RATE)
+}
+
+fn utterance_vad_speech_pct(
+    audio_samples: usize,
+    sample_rate: u32,
+    speech_vad_samples: u64,
+) -> Option<f32> {
+    if audio_samples == 0 || sample_rate == 0 {
+        return None;
+    }
+
+    let audio_16k =
+        (audio_samples as f64 * f64::from(vad::VAD_SAMPLE_RATE) / f64::from(sample_rate)) as u64;
+    if audio_16k == 0 {
+        return None;
+    }
+
+    Some(((speech_vad_samples as f32 / audio_16k as f32) * 100.0).min(100.0))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -956,6 +975,11 @@ pub(crate) async fn transcription_session(
     // Track last raw Whisper output for final flush UtteranceFinal.
     let mut last_raw_text = String::new();
     let mut last_segments: Vec<TranscriptSegment> = Vec::new();
+    // Track per-utterance confidence metadata for UtteranceFinal.
+    let mut utterance_vad_speech_samples: u64 = 0;
+    let mut utterance_avg_logprob: Option<f32> = None;
+    let mut utterance_compression_ratio: Option<f32> = None;
+    let mut utterance_quality_gate_dropped = false;
     // Accumulate segment timestamps for the current utterance across interim slices.
     let mut utterance_segments: Vec<TranscriptSegment> = Vec::new();
 
@@ -1511,9 +1535,22 @@ pub(crate) async fn transcription_session(
                 }
                 correction_audio_buf.extend_from_slice(&item.audio);
                 partial_trigger_state.observe_speech_event(item.is_final, item.speech_vad_samples);
+                utterance_vad_speech_samples = utterance_vad_speech_samples
+                    .saturating_add(item.speech_vad_samples);
 
                 match result {
                     Ok(raw_transcript) => {
+                        if item.is_final {
+                            utterance_avg_logprob = raw_transcript.avg_logprob;
+                            utterance_compression_ratio = raw_transcript.compression_ratio;
+                            utterance_quality_gate_dropped = raw_transcript.quality_gate_dropped;
+                        } else if utterance_avg_logprob.is_none() {
+                            utterance_avg_logprob = raw_transcript.avg_logprob;
+                            utterance_compression_ratio = raw_transcript.compression_ratio;
+                            if raw_transcript.quality_gate_dropped {
+                                utterance_quality_gate_dropped = true;
+                            }
+                        }
                         let raw_text = raw_transcript.text;
                         let mut raw_segments = raw_transcript.segments;
                         let segment_offset_ts = if item.is_final {
@@ -1658,6 +1695,20 @@ pub(crate) async fn transcription_session(
                                     end_ts,
                                     "BOUNDARY final"
                                 );
+                                let avg_logprob = utterance_avg_logprob.take();
+                                let compression_ratio = utterance_compression_ratio.take();
+                                let quality_gate_dropped =
+                                    std::mem::take(&mut utterance_quality_gate_dropped);
+                                let vad_speech_pct = utterance_vad_speech_pct(
+                                    utterance_audio_samples,
+                                    output_sample_rate,
+                                    utterance_vad_speech_samples,
+                                );
+                                let confidence_flags = collect_confidence_flags(
+                                    vad_speech_pct,
+                                    avg_logprob,
+                                    quality_gate_dropped,
+                                );
                                 event_sink.on_event(&EngineEvent::UtteranceFinal {
                                     utterance_id,
                                     text: final_text,
@@ -1665,11 +1716,20 @@ pub(crate) async fn transcription_session(
                                     start_ts: utterance_start_s,
                                     end_ts,
                                     segments: std::mem::take(&mut utterance_segments),
+                                    vad_speech_pct,
+                                    avg_logprob,
+                                    compression_ratio,
+                                    quality_gate_dropped,
+                                    confidence_flags,
                                 });
                             } else {
                                 utterance_segments.clear();
                             }
                             accumulated_text.clear();
+                            utterance_vad_speech_samples = 0;
+                            utterance_avg_logprob = None;
+                            utterance_compression_ratio = None;
+                            utterance_quality_gate_dropped = false;
                             // Fix A: Save current suffix as utterance-boundary snapshot
                             // for the next FINAL to restore from.
                             utterance_boundary_suffix = pipeline.last_suffix.clone();
@@ -1765,6 +1825,16 @@ pub(crate) async fn transcription_session(
             end_ts,
             "BOUNDARY final_flush"
         );
+        let vad_speech_pct = utterance_vad_speech_pct(
+            utterance_audio_samples,
+            output_sample_rate,
+            utterance_vad_speech_samples,
+        );
+        let confidence_flags = collect_confidence_flags(
+            vad_speech_pct,
+            utterance_avg_logprob,
+            utterance_quality_gate_dropped,
+        );
         event_sink.on_event(&EngineEvent::UtteranceFinal {
             utterance_id,
             text: remaining,
@@ -1772,6 +1842,11 @@ pub(crate) async fn transcription_session(
             start_ts: utterance_start_s,
             end_ts,
             segments,
+            vad_speech_pct,
+            avg_logprob: utterance_avg_logprob,
+            compression_ratio: utterance_compression_ratio,
+            quality_gate_dropped: utterance_quality_gate_dropped,
+            confidence_flags,
         });
     }
 
@@ -2389,6 +2464,18 @@ mod tests {
         let short = (0.2 * sample_rate as f32) as usize;
         assert!(should_drop_short_utterance(short, sample_rate, 0.40));
         assert!(!should_drop_short_utterance(short, sample_rate, 0.80));
+    }
+
+    #[test]
+    fn test_utterance_vad_speech_pct_reports_ratio_in_percent() {
+        let sample_rate = 48_000;
+        let audio_samples = 48_000;
+        let speech_vad_samples = 8_000;
+
+        let speech_pct = utterance_vad_speech_pct(audio_samples, sample_rate, speech_vad_samples)
+            .expect("expected speech ratio");
+
+        assert!((speech_pct - 50.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3247,6 +3334,7 @@ mod tests {
                 Ok(RawTranscript {
                     text: format!("job-{id}"),
                     segments: Vec::new(),
+                    ..Default::default()
                 })
             },
         );
@@ -3426,6 +3514,7 @@ mod tests {
                 Ok(RawTranscript {
                     text: format!("job-{id}"),
                     segments: Vec::new(),
+                    ..Default::default()
                 })
             },
         );

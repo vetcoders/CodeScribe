@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::quality_report::{QualityReport, QualityReportConfig, ReportSummary};
+use crate::qube_report::{QualityReport, QualityReportConfig, ReportSummary};
 use crate::safe_path::{
     safe_append_line_bounded, safe_canonicalize_bounded, safe_prepare_path,
     safe_read_to_string_bounded,
@@ -23,7 +23,7 @@ const DEFAULT_SIMILARITY: f32 = 0.93;
 const DEFAULT_NOVELTY: f32 = 0.12;
 
 #[derive(Debug, Clone)]
-pub struct QualityLoopConfig {
+pub struct QubeDaemonConfig {
     pub report_config: QualityReportConfig,
     pub baseline_report: Option<PathBuf>,
     pub history_path: PathBuf,
@@ -105,10 +105,10 @@ struct LoopHistoryEntry {
     summary: ReportSummary,
 }
 
-pub async fn run(config: QualityLoopConfig) -> Result<PathBuf> {
+pub async fn run(config: QubeDaemonConfig) -> Result<PathBuf> {
     let config_root = Config::config_dir();
     let report_config = normalize_report_config(&config.report_config, &config_root)?;
-    let output_dir = crate::quality_report::run(report_config).await?;
+    let output_dir = crate::qube_report::run(report_config).await?;
     let output_root = safe_canonicalize_bounded(&output_dir, &config_root)?;
     let report_path = output_root.join("report.json");
     let report = load_report(&report_path, &config_root)?;
@@ -204,7 +204,7 @@ fn resolve_history_path(path: &Path, root: &Path) -> Result<PathBuf> {
 }
 
 fn resolve_baseline(
-    config: &QualityLoopConfig,
+    config: &QubeDaemonConfig,
     output_dir: &Path,
     root: &Path,
     history_path: &Path,
@@ -874,7 +874,7 @@ fn extract_lexicon_suggestions(
         .map(|((term, mis), count)| LexiconSuggestion { term, mis, count })
         .collect();
 
-    suggestions.sort_by(|a, b| b.count.cmp(&a.count));
+    suggestions.sort_by_key(|b| std::cmp::Reverse(b.count));
     if max_updates > 0 && suggestions.len() > max_updates {
         suggestions.truncate(max_updates);
     }
@@ -1115,9 +1115,9 @@ fn update_env_var(path: &Path, root: &Path, key: &str, value: &str) -> Result<bo
 // Quality Daemon State (for tray integration)
 // ============================================================================
 
-/// Daemon state stored in quality_daemon.json
+/// Daemon state stored in qube_daemon.json
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct QualityDaemonState {
+pub struct QubeDaemonState {
     pub pending_mismatches: usize,
     #[serde(default)]
     pub last_check: String,
@@ -1132,7 +1132,7 @@ fn default_daemon_available() -> bool {
 
 /// Get path to daemon state file
 pub fn daemon_state_path() -> PathBuf {
-    Config::config_dir().join("quality_daemon.json")
+    Config::config_dir().join("qube_daemon.json")
 }
 
 fn daemon_history_path() -> PathBuf {
@@ -1157,7 +1157,7 @@ fn read_latest_report_from_history(path: &Path, root: &Path) -> Option<String> {
         .map(|entry| entry.report_dir)
 }
 
-fn write_daemon_state_file(path: &Path, root: &Path, state: &QualityDaemonState) -> Result<()> {
+fn write_daemon_state_file(path: &Path, root: &Path, state: &QubeDaemonState) -> Result<()> {
     fs::create_dir_all(root)
         .with_context(|| format!("Failed to create config directory {}", root.display()))?;
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -1176,8 +1176,8 @@ fn write_daemon_state_with_paths(
     config_root: &Path,
     pending_mismatches: usize,
     available: bool,
-) -> Result<QualityDaemonState> {
-    let state = QualityDaemonState {
+) -> Result<QubeDaemonState> {
+    let state = QubeDaemonState {
         pending_mismatches,
         last_check: Local::now().to_rfc3339(),
         latest_report: read_latest_report_from_history(history_path, config_root),
@@ -1189,7 +1189,7 @@ fn write_daemon_state_with_paths(
 }
 
 /// Write daemon state using the canonical quality_history.jsonl contract.
-pub fn write_daemon_state(pending_mismatches: usize) -> Result<QualityDaemonState> {
+pub fn write_daemon_state(pending_mismatches: usize) -> Result<QubeDaemonState> {
     let config_root = Config::config_dir();
     let state_path = daemon_state_path();
     let history_path = daemon_history_path();
@@ -1203,11 +1203,11 @@ pub fn write_daemon_state(pending_mismatches: usize) -> Result<QualityDaemonStat
 }
 
 /// Read daemon state from file
-pub fn read_daemon_state() -> QualityDaemonState {
+pub fn read_daemon_state() -> QubeDaemonState {
     let path = daemon_state_path();
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return QualityDaemonState::default(),
+        Err(_) => return QubeDaemonState::default(),
     };
 
     serde_json::from_str(&content).unwrap_or_default()
@@ -1216,15 +1216,6 @@ pub fn read_daemon_state() -> QualityDaemonState {
 /// Get pending mismatch count from daemon state
 pub fn get_pending_mismatches() -> usize {
     read_daemon_state().pending_mismatches
-}
-
-/// Mark daemon as unavailable (used when binary isn't found or daemon fails to start)
-pub fn mark_daemon_unavailable() {
-    let mut state = read_daemon_state();
-    state.available = false;
-    state.last_check = Local::now().to_rfc3339();
-    let config_root = Config::config_dir();
-    let _ = write_daemon_state_file(&daemon_state_path(), &config_root, &state);
 }
 
 /// Get path to the latest HTML report
@@ -1251,7 +1242,7 @@ pub fn open_latest_report() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quality_report::{
+    use crate::qube_report::{
         ReportEntry, ReportEnvironment, ReportMetrics, ReportSummary, ReportTranscripts,
     };
     use crate::stream_postprocess::StreamPostProcessStats;
@@ -1277,6 +1268,7 @@ mod tests {
             reference_path: None,
             duration_secs: 5.0,
             transcripts: ReportTranscripts::default(),
+            raw_semantics: None,
             metrics: ReportMetrics::default(),
             postprocess_stats: None,
             errors: vec![],
@@ -1297,7 +1289,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let root = tmp.path().canonicalize().expect("canonical root");
         let history_path = root.join("reports").join("quality_history.jsonl");
-        let state_path = root.join("quality_daemon.json");
+        let state_path = root.join("qube_daemon.json");
         std::fs::create_dir_all(history_path.parent().expect("history parent"))
             .expect("create reports dir");
 
@@ -1320,7 +1312,7 @@ mod tests {
         assert!(!state.last_check.is_empty());
 
         let persisted = std::fs::read_to_string(&state_path).expect("read daemon state file");
-        let loaded: QualityDaemonState =
+        let loaded: QubeDaemonState =
             serde_json::from_str(&persisted).expect("parse daemon state file");
         assert_eq!(loaded.pending_mismatches, 7);
         assert_eq!(loaded.latest_report.as_deref(), Some("/tmp/quality_latest"));
@@ -1332,7 +1324,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let root = tmp.path().canonicalize().expect("canonical root");
         let history_path = root.join("reports").join("quality_history.jsonl");
-        let state_path = root.join("quality_daemon.json");
+        let state_path = root.join("qube_daemon.json");
         std::fs::create_dir_all(history_path.parent().expect("history parent"))
             .expect("create reports dir");
         std::fs::write(&history_path, "{invalid json}\n").expect("write invalid history");
@@ -1352,7 +1344,7 @@ mod tests {
             "latest_report": "/tmp/quality_latest"
         }"#;
 
-        let state: QualityDaemonState = serde_json::from_str(raw).expect("parse daemon state");
+        let state: QubeDaemonState = serde_json::from_str(raw).expect("parse daemon state");
         assert_eq!(state.pending_mismatches, 4);
         assert_eq!(state.latest_report.as_deref(), Some("/tmp/quality_latest"));
         assert!(state.available);

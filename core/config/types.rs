@@ -369,7 +369,14 @@ pub struct Config {
     pub quick_notes_save_only: bool,
 
     // ===== Backends =====
-    /// Whether to use local STT instead of cloud
+    /// Whether the local pipeline is the authority for the committed transcript.
+    ///
+    /// Live preview always stays local and provisional.
+    ///
+    /// When false, cloud STT becomes the committed verdict after capture if
+    /// endpoint credentials are configured. If that verdict is unavailable, the
+    /// app must surface any degraded fallback explicitly instead of silently
+    /// promoting preview text.
     #[serde(default)]
     pub use_local_stt: bool,
 
@@ -377,7 +384,7 @@ pub struct Config {
     #[serde(default = "default_local_model")]
     pub local_model: String,
 
-    /// Full STT endpoint URL (e.g., https://api.libraxis.cloud/stt/v1/transcribe)
+    /// Cloud STT endpoint used when cloud is selected as the committed verdict path.
     pub stt_endpoint: Option<String>,
 
     /// Full LLM endpoint URL (e.g., https://api.libraxis.cloud/v1/responses)
@@ -386,7 +393,7 @@ pub struct Config {
     /// API key for cloud LLM providers
     pub llm_api_key: Option<String>,
 
-    /// API key for cloud STT providers
+    /// API key for cloud STT providers used on the committed verdict path
     pub stt_api_key: Option<String>,
 
     // ===== Clipboard =====

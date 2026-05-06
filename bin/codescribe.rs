@@ -95,7 +95,10 @@ enum MigrateKind {
     Raw,
     Cloud,
     Ai,
+    Formatted,
     AiFailed,
+    FormattingFailed,
+    Interpretation,
     Failed,
 }
 
@@ -230,11 +233,17 @@ fn handle_migrate_history_command(dry_run: bool, assume_kind: MigrateKind) -> Re
     let kind = match assume_kind {
         MigrateKind::Raw => codescribe::state::history::TranscriptKind::Raw,
         MigrateKind::Cloud => codescribe::state::history::TranscriptKind::Cloud,
-        MigrateKind::Ai => codescribe::state::history::TranscriptKind::Ai,
-        MigrateKind::AiFailed => codescribe::state::history::TranscriptKind::AiFailed,
+        MigrateKind::Ai | MigrateKind::Formatted => {
+            codescribe::state::history::TranscriptKind::FormattedTranscript
+        }
+        MigrateKind::AiFailed | MigrateKind::FormattingFailed => {
+            codescribe::state::history::TranscriptKind::FormattingFailed
+        }
+        MigrateKind::Interpretation => {
+            codescribe::state::history::TranscriptKind::AssistantInterpretation
+        }
         MigrateKind::Failed => codescribe::state::history::TranscriptKind::Failed,
     };
-
     let report = codescribe::state::history::migrate_transcriptions(kind, dry_run)?;
 
     println!(
@@ -383,6 +392,10 @@ async fn handle_transcribe_file(
                 eprintln!("Formatted in {:?}", start.elapsed());
                 result.text
             }
+            ai_formatting::AiFormatStatus::AiNoop => {
+                eprintln!("AI returned no-op - using raw text");
+                raw_text
+            }
             ai_formatting::AiFormatStatus::Failed => {
                 eprintln!("Formatting failed - using raw text");
                 raw_text
@@ -509,7 +522,8 @@ async fn run_daemon() -> Result<()> {
     );
 
     let config = Config::load();
-    let user_settings = UserSettings::load();
+    let _user_settings = UserSettings::load();
+    let _ = codescribe::qube_lifecycle::start_if_enabled();
 
     #[cfg(target_os = "macos")]
     {
@@ -648,198 +662,9 @@ async fn run_daemon() -> Result<()> {
         }
     });
 
-    // Quality Loop daemon (self-improvement) — OFF by default.
-    //
-    // The daemon is useful, but if it survives app restarts it can confuse macOS
-    // permissions / input monitoring workflows. Turn it on explicitly when needed.
-    let quality_autostart = user_settings
-        .quality_daemon_autostart
-        .unwrap_or_else(|| env_bool("CODESCRIBE_AUTOSTART_QUALITY_DAEMON", false));
-    let quality_child = if quality_autostart {
-        spawn_quality_daemon()
-    } else {
-        stop_quality_daemon_if_running();
-        codescribe::quality_loop::mark_daemon_unavailable();
-        None
-    };
-
     tray::run_with_hotkeys(None)?;
 
-    // Cleanup: kill quality daemon when tray exits
-    if let Some(mut handle) = quality_child {
-        let _ = handle.child.kill();
-        let _ = std::fs::remove_file(handle.pid_path);
-    }
-
     Ok(())
-}
-
-fn env_bool(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(default)
-}
-
-fn stop_quality_daemon_if_running() {
-    let config_dir = codescribe::config::Config::config_dir();
-    let pid_path = config_dir.join("logs").join("quality_daemon.pid");
-
-    let pid = std::fs::read_to_string(&pid_path)
-        .ok()
-        .and_then(|s| s.trim().parse::<i32>().ok())
-        .unwrap_or(0);
-    if pid <= 0 {
-        let _ = std::fs::remove_file(&pid_path);
-        return;
-    }
-
-    if !is_process_alive(pid) {
-        let _ = std::fs::remove_file(&pid_path);
-        return;
-    }
-
-    // Best-effort safety check: only kill if it looks like codescribe-loop.
-    let is_codescribe_loop = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.contains("codescribe-loop"))
-        .unwrap_or(false);
-
-    if is_codescribe_loop {
-        let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
-        let _ = std::fs::remove_file(&pid_path);
-    }
-}
-
-/// Spawn `codescribe-loop --daemon` as a background child process.
-/// Returns the Child handle so we can kill it on app exit.
-struct QualityDaemonHandle {
-    child: std::process::Child,
-    pid_path: PathBuf,
-}
-
-fn spawn_quality_daemon() -> Option<QualityDaemonHandle> {
-    use std::process::{Command, Stdio};
-
-    // Strategy: find codescribe-loop binary next to current exe, or in PATH
-    let loop_bin = find_sibling_binary("codescribe-loop");
-
-    let bin_path = match loop_bin {
-        Some(path) => path,
-        None => {
-            // Try PATH fallback
-            if which_exists("codescribe-loop") {
-                PathBuf::from("codescribe-loop")
-            } else {
-                eprintln!("[quality-daemon] codescribe-loop not found; skipping auto-start");
-                codescribe::quality_loop::mark_daemon_unavailable();
-                return None;
-            }
-        }
-    };
-
-    let config_dir = codescribe::config::Config::config_dir();
-    let log_path = config_dir.join("logs").join("quality_daemon.log");
-    let pid_path = config_dir.join("logs").join("quality_daemon.pid");
-    std::fs::create_dir_all(config_dir.join("logs")).ok();
-
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
-        && let Ok(pid) = pid_str.trim().parse::<i32>()
-        && is_process_alive(pid)
-    {
-        eprintln!(
-            "[quality-daemon] Already running (pid={}); skipping auto-start",
-            pid
-        );
-        return None;
-    } else if pid_path.exists() {
-        let _ = std::fs::remove_file(&pid_path);
-    }
-
-    let log_file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("[quality-daemon] Failed to open log file: {}", e);
-            codescribe::quality_loop::mark_daemon_unavailable();
-            return None;
-        }
-    };
-
-    let stderr_file = log_file.try_clone().unwrap_or_else(|_| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .expect("log file")
-    });
-
-    match Command::new(&bin_path)
-        .args(["--daemon", "--apply", "--daemon-interval", "1800"])
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-    {
-        Ok(child) => {
-            let _ = std::fs::write(&pid_path, child.id().to_string());
-            eprintln!(
-                "[quality-daemon] Started (pid={}, bin={}, log={})",
-                child.id(),
-                bin_path.display(),
-                log_path.display()
-            );
-            Some(QualityDaemonHandle { child, pid_path })
-        }
-        Err(e) => {
-            eprintln!("[quality-daemon] Failed to spawn: {}", e);
-            codescribe::quality_loop::mark_daemon_unavailable();
-            None
-        }
-    }
-}
-
-fn is_process_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    let res = unsafe { libc::kill(pid, 0) };
-    if res == 0 {
-        return true;
-    }
-    let err = std::io::Error::last_os_error();
-    matches!(err.raw_os_error(), Some(code) if code == libc::EPERM)
-}
-
-/// Find a sibling binary (same directory as current executable)
-fn find_sibling_binary(name: &str) -> Option<PathBuf> {
-    let current_exe = std::env::current_exe().ok()?;
-    let dir = current_exe.parent()?;
-    let sibling = dir.join(name);
-    if sibling.exists() {
-        Some(sibling)
-    } else {
-        None
-    }
-}
-
-/// Check if a binary exists in PATH
-fn which_exists(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 fn emit_stdout(text: &str) -> Result<()> {

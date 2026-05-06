@@ -32,11 +32,21 @@ use super::responses_streaming_manager::{ResponsesStreamingManager, StreamCallba
 /// HTTP client for AI providers
 static AI_CLIENT: OnceLock<Client> = OnceLock::new();
 
+/// Non-assistive formatting skips only extremely short transcripts.
+/// Short-but-real utterances still flow through AI formatting; the controller
+/// owns the separate quality-gate logic for that 10-23 char window.
+const NON_ASSISTIVE_AI_SKIP_CHARS: usize = 10;
+
+fn should_skip_ai_formatting(text: &str, assistive: bool) -> bool {
+    !assistive && text.chars().count() < NON_ASSISTIVE_AI_SKIP_CHARS
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiFormatStatus {
     Applied,
     Failed,
     Skipped,
+    AiNoop,
 }
 
 pub type AiStreamCallback = Arc<dyn Fn(&str) + Send + Sync>;
@@ -616,14 +626,10 @@ fn extract_output_channels(output: &[OutputItem]) -> ProviderOutput {
 // No token limits - let the API decide. Tokens are cheap, lost notes are not.
 
 /// Check if output is effectively the same as input (raw-like)
-/// Returns true if normalized content (lowercase, alphanumeric only) matches.
+/// Returns true only for whitespace-only echoes. Punctuation and capitalization
+/// changes are meaningful formatting work and must not be collapsed into AiNoop.
 fn is_effectively_same(input: &str, output: &str) -> bool {
-    let normalize = |s: &str| -> String {
-        s.chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(|c| c.to_lowercase())
-            .collect()
-    };
+    let normalize = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
     normalize(input) == normalize(output)
 }
 
@@ -819,8 +825,9 @@ pub async fn format_text_with_status_channels(
     on_assistant_delta: Option<AiStreamCallback>,
     on_reasoning_delta: Option<AiReasoningCallback>,
 ) -> AiFormatResult {
-    // Skip very short texts (but not in assistive mode - user might say "help")
-    if text.len() < 10 && !assistive {
+    // Skip short non-assistive texts. The controller quality gate starts at 24 chars,
+    // so formatting anything shorter would create an unguarded rewrite zone.
+    if should_skip_ai_formatting(text, assistive) {
         return AiFormatResult {
             text: text.to_string(),
             reasoning_text: None,
@@ -1009,12 +1016,10 @@ pub async fn format_text_with_status_channels(
             }
 
             // Analyze result quality
-            let cleaned_trim = cleaned.trim();
-            let formatted_trim = formatted.trim();
             let content_match = is_effectively_same(&cleaned, &formatted);
 
             let mut should_retry = false;
-            let mut raw_like = content_match;
+            let raw_like = content_match;
 
             if assistive {
                 // Assistive should change/expand content
@@ -1025,17 +1030,14 @@ pub async fn format_text_with_status_channels(
                 }
             } else {
                 // Formatting should preserve content but add structure
-                // If output is identical to input
-                if cleaned_trim == formatted_trim {
-                    // Check if input was arguably already formatted (has punctuation)
-                    let input_has_punct = cleaned_trim.ends_with('.')
-                        || cleaned_trim.ends_with('?')
-                        || cleaned_trim.ends_with('!');
-                    if !input_has_punct {
-                        warn!("Formatting mode returned raw echo");
-                        should_retry = true;
-                        raw_like = true;
-                    }
+                // If output matches input (effectively same), it's a no-op
+                if content_match {
+                    warn!("Formatting mode returned AI No-op (raw echo)");
+                    return AiFormatResult {
+                        text: cleaned,
+                        reasoning_text,
+                        status: AiFormatStatus::AiNoop,
+                    };
                 }
             }
 
@@ -1486,5 +1488,35 @@ mod tests {
             remove_simple_repetitions("normalny tekst bez powtórzeń"),
             "normalny tekst bez powtórzeń"
         );
+    }
+
+    #[test]
+    fn test_short_non_assistive_text_is_skipped() {
+        assert!(should_skip_ai_formatting("krótki", false));
+        assert!(should_skip_ai_formatting("123456789", false));
+    }
+
+    #[test]
+    fn test_assistive_short_text_is_not_skipped() {
+        assert!(!should_skip_ai_formatting("Pomóż mi", true));
+    }
+
+    #[test]
+    fn test_non_assistive_text_at_threshold_is_not_skipped() {
+        let text = "1234567890";
+        assert_eq!(text.chars().count(), NON_ASSISTIVE_AI_SKIP_CHARS);
+        assert!(!should_skip_ai_formatting(text, false));
+    }
+
+    #[test]
+    fn test_effectively_same_ignores_whitespace_only() {
+        assert!(is_effectively_same("raw   one two", "raw one two"));
+        assert!(is_effectively_same("raw one two\n", "raw one two"));
+    }
+
+    #[test]
+    fn test_effectively_same_preserves_formatting_changes() {
+        assert!(!is_effectively_same("raw one two", "RAW ONE TWO."));
+        assert!(!is_effectively_same("to jest test", "To jest test"));
     }
 }

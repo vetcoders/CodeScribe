@@ -75,7 +75,7 @@ pub struct UserSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_at_login: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub quality_daemon_autostart: Option<bool>,
+    pub qube_daemon_autostart: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_enter_sends: Option<bool>,
 
@@ -252,7 +252,7 @@ struct SystemV2 {
     #[serde(skip_serializing_if = "Option::is_none")]
     start_at_login: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    quality_daemon_autostart: Option<bool>,
+    qube_daemon_autostart: Option<bool>,
 }
 
 /// Canonical list of env keys that route to `settings.json` (not `.env`).
@@ -296,7 +296,7 @@ pub const PROMOTED_SETTINGS_KEYS: &[&str] = &[
     "QUICK_NOTES_ENABLED",
     "QUICK_NOTES_SAVE_ONLY",
     "START_AT_LOGIN",
-    "CODESCRIBE_AUTOSTART_QUALITY_DAEMON",
+    "QUBE_DAEMON_AUTOSTART",
     "AGENT_ENTER_SENDS",
     // Voice Lab survivors
     "CODESCRIBE_BUFFER_DELAY_MS",
@@ -375,7 +375,7 @@ impl UserSettings {
             }),
             system: Some(SystemV2 {
                 start_at_login: self.start_at_login,
-                quality_daemon_autostart: self.quality_daemon_autostart,
+                qube_daemon_autostart: self.qube_daemon_autostart,
             }),
         }
     }
@@ -482,7 +482,7 @@ impl UserSettings {
             quick_notes_enabled: v2.features.as_ref().and_then(|f| f.quick_notes_enabled),
             quick_notes_save_only: None,
             start_at_login: v2.system.as_ref().and_then(|s| s.start_at_login),
-            quality_daemon_autostart: v2.system.as_ref().and_then(|s| s.quality_daemon_autostart),
+            qube_daemon_autostart: v2.system.as_ref().and_then(|s| s.qube_daemon_autostart),
             agent_enter_sends: None,
             buffer_delay_ms: v2
                 .speech
@@ -564,7 +564,7 @@ impl UserSettings {
     /// Loads settings from disk. Returns `Default` on any error.
     pub fn load() -> Self {
         let path = Self::settings_path();
-        let loaded = match fs::read_to_string(&path) {
+        match fs::read_to_string(&path) {
             Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
                 Ok(value) => {
                     if value.get("schema_version").is_some() {
@@ -621,9 +621,7 @@ impl UserSettings {
                 );
                 Self::default()
             }
-        };
-
-        import_legacy_mode_bindings_if_needed(loaded)
+        }
     }
 
     /// Persists current settings to disk as pretty-printed JSON.
@@ -768,7 +766,7 @@ impl UserSettings {
             "QUICK_NOTES_ENABLED" => self.quick_notes_enabled = Some(value),
             "QUICK_NOTES_SAVE_ONLY" => self.quick_notes_save_only = Some(value),
             "START_AT_LOGIN" => self.start_at_login = Some(value),
-            "CODESCRIBE_AUTOSTART_QUALITY_DAEMON" => self.quality_daemon_autostart = Some(value),
+            "QUBE_DAEMON_AUTOSTART" => self.qube_daemon_autostart = Some(value),
             "AGENT_ENTER_SENDS" => self.agent_enter_sends = Some(value),
             other => {
                 warn!("Unknown bool setting key: {other}");
@@ -809,114 +807,6 @@ impl UserSettings {
             }
         }
         self.save_if_changed(&before, "set_f32", key);
-    }
-}
-
-fn import_legacy_mode_bindings_if_needed(mut settings: UserSettings) -> UserSettings {
-    if settings.mode_bindings.is_some() {
-        return settings;
-    }
-
-    let Some(mode_bindings) = legacy_mode_bindings_from_env() else {
-        return settings;
-    };
-
-    settings.mode_bindings = Some(mode_bindings);
-    if let Err(error) = settings.save() {
-        warn!("Failed to persist imported legacy mode bindings: {error}");
-    } else {
-        info!("Imported legacy HOLD_MODS/TOGGLE_TRIGGER into mode bindings");
-    }
-    settings
-}
-
-fn legacy_mode_bindings_from_env() -> Option<Vec<ModeBinding>> {
-    let mut bindings = default_mode_bindings();
-    let mut imported_any = false;
-
-    if let Ok(raw_hold_mods) = std::env::var("HOLD_MODS") {
-        match parse_legacy_hold_binding(&raw_hold_mods) {
-            Some(binding) => {
-                set_mode_binding_value(&mut bindings, WorkMode::Dictation, binding);
-                imported_any = true;
-            }
-            None => warn!("Ignoring unknown legacy HOLD_MODS value: {raw_hold_mods}"),
-        }
-    }
-
-    if let Ok(raw_toggle_trigger) = std::env::var("TOGGLE_TRIGGER") {
-        match parse_legacy_toggle_bindings(&raw_toggle_trigger) {
-            Some((dictation, formatting, assistive)) => {
-                if let Some(binding) = dictation {
-                    set_mode_binding_value(&mut bindings, WorkMode::Dictation, binding);
-                }
-                if let Some(binding) = formatting {
-                    set_mode_binding_value(&mut bindings, WorkMode::Formatting, binding);
-                }
-                if let Some(binding) = assistive {
-                    set_mode_binding_value(&mut bindings, WorkMode::Assistive, binding);
-                }
-                imported_any = true;
-            }
-            None => warn!("Ignoring unknown legacy TOGGLE_TRIGGER value: {raw_toggle_trigger}"),
-        }
-    }
-
-    imported_any.then_some(bindings)
-}
-
-fn set_mode_binding_value(bindings: &mut [ModeBinding], mode: WorkMode, binding: ShortcutBinding) {
-    if let Some(existing) = bindings.iter_mut().find(|entry| entry.mode == mode) {
-        existing.binding = binding;
-    }
-}
-
-fn parse_legacy_hold_binding(raw: &str) -> Option<ShortcutBinding> {
-    match raw.trim().to_lowercase().as_str() {
-        "fn" | "globe" => Some(ShortcutBinding::HoldFn),
-        "none" | "disabled" | "off" => Some(ShortcutBinding::Disabled),
-        "ctrl" => Some(ShortcutBinding::HoldCtrl),
-        "ctrl_alt" | "ctrl+alt" => Some(ShortcutBinding::HoldCtrlAlt),
-        "ctrl_shift" | "ctrl+shift" => Some(ShortcutBinding::HoldCtrlShift),
-        "ctrl_cmd" | "ctrl+cmd" => Some(ShortcutBinding::HoldCtrlCmd),
-        _ => None,
-    }
-}
-
-fn parse_legacy_toggle_bindings(
-    raw: &str,
-) -> Option<(
-    Option<ShortcutBinding>,
-    Option<ShortcutBinding>,
-    Option<ShortcutBinding>,
-)> {
-    match raw.trim().to_lowercase().as_str() {
-        "double_option" => Some((
-            None,
-            Some(ShortcutBinding::DoubleLeftOption),
-            Some(ShortcutBinding::DoubleRightOption),
-        )),
-        "double_lalt" | "double_left_option" => Some((
-            None,
-            Some(ShortcutBinding::DoubleLeftOption),
-            Some(ShortcutBinding::Disabled),
-        )),
-        "double_ralt" | "double_right_option" => Some((
-            None,
-            Some(ShortcutBinding::Disabled),
-            Some(ShortcutBinding::DoubleRightOption),
-        )),
-        "double_ctrl" | "double_control" => Some((
-            Some(ShortcutBinding::DoubleCtrl),
-            Some(ShortcutBinding::Disabled),
-            Some(ShortcutBinding::Disabled),
-        )),
-        "none" | "disabled" => Some((
-            None,
-            Some(ShortcutBinding::Disabled),
-            Some(ShortcutBinding::Disabled),
-        )),
-        _ => None,
     }
 }
 
@@ -1048,13 +938,13 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_quality_daemon_autostart_persists_in_v2_system_section() {
+    fn test_qube_daemon_autostart_persists_in_v2_system_section() {
         let _tmp = setup_isolated_data_dir();
         let mut settings = UserSettings::default();
-        settings.set_bool("CODESCRIBE_AUTOSTART_QUALITY_DAEMON", true);
+        settings.set_bool("QUBE_DAEMON_AUTOSTART", true);
 
         let loaded = UserSettings::load();
-        assert_eq!(loaded.quality_daemon_autostart, Some(true));
+        assert_eq!(loaded.qube_daemon_autostart, Some(true));
 
         let path = UserSettings::settings_path();
         let persisted: serde_json::Value =
@@ -1063,7 +953,7 @@ mod tests {
         assert_eq!(
             persisted
                 .get("system")
-                .and_then(|v| v.get("quality_daemon_autostart"))
+                .and_then(|v| v.get("qube_daemon_autostart"))
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
@@ -1107,7 +997,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_load_imports_legacy_hold_and_toggle_hotkeys_into_mode_bindings() {
+    fn test_load_ignores_legacy_hotkey_env_imports() {
         let _tmp = setup_isolated_data_dir();
 
         unsafe {
@@ -1118,53 +1008,46 @@ mod tests {
         let settings = UserSettings::load();
         assert_eq!(
             settings.mode_binding_for(WorkMode::Dictation),
-            ShortcutBinding::HoldCtrlAlt
+            ShortcutBinding::HoldFn
         );
         assert_eq!(
             settings.mode_binding_for(WorkMode::Formatting),
-            ShortcutBinding::Disabled
+            ShortcutBinding::DoubleLeftOption
         );
         assert_eq!(
             settings.mode_binding_for(WorkMode::Assistive),
             ShortcutBinding::DoubleRightOption
         );
-
-        let persisted: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(UserSettings::settings_path()).expect("read imported settings"),
-        )
-        .expect("parse imported settings");
         assert!(
-            persisted
-                .get("interaction")
-                .and_then(|v| v.get("mode_bindings"))
-                .and_then(|v| v.as_array())
-                .is_some_and(|bindings| !bindings.is_empty()),
-            "legacy hotkeys should be persisted into canonical mode_bindings"
+            !UserSettings::settings_path().exists(),
+            "loading legacy hotkey envs should not synthesize settings.json"
         );
     }
 
     #[test]
     #[serial]
-    fn test_load_imports_legacy_double_ctrl_profile_into_current_contract() {
+    fn test_saved_mode_bindings_outrank_legacy_hotkey_env_noise() {
         let _tmp = setup_isolated_data_dir();
+        let mut settings = UserSettings::default();
+        settings.set_mode_binding(WorkMode::Dictation, ShortcutBinding::HoldCtrlCmd);
 
         unsafe {
             std::env::set_var("HOLD_MODS", "ctrl_alt");
             std::env::set_var("TOGGLE_TRIGGER", "double_ctrl");
         }
 
-        let settings = UserSettings::load();
+        let loaded = UserSettings::load();
         assert_eq!(
-            settings.mode_binding_for(WorkMode::Dictation),
-            ShortcutBinding::DoubleCtrl
+            loaded.mode_binding_for(WorkMode::Dictation),
+            ShortcutBinding::HoldCtrlCmd
         );
         assert_eq!(
-            settings.mode_binding_for(WorkMode::Formatting),
-            ShortcutBinding::Disabled
+            loaded.mode_binding_for(WorkMode::Formatting),
+            ShortcutBinding::DoubleLeftOption
         );
         assert_eq!(
-            settings.mode_binding_for(WorkMode::Assistive),
-            ShortcutBinding::Disabled
+            loaded.mode_binding_for(WorkMode::Assistive),
+            ShortcutBinding::DoubleRightOption
         );
     }
 }

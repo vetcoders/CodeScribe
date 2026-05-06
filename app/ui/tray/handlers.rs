@@ -74,9 +74,9 @@ fn resolve_menu_route(event_id: &MenuId, menu_ids: &MenuIds) -> Option<MenuRoute
 pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
     match resolve_menu_route(event_id, menu_ids) {
         Some(MenuRoute::CopyLast) => handle_copy_last(),
-        Some(MenuRoute::ShowOverlay) => crate::show_voice_chat_overlay(),
-        Some(MenuRoute::ContinueOnboarding) => crate::show_onboarding_wizard(),
-        Some(MenuRoute::OpenSettings) => crate::show_settings_window(),
+        Some(MenuRoute::ShowOverlay) => crate::ui::voice_chat::show_voice_chat_overlay(),
+        Some(MenuRoute::ContinueOnboarding) => crate::ui::onboarding::show_onboarding_wizard(),
+        Some(MenuRoute::OpenSettings) => crate::ui::settings::show_settings_window(),
         Some(MenuRoute::OpenHistory) => handle_open_history_folder(),
         Some(MenuRoute::CopyDiagnostics) => handle_copy_diagnostics(),
         Some(MenuRoute::Help) => handle_open_help(),
@@ -86,7 +86,7 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         Some(MenuRoute::ToggleQuickNotesSaveOnly) => handle_toggle_quick_notes_save_only(),
         Some(MenuRoute::OpenNotesFolder) => handle_open_notes_folder(),
         Some(MenuRoute::OpenTodayNote) => handle_open_today_note(),
-        Some(MenuRoute::OpenQualityReport) => handle_open_quality_report(),
+        Some(MenuRoute::OpenQualityReport) => handle_open_qube_report(),
         Some(MenuRoute::InstallSileroVad) => handle_install_silero_vad(),
         None => debug!("Unknown menu event id: {:?}", event_id),
     }
@@ -97,7 +97,7 @@ fn handle_copy_last() {
     send_menu_event(TrayMenuEvent::CopyLast);
 
     // Get last transcript from history
-    if let Some(last_entry) = crate::state::history::latest_entry() {
+    if let Some(last_entry) = crate::state::history::latest_copyable_entry() {
         if let Ok(text) = std::fs::read_to_string(&last_entry.path) {
             if let Err(e) = clipboard::set_clipboard(&text) {
                 info!("Failed to copy to clipboard: {}", e);
@@ -106,7 +106,7 @@ fn handle_copy_last() {
             }
         }
     } else {
-        info!("No transcript history available");
+        info!("No copyable transcript history available");
     }
 }
 
@@ -260,17 +260,17 @@ fn handle_show_about() {
 // ============================================================================
 
 /// Open the latest quality report in browser
-fn handle_open_quality_report() {
+fn handle_open_qube_report() {
     info!("Opening quality report...");
 
-    if crate::quality_loop::open_latest_report() {
+    if crate::qube_daemon::open_latest_report() {
         info!("Opened quality report");
     } else {
         // No report available - show notification
         info!("No quality report available");
         let _ = Command::new("osascript")
             .arg("-e")
-            .arg(r#"display notification "No quality report available. Run: codescribe-loop --daemon" with title "CodeScribe Quality""#)
+            .arg(r#"display notification "No quality report available. Run: qube-daemon --daemon" with title "CodeScribe Quality""#)
             .spawn();
     }
 }

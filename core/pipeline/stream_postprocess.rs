@@ -21,6 +21,7 @@ const DEFAULT_SIMILARITY_THRESHOLD: f32 = 0.93;
 const DEFAULT_NOVELTY_THRESHOLD: f32 = 0.12;
 const MAX_EMBED_CHARS: usize = 512;
 const MAX_DROPS_IN_ROW: u8 = 2;
+const FINAL_PASS_ARTIFACT_TOKENS: &[&str] = &["going", "use"];
 
 lazy_static! {
     // Whisper sometimes emits trailing emoticon artifacts like ":D", ":-D", "::D", often repeated.
@@ -130,7 +131,7 @@ impl Lexicon {
 
         if total > 0 {
             info!(
-                "Loaded {} lexicon rules in {}ms (legacy={} in {}ms, seed={} in {}ms, custom={} in {}ms)",
+                "Loaded {} lexicon rules in {}ms (legacy={} in {}ms, seed={} in {}ms, custom={} in {}ms, custom_path={})",
                 total,
                 total_ms,
                 legacy_count,
@@ -139,9 +140,13 @@ impl Lexicon {
                 seed_ms,
                 custom_count,
                 custom_ms,
+                custom_path.display(),
             );
         } else {
-            warn!("No lexicon rules loaded from lexicon sources");
+            warn!(
+                "No lexicon rules loaded from lexicon sources (custom_path={})",
+                custom_path.display()
+            );
         }
 
         Self {
@@ -167,9 +172,10 @@ impl Lexicon {
             .unwrap_or(0);
         self.custom_mtime = current_mtime;
         info!(
-            "Hot-reloaded {} custom lexicon rules (total={})",
+            "Hot-reloaded {} custom lexicon rules (total={}, custom_path={})",
             custom_count,
-            self.rule_count()
+            self.rule_count(),
+            self.custom_path.display(),
         );
     }
 
@@ -653,6 +659,38 @@ fn is_suspicious(text: &str) -> bool {
     ratio < 0.5 || crate::ai_formatting::has_repetition_loop(text)
 }
 
+fn introduced_artifact_tokens(raw: &str, candidate: &str) -> Vec<String> {
+    let raw_tokens: HashSet<String> = tokenize(raw).into_iter().collect();
+    let mut introduced = HashSet::new();
+
+    for token in tokenize(candidate) {
+        if !raw_tokens.contains(&token) && FINAL_PASS_ARTIFACT_TOKENS.contains(&token.as_str()) {
+            introduced.insert(token);
+        }
+    }
+
+    let mut introduced: Vec<String> = introduced.into_iter().collect();
+    introduced.sort();
+    introduced
+}
+
+pub(crate) fn final_pass_guardrail_reason(raw: &str, candidate: &str) -> Option<String> {
+    if candidate == raw {
+        return None;
+    }
+
+    if is_suspicious(candidate) && !is_suspicious(raw) {
+        return Some("candidate_became_suspicious".to_string());
+    }
+
+    let introduced = introduced_artifact_tokens(raw, candidate);
+    if introduced.len() >= 2 {
+        return Some(format!("artifact_token_drift:{}", introduced.join(",")));
+    }
+
+    None
+}
+
 fn truncate_for_embedding(text: &str) -> String {
     if text.len() <= MAX_EMBED_CHARS {
         return text.to_string();
@@ -702,6 +740,23 @@ mod tests {
     }
 
     #[test]
+    fn test_final_pass_guardrail_rejects_artifact_token_drift() {
+        let raw = "Co będę robił? Ja chyba coś nagrywam? Ja coś się... Może zhulać, ale w tym momencie myślę, że kwestia";
+        let candidate = "Co będę robił? Ja chyba coś nagrywam? Ja coś going... Może zhulać, ale w tym momencie myślę, use kwestia";
+
+        let reason = final_pass_guardrail_reason(raw, candidate).expect("expected guardrail");
+        assert_eq!(reason, "artifact_token_drift:going,use");
+    }
+
+    #[test]
+    fn test_final_pass_guardrail_allows_expected_lexicon_cleanup() {
+        let raw = "Uzywam doker do github";
+        let candidate = "Uzywam Docker do GitHub";
+
+        assert_eq!(final_pass_guardrail_reason(raw, candidate), None);
+    }
+
+    #[test]
     fn test_hot_reload_picks_up_new_rules() {
         use std::io::Write;
 
@@ -713,8 +768,8 @@ mod tests {
 
         // Build a Lexicon pointing at our temp file
         let mut lexicon = Lexicon {
-            rules: Vec::new(),
-            builtin_count: 0,
+            builtin_rules: Vec::new(),
+            custom_rules: Vec::new(),
             custom_path: custom_path.clone(),
             custom_mtime: std::fs::metadata(&custom_path)
                 .ok()
@@ -741,7 +796,8 @@ mod tests {
             lexicon.apply("mam foobarski w projekcie"),
             "mam FooBar w projekcie"
         );
-        assert_eq!(lexicon.rules.len(), 1);
+        assert_eq!(lexicon.rule_count(), 1);
+        assert_eq!(lexicon.custom_rules.len(), 1);
     }
 
     #[test]
@@ -755,20 +811,20 @@ mod tests {
         .unwrap();
 
         let mut lexicon = Lexicon {
-            rules: Vec::new(),
-            builtin_count: 0,
+            builtin_rules: Vec::new(),
+            custom_rules: Vec::new(),
             custom_path: custom_path.clone(),
             custom_mtime: None, // Force initial load
         };
 
         // First reload loads the rule
         lexicon.maybe_reload();
-        assert_eq!(lexicon.rules.len(), 1);
+        assert_eq!(lexicon.rule_count(), 1);
         let mtime_after = lexicon.custom_mtime;
 
         // Second reload with same mtime — should be a no-op
         lexicon.maybe_reload();
-        assert_eq!(lexicon.rules.len(), 1);
+        assert_eq!(lexicon.rule_count(), 1);
         assert_eq!(lexicon.custom_mtime, mtime_after);
     }
 
@@ -780,7 +836,7 @@ mod tests {
 
         // Simulate 2 builtin rules
         let mut lexicon = Lexicon {
-            rules: vec![
+            builtin_rules: vec![
                 LexiconRule {
                     pattern: build_word_regex("builtin1").unwrap(),
                     replacement: "BUILTIN1".to_string(),
@@ -790,7 +846,7 @@ mod tests {
                     replacement: "BUILTIN2".to_string(),
                 },
             ],
-            builtin_count: 2,
+            custom_rules: Vec::new(),
             custom_path: custom_path.clone(),
             custom_mtime: std::fs::metadata(&custom_path)
                 .ok()
@@ -808,7 +864,7 @@ mod tests {
         lexicon.maybe_reload();
 
         // Should have 2 builtin + 1 custom = 3 rules
-        assert_eq!(lexicon.rules.len(), 3);
+        assert_eq!(lexicon.rule_count(), 3);
         // Builtin rules preserved
         assert_eq!(lexicon.apply("builtin1 builtin2"), "BUILTIN1 BUILTIN2");
         // Custom rule added
@@ -856,7 +912,7 @@ mod tests {
         let vet_json = r#"{"term":"Acepromazyna","ipa":"/x/","category":"drug","definition":"x","synonyms":[],"extras":{"mispronunciations":["acepromasyna","acepramazyna"]},"mispronunciations":[]}"#;
 
         let mut rules = Vec::new();
-        let count = load_rules_from_jsonl(vet_json, "test-vet", &mut rules);
+        let count = load_legacy_jsonl(vet_json, "test-vet", &mut rules);
         assert_eq!(
             count, 2,
             "Should extract 2 rules from extras.mispronunciations"
@@ -871,7 +927,7 @@ mod tests {
         let json = r#"{"term":"Anemia","mispronunciations":["anemia"],"extras":{"mispronunciations":["abemia","amemia"]}}"#;
 
         let mut rules = Vec::new();
-        let count = load_rules_from_jsonl(json, "test-merge", &mut rules);
+        let count = load_legacy_jsonl(json, "test-merge", &mut rules);
         // "anemia" == "Anemia" case-insensitive → skipped; "abemia" + "amemia" → 2 rules
         assert_eq!(count, 2, "Should skip case-equal + extract 2 from extras");
     }
@@ -881,9 +937,9 @@ mod tests {
         // Integration test: the real builtin lexicon must produce > 798 rules now
         let lexicon = Lexicon::from_builtin();
         assert!(
-            lexicon.rules.len() > 5000,
+            lexicon.rule_count() > 5000,
             "Expected >5000 rules with extras fix, got {}",
-            lexicon.rules.len()
+            lexicon.rule_count()
         );
     }
 }
