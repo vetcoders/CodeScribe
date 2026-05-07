@@ -55,21 +55,17 @@ Grant in: System Settings > Privacy & Security
 
 ## Model
 
-**Strictly Embedded (Release Policy)**: `whisper-large-v3-turbo-mlx-q8` (~888MB)
+**Embedded-first Whisper policy**: `whisper-large-v3-turbo-mlx-q8`
 **Embedded Embedder**: `paraphrase-multilingual-MiniLM-L12-v2` (for semantic gating)
 
-- **Zero Exceptions:** Release binaries ALWAYS contain the model.
-- **No external files:** We never bundle `Resources/models/*`.
-- **Zero I/O:** Model loads from memory directly to Metal.
+- `core/build.rs` embeds Whisper by default when a complete model is available at build time.
+- Runtime fallback resolves Whisper from exactly one shared contract in `core/config/models.rs`:
+  `CODESCRIBE_MODEL_PATH` → configured local model path/alias → configured HF repo snapshot →
+  default local turbo model → default HF cache snapshot.
+- `make install` / `scripts/ensure-models.sh` are the easiest way to warm the expected cache paths.
 
-**Developer note (Build Time):**
-You still need the model files locally to _build_ the app (because they are `include_bytes!`-ed into the binary).
-
-```bash
-make download-model  # Required for build
-```
-
-Location (build-time only): `models/whisper-large-v3-turbo-mlx-q8/`
+**Developer note:**
+If runtime lookup cannot find the model, point `CODESCRIBE_MODEL_PATH` at a valid Whisper directory.
 
 ## CLI Usage
 
@@ -89,11 +85,11 @@ codescribe transcribe audio.wav --language pl
 New CLI tools for batch processing and automation:
 
 ```bash
-# Batch quality report
-codescribe-quality --help
+# Batch quality report (renamed from codescribe-quality in 0.9.0)
+qube-report --help
 
-# Self-improving quality loop
-codescribe-loop --help
+# Self-improving quality daemon (renamed from codescribe-loop in 0.9.0)
+qube-daemon --help
 ```
 
 ## Configuration

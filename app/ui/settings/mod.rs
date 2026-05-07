@@ -1,4 +1,29 @@
-use std::collections::HashMap;
+//! Native AppKit Settings window.
+//!
+//! # Safety
+//!
+//! Every `unsafe` block / function in this module shares one invariant matrix:
+//!
+//! 1. **Main-thread affinity.** AppKit objects (`NSWindow`, `NSView`, `NSButton`,
+//!    etc.) MUST only be addressed from the main thread. All entry points here
+//!    are reached either directly from the main runloop or via
+//!    `Queue::main().exec_async(...)`, which trampolines onto the main thread
+//!    before the closure body executes.
+//! 2. **Object validity.** `Id = *mut Object` parameters and the values returned
+//!    by `[cls new]` / `[cls alloc] init...]` are non-null retained pointers
+//!    obtained on the main thread and not yet released. Subviews/controls owned
+//!    by their parent window/view live as long as the parent.
+//! 3. **Selector / message arity.** `msg_send!` invocations bind to documented
+//!    AppKit / Foundation selectors with matching argument types. The
+//!    `extern_class!`-style declarations in `objc2_app_kit` provide the source
+//!    of truth for selector signatures.
+//! 4. **Environment mutation.** `std::env::remove_var` / `set_var` calls in this
+//!    module run synchronously on the main thread before any worker spawns; no
+//!    parallel reader is in flight (Rust 2024 soundness contract).
+//!
+//! Per-block `// SAFETY:` annotations call out additional invariants where the
+//! pattern deviates (e.g. raw FFI, retain-count balancing, cross-thread hops).
+
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -13,28 +38,27 @@ use dispatch::Queue;
 use lazy_static::lazy_static;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use objc2_app_kit::{NSVisualEffectMaterial, NSWindowButton, NSWindowCollectionBehavior};
+use objc2_app_kit::{NSVisualEffectMaterial, NSWindowButton, NSWindowToolbarStyle};
 use tracing::{info, warn};
 
 use crate::config::{Config, ShortcutBinding, UserSettings, WorkMode, keychain};
 use crate::ipc::{IpcCommand, IpcResponse};
 use crate::os::permissions::PermissionStatus;
 use crate::os::{hotkeys, shortcut_registry};
-use crate::ui::bootstrap::handlers::{
-    action_handler_class, toolbar_delegate_class, window_delegate_class,
-};
 use crate::ui::onboarding::{
     PERMISSION_ORDER, PermissionKind, open_permission_settings, permission_status,
-    request_permission,
+    reconcile_permission_runtime_after_grant, request_permission,
+};
+use crate::ui::settings::handlers::{
+    action_handler_class, toolbar_delegate_class, window_delegate_class,
 };
 use crate::ui_helpers::{
-    LabelConfig, add_subview, button, button_set_action, button_style, create_button,
-    create_floating_window, create_glass_effect_container_view, create_glass_effect_view_with,
-    create_label, create_scrollable_text_view, create_secure_text_input, create_slider,
-    create_text_input, create_toggle, get_text_view_string, layout_region_frame_for_view,
-    ns_string, set_glass_container_content_view, set_glass_effect_content_view,
-    set_text_field_string, set_text_view_string, ui_colors, ui_tokens, window_close,
-    window_content_view, window_show,
+    LabelConfig, add_subview, apply_shared_shell_panel_policy, button_set_action, button_style,
+    create_button, create_glass_effect_view_with, create_label, create_scrollable_text_view,
+    create_secure_text_input, create_slider, create_text_input, create_toggle,
+    get_text_view_string, layout_region_frame_for_view, ns_string, present_shared_shell_panel,
+    set_glass_effect_content_view, set_text_field_string, set_text_view_string,
+    settings_shell_panel_policy, ui_colors, ui_tokens, window_close, window_content_view,
 };
 
 mod handlers;
@@ -45,8 +69,6 @@ type Id = *mut Object;
 const SIDEBAR_WIDTH: f64 = 216.0;
 const SETTINGS_WINDOW_WIDTH: f64 = 840.0;
 const SETTINGS_WINDOW_HEIGHT: f64 = 700.0;
-// Keep Settings readable while restoring stronger system glass.
-const SETTINGS_MAX_OPACITY: f64 = ui_tokens::SETTINGS_WINDOW_OPACITY;
 const SETTINGS_CONTENT_INSET_X: f64 = 20.0;
 const SETTINGS_CONTENT_INSET_Y: f64 = 20.0;
 const TAB_BUTTON_HEIGHT: f64 = 34.0;
@@ -57,21 +79,12 @@ const TAB_ACTIVE_BORDER_ALPHA: f64 = 0.22;
 const SIDEBAR_INSET: f64 = 12.0;
 const SETTINGS_TITLEBAR_SAFE_INSET: f64 = 56.0;
 const SETTINGS_TAB_START_OFFSET: f64 = 20.0;
-const PERMISSION_ROW_HEIGHT: f64 = 24.0 + ui_tokens::DENSITY_COMFORTABLE;
-const PERMISSION_BUTTON_WIDTH: f64 = 118.0;
-const STEP_ROW_HEIGHT: f64 = 24.0 + ui_tokens::DENSITY_COMFORTABLE;
-const SETUP_TOP_OFFSET: f64 = 20.0;
-const SETUP_POST_STEPS_GAP: f64 = 8.0;
-const SETUP_SAVE_MIN_ANCHOR_Y: f64 = 52.0;
-const SETUP_HINT_MIN_Y: f64 = 52.0;
-const TAB_SETUP: usize = 0;
+const TAB_TRANSCRIPTION: usize = 0;
 const TAB_MODES_SHORTCUTS: usize = 1;
 const TAB_AI_PROMPTS: usize = 2;
 const TAB_AUDIO_INPUT: usize = 3;
-const TAB_QUALITY: usize = 4;
-const TAB_DIAGNOSTICS: usize = 5;
-const TAB_ADVANCED: usize = 6;
-const TAB_COUNT: usize = 7;
+const TAB_DIAGNOSTICS: usize = 4;
+const TAB_COUNT: usize = 5;
 
 const TOGGLE_ROW_HEIGHT: f64 = 22.0;
 const TOGGLE_SWITCH_WIDTH: f64 = 38.0;
@@ -81,6 +94,13 @@ const TOGGLE_ROW_DESC_OFFSET: f64 = 18.0;
 const TOGGLE_ROW_DESC_HEIGHT: f64 = 16.0;
 const SETTINGS_INPUT_HEIGHT: f64 = 22.0;
 const KEY_STATUS_ICON_SIZE: f64 = 14.0;
+const PREVIEW_NO_OVERLAY_MIN_INTERIM_SEC: f32 = 8.0;
+const PREVIEW_SAMPLE_UTTERANCE_SEC: f32 = 12.0;
+const PREVIEW_SAMPLE_TEXT: &str =
+    "Partiale mają być appendowane, poprawiamy tylko aktywny ogon, a nie kasujemy całego tekstu.";
+const PROMPT_EDITOR_DESIRED_HEIGHT: f64 = 220.0;
+const PROMPT_EDITOR_STATUS_HEIGHT: f64 = 16.0;
+const PROMPT_EDITOR_BOTTOM_PADDING: f64 = 24.0;
 
 const STEP_TEST_MIC: usize = 0;
 const STEP_SHOW_OVERLAY: usize = 1;
@@ -114,6 +134,7 @@ fn settings_titlebar_safe_inset(view: Id, fallback: f64) -> f64 {
         return fallback;
     }
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let bounds: CGRect = msg_send![view, bounds];
         if let Some(layout_frame) = layout_region_frame_for_view(view) {
@@ -138,75 +159,16 @@ struct ToggleRowSpec<'a> {
     gap: f64,
 }
 
-unsafe fn intensify_settings_glass(view: Id) {
-    let supports_emphasized: bool = msg_send![view, respondsToSelector: sel!(setEmphasized:)];
-    if supports_emphasized {
-        let _: () = msg_send![view, setEmphasized: true];
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum VoiceLabFieldKind {
-    Bool,
-    Value,
-}
-
 #[derive(Clone, Copy)]
-struct VoiceLabFieldSpec {
-    key: &'static str,
-    label: &'static str,
-    default_value: &'static str,
-    description: &'static str,
-    kind: VoiceLabFieldKind,
+struct SliderSettingRowSpec<'a> {
+    title: &'a str,
+    value_text: &'a str,
+    min: f64,
+    max: f64,
+    current: f64,
+    action: objc::runtime::Sel,
+    gap: f64,
 }
-
-// Voice Lab: only fields where user choice actually improves UX.
-// Tuned pipeline internals (chunk_sec, similarity, correction thresholds etc.)
-// stay as env-var escape hatches — their defaults are proven optimal.
-const VOICE_LAB_FIELDS: [VoiceLabFieldSpec; 6] = [
-    VoiceLabFieldSpec {
-        key: "CODESCRIBE_BUFFER_DELAY_MS",
-        label: "Buffer delay (ms)",
-        default_value: "280",
-        description: "Delay before buffered emission starts.",
-        kind: VoiceLabFieldKind::Value,
-    },
-    VoiceLabFieldSpec {
-        key: "CODESCRIBE_TYPING_CPS",
-        label: "Typing speed (CPS)",
-        default_value: "90",
-        description: "Characters-per-second animation speed.",
-        kind: VoiceLabFieldKind::Value,
-    },
-    VoiceLabFieldSpec {
-        key: "CODESCRIBE_EMIT_WORDS_MAX",
-        label: "Emit words max",
-        default_value: "2",
-        description: "Max words emitted per tick in buffered mode.",
-        kind: VoiceLabFieldKind::Value,
-    },
-    VoiceLabFieldSpec {
-        key: "CODESCRIBE_BUFFERED_INTERIM_SEC",
-        label: "Interim cadence (sec)",
-        default_value: "1.2",
-        description: "How often partial results are shown.",
-        kind: VoiceLabFieldKind::Value,
-    },
-    VoiceLabFieldSpec {
-        key: "WHISPER_MODEL",
-        label: "Whisper cloud model",
-        default_value: "mlx-community/whisper-large-v3-mlx",
-        description: "Cloud/multipart STT model id.",
-        kind: VoiceLabFieldKind::Value,
-    },
-    VoiceLabFieldSpec {
-        key: "BACKEND_MAX_UPLOAD_MB",
-        label: "Cloud upload cap (MB)",
-        default_value: "20",
-        description: "Max upload size for cloud STT multipart.",
-        kind: VoiceLabFieldKind::Value,
-    },
-];
 
 fn parse_env_bool(v: &str) -> bool {
     matches!(
@@ -223,22 +185,249 @@ fn toggle_row_step(has_description: bool, gap: f64) -> f64 {
     }
 }
 
-fn setup_content_height(min_visible_height: f64, gap: f64) -> f64 {
-    let permission_rows = PERMISSION_ORDER.len() as f64;
-    let quick_start_steps = (STEP_PRESS_HOTKEY + 1) as f64;
-    let flow_before_save = (24.0 + gap) // setup title
-        + (1.0 + gap) // header separator
-        + (16.0 + gap) // optional/non-blocking note
-        + (20.0 + gap) // permissions header
-        + permission_rows * PERMISSION_ROW_HEIGHT
-        + gap // permissions divider
-        + (20.0 + gap) // quick start header
-        + quick_start_steps * STEP_ROW_HEIGHT
-        + SETUP_POST_STEPS_GAP
-        + (16.0 + gap) // checklist hint
-        + gap // setup divider
-        + (16.0 + gap); // tab routing hint
-    min_visible_height.max((SETUP_TOP_OFFSET + flow_before_save + SETUP_SAVE_MIN_ANCHOR_Y).ceil())
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PreviewTimingModel {
+    overlay_enabled: bool,
+    buffer_delay_ms: u64,
+    typing_cps: f32,
+    emit_words_max: usize,
+    requested_interim_sec: f32,
+    effective_interim_sec: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreviewTimingStep {
+    publish_ms: u64,
+    visible_at_ms: u64,
+    target_text: String,
+    visible_text: String,
+}
+
+fn preview_effective_interim_sec(overlay_enabled: bool, requested_interim_sec: f32) -> f32 {
+    let requested = requested_interim_sec.clamp(1.0, 30.0);
+    if overlay_enabled {
+        requested
+    } else {
+        requested.max(PREVIEW_NO_OVERLAY_MIN_INTERIM_SEC)
+    }
+}
+
+fn current_preview_timing_model() -> PreviewTimingModel {
+    let config = Config::load();
+    let settings = UserSettings::load();
+    let requested_interim_sec = settings.buffered_interim_sec.unwrap_or(1.2);
+
+    PreviewTimingModel {
+        overlay_enabled: config.transcription_overlay_enabled,
+        buffer_delay_ms: settings.buffer_delay_ms.unwrap_or(280),
+        typing_cps: settings.typing_cps.unwrap_or(90.0).max(5.0),
+        emit_words_max: settings.emit_words_max.unwrap_or(2).clamp(1, 10) as usize,
+        requested_interim_sec,
+        effective_interim_sec: preview_effective_interim_sec(
+            config.transcription_overlay_enabled,
+            requested_interim_sec,
+        ),
+    }
+}
+
+fn preview_tokenize_for_emit(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut cursor = 0usize;
+
+    while cursor < chars.len() {
+        let mut token = String::new();
+        if chars[cursor].is_whitespace() {
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                token.push(chars[cursor]);
+                cursor += 1;
+            }
+        } else {
+            while cursor < chars.len() && !chars[cursor].is_whitespace() {
+                token.push(chars[cursor]);
+                cursor += 1;
+            }
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                token.push(chars[cursor]);
+                cursor += 1;
+            }
+        }
+        tokens.push(token);
+    }
+    if tokens.is_empty() && !text.is_empty() {
+        tokens.push(text.to_string());
+    }
+    tokens
+}
+
+fn preview_emit_chunks(text: &str, emit_words_max: usize) -> Vec<String> {
+    let tokens = preview_tokenize_for_emit(text);
+    let mut chunks = Vec::new();
+    let mut current_index = 0usize;
+
+    while current_index < tokens.len() {
+        let mut chunk = String::new();
+        let mut words = 0usize;
+        while current_index < tokens.len() {
+            let token = &tokens[current_index];
+            chunk.push_str(token);
+            if token.chars().any(|c| !c.is_whitespace()) {
+                words += 1;
+            }
+            current_index += 1;
+
+            if words >= emit_words_max {
+                if current_index < tokens.len() {
+                    let next = &tokens[current_index];
+                    if next.chars().all(|c| c.is_whitespace()) {
+                        chunk.push_str(next);
+                        current_index += 1;
+                    }
+                }
+                break;
+            }
+        }
+
+        if !chunk.is_empty() {
+            chunks.push(chunk);
+        }
+    }
+
+    chunks
+}
+
+fn preview_partial_targets(sample: &str, interim_sec: f32) -> Vec<(u64, String)> {
+    let words: Vec<&str> = sample.split_whitespace().collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    let total_duration = PREVIEW_SAMPLE_UTTERANCE_SEC.max(interim_sec);
+    let total_words = words.len();
+    let mut targets = Vec::new();
+    let mut reveal_cursor = 0usize;
+    let mut t = interim_sec;
+
+    while t < total_duration {
+        let progress = (t / total_duration).clamp(0.0, 1.0);
+        let reveal_words = ((total_words as f32 * progress).ceil() as usize)
+            .clamp(1, total_words)
+            .max((reveal_cursor + 1).min(total_words));
+        if reveal_words > reveal_cursor {
+            reveal_cursor = reveal_words;
+            targets.push((
+                (t * 1000.0).round() as u64,
+                words[..reveal_cursor].join(" "),
+            ));
+        }
+        t += interim_sec;
+    }
+
+    if reveal_cursor < total_words {
+        targets.push((
+            (total_duration * 1000.0).round() as u64,
+            words[..total_words].join(" "),
+        ));
+    }
+
+    targets
+}
+
+fn preview_timing_steps(model: PreviewTimingModel) -> Vec<PreviewTimingStep> {
+    let partial_targets = preview_partial_targets(PREVIEW_SAMPLE_TEXT, model.effective_interim_sec);
+    let tick_ms = ((1000.0 / model.typing_cps as f64).round() as u64).max(1);
+    let mut visible_text = String::new();
+    let mut previous_target = String::new();
+    let mut last_emit_done_ms = 0u64;
+    let mut steps = Vec::new();
+
+    for (index, (publish_ms, target_text)) in partial_targets.into_iter().enumerate() {
+        let suffix = if target_text.starts_with(&previous_target) {
+            target_text[previous_target.len()..].to_string()
+        } else {
+            target_text.clone()
+        };
+
+        if suffix.is_empty() {
+            previous_target = target_text;
+            continue;
+        }
+
+        let start_ms = if index == 0 {
+            publish_ms
+        } else {
+            publish_ms
+                .saturating_add(model.buffer_delay_ms)
+                .max(last_emit_done_ms)
+        };
+
+        let mut current_ms = start_ms;
+        for chunk in preview_emit_chunks(&suffix, model.emit_words_max) {
+            visible_text.push_str(&chunk);
+            steps.push(PreviewTimingStep {
+                publish_ms,
+                visible_at_ms: current_ms,
+                target_text: target_text.clone(),
+                visible_text: visible_text.clone(),
+            });
+            current_ms = current_ms.saturating_add(tick_ms);
+        }
+
+        last_emit_done_ms = current_ms;
+        previous_target = target_text;
+    }
+
+    steps
+}
+
+fn preview_timing_summary_text(model: PreviewTimingModel) -> String {
+    let tick_ms = ((1000.0 / model.typing_cps as f64).round() as u64).max(1);
+    if model.overlay_enabled {
+        format!(
+            "Overlay ON • partial target every {:.1}s • first output immediate • later growth +{}ms • {} words/tick • {}ms between ticks",
+            model.effective_interim_sec, model.buffer_delay_ms, model.emit_words_max, tick_ms
+        )
+    } else {
+        format!(
+            "Overlay OFF • runtime hides floating preview • cadence clamped to {:.1}s (requested {:.1}s) • if shown: +{}ms buffer • {} words/tick • {}ms ticks",
+            model.effective_interim_sec,
+            model.requested_interim_sec,
+            model.buffer_delay_ms,
+            model.emit_words_max,
+            tick_ms
+        )
+    }
+}
+
+fn preview_timing_report_text(model: PreviewTimingModel) -> String {
+    let partial_targets = preview_partial_targets(PREVIEW_SAMPLE_TEXT, model.effective_interim_sec);
+    let steps = preview_timing_steps(model);
+    let mut lines = Vec::new();
+    lines.push(format!("Sample: {PREVIEW_SAMPLE_TEXT}"));
+    lines.push(String::new());
+    lines.push("Chunker partial targets".to_string());
+    for (publish_ms, target_text) in partial_targets {
+        lines.push(format!(
+            "[{:.1}s] {}",
+            publish_ms as f32 / 1000.0,
+            target_text
+        ));
+    }
+    lines.push(String::new());
+    lines.push(if model.overlay_enabled {
+        "Overlay-visible text".to_string()
+    } else {
+        "Overlay-visible text (would look like this if overlay was enabled)".to_string()
+    });
+    for step in steps {
+        lines.push(format!(
+            "[publish {:.1}s -> visible {:.2}s] {}",
+            step.publish_ms as f32 / 1000.0,
+            step.visible_at_ms as f32 / 1000.0,
+            step.visible_text
+        ));
+    }
+    lines.join("\n")
 }
 
 unsafe fn style_paper_input(field: Id) {
@@ -260,10 +449,67 @@ unsafe fn add_tafla_header_separator(container: Id, x: f64, y: f64, width: f64) 
         ..Default::default()
     });
     let _: () = msg_send![separator, setAlphaValue: 0.9f64];
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         add_subview(container, separator);
     }
     y - 1.0
+}
+
+unsafe fn add_slider_setting_row(
+    container: Id,
+    action_handler: Id,
+    x: f64,
+    y: &mut f64,
+    width: f64,
+    secondary: Id,
+    spec: SliderSettingRowSpec<'_>,
+) -> usize {
+    let label = create_label(LabelConfig {
+        frame: CGRect::new(&CGPoint::new(x, *y), &CGSize::new(136.0, 18.0)),
+        text: spec.title.to_string(),
+        font_size: ui_tokens::SMALL_FONT_SIZE,
+        text_color: secondary,
+        ..Default::default()
+    });
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        add_subview(container, label);
+    }
+
+    let value_label = create_label(LabelConfig {
+        frame: CGRect::new(
+            &CGPoint::new(x + width - 110.0, *y),
+            &CGSize::new(110.0, 18.0),
+        ),
+        text: spec.value_text.to_string(),
+        font_size: ui_tokens::SMALL_FONT_SIZE,
+        text_color: secondary,
+        ..Default::default()
+    });
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        add_subview(container, value_label);
+    }
+
+    let slider = create_slider(
+        CGRect::new(
+            &CGPoint::new(x + 140.0, *y - 1.0),
+            &CGSize::new((width - 254.0).max(160.0), 20.0),
+        ),
+        spec.min,
+        spec.max,
+        spec.current,
+    );
+    let _: () = msg_send![slider, setContinuous: true];
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        button_set_action(slider, action_handler, spec.action);
+        add_subview(container, slider);
+    }
+
+    *y -= 24.0 + spec.gap;
+    value_label as usize
 }
 
 unsafe fn autosize_tab_document_view(document_view: Id, minimum_height: f64) -> f64 {
@@ -371,6 +617,7 @@ unsafe fn add_toggle_row(
         text_color: crate::ui_helpers::color_label(),
         ..Default::default()
     });
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         add_subview(container, title_label);
     }
@@ -385,6 +632,7 @@ unsafe fn add_toggle_row(
     if let Some(tag) = spec.tag {
         let _: () = msg_send![toggle, setTag: tag];
     }
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         button_set_action(toggle, action_handler, spec.action);
         add_subview(container, toggle);
@@ -404,6 +652,7 @@ unsafe fn add_toggle_row(
             text_color: secondary,
             ..Default::default()
         });
+        // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
         unsafe {
             add_subview(container, desc_label);
         }
@@ -413,82 +662,11 @@ unsafe fn add_toggle_row(
     toggle
 }
 
-fn voice_lab_value(spec: &VoiceLabFieldSpec) -> String {
-    std::env::var(spec.key).unwrap_or_else(|_| spec.default_value.to_string())
-}
-
-fn voice_lab_value_from_snapshot(
-    spec: &VoiceLabFieldSpec,
-    env_snapshot: &HashMap<String, String>,
-) -> String {
-    env_snapshot
-        .get(spec.key)
-        .cloned()
-        .unwrap_or_else(|| spec.default_value.to_string())
-}
-
-fn parse_ranged_f32(raw: &str, min: f32, max: f32) -> Option<f32> {
-    let parsed = raw.parse::<f32>().ok()?;
-    if !parsed.is_finite() || parsed < min || parsed > max {
-        return None;
-    }
-    Some(parsed)
-}
-
-fn parse_ranged_u64(raw: &str, min: u64, max: u64) -> Option<u64> {
-    let parsed = raw.parse::<u64>().ok()?;
-    if parsed < min || parsed > max {
-        return None;
-    }
-    Some(parsed)
-}
-
-fn parse_ranged_usize(raw: &str, min: usize, max: usize) -> Option<usize> {
-    let parsed = raw.parse::<usize>().ok()?;
-    if parsed < min || parsed > max {
-        return None;
-    }
-    Some(parsed)
-}
-
-fn validate_voice_lab_value(spec: &VoiceLabFieldSpec, raw_value: &str) -> Option<String> {
-    let trimmed = raw_value.trim();
-    if trimmed.is_empty() {
-        return if spec.default_value.is_empty() {
-            Some(String::new())
-        } else {
-            None
-        };
-    }
-
-    let valid = match spec.key {
-        "CODESCRIBE_BUFFER_DELAY_MS" => parse_ranged_u64(trimmed, 0, 60_000).is_some(),
-        "CODESCRIBE_TYPING_CPS" => parse_ranged_f32(trimmed, 5.0, 120.0).is_some(),
-        "CODESCRIBE_EMIT_WORDS_MAX" => parse_ranged_usize(trimmed, 1, 12).is_some(),
-        "CODESCRIBE_BUFFERED_INTERIM_SEC" => parse_ranged_f32(trimmed, 1.0, 30.0).is_some(),
-        "BACKEND_MAX_UPLOAD_MB" => parse_ranged_u64(trimmed, 1, 200).is_some(),
-        "WHISPER_MODEL" => true,
-        _ => true,
-    };
-
-    if valid {
-        Some(trimmed.to_string())
-    } else {
-        None
-    }
-}
-
-fn voice_lab_spec_from_tag(tag: isize) -> Option<&'static VoiceLabFieldSpec> {
-    if tag < 0 {
-        return None;
-    }
-    VOICE_LAB_FIELDS.get(tag as usize)
-}
-
 #[derive(Default)]
-struct BootstrapState {
+struct SettingsWindowState {
     window: Option<usize>,
     window_delegate: Option<usize>,
+    action_handler: Option<usize>,
     root_view: Option<usize>,
     step_labels: [Option<usize>; 3],
     tab_buttons: [Option<usize>; TAB_COUNT],
@@ -500,18 +678,24 @@ struct BootstrapState {
     keys_conflict_details_button: Option<usize>,
     hold_delay_value_label: Option<usize>,
     double_tap_value_label: Option<usize>,
+    preview_buffer_delay_value_label: Option<usize>,
+    preview_typing_cps_value_label: Option<usize>,
+    preview_emit_words_max_value_label: Option<usize>,
+    preview_interim_sec_value_label: Option<usize>,
+    preview_timing_summary_label: Option<usize>,
+    preview_timing_text_view: Option<usize>,
     config_cache: Option<Config>,
     // Onboarding additions
     permission_labels: [Option<usize>; 5],
     permission_action_buttons: [Option<usize>; 5],
     permission_requested: [bool; 5],
     permission_polling: bool,
-    quality_daemon_checkbox: Option<usize>,
+    qube_daemon_checkbox: Option<usize>,
     ultra_quality_checkbox: Option<usize>,
     quality_available_label: Option<usize>,
     quality_pending_label: Option<usize>,
     quality_last_check_label: Option<usize>,
-    quality_report_label: Option<usize>,
+    qube_report_label: Option<usize>,
     quality_open_report_button: Option<usize>,
     llm_endpoint_field: Option<usize>,
     llm_model_field: Option<usize>,
@@ -534,30 +718,37 @@ struct BootstrapState {
 }
 
 lazy_static! {
-    static ref BOOTSTRAP_STATE: Mutex<BootstrapState> = Mutex::new(BootstrapState::default());
+    static ref SETTINGS_WINDOW_STATE: Mutex<SettingsWindowState> =
+        Mutex::new(SettingsWindowState::default());
 }
 
-fn clear_bootstrap_ui_state(state: &mut BootstrapState) {
+fn clear_settings_ui_state(state: &mut SettingsWindowState) {
     state.step_labels = [None, None, None];
     state.tab_buttons = [None; TAB_COUNT];
     state.content_views = [None; TAB_COUNT];
-    state.active_tab = TAB_SETUP;
+    state.active_tab = TAB_TRANSCRIPTION;
     state.keys_mode_binding_labels = [None; 3];
     state.keys_recorder_hint_label = None;
     state.keys_conflict_label = None;
     state.keys_conflict_details_button = None;
     state.hold_delay_value_label = None;
     state.double_tap_value_label = None;
+    state.preview_buffer_delay_value_label = None;
+    state.preview_typing_cps_value_label = None;
+    state.preview_emit_words_max_value_label = None;
+    state.preview_interim_sec_value_label = None;
+    state.preview_timing_summary_label = None;
+    state.preview_timing_text_view = None;
     state.permission_labels = [None, None, None, None, None];
     state.permission_action_buttons = [None, None, None, None, None];
     state.permission_requested = [false; 5];
     state.permission_polling = false;
-    state.quality_daemon_checkbox = None;
+    state.qube_daemon_checkbox = None;
     state.ultra_quality_checkbox = None;
     state.quality_available_label = None;
     state.quality_pending_label = None;
     state.quality_last_check_label = None;
-    state.quality_report_label = None;
+    state.qube_report_label = None;
     state.quality_open_report_button = None;
     state.llm_endpoint_field = None;
     state.llm_model_field = None;
@@ -579,71 +770,25 @@ fn clear_bootstrap_ui_state(state: &mut BootstrapState) {
     state.diagnostics_status_label = None;
 }
 
-fn setup_done_path() -> PathBuf {
-    Config::config_dir().join("setup_done")
+static SHOW_SETTINGS_WINDOW_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+unsafe fn present_settings_window(window: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe { present_shared_shell_panel(window) };
 }
 
-fn onboarding_done_path() -> PathBuf {
-    Config::config_dir().join("onboarding_done")
-}
-
-fn bootstrap_done_path() -> PathBuf {
-    Config::config_dir().join("bootstrap_done")
-}
-
-fn migrate_legacy_setup_sentinel() {
-    let setup_done = setup_done_path();
-    if setup_done.exists() {
-        return;
-    }
-
-    if onboarding_done_path().exists() && bootstrap_done_path().exists() {
-        if let Some(parent) = setup_done.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(setup_done, "done");
-    }
-}
-
-pub fn should_show_setup() -> bool {
-    migrate_legacy_setup_sentinel();
-    !setup_done_path().exists()
-}
-
-pub fn should_show_bootstrap() -> bool {
-    should_show_setup()
-}
-
-fn mark_setup_done() {
-    let path = setup_done_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(path, "done");
-}
-
-pub fn schedule_bootstrap() {
-    if !should_show_setup() {
-        return;
-    }
-
-    thread::spawn(|| {
-        thread::sleep(Duration::from_millis(800));
-        show_settings_setup_tab();
-    });
-}
-
-static SHOW_OVERLAY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-pub fn show_bootstrap_overlay() {
+/// Show the persistent Settings window.
+pub fn show_settings_window() {
     // Fast path: if window already exists, just show it on main thread.
     {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(ptr) = state.window {
             drop(state);
             Queue::main().exec_async(move || unsafe {
                 let window = ptr as Id;
-                window_show(window);
+                present_settings_window(window);
                 refresh_permission_indicators();
                 start_permission_polling();
             });
@@ -652,33 +797,33 @@ pub fn show_bootstrap_overlay() {
     }
 
     // Slow path: need to create window — guard against concurrent thread spawns.
-    if SHOW_OVERLAY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+    if SHOW_SETTINGS_WINDOW_IN_FLIGHT.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(|| {
         let config = Config::load();
         Queue::main().exec_async(move || {
-            SHOW_OVERLAY_IN_FLIGHT.store(false, Ordering::SeqCst);
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            SHOW_SETTINGS_WINDOW_IN_FLIGHT.store(false, Ordering::SeqCst);
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.config_cache = Some(config);
             drop(state);
-            show_bootstrap_overlay_impl();
+            show_settings_window_impl();
         });
     });
 }
 
-/// Alias: Settings window (bootstrap is now a standalone Settings window).
-pub fn show_settings_window() {
-    show_bootstrap_overlay();
-}
-
-fn show_bootstrap_overlay_impl() {
+fn show_settings_window_impl() {
     // Keep Settings as a standalone window.
     // It should not depend on the voice chat overlay being available.
     // (This also avoids deadlocks when the overlay is mid-layout.)
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let reuse_window = {
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(window_ptr) = state.window {
                 let ns_window = objc_class("NSWindow");
                 let window = window_ptr as Id;
@@ -694,7 +839,7 @@ fn show_bootstrap_overlay_impl() {
             }
         }; // Release lock before AppKit call.
         if let Some(window) = reuse_window {
-            window_show(window);
+            present_settings_window(window);
             refresh_permission_indicators();
             start_permission_polling();
             return;
@@ -716,20 +861,22 @@ fn show_bootstrap_overlay_impl() {
             &CGSize::new(window_width, window_height),
         );
 
-        // Settings window should be fixed-size (no resize / fullscreen), to avoid AppKit
-        // fullscreen transition crashes with our custom content setup.
-        let window = create_floating_window(frame, "CodeScribe Settings", true, false);
-        // Keep Settings glass/opacity aligned with chat + transcription overlays.
-        let _: () = msg_send![window, setAlphaValue: SETTINGS_MAX_OPACITY];
-        let _: () = msg_send![window, setLevel: crate::ui_helpers::NS_NORMAL_WINDOW_LEVEL];
-        let _: () = msg_send![window, setTitle: ns_string("CodeScribe Settings")];
-        let supports_subtitle: bool = msg_send![window, respondsToSelector: sel!(setSubtitle:)];
-        if supports_subtitle {
-            let _: () = msg_send![
-                window,
-                setSubtitle: ns_string("Native macOS speech-to-text setup and runtime tuning")
-            ];
-        }
+        let fixed_size = CGSize::new(window_width, window_height);
+        let shell_policy = settings_shell_panel_policy(fixed_size);
+        let ns_window = objc_class("NSWindow");
+        let window: Id = msg_send![ns_window, alloc];
+        let window: Id = msg_send![
+            window,
+            initWithContentRect: frame
+            styleMask: shell_policy.style_mask
+            backing: shell_policy.backing_store
+            defer: false
+        ];
+
+        // Keep Settings on a conventional AppKit preferences shell. The content
+        // panes use semantic NSVisualEffect materials; the window itself stays native.
+        let _: () = msg_send![window, setTitle: ns_string("Settings")];
+        apply_shared_shell_panel_policy(window, &shell_policy);
         let toolbar_delegate_class = toolbar_delegate_class();
         let toolbar_delegate: Id = msg_send![toolbar_delegate_class, new];
         let ns_toolbar = objc_class("NSToolbar");
@@ -743,20 +890,14 @@ fn show_bootstrap_overlay_impl() {
         let supports_toolbar_style: bool =
             msg_send![window, respondsToSelector: sel!(setToolbarStyle:)];
         if supports_toolbar_style {
-            let _: () = msg_send![window, setToolbarStyle: 3_isize]; // NSWindowToolbarStyleUnified
+            let _: () = msg_send![window, setToolbarStyle: NSWindowToolbarStyle::Preference];
         }
         let supports_toolbar_button: bool =
             msg_send![window, respondsToSelector: sel!(setShowsToolbarButton:)];
         if supports_toolbar_button {
             let _: () = msg_send![window, setShowsToolbarButton: false];
         }
-        // Disallow fullscreen/zoom to avoid triggering AppKit fullscreen snapshots that can crash.
-        let _: () =
-            msg_send![window, setCollectionBehavior: NSWindowCollectionBehavior::FullScreenNone];
         // Hard lock the size (no resize handles, no zoom).
-        let fixed_size = CGSize::new(window_width, window_height);
-        let _: () = msg_send![window, setContentMinSize: fixed_size];
-        let _: () = msg_send![window, setContentMaxSize: fixed_size];
         let zoom_btn: Id = msg_send![window, standardWindowButton: NSWindowButton::ZoomButton];
         if !zoom_btn.is_null() {
             let _: () = msg_send![zoom_btn, setEnabled: false];
@@ -769,12 +910,14 @@ fn show_bootstrap_overlay_impl() {
         let _ = attach_settings_view(content_view, bounds);
 
         {
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.window = Some(window as usize);
             state.window_delegate = Some(window_delegate as usize);
         } // Release lock before AppKit call to avoid nested-runloop deadlock.
 
-        window_show(window);
+        present_settings_window(window);
         refresh_permission_indicators();
         start_permission_polling();
     }
@@ -785,9 +928,12 @@ fn show_bootstrap_overlay_impl() {
 /// # Safety
 /// `parent` must be a valid `NSView` instance owned by AppKit.
 unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRect) -> Option<Id> {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let (config, existing_root) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 state.config_cache.clone().unwrap_or_else(Config::load),
                 state.root_view,
@@ -817,13 +963,6 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
             root,
             setAutoresizingMask: 2_isize | 16_isize // NSViewWidthSizable | NSViewHeightSizable
         ];
-        let _: () = msg_send![root, setWantsLayer: true];
-        let root_layer: Id = msg_send![root, layer];
-        if !root_layer.is_null() {
-            let _: () = msg_send![root_layer, setCornerRadius: ui_tokens::SURFACE_RADIUS];
-            let _: () = msg_send![root_layer, setMasksToBounds: true];
-            let _: () = msg_send![root_layer, setBorderWidth: 0.0f64];
-        }
         add_subview(parent, root);
 
         let action_handler_class = action_handler_class();
@@ -836,9 +975,11 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
             &config,
         );
 
-        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.root_view = Some(root as usize);
-        state.window = None;
+        state.action_handler = Some(action_handler as usize);
         state.step_labels = built_state.step_labels;
         state.tab_buttons = built_state.tab_buttons;
         state.content_views = built_state.content_views;
@@ -847,17 +988,25 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         state.keys_recorder_hint_label = built_state.keys_recorder_hint_label;
         state.keys_conflict_label = built_state.keys_conflict_label;
         state.keys_conflict_details_button = built_state.keys_conflict_details_button;
+        state.hold_delay_value_label = built_state.hold_delay_value_label;
+        state.double_tap_value_label = built_state.double_tap_value_label;
+        state.preview_buffer_delay_value_label = built_state.preview_buffer_delay_value_label;
+        state.preview_typing_cps_value_label = built_state.preview_typing_cps_value_label;
+        state.preview_emit_words_max_value_label = built_state.preview_emit_words_max_value_label;
+        state.preview_interim_sec_value_label = built_state.preview_interim_sec_value_label;
+        state.preview_timing_summary_label = built_state.preview_timing_summary_label;
+        state.preview_timing_text_view = built_state.preview_timing_text_view;
         state.config_cache = built_state.config_cache;
         state.permission_labels = built_state.permission_labels;
         state.permission_action_buttons = built_state.permission_action_buttons;
         state.permission_requested = built_state.permission_requested;
         state.permission_polling = built_state.permission_polling;
-        state.quality_daemon_checkbox = built_state.quality_daemon_checkbox;
+        state.qube_daemon_checkbox = built_state.qube_daemon_checkbox;
         state.ultra_quality_checkbox = built_state.ultra_quality_checkbox;
         state.quality_available_label = built_state.quality_available_label;
         state.quality_pending_label = built_state.quality_pending_label;
         state.quality_last_check_label = built_state.quality_last_check_label;
-        state.quality_report_label = built_state.quality_report_label;
+        state.qube_report_label = built_state.qube_report_label;
         state.quality_open_report_button = built_state.quality_open_report_button;
         state.llm_endpoint_field = built_state.llm_endpoint_field;
         state.llm_model_field = built_state.llm_model_field;
@@ -884,6 +1033,7 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
         refresh_quality_dashboard();
         refresh_diagnostics_dashboard();
         refresh_prompt_editor_labels();
+        refresh_transcription_preview_panel();
         refresh_permission_indicators();
         start_permission_polling();
         Some(root)
@@ -891,14 +1041,8 @@ unsafe fn attach_settings_view(parent: Id, frame: core_graphics::geometry::CGRec
 }
 
 // ============================================================================
-// Permission checks / setup readiness
+// Permission checks / onboarding readiness
 // ============================================================================
-
-fn permissions_all_granted() -> bool {
-    PERMISSION_ORDER
-        .iter()
-        .all(|kind| permission_status(*kind) == PermissionStatus::Granted)
-}
 
 fn permission_color(granted: bool) -> Id {
     if granted {
@@ -942,7 +1086,9 @@ fn open_system_settings_security() {
 fn handle_permission_action(kind: PermissionKind) {
     let idx = kind.index();
     let already_requested = {
-        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let was_requested = state.permission_requested[idx];
         state.permission_requested[idx] = true;
         was_requested
@@ -957,6 +1103,7 @@ fn handle_permission_action(kind: PermissionKind) {
     if kind == PermissionKind::Microphone {
         thread::spawn(move || {
             let _ = request_permission(kind);
+            reconcile_permission_runtime_after_grant(kind);
             refresh_permission_indicators();
         });
         refresh_permission_indicators();
@@ -971,6 +1118,10 @@ fn handle_permission_action(kind: PermissionKind) {
         )
     {
         open_permission_settings(kind);
+    }
+
+    if granted {
+        reconcile_permission_runtime_after_grant(kind);
     }
 
     refresh_permission_indicators();
@@ -1013,6 +1164,7 @@ fn formatting_key_is_set() -> bool {
 
 unsafe fn update_key_status_indicator(indicator: Id, is_set: bool) {
     let _ =
+        // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
         unsafe { crate::ui_helpers::set_button_symbol(indicator, key_status_symbol_name(is_set)) };
     let supports_tint: bool = msg_send![indicator, respondsToSelector: sel!(setContentTintColor:)];
     if supports_tint {
@@ -1027,6 +1179,7 @@ unsafe fn create_key_status_indicator(frame: CGRect, is_set: bool) -> Id {
     let _: () = msg_send![indicator, setBordered: false];
     let _: () = msg_send![indicator, setEnabled: false];
     let _: () = msg_send![indicator, setTitle: ns_string("")];
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         update_key_status_indicator(indicator, is_set);
     }
@@ -1035,7 +1188,9 @@ unsafe fn create_key_status_indicator(frame: CGRect, is_set: bool) -> Id {
 
 fn update_keychain_status_labels() {
     let (llm_icon, llm_label, assist_icon, assist_label) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.llm_key_status_icon,
             state.llm_key_status_label,
@@ -1043,6 +1198,7 @@ fn update_keychain_status_labels() {
             state.assistive_key_status_label,
         )
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         if let Some(ptr) = llm_icon {
             let is_set = formatting_key_is_set();
@@ -1073,8 +1229,10 @@ fn clear_keychain_entry(account: &str, field_ptr: Option<usize>) {
     } else {
         info!("Deleted {account} from Keychain");
     }
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe { std::env::remove_var(account) };
     if let Some(ptr) = field_ptr {
+        // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
         unsafe { set_text_field_string(ptr as Id, "") };
     }
     update_keychain_status_labels();
@@ -1082,7 +1240,9 @@ fn clear_keychain_entry(account: &str, field_ptr: Option<usize>) {
 
 fn start_permission_polling() {
     let should_start = {
-        let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if state.permission_polling {
             false
         } else {
@@ -1099,7 +1259,9 @@ fn start_permission_polling() {
         loop {
             thread::sleep(Duration::from_secs(2));
             let keep_running = {
-                let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                let state = SETTINGS_WINDOW_STATE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 state.permission_polling
             };
             if !keep_running {
@@ -1113,7 +1275,9 @@ fn start_permission_polling() {
 pub(super) fn refresh_permission_indicators() {
     Queue::main().exec_async(move || unsafe {
         let (labels, action_buttons, requested) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 state.permission_labels,
                 state.permission_action_buttons,
@@ -1146,10 +1310,6 @@ pub(super) fn refresh_permission_indicators() {
             }
         }
 
-        if permissions_all_granted() {
-            mark_setup_done();
-        }
-
         refresh_diagnostics_dashboard();
     });
 }
@@ -1160,35 +1320,30 @@ unsafe fn build_settings_ui(
     settings_height: f64,
     action_handler: Id,
     config: &Config,
-) -> BootstrapState {
+) -> SettingsWindowState {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         use core_graphics::geometry::{CGPoint, CGRect, CGSize};
         let ns_view = objc_class("NSView");
-        let mut state = BootstrapState::default();
+        let mut state = SettingsWindowState::default();
 
         let settings_width = settings_width.max(SIDEBAR_WIDTH + 240.0);
         let settings_height = settings_height.max(280.0);
         let body_h = settings_height;
 
-        // Group adjacent glass panes so Tahoe can merge boundaries naturally.
-        let root_frame = CGRect::new(
-            &CGPoint::new(0.0, 0.0),
-            &CGSize::new(settings_width, settings_height),
-        );
-        let root_glass_group = create_glass_effect_container_view(root_frame, 0.0);
-        let _: () = msg_send![
-            root_glass_group,
-            setAutoresizingMask: 2_isize | 16_isize // Width | Height
-        ];
-        add_subview(root_view, root_glass_group);
-
         let root_content: Id = msg_send![ns_view, alloc];
-        let root_content: Id = msg_send![root_content, initWithFrame: root_frame];
+        let root_content: Id = msg_send![
+            root_content,
+            initWithFrame: CGRect::new(
+                &CGPoint::new(0.0, 0.0),
+                &CGSize::new(settings_width, settings_height),
+            )
+        ];
         let _: () = msg_send![
             root_content,
             setAutoresizingMask: 2_isize | 16_isize // Width | Height
         ];
-        let _: bool = set_glass_container_content_view(root_glass_group, root_content);
+        add_subview(root_view, root_content);
 
         // Left: Sidebar glass pane
         let sidebar_frame =
@@ -1196,11 +1351,9 @@ unsafe fn build_settings_ui(
         let sidebar_glass = create_glass_effect_view_with(
             sidebar_frame,
             NSVisualEffectMaterial::Sidebar,
-            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
-            objc2_app_kit::NSVisualEffectState::Active,
+            objc2_app_kit::NSVisualEffectBlendingMode::WithinWindow,
+            objc2_app_kit::NSVisualEffectState::FollowsWindowActiveState,
         );
-        let _: () = msg_send![sidebar_glass, setAlphaValue: SETTINGS_MAX_OPACITY];
-        intensify_settings_glass(sidebar_glass);
         let _: () = msg_send![
             sidebar_glass,
             setAutoresizingMask: 16_isize | 4_isize // Height | MaxXMargin
@@ -1232,12 +1385,10 @@ unsafe fn build_settings_ui(
         );
         let content_glass = create_glass_effect_view_with(
             content_bg_frame,
-            NSVisualEffectMaterial::FullScreenUI,
-            objc2_app_kit::NSVisualEffectBlendingMode::BehindWindow,
-            objc2_app_kit::NSVisualEffectState::Active,
+            NSVisualEffectMaterial::ContentBackground,
+            objc2_app_kit::NSVisualEffectBlendingMode::WithinWindow,
+            objc2_app_kit::NSVisualEffectState::FollowsWindowActiveState,
         );
-        let _: () = msg_send![content_glass, setAlphaValue: SETTINGS_MAX_OPACITY];
-        intensify_settings_glass(content_glass);
         let _: () = msg_send![
             content_glass,
             setAutoresizingMask: 2_isize | 16_isize // Width | Height
@@ -1289,28 +1440,23 @@ unsafe fn build_settings_ui(
         // Sidebar tab buttons (inside sidebar container, no redundant title label)
         let tab_start_y = body_h - titlebar_inset - SETTINGS_TAB_START_OFFSET;
         let tab_names = [
-            "Setup",
+            "Transcription",
             "Modes & Shortcuts",
             "AI & Prompts",
             "Audio & Input",
-            "Quality",
             "Diagnostics",
-            "Advanced",
         ];
         let tab_sels = [
-            sel!(onTabSetup:),
+            sel!(onTabTranscription:),
             sel!(onTabModesShortcuts:),
             sel!(onTabAiPrompts:),
             sel!(onTabAudioInput:),
-            sel!(onTabQuality:),
             sel!(onTabDiagnostics:),
-            sel!(onTabAdvanced:),
         ];
         let mut tab_buttons: [Option<usize>; TAB_COUNT] = [None; TAB_COUNT];
 
         let mut cursor_y = tab_start_y;
         for (i, (name, sel)) in tab_names.iter().zip(tab_sels.iter()).enumerate() {
-            // Group separators: after Setup (index 0) and after Audio & Input (index 3)
             if i == 1 || i == 4 {
                 cursor_y -= SIDEBAR_GROUP_GAP / 2.0;
                 let sep_line = create_label(LabelConfig {
@@ -1332,7 +1478,7 @@ unsafe fn build_settings_ui(
                 &CGSize::new(SIDEBAR_WIDTH - SIDEBAR_INSET * 2.0, TAB_BUTTON_HEIGHT),
             );
 
-            let tab_btn = create_sidebar_tab_button(btn_frame, name, i == TAB_SETUP);
+            let tab_btn = create_sidebar_tab_button(btn_frame, name, i == TAB_TRANSCRIPTION);
             button_set_action(tab_btn, action_handler, *sel);
             add_subview(sidebar_container, tab_btn);
             tab_buttons[i] = Some(tab_btn as usize);
@@ -1347,227 +1493,21 @@ unsafe fn build_settings_ui(
             &CGPoint::new(SETTINGS_CONTENT_INSET_X, SETTINGS_CONTENT_INSET_Y),
             &CGSize::new(
                 (content_area_w - SETTINGS_CONTENT_INSET_X * 2.0).max(240.0),
-                (content_area_h - SETTINGS_CONTENT_INSET_Y * 2.0).max(220.0),
+                (content_area_h - SETTINGS_CONTENT_INSET_Y - (titlebar_inset + 8.0)).max(220.0),
             ),
         );
 
-        // --- Setup tab (index 0) ---
-        let content_width = tab_content_frame.size.width;
         let tab_document_frame = CGRect::new(
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(tab_content_frame.size.width, tab_content_frame.size.height),
         );
-        let setup_gap = ui_tokens::DENSITY_COMFORTABLE;
-        let content_h = setup_content_height(tab_content_frame.size.height, setup_gap);
-        let setup_document_frame = CGRect::new(
-            &CGPoint::new(0.0, 0.0),
-            &CGSize::new(content_width, content_h),
-        );
 
-        let setup_view: Id = msg_send![ns_view, alloc];
-        let setup_view: Id = msg_send![setup_view, initWithFrame: setup_document_frame];
-        let setup_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, setup_view);
-        add_subview(content_container, setup_scroll);
-
-        let pad = ui_tokens::EDGE_PADDING;
-        let field_w = content_width - pad * 2.0;
-        let primary = crate::ui_helpers::color_label();
-        let secondary = crate::ui_helpers::color_secondary_label();
-        let mut y = content_h - SETUP_TOP_OFFSET;
-
-        // ── Permissions ───────────────────────────────────────────────
-        let mut perm_labels: [Option<usize>; 5] = [None; 5];
-        let mut perm_action_buttons: [Option<usize>; 5] = [None; 5];
-
-        let setup_title = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 24.0)),
-            text: "Setup".to_string(),
-            font_size: ui_tokens::TITLE_FONT_SIZE,
-            bold: true,
-            text_color: primary,
-            ..Default::default()
-        });
-        add_subview(setup_view, setup_title);
-        y -= 24.0 + setup_gap;
-
-        y = add_tafla_header_separator(setup_view, pad, y, field_w);
-        y -= setup_gap;
-
-        let setup_hint_top = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 16.0)),
-            text: "Checklist is optional. You can switch tabs any time.".to_string(),
-            font_size: ui_tokens::MICRO_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(setup_view, setup_hint_top);
-        y -= 16.0 + setup_gap;
-
-        let permissions_header = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 20.0)),
-            text: "Permissions Checklist".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: true,
-            text_color: primary,
-            ..Default::default()
-        });
-        add_subview(setup_view, permissions_header);
-        y -= 20.0 + setup_gap;
-
-        // Let action buttons expand with available width to reduce label clipping
-        // and keep localized copy readable across larger settings windows.
-        let permission_button_w = (field_w * 0.30).clamp(PERMISSION_BUTTON_WIDTH, 176.0);
-        let permission_label_w = (field_w - permission_button_w - 12.0).max(180.0);
-
-        for kind in PERMISSION_ORDER {
-            let idx = kind.index();
-            let status = permission_status(kind);
-            let granted = status == PermissionStatus::Granted;
-            let marker = if granted { "\u{2713}" } else { "\u{2715}" };
-            let text = format!("{marker} {}", permission_row_label(kind));
-
-            let label = create_label(LabelConfig {
-                frame: CGRect::new(
-                    &CGPoint::new(pad, y),
-                    &CGSize::new(permission_label_w, 20.0),
-                ),
-                text,
-                font_size: ui_tokens::BODY_FONT_SIZE,
-                bold: true,
-                text_color: permission_color(granted),
-                ..Default::default()
-            });
-            add_subview(setup_view, label);
-            perm_labels[idx] = Some(label as usize);
-
-            let initial_button_title =
-                permission_action_title(kind, status, false).unwrap_or("Grant");
-            let action_btn = button(
-                CGRect::new(
-                    &CGPoint::new(content_width - pad - permission_button_w, y - 2.0),
-                    &CGSize::new(permission_button_w, 24.0),
-                ),
-                initial_button_title,
-            );
-            let _: () = msg_send![action_btn, setTag: idx as isize];
-            button_set_action(action_btn, action_handler, sel!(onPermissionAction:));
-            if permission_action_title(kind, status, false).is_none() {
-                let _: () = msg_send![action_btn, setHidden: true];
-            }
-            add_subview(setup_view, action_btn);
-            perm_action_buttons[idx] = Some(action_btn as usize);
-            y -= PERMISSION_ROW_HEIGHT;
-        }
-
-        let permissions_divider = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 1.0)),
-            text: String::new(),
-            background_color: Some(ui_colors::surface_border()),
-            ..Default::default()
-        });
-        let _: () = msg_send![permissions_divider, setAlphaValue: 0.9f64];
-        add_subview(setup_view, permissions_divider);
-        y -= setup_gap;
-
-        let quick_start_header = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 20.0)),
-            text: "Quick Start".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: true,
-            text_color: primary,
-            ..Default::default()
-        });
-        add_subview(setup_view, quick_start_header);
-        y -= 20.0 + setup_gap;
-
-        // ── Quick-start steps ────────────────────────────────────────
-        // Make hotkey discovery explicit by showing the current Assistive binding
-        // (the most "agent-like" mode).
-        let settings_snapshot = UserSettings::load();
-        let assistive_binding = settings_snapshot.mode_binding_for(WorkMode::Assistive);
-        let step_defs: [(String, objc::runtime::Sel, &str); 3] = [
-            ("1) Test mic".to_string(), sel!(onTestMic:), "Test"),
-            (
-                "2) Show agent overlay".to_string(),
-                sel!(onShowOverlay:),
-                "Show",
-            ),
-            (
-                "3) Trigger Assistive".to_string(),
-                sel!(onHotkeyDone:),
-                "Done",
-            ),
-        ];
-        let mut step_status_labels: [Option<usize>; 3] = [None; 3];
-
-        for (i, (label_text, sel, btn_text)) in step_defs.iter().enumerate() {
-            let step_label = create_label(LabelConfig {
-                frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(240.0, 20.0)),
-                text: label_text.to_string(),
-                font_size: ui_tokens::BODY_FONT_SIZE,
-                bold: true,
-                text_color: primary,
-                ..Default::default()
-            });
-            add_subview(setup_view, step_label);
-
-            let status_lbl = create_label(LabelConfig {
-                frame: CGRect::new(&CGPoint::new(pad + 250.0, y), &CGSize::new(120.0, 20.0)),
-                text: "pending".to_string(),
-                font_size: ui_tokens::SMALL_FONT_SIZE,
-                text_color: secondary,
-                ..Default::default()
-            });
-            add_subview(setup_view, status_lbl);
-            step_status_labels[i] = Some(status_lbl as usize);
-
-            let step_btn = button(
-                CGRect::new(
-                    &CGPoint::new(content_width - 100.0, y - 2.0),
-                    &CGSize::new(80.0, 24.0),
-                ),
-                btn_text,
-            );
-            button_set_action(step_btn, action_handler, *sel);
-            add_subview(setup_view, step_btn);
-            y -= STEP_ROW_HEIGHT;
-        }
-        y -= SETUP_POST_STEPS_GAP;
-
-        let checklist_hint = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 16.0)),
-            text: format!(
-                "Assistive hotkey: {} (Modes & Shortcuts). Permissions update live as macOS grants access.",
-                assistive_binding.label()
-            ),
-            font_size: ui_tokens::MICRO_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(setup_view, checklist_hint);
-        y -= 16.0 + setup_gap;
-
-        let setup_divider = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 1.0)),
-            text: String::new(),
-            background_color: Some(ui_colors::surface_border()),
-            ..Default::default()
-        });
-        let _: () = msg_send![setup_divider, setAlphaValue: 0.9f64];
-        add_subview(setup_view, setup_divider);
-        y -= setup_gap;
-
-        let setup_hint = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(pad, (y - 6.0).max(SETUP_HINT_MIN_Y)),
-                &CGSize::new(field_w, 16.0),
-            ),
-            text: "Hotkeys live in Modes & Shortcuts. Agent provider + prompts live in AI & Prompts. Timing lives in Advanced.".to_string(),
-            font_size: ui_tokens::MICRO_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(setup_view, setup_hint);
+        // --- Transcription tab (index 0) ---
+        let transcription_view =
+            build_quality_tab(action_handler, tab_document_frame, config, &mut state);
+        let transcription_scroll =
+            wrap_tab_content_in_scroll_view(tab_content_frame, transcription_view);
+        add_subview(content_container, transcription_scroll);
 
         // --- Modes & Shortcuts tab (index 1) ---
         let keys_view =
@@ -1588,14 +1528,7 @@ unsafe fn build_settings_ui(
         let _: () = msg_send![audio_scroll, setHidden: true];
         add_subview(content_container, audio_scroll);
 
-        // --- Quality tab (index 4) ---
-        let quality_view =
-            build_quality_tab(action_handler, tab_document_frame, config, &mut state);
-        let quality_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, quality_view);
-        let _: () = msg_send![quality_scroll, setHidden: true];
-        add_subview(content_container, quality_scroll);
-
-        // --- Diagnostics tab (index 5) ---
+        // --- Diagnostics tab (index 4) ---
         let diagnostics_view =
             build_diagnostics_tab(action_handler, tab_document_frame, config, &mut state);
         let diagnostics_scroll =
@@ -1603,32 +1536,18 @@ unsafe fn build_settings_ui(
         let _: () = msg_send![diagnostics_scroll, setHidden: true];
         add_subview(content_container, diagnostics_scroll);
 
-        // --- Advanced tab (index 6) ---
-        let advanced_view =
-            build_advanced_tab(action_handler, tab_document_frame, config, &mut state);
-        let advanced_scroll = wrap_tab_content_in_scroll_view(tab_content_frame, advanced_view);
-        let _: () = msg_send![advanced_scroll, setHidden: true];
-        add_subview(content_container, advanced_scroll);
-
         // ====================================================================
         // Store state
         // ====================================================================
-        state.step_labels = step_status_labels;
         state.tab_buttons = tab_buttons;
         state.content_views = [
-            Some(setup_scroll as usize),
+            Some(transcription_scroll as usize),
             Some(keys_scroll as usize),
             Some(api_scroll as usize),
             Some(audio_scroll as usize),
-            Some(quality_scroll as usize),
             Some(diagnostics_scroll as usize),
-            Some(advanced_scroll as usize),
         ];
-        state.active_tab = TAB_SETUP;
-        state.permission_labels = perm_labels;
-        state.permission_action_buttons = perm_action_buttons;
-        state.permission_requested = [false; 5];
-        state.permission_polling = false;
+        state.active_tab = TAB_TRANSCRIPTION;
         state.config_cache = Some(config.clone());
 
         state
@@ -1641,6 +1560,7 @@ unsafe fn create_sidebar_tab_button(
     title: &str,
     active: bool,
 ) -> Id {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_button = objc_class("NSButton");
         let ns_font = objc_class("NSFont");
@@ -1660,13 +1580,11 @@ unsafe fn create_sidebar_tab_button(
 
         // Add SF Symbol icon based on title
         let symbol_name = match title {
-            "Setup" => "gearshape",
+            "Transcription" => "waveform",
             "Modes & Shortcuts" => "keyboard",
             "AI & Prompts" => "text.bubble",
-            "Audio & Input" => "waveform",
-            "Quality" => "checkmark.seal",
+            "Audio & Input" => "speaker.wave.2",
             "Diagnostics" => "stethoscope",
-            "Advanced" => "slider.horizontal.3",
             _ => "circle",
         };
         crate::ui_helpers::set_button_symbol(btn, symbol_name);
@@ -1713,7 +1631,9 @@ unsafe fn create_sidebar_tab_button(
 pub(super) fn switch_tab(index: usize) {
     Queue::main().exec_async(move || unsafe {
         let (content_views, tab_buttons) = {
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if index >= TAB_COUNT || state.active_tab == index {
                 return;
             }
@@ -1765,8 +1685,9 @@ pub(super) fn switch_tab(index: usize) {
             }
         }
 
-        if index == TAB_QUALITY {
+        if index == TAB_TRANSCRIPTION {
             refresh_quality_dashboard();
+            refresh_transcription_preview_panel();
         } else if index == TAB_DIAGNOSTICS {
             refresh_diagnostics_dashboard();
         } else if index == TAB_AI_PROMPTS {
@@ -1779,7 +1700,7 @@ pub(super) fn handle_test_mic() {
     update_step_status(STEP_TEST_MIC, "recording\u{2026}");
 
     if let Err(e) = send_ipc(IpcCommand::StartRecording { assistive: false }) {
-        warn!("Bootstrap test mic failed to start: {}", e);
+        warn!("Settings test mic failed to start: {}", e);
         update_step_status(STEP_TEST_MIC, "failed");
         return;
     }
@@ -1792,9 +1713,9 @@ pub(super) fn handle_test_mic() {
 }
 
 pub(super) fn handle_show_overlay() {
-    crate::show_voice_chat_overlay();
-    crate::show_agent_tab();
-    crate::voice_chat_ui::update_voice_chat_status("Listening...");
+    crate::ui::voice_chat::show_voice_chat_overlay();
+    crate::ui::voice_chat::show_agent_tab();
+    crate::ui::voice_chat::update_voice_chat_status("Listening...");
     update_step_status(STEP_SHOW_OVERLAY, "done");
 }
 
@@ -1802,29 +1723,46 @@ pub(super) fn handle_hotkey_done() {
     update_step_status(STEP_PRESS_HOTKEY, "done");
 }
 
-pub(super) fn handle_bootstrap_window_closed() {
-    let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.window = None;
-    state.window_delegate = None;
-    state.root_view = None;
-    clear_bootstrap_ui_state(&mut state);
-    state.config_cache = None;
+pub(super) fn handle_settings_window_closed() {
+    let (delegate_ptr, handler_ptr, window_ptr) = {
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let delegate_ptr = state.window_delegate.take();
+        let handler_ptr = state.action_handler.take();
+        let window_ptr = state.window.take();
+        state.root_view = None;
+        clear_settings_ui_state(&mut state);
+        state.config_cache = None;
+        (delegate_ptr, handler_ptr, window_ptr)
+    };
+
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        if let Some(ptr) = delegate_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = handler_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = window_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+    }
 }
 
-pub fn hide_bootstrap_overlay() {
+pub fn hide_settings_surface() {
     Queue::main().exec_async(|| unsafe {
         let (window_ptr, root_ptr) = {
-            let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.permission_polling = false;
-            let window_ptr = state.window.take();
-            if window_ptr.is_some() {
-                state.window_delegate = None;
-                state.root_view = None;
-                clear_bootstrap_ui_state(&mut state);
-                (window_ptr, None)
-            } else {
-                (None, state.root_view)
-            }
+            // Do NOT take ownership of window/delegate/action_handler here.
+            // The `windowWillClose:` notification fires `handle_settings_window_closed`,
+            // which drains and releases all three. Releasing twice would crash.
+            // For the embedded (root-only, no window) path, the parent owns lifecycle.
+            (state.window, state.root_view)
         };
 
         if let Some(window_ptr) = window_ptr {
@@ -1840,41 +1778,43 @@ pub fn hide_bootstrap_overlay() {
 
 /// Alias: Settings window close.
 pub fn hide_settings_window() {
-    hide_bootstrap_overlay();
-}
-
-/// Alias: schedule Settings onboarding window.
-pub fn schedule_settings_window() {
-    schedule_bootstrap();
-}
-
-/// Show Settings and force-focus the Setup tab.
-pub fn show_settings_setup_tab() {
-    show_bootstrap_overlay();
-    switch_tab(TAB_SETUP);
-}
-
-/// Alias: should show Settings onboarding window.
-pub fn should_show_settings_onboarding() -> bool {
-    should_show_setup()
+    hide_settings_surface();
 }
 
 /// Reset embedded Settings view state when the overlay is destroyed.
-pub fn reset_embedded_bootstrap_state() {
-    let mut state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if state.window.is_some() {
-        return;
+pub fn reset_embedded_settings_state() {
+    let (delegate_ptr, handler_ptr) = {
+        let mut state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if state.window.is_some() {
+            return;
+        }
+        let delegate_ptr = state.window_delegate.take();
+        let handler_ptr = state.action_handler.take();
+        state.root_view = None;
+        state.config_cache = None;
+        clear_settings_ui_state(&mut state);
+        (delegate_ptr, handler_ptr)
+    };
+
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        if let Some(ptr) = delegate_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = handler_ptr {
+            let _: () = msg_send![ptr as Id, release];
+        }
     }
-    state.root_view = None;
-    state.window_delegate = None;
-    state.config_cache = None;
-    clear_bootstrap_ui_state(&mut state);
 }
 
 fn update_step_status(index: usize, text: &str) {
     let text = text.to_string();
     Queue::main().exec_async(move || unsafe {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(label) = state.step_labels.get(index).and_then(|v| *v) {
             set_text_field_string(label as Id, &text);
         }
@@ -1908,12 +1848,15 @@ fn mode_label_slot(mode: WorkMode) -> usize {
 
 fn set_mode_recorder_hint(text: &str, is_error: bool) {
     let hint_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.keys_recorder_hint_label
     };
     let Some(hint_ptr) = hint_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let hint_label = hint_ptr as Id;
         set_text_field_string(hint_label, text);
@@ -1928,7 +1871,9 @@ fn set_mode_recorder_hint(text: &str, is_error: bool) {
 
 fn refresh_mode_binding_labels() {
     let settings = UserSettings::load();
-    let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = SETTINGS_WINDOW_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     for mode in [
         WorkMode::Dictation,
         WorkMode::Formatting,
@@ -1936,6 +1881,7 @@ fn refresh_mode_binding_labels() {
     ] {
         if let Some(label_ptr) = state.keys_mode_binding_labels[mode_label_slot(mode)] {
             let text = settings.mode_binding_for(mode).label().to_string();
+            // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
             unsafe {
                 set_text_field_string(label_ptr as Id, &text);
             }
@@ -2115,6 +2061,7 @@ fn handle_mode_binding_recorder_event(event: Id) -> Id {
         return event;
     };
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let event_type: u64 = msg_send![event, type];
         let keycode: u16 = msg_send![event, keyCode];
@@ -2152,6 +2099,7 @@ fn ensure_mode_binding_recorder_monitor() -> bool {
         return true;
     }
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_event = objc_class("NSEvent");
         let mask: u64 = (1_u64 << 10) | (1_u64 << 12); // keyDown + flagsChanged
@@ -2202,10 +2150,7 @@ fn hotkey_conflicts(_config: &Config) -> Vec<shortcut_registry::HotkeyConflict> 
 
 fn hotkey_conflict_status_from(conflicts: &[shortcut_registry::HotkeyConflict]) -> (String, bool) {
     if conflicts.is_empty() {
-        return (
-            "Mode shortcuts: no conflicts in macOS Keyboard Shortcuts registry.".to_string(),
-            false,
-        );
+        return ("Mode shortcuts: clear.".to_string(), false);
     }
 
     let first = &conflicts[0];
@@ -2218,7 +2163,7 @@ fn hotkey_conflict_status_from(conflicts: &[shortcut_registry::HotkeyConflict]) 
 
     (
         format!(
-            "Conflict: {} -> {}{}",
+            "Review shortcut: {} -> {}{}",
             first.gesture.label(),
             first.message,
             suffix
@@ -2238,7 +2183,7 @@ fn hotkey_conflict_details_text(conflicts: &[shortcut_registry::HotkeyConflict])
     }
 
     let mut lines = vec![
-        "CodeScribe detected conflicts with macOS/global shortcuts:".to_string(),
+        "CodeScribe detected shortcuts that may overlap current mode bindings:".to_string(),
         String::new(),
     ];
     for (index, conflict) in conflicts.iter().enumerate() {
@@ -2250,7 +2195,7 @@ fn hotkey_conflict_details_text(conflicts: &[shortcut_registry::HotkeyConflict])
         ));
     }
     lines.push(String::new());
-    lines.push("Recommendation: change the conflicting mode binding or disable that mode shortcut in Settings.".to_string());
+    lines.push("Recommendation: change that mode binding only if the gesture does not behave correctly at runtime.".to_string());
     lines.join("\n")
 }
 
@@ -2258,6 +2203,7 @@ fn set_hotkey_conflict_details_button_enabled(button_ptr: Option<usize>, enabled
     let Some(button_ptr) = button_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let button = button_ptr as Id;
         let _: () = msg_send![button, setEnabled: enabled];
@@ -2267,7 +2213,9 @@ fn set_hotkey_conflict_details_button_enabled(button_ptr: Option<usize>, enabled
 fn refresh_hotkey_conflict_indicator() {
     let config = Config::load();
     let (label_ptr, button_ptr) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.keys_conflict_label,
             state.keys_conflict_details_button,
@@ -2288,6 +2236,7 @@ fn apply_hotkey_conflict_indicator(
     let Some(label_ptr) = label_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let label = label_ptr as Id;
         set_text_field_string(label, &text);
@@ -2310,10 +2259,13 @@ fn show_hotkey_conflicts_sheet() {
     };
     let details = hotkey_conflict_details_text(&conflicts);
     let window_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.window
     };
 
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_alert = objc_class("NSAlert");
         let alert: Id = msg_send![ns_alert, new];
@@ -2354,12 +2306,15 @@ fn prompt_display_name(prompt_type: &str) -> &'static str {
 
 fn selected_prompt_type() -> &'static str {
     let popup_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.prompt_type_popup
     };
     let Some(popup_ptr) = popup_ptr else {
         return "formatting";
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let popup = popup_ptr as Id;
         let idx: isize = msg_send![popup, indexOfSelectedItem];
@@ -2449,12 +2404,15 @@ fn reset_prompt_content(prompt_type: &str) -> Result<(), String> {
 
 fn set_prompt_editor_content(text: &str) {
     let text_view_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.prompt_editor_text_view
     };
     let Some(text_view_ptr) = text_view_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         set_text_view_string(text_view_ptr as Id, text);
     }
@@ -2462,23 +2420,29 @@ fn set_prompt_editor_content(text: &str) {
 
 fn read_prompt_editor_content() -> String {
     let text_view_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.prompt_editor_text_view
     };
     let Some(text_view_ptr) = text_view_ptr else {
         return String::new();
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe { get_text_view_string(text_view_ptr as Id) }
 }
 
 fn set_prompt_editor_status(text: &str, is_error: bool) {
     let status_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.prompt_status_label
     };
     let Some(status_ptr) = status_ptr else {
         return;
     };
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let label = status_ptr as Id;
         set_text_field_string(label, text);
@@ -2491,10 +2455,70 @@ fn set_prompt_editor_status(text: &str, is_error: bool) {
     }
 }
 
+fn refresh_transcription_preview_panel() {
+    let model = current_preview_timing_model();
+    let preview_text = preview_timing_report_text(model);
+    let summary_text = preview_timing_summary_text(model);
+    let (
+        buffer_delay_label,
+        typing_cps_label,
+        emit_words_label,
+        interim_label,
+        summary_label,
+        preview_text_view,
+    ) = {
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        (
+            state.preview_buffer_delay_value_label,
+            state.preview_typing_cps_value_label,
+            state.preview_emit_words_max_value_label,
+            state.preview_interim_sec_value_label,
+            state.preview_timing_summary_label,
+            state.preview_timing_text_view,
+        )
+    };
+
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        if let Some(ptr) = buffer_delay_label {
+            set_text_field_string(ptr as Id, &format!("{} ms", model.buffer_delay_ms));
+        }
+        if let Some(ptr) = typing_cps_label {
+            set_text_field_string(ptr as Id, &format!("{:.1} cps", model.typing_cps));
+        }
+        if let Some(ptr) = emit_words_label {
+            set_text_field_string(ptr as Id, &format!("{} words", model.emit_words_max));
+        }
+        if let Some(ptr) = interim_label {
+            let label = if (model.effective_interim_sec - model.requested_interim_sec).abs()
+                > f32::EPSILON
+            {
+                format!(
+                    "{:.1} s -> {:.1} s effective",
+                    model.requested_interim_sec, model.effective_interim_sec
+                )
+            } else {
+                format!("{:.1} s", model.effective_interim_sec)
+            };
+            set_text_field_string(ptr as Id, &label);
+        }
+        if let Some(ptr) = summary_label {
+            set_text_field_string(ptr as Id, &summary_text);
+        }
+        if let Some(ptr) = preview_text_view {
+            set_text_view_string(ptr as Id, &preview_text);
+        }
+    }
+}
+
 fn refresh_prompt_editor_labels() {
     Queue::main().exec_async(move || unsafe {
         let (path_ptr, status_ptr) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (state.prompt_path_label, state.prompt_status_label)
         };
         let prompt_type = selected_prompt_type();
@@ -2515,34 +2539,53 @@ fn refresh_prompt_editor_labels() {
     });
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PromptEditorLayout {
+    editor_height: f64,
+    editor_y: f64,
+    status_y: f64,
+}
+
+fn compute_prompt_editor_layout(y: f64, gap: f64) -> PromptEditorLayout {
+    // Keep status text and bottom breathing room below the editor so the editor
+    // never climbs into API/model/key controls on smaller vertical space.
+    let reserved_below_editor = PROMPT_EDITOR_STATUS_HEIGHT + gap + PROMPT_EDITOR_BOTTOM_PADDING;
+    let available_editor_height = (y - reserved_below_editor).max(0.0);
+    let editor_height = available_editor_height.min(PROMPT_EDITOR_DESIRED_HEIGHT);
+    let editor_y = (y - editor_height).max(0.0);
+    let status_y = (editor_y - gap).max(0.0);
+
+    PromptEditorLayout {
+        editor_height,
+        editor_y,
+        status_y,
+    }
+}
+
 fn refresh_quality_dashboard() {
     Queue::main().exec_async(move || unsafe {
         let (available_label, pending_label, last_check_label, report_label, open_report_button) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 state.quality_available_label,
                 state.quality_pending_label,
                 state.quality_last_check_label,
-                state.quality_report_label,
+                state.qube_report_label,
                 state.quality_open_report_button,
             )
         };
 
-        let daemon_state = crate::quality_loop::read_daemon_state();
+        let snapshot = crate::qube_lifecycle::dashboard_snapshot();
+        let daemon_state = &snapshot.daemon_state;
 
         if let Some(ptr) = available_label {
             let label = ptr as Id;
-            set_text_field_string(
-                label,
-                if daemon_state.available {
-                    "Available"
-                } else {
-                    "Unavailable"
-                },
-            );
+            set_text_field_string(label, snapshot.availability_label());
             let _: () = msg_send![
                 label,
-                setTextColor: if daemon_state.available {
+                setTextColor: if snapshot.available {
                     ui_colors::status_granted()
                 } else {
                     ui_colors::status_warning()
@@ -2571,11 +2614,11 @@ fn refresh_quality_dashboard() {
         }
 
         if let Some(ptr) = report_label {
-            set_text_field_string(ptr as Id, &quality_report_text(&daemon_state));
+            set_text_field_string(ptr as Id, &qube_report_text(daemon_state));
         }
 
         if let Some(ptr) = open_report_button {
-            let _: () = msg_send![ptr as Id, setEnabled: quality_report_exists(&daemon_state)];
+            let _: () = msg_send![ptr as Id, setEnabled: qube_report_exists(daemon_state)];
         }
     });
 }
@@ -2583,7 +2626,9 @@ fn refresh_quality_dashboard() {
 fn refresh_diagnostics_dashboard() {
     Queue::main().exec_async(move || unsafe {
         let (permission_labels, conflict_label, conflict_button, status_label) = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             (
                 state.diagnostics_permission_labels,
                 state.diagnostics_conflict_label,
@@ -2622,9 +2667,10 @@ unsafe fn build_modes_shortcuts_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     config: &Config,
-    state: &mut BootstrapState,
+    state: &mut SettingsWindowState,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
 
@@ -2666,7 +2712,7 @@ unsafe fn build_modes_shortcuts_tab(
 
         let usage_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 28.0)),
-            text: "Usage: hold bindings record while held (release to send). Double-tap bindings are hands-free: pause to auto-send an utterance, double-tap again to stop.".to_string(),
+            text: "Hold records while pressed. Double-tap records hands-free; repeat the gesture to stop.".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -2785,6 +2831,18 @@ unsafe fn build_modes_shortcuts_tab(
         add_subview(container, recorder_hint);
         y -= 16.0 + gap;
 
+        if let Some(fn_note) = shortcut_registry::fn_tap_intercept_note(&settings_snapshot) {
+            let fn_note_label = create_label(LabelConfig {
+                frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 28.0)),
+                text: fn_note.to_string(),
+                font_size: ui_tokens::MICRO_FONT_SIZE,
+                text_color: secondary,
+                ..Default::default()
+            });
+            add_subview(container, fn_note_label);
+            y -= 28.0 + gap;
+        }
+
         let (conflict_text, has_conflict) = hotkey_conflict_status(config);
         let conflict_label = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w - 130.0, 28.0)),
@@ -2828,12 +2886,111 @@ unsafe fn build_modes_shortcuts_tab(
 
         let api_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Capture timing controls are available in Advanced.".to_string(),
+            text: "Tighten the shortcut feel here. These controls affect trigger responsiveness, not transcript quality."
+                .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
         });
         add_subview(container, api_hint);
+        y -= 16.0 + gap;
+
+        let timing_divider = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 1.0)),
+            text: String::new(),
+            background_color: Some(ui_colors::surface_border()),
+            ..Default::default()
+        });
+        let _: () = msg_send![timing_divider, setAlphaValue: 0.9f64];
+        add_subview(container, timing_divider);
+        y -= ui_tokens::SECTION_GAP;
+
+        let timing_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Trigger Timing".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, timing_header);
+        y -= 18.0 + gap;
+
+        let delay_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
+            text: "Hold delay (ms):".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, delay_label);
+
+        let delay_ms = config.hold_start_delay_ms as f64;
+        let value_w = 60.0;
+        let value_gap = 8.0;
+        let slider_w = (content_w - 124.0 - value_gap - value_w).max(120.0);
+        let delay_slider = create_slider(
+            CGRect::new(&CGPoint::new(pad + 124.0, y), &CGSize::new(slider_w, 20.0)),
+            200.0,
+            1500.0,
+            delay_ms,
+        );
+        button_set_action(delay_slider, action_handler, sel!(onDelayChanged:));
+        add_subview(container, delay_slider);
+
+        let delay_value = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(pad + 124.0 + slider_w + value_gap, y - 1.0),
+                &CGSize::new(value_w, 20.0),
+            ),
+            text: format!("{} ms", delay_ms.round() as u64),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, delay_value);
+        state.hold_delay_value_label = Some(delay_value as usize);
+        y -= 20.0 + gap;
+
+        let double_tap_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(160.0, 20.0)),
+            text: "Double-tap interval (ms):".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, double_tap_label);
+
+        let double_tap_ms = config.double_tap_interval_ms as f64;
+        let double_tap_slider_w = (content_w - 164.0 - value_gap - value_w).max(120.0);
+        let double_tap_slider = create_slider(
+            CGRect::new(
+                &CGPoint::new(pad + 164.0, y),
+                &CGSize::new(double_tap_slider_w, 20.0),
+            ),
+            100.0,
+            450.0,
+            double_tap_ms,
+        );
+        button_set_action(
+            double_tap_slider,
+            action_handler,
+            sel!(onDoubleTapIntervalChanged:),
+        );
+        add_subview(container, double_tap_slider);
+
+        let double_tap_value = create_label(LabelConfig {
+            frame: CGRect::new(
+                &CGPoint::new(pad + 164.0 + double_tap_slider_w + value_gap, y - 1.0),
+                &CGSize::new(value_w, 20.0),
+            ),
+            text: format!("{} ms", double_tap_ms.round() as u64),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, double_tap_value);
+        state.double_tap_value_label = Some(double_tap_value as usize);
 
         state.keys_mode_binding_labels = mode_binding_labels;
         state.keys_recorder_hint_label = Some(recorder_hint as usize);
@@ -2852,9 +3009,10 @@ unsafe fn build_ai_prompts_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     _config: &Config,
-    state: &mut BootstrapState,
+    state: &mut SettingsWindowState,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
         let ns_popup = objc_class("NSPopUpButton");
@@ -3219,8 +3377,9 @@ unsafe fn build_ai_prompts_tab(
         state.prompt_path_label = Some(path_label as usize);
         y -= 16.0 + gap;
 
-        let editor_height = 220.0;
-        let editor_y = (y - editor_height).max(28.0);
+        let prompt_editor_layout = compute_prompt_editor_layout(y, gap);
+        let editor_height = prompt_editor_layout.editor_height;
+        let editor_y = prompt_editor_layout.editor_y;
         let (editor_scroll, editor_text_view) = create_scrollable_text_view(
             CGRect::new(
                 &CGPoint::new(pad, editor_y),
@@ -3243,9 +3402,11 @@ unsafe fn build_ai_prompts_tab(
         });
         set_text_view_string(editor_text_view, &initial_prompt);
 
-        y = editor_y - gap;
         let prompt_status = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            frame: CGRect::new(
+                &CGPoint::new(pad, prompt_editor_layout.status_y),
+                &CGSize::new(content_w, PROMPT_EDITOR_STATUS_HEIGHT),
+            ),
             text: "Formatting prompt loaded.".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
@@ -3268,6 +3429,7 @@ unsafe fn build_audio_input_tab(
     config: &Config,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
         let ns_popup = objc_class("NSPopUpButton");
@@ -3299,7 +3461,7 @@ unsafe fn build_audio_input_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Speech capture, formatting, and interaction behavior.".to_string(),
+            text: "Speech capture defaults, recorder feedback, and overlay behavior.".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -3332,55 +3494,6 @@ unsafe fn build_audio_input_tab(
         let _: () = msg_send![lang_popup, selectItemAtIndex: lang_idx];
         button_set_action(lang_popup, action_handler, sel!(onLanguageChanged:));
         add_subview(container, lang_popup);
-        y -= 24.0 + gap;
-
-        // AI Formatting toggle
-        let _fmt_check = add_toggle_row(
-            container,
-            action_handler,
-            pad,
-            &mut y,
-            content_w,
-            secondary,
-            ToggleRowSpec {
-                title: "AI Formatting",
-                checked: config.ai_formatting_enabled,
-                action: sel!(onFormattingToggled:),
-                description: Some("Use LLM to clean up transcriptions"),
-                tag: None,
-                gap,
-            },
-        );
-
-        // Formatting level dropdown
-        let fmt_level_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 18.0)),
-            text: "Formatting level:".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, fmt_level_label);
-
-        let fmt_popup: Id = msg_send![ns_popup, alloc];
-        let fmt_popup: Id = msg_send![fmt_popup, initWithFrame:
-            CGRect::new(&CGPoint::new(pad + 124.0, y - 2.0), &CGSize::new(240.0, 24.0))
-            pullsDown: false
-        ];
-        let _: () = msg_send![fmt_popup, addItemWithTitle: ns_string("Raw")];
-        let _: () = msg_send![fmt_popup, addItemWithTitle: ns_string("Medium")];
-        let _: () = msg_send![fmt_popup, addItemWithTitle: ns_string("Creative")];
-        // Pre-select based on current setting
-        let current_level = std::env::var("FORMATTING_LEVEL").unwrap_or_default();
-        let sel_idx: isize = match current_level.as_str() {
-            "raw" => 0,
-            "medium" => 1,
-            "creative" => 2,
-            _ => 1, // default to Medium
-        };
-        let _: () = msg_send![fmt_popup, selectItemAtIndex: sel_idx];
-        button_set_action(fmt_popup, action_handler, sel!(onFormattingLevelChanged:));
-        add_subview(container, fmt_popup);
         y -= 24.0 + gap;
 
         // Beep on start toggle
@@ -3417,6 +3530,40 @@ unsafe fn build_audio_input_tab(
                 gap,
             },
         );
+        let _overlay_check = add_toggle_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            content_w,
+            secondary,
+            ToggleRowSpec {
+                title: "Transcription overlay",
+                checked: config.transcription_overlay_enabled,
+                action: sel!(onTranscriptionOverlayToggled:),
+                description: Some(
+                    "On: live floating preview with fast partials. Off: no overlay and buffered partials for lower local load.",
+                ),
+                tag: None,
+                gap,
+            },
+        );
+        let _dock_check = add_toggle_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            content_w,
+            secondary,
+            ToggleRowSpec {
+                title: "Show Dock icon",
+                checked: config.show_dock_icon,
+                action: sel!(onShowDockIconToggled:),
+                description: Some("Keep CodeScribe in the Dock after windows close."),
+                tag: None,
+                gap,
+            },
+        );
         // Sound volume slider
         let vol_label = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
@@ -3443,239 +3590,8 @@ unsafe fn build_audio_input_tab(
     } // unsafe
 }
 
-unsafe fn build_advanced_tab(
-    action_handler: Id,
-    frame: core_graphics::geometry::CGRect,
-    config: &Config,
-    state: &mut BootstrapState,
-) -> Id {
-    use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-    unsafe {
-        let ns_view = objc_class("NSView");
-        let env_snapshot: HashMap<String, String> = std::env::vars().collect();
-
-        let container: Id = msg_send![ns_view, alloc];
-        let container: Id = msg_send![container, initWithFrame: frame];
-
-        let pad = ui_tokens::EDGE_PADDING;
-        let content_w = frame.size.width - pad * 2.0;
-        let gap = ui_tokens::DENSITY_COMFORTABLE;
-        let mut y = frame.size.height - (24.0 + gap);
-        let primary = crate::ui_helpers::color_label();
-        let secondary = crate::ui_helpers::color_secondary_label();
-
-        let title = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 24.0)),
-            text: "Advanced".to_string(),
-            font_size: ui_tokens::TITLE_FONT_SIZE,
-            bold: true,
-            text_color: primary,
-            ..Default::default()
-        });
-        add_subview(container, title);
-        y -= 24.0 + gap;
-
-        y = add_tafla_header_separator(container, pad, y, content_w);
-        y -= gap;
-
-        let subtitle = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Low-level tuning for shortcut timing and transcription pipeline experiments."
-                .to_string(),
-            font_size: ui_tokens::MICRO_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, subtitle);
-        y -= 16.0 + gap;
-
-        let capture_header = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
-            text: "Capture Timing".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: true,
-            text_color: primary,
-            ..Default::default()
-        });
-        add_subview(container, capture_header);
-        y -= 18.0 + gap;
-
-        let delay_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 20.0)),
-            text: "Hold delay (ms):".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, delay_label);
-
-        let delay_ms = config.hold_start_delay_ms as f64;
-        let value_w = 60.0;
-        let value_gap = 8.0;
-        let slider_w = (content_w - 124.0 - value_gap - value_w).max(120.0);
-        let delay_slider = create_slider(
-            CGRect::new(&CGPoint::new(pad + 124.0, y), &CGSize::new(slider_w, 20.0)),
-            200.0,
-            1500.0,
-            delay_ms,
-        );
-        button_set_action(delay_slider, action_handler, sel!(onDelayChanged:));
-        add_subview(container, delay_slider);
-
-        let delay_value = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(pad + 124.0 + slider_w + value_gap, y - 1.0),
-                &CGSize::new(value_w, 20.0),
-            ),
-            text: format!("{} ms", delay_ms.round() as u64),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, delay_value);
-        state.hold_delay_value_label = Some(delay_value as usize);
-        y -= 20.0 + gap;
-
-        let double_tap_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(160.0, 20.0)),
-            text: "Double-tap interval (ms):".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, double_tap_label);
-
-        let double_tap_ms = config.double_tap_interval_ms as f64;
-        let double_tap_slider_w = (content_w - 164.0 - value_gap - value_w).max(120.0);
-        let double_tap_slider = create_slider(
-            CGRect::new(
-                &CGPoint::new(pad + 164.0, y),
-                &CGSize::new(double_tap_slider_w, 20.0),
-            ),
-            100.0,
-            450.0,
-            double_tap_ms,
-        );
-        button_set_action(
-            double_tap_slider,
-            action_handler,
-            sel!(onDoubleTapIntervalChanged:),
-        );
-        add_subview(container, double_tap_slider);
-
-        let double_tap_value = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(pad + 164.0 + double_tap_slider_w + value_gap, y - 1.0),
-                &CGSize::new(value_w, 20.0),
-            ),
-            text: format!("{} ms", double_tap_ms.round() as u64),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, double_tap_value);
-        state.double_tap_value_label = Some(double_tap_value as usize);
-        y -= 20.0 + gap;
-
-        let advanced_divider = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 1.0)),
-            text: String::new(),
-            background_color: Some(ui_colors::surface_border()),
-            ..Default::default()
-        });
-        let _: () = msg_send![advanced_divider, setAlphaValue: 0.9f64];
-        add_subview(container, advanced_divider);
-        y -= ui_tokens::SECTION_GAP;
-
-        let voice_lab_header = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
-            text: "Voice Lab Overrides".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: true,
-            text_color: primary,
-            ..Default::default()
-        });
-        add_subview(container, voice_lab_header);
-        y -= 18.0 + gap;
-
-        let apply_hint = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 14.0)),
-            text: "Apply: press Enter or click outside the field.".to_string(),
-            font_size: 10.0,
-            text_color: secondary,
-            ..Default::default()
-        });
-        add_subview(container, apply_hint);
-        y -= 14.0 + gap;
-
-        for (idx, spec) in VOICE_LAB_FIELDS.iter().enumerate() {
-            match spec.kind {
-                VoiceLabFieldKind::Bool => {
-                    let checked =
-                        parse_env_bool(&voice_lab_value_from_snapshot(spec, &env_snapshot));
-                    let title = format!("{} ({})", spec.label, spec.key);
-                    let _check = add_toggle_row(
-                        container,
-                        action_handler,
-                        pad,
-                        &mut y,
-                        content_w,
-                        secondary,
-                        ToggleRowSpec {
-                            title: &title,
-                            checked,
-                            action: sel!(onVoiceLabToggleChanged:),
-                            description: Some(spec.description),
-                            tag: Some(idx as isize),
-                            gap,
-                        },
-                    );
-                }
-                VoiceLabFieldKind::Value => {
-                    let label = create_label(LabelConfig {
-                        frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-                        text: format!("{} ({})", spec.label, spec.key),
-                        font_size: ui_tokens::MICRO_FONT_SIZE,
-                        text_color: secondary,
-                        ..Default::default()
-                    });
-                    add_subview(container, label);
-                    y -= 16.0 + gap;
-
-                    let current = voice_lab_value_from_snapshot(spec, &env_snapshot);
-                    let field = create_text_input(
-                        CGRect::new(
-                            &CGPoint::new(pad, y),
-                            &CGSize::new(content_w, SETTINGS_INPUT_HEIGHT),
-                        ),
-                        spec.default_value,
-                        &current,
-                    );
-                    style_paper_input(field);
-                    let _: () = msg_send![field, setTag: idx as isize];
-                    button_set_action(field, action_handler, sel!(onVoiceLabFieldChanged:));
-                    add_subview(container, field);
-                    y -= SETTINGS_INPUT_HEIGHT + gap;
-
-                    let desc = create_label(LabelConfig {
-                        frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-                        text: spec.description.to_string(),
-                        font_size: ui_tokens::MICRO_FONT_SIZE,
-                        text_color: secondary,
-                        ..Default::default()
-                    });
-                    add_subview(container, desc);
-                    y -= 16.0 + gap;
-                }
-            }
-        }
-
-        container
-    }
-}
-
 // ============================================================================
-// Quality tab
+// Transcription tab
 // ============================================================================
 
 fn quality_last_check_text(last_check: &str) -> String {
@@ -3687,7 +3603,7 @@ fn quality_last_check_text(last_check: &str) -> String {
     }
 }
 
-fn quality_report_exists(state: &crate::quality_loop::QualityDaemonState) -> bool {
+fn qube_report_exists(state: &crate::qube_daemon::QubeDaemonState) -> bool {
     state
         .latest_report
         .as_ref()
@@ -3695,7 +3611,7 @@ fn quality_report_exists(state: &crate::quality_loop::QualityDaemonState) -> boo
         .unwrap_or(false)
 }
 
-fn quality_report_text(state: &crate::quality_loop::QualityDaemonState) -> String {
+fn qube_report_text(state: &crate::qube_daemon::QubeDaemonState) -> String {
     match state.latest_report.as_ref() {
         Some(dir) => {
             let html_path = PathBuf::from(dir).join("index.html");
@@ -3713,9 +3629,10 @@ unsafe fn build_quality_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     _config: &Config,
-    state: &mut BootstrapState,
+    state: &mut SettingsWindowState,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
         let container: Id = msg_send![ns_view, alloc];
@@ -3726,12 +3643,14 @@ unsafe fn build_quality_tab(
         let field_w = content_w;
         let gap = ui_tokens::DENSITY_COMFORTABLE;
         let mut y = frame.size.height - (24.0 + gap);
+        let mono_font_input = crate::ui_helpers::monospace_font(ui_tokens::BODY_FONT_SIZE);
         let primary = crate::ui_helpers::color_label();
         let secondary = crate::ui_helpers::color_secondary_label();
+        let preview_model = current_preview_timing_model();
 
         let title = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 24.0)),
-            text: "Quality".to_string(),
+            text: "Transcription".to_string(),
             font_size: ui_tokens::TITLE_FONT_SIZE,
             bold: true,
             text_color: primary,
@@ -3745,7 +3664,7 @@ unsafe fn build_quality_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Quality daemon dashboard with live status, pending mismatch signal, and report actions."
+            text: "Choose the backend for the committed transcript. Overlay preview stays local and provisional."
                 .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
@@ -3754,30 +3673,235 @@ unsafe fn build_quality_tab(
         add_subview(container, subtitle);
         y -= 16.0 + gap;
 
-        let quality_on = UserSettings::load()
-            .quality_daemon_autostart
-            .unwrap_or_else(|| {
-                std::env::var("CODESCRIBE_AUTOSTART_QUALITY_DAEMON")
-                    .map(|v| parse_env_bool(&v))
-                    .unwrap_or(false)
-            });
-        let quality_check = add_toggle_row(
+        let engine_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Final Transcript Path".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, engine_header);
+        y -= 18.0 + gap;
+
+        let provider_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(92.0, 18.0)),
+            text: "Commit with:".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, provider_label);
+
+        let ns_popup = objc_class("NSPopUpButton");
+        let provider_popup: Id = msg_send![ns_popup, alloc];
+        let provider_popup: Id = msg_send![provider_popup, initWithFrame:
+            CGRect::new(&CGPoint::new(pad + 96.0, y - 2.0), &CGSize::new(220.0, 24.0))
+            pullsDown: false
+        ];
+        let _: () = msg_send![provider_popup, addItemWithTitle: ns_string("Local final verdict")];
+        let _: () = msg_send![provider_popup, addItemWithTitle: ns_string("Cloud final verdict")];
+        let provider_index: isize = if _config.use_local_stt { 0 } else { 1 };
+        let _: () = msg_send![provider_popup, selectItemAtIndex: provider_index];
+        button_set_action(provider_popup, action_handler, sel!(onSttProviderChanged:));
+        add_subview(container, provider_popup);
+        y -= 24.0 + gap;
+
+        let backend_note = if _config.use_local_stt {
+            "Current mode: preview stays local, then the local verdict becomes the committed transcript. File-based final pass can strengthen that verdict or surface weak-truth warnings before paste/save."
+        } else {
+            "Current mode: preview stays local, then cloud STT becomes the committed verdict. If cloud does not return a reliable result, the app marks any surviving fallback as degraded and blocks silent auto-paste."
+        };
+        let provider_hint = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: format!(
+                "{backend_note} Endpoints ending with :stream use NDJSON and fit long buffered runs better."
+            ),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, provider_hint);
+        y -= 16.0 + gap;
+
+        let stt_endpoint_val = std::env::var("STT_ENDPOINT").unwrap_or_default();
+        let stt_endpoint_field = create_text_input(
+            CGRect::new(
+                &CGPoint::new(pad, y),
+                &CGSize::new(content_w, SETTINGS_INPUT_HEIGHT),
+            ),
+            "Cloud final-verdict endpoint (multipart or ...:stream for NDJSON)",
+            &stt_endpoint_val,
+        );
+        style_paper_input(stt_endpoint_field);
+        let _: () = msg_send![stt_endpoint_field, setFont: mono_font_input];
+        button_set_action(
+            stt_endpoint_field,
+            action_handler,
+            sel!(onSttEndpointChanged:),
+        );
+        add_subview(container, stt_endpoint_field);
+        y -= SETTINGS_INPUT_HEIGHT + gap;
+
+        let stt_key_field = create_secure_text_input(
+            CGRect::new(
+                &CGPoint::new(pad, y),
+                &CGSize::new(content_w, SETTINGS_INPUT_HEIGHT),
+            ),
+            "Cloud final-verdict API key (stored in Keychain; erase field to remove)",
+        );
+        style_paper_input(stt_key_field);
+        let _: () = msg_send![stt_key_field, setFont: mono_font_input];
+        button_set_action(stt_key_field, action_handler, sel!(onSttKeyChanged:));
+        add_subview(container, stt_key_field);
+        y -= SETTINGS_INPUT_HEIGHT + gap;
+
+        y = add_tafla_header_separator(container, pad, y, content_w);
+        y -= ui_tokens::SECTION_GAP;
+
+        let preview_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Preview Timing".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, preview_header);
+        y -= 18.0 + gap;
+
+        let preview_hint = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: "Live preview cadence. Buffer delay applies after the first visible partial."
+                .to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, preview_hint);
+        y -= 16.0 + gap;
+
+        state.preview_buffer_delay_value_label = Some(add_slider_setting_row(
             container,
             action_handler,
             pad,
             &mut y,
-            field_w,
+            content_w,
             secondary,
-            ToggleRowSpec {
-                title: "Auto-tune transcription quality (recommended)",
-                checked: quality_on,
-                action: sel!(onQualityDaemonToggled:),
-                description: Some("Runs quality analysis every 30 minutes in the background."),
-                tag: None,
+            SliderSettingRowSpec {
+                title: "Buffer delay:",
+                value_text: &format!("{} ms", preview_model.buffer_delay_ms),
+                min: 0.0,
+                max: 1500.0,
+                current: preview_model.buffer_delay_ms as f64,
+                action: sel!(onPreviewBufferDelayChanged:),
                 gap,
             },
+        ));
+        state.preview_typing_cps_value_label = Some(add_slider_setting_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            content_w,
+            secondary,
+            SliderSettingRowSpec {
+                title: "Typing speed:",
+                value_text: &format!("{:.1} cps", preview_model.typing_cps),
+                min: 5.0,
+                max: 180.0,
+                current: preview_model.typing_cps as f64,
+                action: sel!(onPreviewTypingCpsChanged:),
+                gap,
+            },
+        ));
+        state.preview_emit_words_max_value_label = Some(add_slider_setting_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            content_w,
+            secondary,
+            SliderSettingRowSpec {
+                title: "Words per tick:",
+                value_text: &format!("{} words", preview_model.emit_words_max),
+                min: 1.0,
+                max: 10.0,
+                current: preview_model.emit_words_max as f64,
+                action: sel!(onPreviewEmitWordsMaxChanged:),
+                gap,
+            },
+        ));
+        state.preview_interim_sec_value_label = Some(add_slider_setting_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            content_w,
+            secondary,
+            SliderSettingRowSpec {
+                title: "Interim cadence:",
+                value_text: &if (preview_model.effective_interim_sec
+                    - preview_model.requested_interim_sec)
+                    .abs()
+                    > f32::EPSILON
+                {
+                    format!(
+                        "{:.1} s -> {:.1} s effective",
+                        preview_model.requested_interim_sec, preview_model.effective_interim_sec
+                    )
+                } else {
+                    format!("{:.1} s", preview_model.effective_interim_sec)
+                },
+                min: 1.0,
+                max: 12.0,
+                current: preview_model.requested_interim_sec as f64,
+                action: sel!(onPreviewInterimCadenceChanged:),
+                gap,
+            },
+        ));
+
+        let preview_summary = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: preview_timing_summary_text(preview_model),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, preview_summary);
+        state.preview_timing_summary_label = Some(preview_summary as usize);
+        y -= 16.0 + gap;
+
+        let preview_box_height = 168.0;
+        let (preview_scroll, preview_text_view) = create_scrollable_text_view(
+            CGRect::new(
+                &CGPoint::new(pad, y - preview_box_height),
+                &CGSize::new(content_w, preview_box_height),
+            ),
+            false,
         );
-        state.quality_daemon_checkbox = Some(quality_check as usize);
+        let _: () = msg_send![preview_text_view, setFont: mono_font_input];
+        set_text_view_string(
+            preview_text_view,
+            &preview_timing_report_text(preview_model),
+        );
+        add_subview(container, preview_scroll);
+        state.preview_timing_text_view = Some(preview_text_view as usize);
+        y -= preview_box_height + gap;
+
+        y = add_tafla_header_separator(container, pad, y, content_w);
+        y -= ui_tokens::SECTION_GAP;
+
+        let final_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Final Transcript".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, final_header);
+        y -= 18.0 + gap;
 
         let ultra_on = std::env::var("CODESCRIBE_LOCAL_STT_FINAL_PASS")
             .map(|v| parse_env_bool(&v))
@@ -3790,15 +3914,77 @@ unsafe fn build_quality_tab(
             field_w,
             secondary,
             ToggleRowSpec {
-                title: "Ultra Quality (slow final pass)",
+                title: "Local file-based final pass",
                 checked: ultra_on,
                 action: sel!(onUltraQualityToggled:),
-                description: Some("Runs a slower explicit final pass for maximum text quality."),
+                description: Some(
+                    "Re-runs local Whisper on the saved audio after capture ends. Best lever when preview looks fine but the committed verdict should be upgraded, downgraded, or blocked before paste/save.",
+                ),
                 tag: None,
                 gap,
             },
         );
         state.ultra_quality_checkbox = Some(ultra_check as usize);
+
+        let _fmt_check = add_toggle_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            field_w,
+            secondary,
+            ToggleRowSpec {
+                title: "AI Formatting",
+                checked: _config.ai_formatting_enabled,
+                action: sel!(onFormattingToggled:),
+                description: Some(
+                    "Uses the formatting model to clean up the committed transcript. If formatting fails, the raw transcript is preserved and labeled as a formatting fallback.",
+                ),
+                tag: None,
+                gap,
+            },
+        );
+
+        let fmt_level_label = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 18.0)),
+            text: "Formatting level:".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, fmt_level_label);
+
+        let ns_popup = objc_class("NSPopUpButton");
+        let fmt_popup: Id = msg_send![ns_popup, alloc];
+        let fmt_popup: Id = msg_send![fmt_popup, initWithFrame:
+            CGRect::new(&CGPoint::new(pad + 124.0, y - 2.0), &CGSize::new(240.0, 24.0))
+            pullsDown: false
+        ];
+        let _: () = msg_send![fmt_popup, addItemWithTitle: ns_string("Raw")];
+        let _: () = msg_send![fmt_popup, addItemWithTitle: ns_string("Medium")];
+        let _: () = msg_send![fmt_popup, addItemWithTitle: ns_string("Creative")];
+        let current_level = std::env::var("FORMATTING_LEVEL").unwrap_or_default();
+        let sel_idx: isize = match current_level.as_str() {
+            "raw" => 0,
+            "medium" => 1,
+            "creative" => 2,
+            _ => 1,
+        };
+        let _: () = msg_send![fmt_popup, selectItemAtIndex: sel_idx];
+        button_set_action(fmt_popup, action_handler, sel!(onFormattingLevelChanged:));
+        add_subview(container, fmt_popup);
+        y -= 24.0 + gap;
+
+        let routing_hint = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: "Whisper language lives in Audio & Input. AI endpoints and prompts live in AI & Prompts."
+                .to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, routing_hint);
+        y -= 16.0 + gap;
 
         let divider = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 1.0)),
@@ -3808,6 +3994,66 @@ unsafe fn build_quality_tab(
         });
         let _: () = msg_send![divider, setAlphaValue: 0.9f64];
         add_subview(container, divider);
+        y -= ui_tokens::SECTION_GAP;
+
+        let automation_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Quality Automation".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, automation_header);
+        y -= 18.0 + gap;
+
+        let quality_on = UserSettings::load()
+            .qube_daemon_autostart
+            .unwrap_or_else(|| {
+                std::env::var("QUBE_DAEMON_AUTOSTART")
+                    .map(|v| parse_env_bool(&v))
+                    .unwrap_or(false)
+            });
+        let quality_check = add_toggle_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            field_w,
+            secondary,
+            ToggleRowSpec {
+                title: "Start quality daemon automatically",
+                checked: quality_on,
+                action: sel!(onQubeDaemonToggled:),
+                description: Some(
+                    "Starts bundled `qube-daemon --daemon` immediately and on next CodeScribe launch when the binary is installed. \
+                     Turning it off stops the daemon only when CodeScribe owns that process; externally managed launchd or shell runs remain untouched.",
+                ),
+                tag: None,
+                gap,
+            },
+        );
+        state.qube_daemon_checkbox = Some(quality_check as usize);
+
+        let automation_hint = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: "Use reports below to compare raw, postprocess, and final output when the runtime starts lying."
+                .to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, automation_hint);
+        y -= 16.0 + gap;
+
+        let daemon_divider = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(field_w, 1.0)),
+            text: String::new(),
+            background_color: Some(ui_colors::surface_border()),
+            ..Default::default()
+        });
+        let _: () = msg_send![daemon_divider, setAlphaValue: 0.9f64];
+        add_subview(container, daemon_divider);
         y -= ui_tokens::SECTION_GAP;
 
         let dashboard_header = create_label(LabelConfig {
@@ -3821,7 +4067,8 @@ unsafe fn build_quality_tab(
         add_subview(container, dashboard_header);
         y -= 18.0 + gap;
 
-        let daemon_state = crate::quality_loop::read_daemon_state();
+        let snapshot = crate::qube_lifecycle::dashboard_snapshot();
+        let daemon_state = &snapshot.daemon_state;
 
         let add_metric_row = |container: Id,
                               y: &mut f64,
@@ -3856,12 +4103,8 @@ unsafe fn build_quality_tab(
             value_view as usize
         };
 
-        let available_text = if daemon_state.available {
-            "Available"
-        } else {
-            "Unavailable"
-        };
-        let available_color = if daemon_state.available {
+        let available_text = snapshot.availability_label();
+        let available_color = if snapshot.available {
             ui_colors::status_granted()
         } else {
             ui_colors::status_warning()
@@ -3900,11 +4143,11 @@ unsafe fn build_quality_tab(
             pad,
             gap,
         ));
-        state.quality_report_label = Some(add_metric_row(
+        state.qube_report_label = Some(add_metric_row(
             container,
             &mut y,
             "Latest report:",
-            &quality_report_text(&daemon_state),
+            &qube_report_text(daemon_state),
             secondary,
             content_w,
             pad,
@@ -3928,7 +4171,7 @@ unsafe fn build_quality_tab(
             button_style::GLASS,
         );
         button_set_action(open_report_btn, action_handler, sel!(onOpenQualityReport:));
-        let _: () = msg_send![open_report_btn, setEnabled: quality_report_exists(&daemon_state)];
+        let _: () = msg_send![open_report_btn, setEnabled: qube_report_exists(daemon_state)];
         add_subview(container, open_report_btn);
         state.quality_open_report_button = Some(open_report_btn as usize);
 
@@ -3960,9 +4203,10 @@ unsafe fn build_diagnostics_tab(
     action_handler: Id,
     frame: core_graphics::geometry::CGRect,
     config: &Config,
-    state: &mut BootstrapState,
+    state: &mut SettingsWindowState,
 ) -> Id {
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_view = objc_class("NSView");
         let container: Id = msg_send![ns_view, alloc];
@@ -3991,8 +4235,7 @@ unsafe fn build_diagnostics_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text: "Permission matrix, hotkey conflict clarity, and one-click diagnostics copy."
-                .to_string(),
+            text: "Permissions, shortcut overlap, and one-click diagnostics copy.".to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -4160,6 +4403,7 @@ pub(super) extern "C" fn on_mode_binding_change(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let tag: isize = msg_send![sender, tag];
         if mode_from_double_ctrl_tag(tag) {
@@ -4185,6 +4429,7 @@ pub(super) extern "C" fn on_show_hotkey_conflicts(
 }
 
 pub(super) extern "C" fn on_language_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
         let lang = match idx {
@@ -4203,6 +4448,7 @@ pub(super) extern "C" fn on_formatting_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4217,6 +4463,7 @@ pub(super) extern "C" fn on_formatting_level_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let idx: isize = msg_send![sender, indexOfSelectedItem];
         let level = match idx {
@@ -4236,6 +4483,7 @@ pub(super) extern "C" fn on_llm_endpoint_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4251,6 +4499,7 @@ pub(super) extern "C" fn on_llm_model_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4262,6 +4511,7 @@ pub(super) extern "C" fn on_llm_model_changed(
 }
 
 pub(super) extern "C" fn on_llm_key_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4277,7 +4527,9 @@ pub(super) extern "C" fn on_llm_key_changed(_this: &Object, _cmd: objc::runtime:
 
 pub(super) extern "C" fn on_clear_llm_key(_this: &Object, _cmd: objc::runtime::Sel, _sender: Id) {
     let field_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.llm_key_field
     };
     clear_keychain_entry("LLM_FORMATTING_API_KEY", field_ptr);
@@ -4289,7 +4541,9 @@ pub(super) extern "C" fn on_save_api_settings(
     _sender: Id,
 ) {
     let (llm_endpoint, llm_model, llm_key, assist_endpoint, assist_model, assist_key) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.llm_endpoint_field,
             state.llm_model_field,
@@ -4301,6 +4555,7 @@ pub(super) extern "C" fn on_save_api_settings(
     };
 
     let mut entries: Vec<(&str, String)> = Vec::new();
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         if let Some(ptr) = llm_endpoint {
             let value = crate::ui_helpers::get_text_field_string(ptr as Id);
@@ -4336,6 +4591,7 @@ pub(super) extern "C" fn on_save_api_settings(
         let borrowed: Vec<(&str, &str)> = entries.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let _ = config.save_to_env_many(&borrowed);
     }
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         if let Some(ptr) = llm_key {
             set_text_field_string(ptr as Id, "");
@@ -4425,12 +4681,12 @@ pub(super) extern "C" fn on_quality_refresh(_this: &Object, _cmd: objc::runtime:
     refresh_quality_dashboard();
 }
 
-pub(super) extern "C" fn on_open_quality_report(
+pub(super) extern "C" fn on_open_qube_report(
     _this: &Object,
     _cmd: objc::runtime::Sel,
     _sender: Id,
 ) {
-    if !crate::quality_loop::open_latest_report() {
+    if !crate::qube_daemon::open_latest_report() {
         warn!("Settings: no quality report available");
     }
     refresh_quality_dashboard();
@@ -4452,7 +4708,9 @@ pub(super) extern "C" fn on_copy_diagnostics(
 ) {
     let report = crate::os::permissions::diagnostics_report();
     let (status_ptr, secondary) = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (
             state.diagnostics_status_label,
             crate::ui_helpers::color_secondary_label(),
@@ -4461,6 +4719,7 @@ pub(super) extern "C" fn on_copy_diagnostics(
     match crate::os::clipboard::set_clipboard(&report) {
         Ok(()) => {
             if let Some(ptr) = status_ptr {
+                // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
                 unsafe {
                     let label = ptr as Id;
                     set_text_field_string(label, "Diagnostics copied to clipboard.");
@@ -4470,6 +4729,7 @@ pub(super) extern "C" fn on_copy_diagnostics(
         }
         Err(err) => {
             if let Some(ptr) = status_ptr {
+                // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
                 unsafe {
                     let label = ptr as Id;
                     set_text_field_string(label, &format!("Failed to copy diagnostics: {err}"));
@@ -4481,6 +4741,7 @@ pub(super) extern "C" fn on_copy_diagnostics(
 }
 
 pub(super) extern "C" fn on_delay_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         let ms = value.round() as u64;
@@ -4491,7 +4752,9 @@ pub(super) extern "C" fn on_delay_changed(_this: &Object, _cmd: objc::runtime::S
         runtime_config.hold_start_delay_ms = ms;
         hotkeys::apply_hotkey_runtime_config(runtime_config);
         let label_ptr = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.hold_delay_value_label
         };
         if let Some(ptr) = label_ptr {
@@ -4506,6 +4769,7 @@ pub(super) extern "C" fn on_double_tap_interval_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         let ms = value.round() as u64;
@@ -4516,7 +4780,9 @@ pub(super) extern "C" fn on_double_tap_interval_changed(
         runtime_config.double_tap_interval_ms = ms;
         hotkeys::apply_hotkey_runtime_config(runtime_config);
         let label_ptr = {
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             state.double_tap_value_label
         };
         if let Some(ptr) = label_ptr {
@@ -4527,6 +4793,7 @@ pub(super) extern "C" fn on_double_tap_interval_changed(
 }
 
 pub(super) extern "C" fn on_beep_toggled(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4542,6 +4809,7 @@ pub(super) extern "C" fn on_enter_send_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4556,6 +4824,7 @@ pub(super) extern "C" fn on_show_dock_icon_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4566,72 +4835,168 @@ pub(super) extern "C" fn on_show_dock_icon_toggled(
     }
 }
 
+pub(super) extern "C" fn on_transcription_overlay_toggled(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let state: isize = msg_send![sender, state];
+        let enabled = state == 1;
+        info!("Settings: transcription overlay -> {}", enabled);
+        let config = Config::load();
+        let _ = config.save_to_env(
+            "TRANSCRIPTION_OVERLAY_ENABLED",
+            if enabled { "1" } else { "0" },
+        );
+        sync_runtime_config_via_ipc();
+        if !enabled {
+            crate::ui::overlay::hide_transcription_overlay();
+        }
+        refresh_transcription_preview_panel();
+    }
+}
+
+pub(super) extern "C" fn on_preview_buffer_delay_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let value: f64 = msg_send![sender, doubleValue];
+        let ms = value.round() as u64;
+        info!("Settings: preview buffer delay -> {}ms", ms);
+        let config = Config::load();
+        let _ = config.save_to_env("CODESCRIBE_BUFFER_DELAY_MS", &ms.to_string());
+        sync_runtime_config_via_ipc();
+        refresh_transcription_preview_panel();
+    }
+}
+
+pub(super) extern "C" fn on_preview_typing_cps_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let value: f64 = msg_send![sender, doubleValue];
+        let cps = value.max(5.0) as f32;
+        info!("Settings: preview typing cps -> {:.1}", cps);
+        let config = Config::load();
+        let _ = config.save_to_env("CODESCRIBE_TYPING_CPS", &format!("{cps:.1}"));
+        sync_runtime_config_via_ipc();
+        refresh_transcription_preview_panel();
+    }
+}
+
+pub(super) extern "C" fn on_preview_emit_words_max_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let value: f64 = msg_send![sender, doubleValue];
+        let words = value.round().clamp(1.0, 10.0) as u64;
+        info!("Settings: preview emit words max -> {}", words);
+        let config = Config::load();
+        let _ = config.save_to_env("CODESCRIBE_EMIT_WORDS_MAX", &words.to_string());
+        sync_runtime_config_via_ipc();
+        refresh_transcription_preview_panel();
+    }
+}
+
+pub(super) extern "C" fn on_preview_interim_cadence_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let value: f64 = msg_send![sender, doubleValue];
+        let secs = value.clamp(1.0, 12.0) as f32;
+        info!("Settings: preview interim cadence -> {:.1}s", secs);
+        let config = Config::load();
+        let _ = config.save_to_env("CODESCRIBE_BUFFERED_INTERIM_SEC", &format!("{secs:.1}"));
+        sync_runtime_config_via_ipc();
+        refresh_transcription_preview_panel();
+    }
+}
+
+pub(super) extern "C" fn on_stt_provider_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let selected_idx: isize = msg_send![sender, indexOfSelectedItem];
+        let use_local_stt = selected_idx == 0;
+        info!(
+            "Settings: final transcript path -> {}",
+            if use_local_stt { "local" } else { "cloud" }
+        );
+        let config = Config::load();
+        let _ = config.save_to_env("USE_LOCAL_STT", if use_local_stt { "1" } else { "0" });
+        sync_runtime_config_via_ipc();
+    }
+}
+
+pub(super) extern "C" fn on_stt_endpoint_changed(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let ns_val: Id = msg_send![sender, stringValue];
+        let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
+        let value = std::ffi::CStr::from_ptr(cstr)
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        info!("Settings: STT endpoint -> {}", value);
+        let config = Config::load();
+        let _ = config.save_to_env("STT_ENDPOINT", &value);
+        sync_runtime_config_via_ipc();
+    }
+}
+
+pub(super) extern "C" fn on_stt_key_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let ns_val: Id = msg_send![sender, stringValue];
+        let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
+        let value = std::ffi::CStr::from_ptr(cstr)
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        if value.is_empty() {
+            info!("Settings: clearing cloud STT API key from Keychain");
+            if let Err(e) = keychain::delete_key("STT_API_KEY") {
+                warn!("Failed to delete STT_API_KEY from Keychain: {e}");
+            }
+            std::env::remove_var("STT_API_KEY");
+        } else {
+            info!("Settings: cloud STT API key updated (stored in Keychain)");
+            let config = Config::load();
+            let _ = config.save_to_env("STT_API_KEY", &value);
+        }
+        sync_runtime_config_via_ipc();
+    }
+}
+
 pub(super) extern "C" fn on_volume_changed(_this: &Object, _cmd: objc::runtime::Sel, sender: Id) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let value: f64 = msg_send![sender, doubleValue];
         info!("Settings: sound volume -> {:.2}", value);
         let config = Config::load();
         let _ = config.save_to_env("SOUND_VOLUME", &format!("{:.2}", value));
         sync_runtime_config_via_ipc();
-    }
-}
-
-pub(super) extern "C" fn on_voice_lab_toggle_changed(
-    _this: &Object,
-    _cmd: objc::runtime::Sel,
-    sender: Id,
-) {
-    unsafe {
-        let tag: isize = msg_send![sender, tag];
-        let Some(spec) = voice_lab_spec_from_tag(tag) else {
-            return;
-        };
-        if spec.kind != VoiceLabFieldKind::Bool {
-            return;
-        }
-        let checked_state: isize = msg_send![sender, state];
-        let enabled = checked_state == 1;
-        info!("Settings: {} -> {}", spec.key, enabled);
-        let config = Config::load();
-        let _ = config.save_to_env(spec.key, if enabled { "1" } else { "0" });
-    }
-}
-
-pub(super) extern "C" fn on_voice_lab_field_changed(
-    _this: &Object,
-    _cmd: objc::runtime::Sel,
-    sender: Id,
-) {
-    unsafe {
-        let tag: isize = msg_send![sender, tag];
-        let Some(spec) = voice_lab_spec_from_tag(tag) else {
-            return;
-        };
-        if spec.kind != VoiceLabFieldKind::Value {
-            return;
-        }
-
-        let ns_val: Id = msg_send![sender, stringValue];
-        let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
-        if cstr.is_null() {
-            return;
-        }
-        let value = std::ffi::CStr::from_ptr(cstr)
-            .to_string_lossy()
-            .trim()
-            .to_string();
-        let Some(validated) = validate_voice_lab_value(spec, &value) else {
-            warn!(
-                "Settings: rejected invalid value for {} -> {:?}",
-                spec.key, value
-            );
-            set_text_field_string(sender, &voice_lab_value(spec));
-            return;
-        };
-        info!("Settings: {} -> {}", spec.key, validated);
-        let config = Config::load();
-        let _ = config.save_to_env(spec.key, &validated);
-        set_text_field_string(sender, &validated);
     }
 }
 
@@ -4644,6 +5009,7 @@ pub(super) extern "C" fn on_assistive_endpoint_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4659,6 +5025,7 @@ pub(super) extern "C" fn on_assistive_model_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4674,6 +5041,7 @@ pub(super) extern "C" fn on_assistive_key_changed(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let ns_val: Id = msg_send![sender, stringValue];
         let cstr: *const std::ffi::c_char = msg_send![ns_val, UTF8String];
@@ -4693,27 +5061,33 @@ pub(super) extern "C" fn on_clear_assistive_key(
     _sender: Id,
 ) {
     let field_ptr = {
-        let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = SETTINGS_WINDOW_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         state.assistive_key_field
     };
     clear_keychain_entry("LLM_ASSISTIVE_API_KEY", field_ptr);
 }
 
-pub(super) extern "C" fn on_quality_daemon_toggled(
+pub(super) extern "C" fn on_qube_daemon_toggled(
     _this: &Object,
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
         info!("Settings: quality daemon autostart -> {}", enabled);
         let config = Config::load();
-        let _ = config.save_to_env(
-            "CODESCRIBE_AUTOSTART_QUALITY_DAEMON",
-            if enabled { "1" } else { "0" },
-        );
+        let _ = config.save_to_env("QUBE_DAEMON_AUTOSTART", if enabled { "1" } else { "0" });
+        if enabled {
+            let _ = crate::qube_lifecycle::start_managed();
+        } else {
+            let _ = crate::qube_lifecycle::stop_managed();
+        }
         refresh_quality_dashboard();
+        crate::ui::tray::update_quality_label();
     }
 }
 
@@ -4722,6 +5096,7 @@ pub(super) extern "C" fn on_ultra_quality_toggled(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let state: isize = msg_send![sender, state];
         let enabled = state == 1;
@@ -4740,6 +5115,7 @@ pub(super) extern "C" fn on_permission_action(
     _cmd: objc::runtime::Sel,
     sender: Id,
 ) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
     unsafe {
         let tag: isize = msg_send![sender, tag];
         if let Some(kind) = permission_kind_from_tag(tag) {
@@ -4802,46 +5178,6 @@ mod tests {
         assert_eq!(
             toggle_row_step(true, gap),
             TOGGLE_ROW_DESC_OFFSET + TOGGLE_ROW_DESC_HEIGHT + gap
-        );
-    }
-
-    #[test]
-    fn voice_lab_validation_rejects_invalid_numeric() {
-        let spec = VoiceLabFieldSpec {
-            key: "CODESCRIBE_BUFFERED_INTERIM_SEC",
-            label: "Interim cadence",
-            default_value: "1.2",
-            description: "",
-            kind: VoiceLabFieldKind::Value,
-        };
-        assert!(validate_voice_lab_value(&spec, "abc").is_none());
-        assert!(validate_voice_lab_value(&spec, "0.1").is_none());
-        assert_eq!(
-            validate_voice_lab_value(&spec, "4.5"),
-            Some("4.5".to_string())
-        );
-    }
-
-    #[test]
-    fn voice_lab_validation_handles_empty_by_default_policy() {
-        let non_empty = VoiceLabFieldSpec {
-            key: "WHISPER_MODEL",
-            label: "Whisper cloud model",
-            default_value: "mlx-community/whisper-large-v3-mlx",
-            description: "",
-            kind: VoiceLabFieldKind::Value,
-        };
-        let allow_empty = VoiceLabFieldSpec {
-            key: "CUSTOM_EMPTY_KEY",
-            label: "Custom empty key",
-            default_value: "",
-            description: "",
-            kind: VoiceLabFieldKind::Value,
-        };
-        assert!(validate_voice_lab_value(&non_empty, " ").is_none());
-        assert_eq!(
-            validate_voice_lab_value(&allow_empty, " "),
-            Some(String::new())
         );
     }
 
@@ -4950,12 +5286,79 @@ mod tests {
     }
 
     #[test]
+    fn preview_effective_interim_sec_clamps_without_overlay() {
+        assert_eq!(preview_effective_interim_sec(true, 1.2), 1.2);
+        assert_eq!(
+            preview_effective_interim_sec(false, 1.2),
+            PREVIEW_NO_OVERLAY_MIN_INTERIM_SEC
+        );
+    }
+
+    #[test]
+    fn preview_emit_chunks_respect_emit_words_cap() {
+        let chunks = preview_emit_chunks("Partiale mają być appendowane teraz", 2);
+        assert_eq!(
+            chunks,
+            vec![
+                "Partiale mają ".to_string(),
+                "być appendowane ".to_string(),
+                "teraz".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn preview_timing_steps_grow_visible_text_monotonically() {
+        let model = PreviewTimingModel {
+            overlay_enabled: true,
+            buffer_delay_ms: 280,
+            typing_cps: 90.0,
+            emit_words_max: 2,
+            requested_interim_sec: 1.2,
+            effective_interim_sec: 1.2,
+        };
+        let steps = preview_timing_steps(model);
+        assert!(!steps.is_empty(), "preview should produce visible steps");
+        for pair in steps.windows(2) {
+            assert!(
+                pair[1].visible_text.starts_with(&pair[0].visible_text),
+                "preview should append forward, not reset"
+            );
+            assert!(
+                pair[1].visible_at_ms >= pair[0].visible_at_ms,
+                "preview timestamps should be monotonic"
+            );
+        }
+        let report = preview_timing_report_text(model);
+        assert!(report.contains("Chunker partial targets"));
+        assert!(report.contains("Overlay-visible text"));
+    }
+
+    #[test]
+    fn prompt_editor_layout_does_not_overlap_fields_above() {
+        let gap = 10.0;
+        let controls_bottom_y = 220.0;
+        let layout = compute_prompt_editor_layout(controls_bottom_y, gap);
+        let editor_top = layout.editor_y + layout.editor_height;
+
+        assert!(
+            editor_top <= controls_bottom_y + f64::EPSILON,
+            "editor overlaps controls above"
+        );
+        assert!(
+            layout.status_y + gap <= layout.editor_y + f64::EPSILON,
+            "status must remain below editor"
+        );
+    }
+
+    #[test]
     #[serial]
     #[cfg(target_os = "macos")]
     fn attach_settings_view_builds_root_view() {
         if std::env::var("CODESCRIBE_UI_TESTS").is_err() {
             return;
         }
+        // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
         unsafe {
             let ns_view = objc_class("NSView");
             let parent: Id = msg_send![ns_view, alloc];
@@ -4974,8 +5377,10 @@ mod tests {
             let view = attach_settings_view(parent, frame);
             assert!(view.is_some());
 
-            reset_embedded_bootstrap_state();
-            let state = BOOTSTRAP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            reset_embedded_settings_state();
+            let state = SETTINGS_WINDOW_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             assert!(state.root_view.is_none());
         }
     }

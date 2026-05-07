@@ -1,7 +1,7 @@
 mod steps;
 
 pub(crate) use self::steps::PermissionKind;
-use self::steps::{TOTAL_STEPS, WizardStep, step_for_index};
+use self::steps::{PermissionRecoveryStrategy, TOTAL_STEPS, WizardStep, step_for_index};
 use crate::config::{Config, ShortcutBinding, UserSettings, WorkMode, keychain};
 use crate::os::hotkeys;
 use crate::os::permissions::{self, PermissionStatus};
@@ -20,8 +20,9 @@ use objc2_app_kit::{
     NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::{ErrorKind, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::thread;
@@ -37,8 +38,7 @@ const FULL_DISK_STEP_INDEX: usize = 5;
 const STATUS_NOT_DETERMINED: &str = "\u{25CB} Not Enabled Yet";
 const STATUS_GRANTED: &str = "\u{25CF} Granted";
 const STATUS_DENIED: &str = "\u{2715} Denied";
-const STATUS_RECHECK_READY: &str = "\u{25CB} Ready To Recheck";
-const STATUS_RECHECK_PENDING: &str = "\u{2715} Not Granted Yet";
+const STATUS_RESTART_REQUIRED: &str = "\u{25CF} Granted - Restart Required";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum LanguageChoice {
@@ -166,8 +166,16 @@ pub(crate) const PERMISSION_ORDER: [PermissionKind; 5] = [
     PermissionKind::FullDiskAccess,
 ];
 
+fn setup_done_path() -> PathBuf {
+    Config::config_dir().join("setup_done")
+}
+
 fn onboarding_done_path() -> PathBuf {
     Config::config_dir().join("onboarding_done")
+}
+
+fn legacy_bootstrap_done_path() -> PathBuf {
+    Config::config_dir().join("bootstrap_done")
 }
 
 fn onboarding_progress_path() -> PathBuf {
@@ -209,6 +217,11 @@ fn mode_api_key_configured() -> bool {
         })
 }
 
+/// Best-effort liveness probe for a PID via `kill(pid, 0)`.
+///
+/// Retained for diagnostics and possible future tooling: the current lock
+/// path uses `flock(2)` and no longer relies on PID liveness to gate access.
+#[allow(dead_code)]
 fn process_is_alive(pid: u32) -> bool {
     let result = unsafe { libc::kill(pid as i32, 0) };
     if result == 0 {
@@ -218,77 +231,135 @@ fn process_is_alive(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Holds the open `File` for the onboarding lock for the lifetime of the
+/// process. Dropping the `File` closes the fd, which atomically releases the
+/// `flock(2)` advisory lock — so we MUST keep it parked here.
+static ONBOARDING_LOCK_FILE: Mutex<Option<File>> = Mutex::new(None);
+
+/// Acquire an exclusive, non-blocking advisory lock on the onboarding session
+/// file using `flock(2)`. Returns `true` iff this process now holds the lock.
+///
+/// Contract:
+/// - Two simultaneous launches: exactly one wins, the other gets `false`.
+/// - The lock is released automatically when the process exits (kernel closes
+///   the fd) OR when [`release_onboarding_lock`] is called explicitly.
+/// - The PID written to the file is informational only (for `ps`/log triage);
+///   correctness comes from `flock`, not from the PID contents.
+/// - Replaces an earlier check-then-create scheme that had a TOCTOU window
+///   between liveness check and re-create — two launches could both pass and
+///   both create the file. `flock` closes that window at the kernel level.
 fn acquire_onboarding_lock() -> bool {
     let path = onboarding_lock_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
 
-    let pid = std::process::id();
-
-    let try_create = || -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)?;
-        let _ = write!(file, "{pid}");
-        Ok(())
-    };
-
-    match try_create() {
-        Ok(()) => return true,
-        Err(e) if e.kind() != ErrorKind::AlreadyExists => {
-            warn!("Onboarding: failed to acquire lock: {e}");
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            warn!("Onboarding: failed to open lock file: {e}");
             return false;
         }
-        Err(_) => {}
-    }
+    };
 
-    let existing_pid = fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-
-    if existing_pid > 0 && existing_pid != pid && process_is_alive(existing_pid) {
-        warn!(
-            "Onboarding: lock is held by live process pid={existing_pid}, skipping duplicate wizard"
-        );
+    // Non-blocking exclusive advisory lock. If another process holds it,
+    // `flock` returns -1 with errno EWOULDBLOCK and we bail out cleanly.
+    // SAFETY: `file.as_raw_fd()` is a valid borrowed fd for the lifetime of
+    // `file`, which outlives the `flock(2)` syscall. The flag bitmask is
+    // composed of libc-provided constants. No memory is read or written.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            // Try to read the holder PID for a useful diagnostic. Best-effort.
+            let holder_pid = fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok());
+            match holder_pid {
+                Some(pid) => warn!(
+                    "Onboarding: lock is held by live process pid={pid}, skipping duplicate wizard"
+                ),
+                None => {
+                    warn!("Onboarding: lock is held by another process, skipping duplicate wizard")
+                }
+            }
+        } else {
+            warn!("Onboarding: failed to acquire lock via flock: {err}");
+        }
         return false;
     }
 
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => {
-            warn!("Onboarding: failed to remove stale lock: {e}");
-            return false;
-        }
-    }
+    // We own the lock. Refresh the PID record for human diagnostics. Failures
+    // here do not affect correctness — the lock is what gates concurrency.
+    let pid = std::process::id();
+    let _ = file.set_len(0);
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = write!(file, "{pid}");
+    let _ = file.flush();
 
-    match try_create() {
-        Ok(()) => true,
-        Err(e) => {
-            warn!("Onboarding: failed to acquire lock: {e}");
-            false
-        }
-    }
+    // Park the file so the fd stays open and the lock persists for the
+    // process lifetime. Dropping the file would close the fd and release
+    // the kernel-level lock immediately.
+    let mut guard = match ONBOARDING_LOCK_FILE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = Some(file);
+    true
 }
 
 fn release_onboarding_lock() {
+    let mut guard = match ONBOARDING_LOCK_FILE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(file) = guard.take() {
+        // Explicit unlock first; dropping the File closes the fd which would
+        // release the lock anyway, but explicit `LOCK_UN` is cheap insurance.
+        // SAFETY: `file.as_raw_fd()` is a valid borrowed fd for the lifetime
+        // of `file`, which is held until the explicit `drop(file)` below.
+        // `LOCK_UN` is a single libc constant. No memory is read or written.
+        let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        drop(file);
+    }
+    // Best-effort cleanup so a stale lock file does not linger between runs.
     let _ = fs::remove_file(onboarding_lock_path());
 }
 
+fn migrate_legacy_setup_done_marker() {
+    let setup_done = setup_done_path();
+    if setup_done.exists() {
+        return;
+    }
+
+    // Older builds tracked onboarding and settings completion separately.
+    // The current runtime only needs one canonical setup marker.
+    if onboarding_done_path().exists() && legacy_bootstrap_done_path().exists() {
+        if let Some(parent) = setup_done.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(setup_done, "done");
+    }
+}
+
 pub fn should_show_onboarding() -> bool {
-    crate::ui::bootstrap::should_show_setup()
+    migrate_legacy_setup_done_marker();
+    !setup_done_path().exists()
 }
 
 fn mark_onboarding_done() {
     clear_onboarding_progress();
-    let path = onboarding_done_path();
-    if let Some(parent) = path.parent() {
+    let setup_done = setup_done_path();
+    if let Some(parent) = setup_done.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(path, "done");
+    let _ = fs::write(setup_done, "done");
 }
 
 pub fn show_onboarding_wizard() {
@@ -1022,7 +1093,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Welcome to CodeScribe");
             set_text_if_present(
                 ui.description_label,
-                "We will guide you through permissions and setup so CodeScribe works perfectly from first launch.",
+                "We will wire permissions, choose your transcript defaults, and show how live preview, committed verdict, and AI help stay honest from first launch.",
             );
             set_button_title_if_present(ui.primary_button, "Get Started");
         }
@@ -1042,26 +1113,31 @@ fn render_current_step() {
             set_label_color_if_present(ui.status_label, permission_status_color(status));
 
             if status == PermissionUiStatus::Granted {
-                set_button_title_if_present(ui.primary_button, "Continue");
-                maybe_schedule_auto_advance(step_index);
+                if should_wait_for_restart(kind, status, requested) {
+                    set_button_title_if_present(ui.primary_button, "Close for Restart");
+                } else {
+                    set_button_title_if_present(ui.primary_button, "Continue");
+                    maybe_schedule_auto_advance(step_index);
+                }
             } else if kind == PermissionKind::FullDiskAccess {
-                set_button_title_if_present(
-                    ui.primary_button,
-                    if requested {
-                        "Recheck"
-                    } else {
-                        "Open Settings"
-                    },
-                );
+                set_button_title_if_present(ui.primary_button, "Open Settings");
                 set_hidden_if_present(ui.skip_button, false);
                 set_button_title_if_present(
                     ui.skip_button,
-                    if requested { "Continue Anyway" } else { "Skip" },
+                    if requested {
+                        "Continue Without It"
+                    } else {
+                        "Skip"
+                    },
                 );
             } else {
                 set_button_title_if_present(
                     ui.primary_button,
-                    if status == PermissionUiStatus::Denied {
+                    if kind.recovery_strategy() == PermissionRecoveryStrategy::AppRestartRequired
+                        && requested
+                    {
+                        "Open Settings"
+                    } else if status == PermissionUiStatus::Denied {
                         "Try Again"
                     } else {
                         "Grant Access"
@@ -1079,7 +1155,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Choose Language");
             set_text_if_present(
                 ui.description_label,
-                "Select the default transcription language. You can change it later in Settings.",
+                "Select the default transcript language. Live preview stays provisional, and the committed verdict will use this language unless you change it later in Settings.",
             );
             set_hidden_if_present(ui.language_view, false);
             set_button_title_if_present(ui.primary_button, "Continue");
@@ -1089,7 +1165,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Add API Key (Optional)");
             set_text_if_present(
                 ui.description_label,
-                "Use your LLM API key for AI formatting and assistant features.",
+                "Optional. Your LLM API key unlocks formatted transcript and assistant features, while raw transcript truth stays preserved whenever AI is skipped, rejected, or unavailable.",
             );
             set_hidden_if_present(ui.api_view, false);
             set_button_title_if_present(ui.primary_button, "Save & Continue");
@@ -1101,7 +1177,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "Customize Mode Shortcuts");
             set_text_if_present(
                 ui.description_label,
-                "Mode first, keys second. Pick a starter profile now; you can refine each mode shortcut later in Settings.",
+                "Mode first, keys second. Dictation aims for a committed transcript verdict, Formatting upgrades text only when safe, and Assistive stays in the chat overlay instead of silent paste.",
             );
             set_hidden_if_present(ui.hotkey_view, false);
             set_button_title_if_present(ui.primary_button, "Continue");
@@ -1111,7 +1187,7 @@ fn render_current_step() {
             set_text_if_present(ui.title_label, "You're All Set");
             set_text_if_present(
                 ui.description_label,
-                "Review your setup. You can always adjust these settings later.",
+                "Review the truth model below. You can always adjust these settings later, but the runtime should already be telling the same story as the UI.",
             );
             set_hidden_if_present(ui.summary_view, false);
             set_hidden_if_present(ui.skip_button, true);
@@ -1172,6 +1248,84 @@ fn handle_skip_action() {
     }
 }
 
+fn should_wait_for_restart(
+    kind: PermissionKind,
+    status: PermissionUiStatus,
+    requested: bool,
+) -> bool {
+    kind.recovery_strategy() == PermissionRecoveryStrategy::AppRestartRequired
+        && status == PermissionUiStatus::Granted
+        && requested
+}
+
+fn should_refresh_hotkey_runtime_after_grant(
+    kind: PermissionKind,
+    accessibility_status: PermissionStatus,
+    input_monitoring_status: PermissionStatus,
+) -> bool {
+    matches!(
+        kind,
+        PermissionKind::Accessibility | PermissionKind::InputMonitoring
+    ) && accessibility_status == PermissionStatus::Granted
+        && input_monitoring_status == PermissionStatus::Granted
+}
+
+pub(crate) fn reconcile_permission_runtime_after_grant(kind: PermissionKind) {
+    if permission_status(kind) != PermissionStatus::Granted {
+        return;
+    }
+
+    match kind.recovery_strategy() {
+        PermissionRecoveryStrategy::LiveRecheck => {
+            if kind == PermissionKind::Microphone {
+                crate::controller::request_permission_runtime_reconcile();
+                info!(
+                    "Onboarding: rechecked {} live after permission grant",
+                    kind.runtime_subsystem()
+                );
+            }
+        }
+        PermissionRecoveryStrategy::LiveReinitialize => {
+            let accessibility_status = permissions::check_accessibility();
+            let input_monitoring_status = permissions::check_input_monitoring();
+            if permissions::hotkey_permissions_granted()
+                && should_refresh_hotkey_runtime_after_grant(
+                    kind,
+                    accessibility_status,
+                    input_monitoring_status,
+                )
+            {
+                match hotkeys::refresh_global_hotkey_manager() {
+                    Ok(()) => info!(
+                        "Onboarding: reinitialized {} after permission grant",
+                        kind.runtime_subsystem()
+                    ),
+                    Err(error) => warn!(
+                        "Onboarding: failed to reinitialize {} after permission grant: {error}",
+                        kind.runtime_subsystem()
+                    ),
+                }
+            }
+        }
+        PermissionRecoveryStrategy::AppRestartRequired => {
+            info!(
+                "Onboarding: {} still requires app restart after grant",
+                kind.runtime_subsystem()
+            );
+        }
+    }
+}
+
+fn reconcile_runtime_after_onboarding_completion() {
+    for kind in [
+        PermissionKind::Microphone,
+        PermissionKind::Accessibility,
+        PermissionKind::InputMonitoring,
+    ] {
+        reconcile_permission_runtime_after_grant(kind);
+    }
+}
+
 fn handle_permission_primary(kind: PermissionKind) {
     let idx = kind.index();
     let step_to_persist;
@@ -1179,13 +1333,19 @@ fn handle_permission_primary(kind: PermissionKind) {
 
     {
         let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if state.permission_states[idx] == PermissionUiStatus::Granted {
+        let status = state.permission_states[idx];
+        let requested = state.requested_permissions[idx];
+        if status == PermissionUiStatus::Granted {
             drop(state);
-            advance_step();
+            if should_wait_for_restart(kind, status, requested) {
+                finish_onboarding(false);
+            } else {
+                advance_step();
+            }
             return;
         }
 
-        already_requested = state.requested_permissions[idx];
+        already_requested = requested;
         state.requested_permissions[idx] = true;
         step_to_persist = state.step_index;
     }
@@ -1219,6 +1379,7 @@ fn handle_permission_primary(kind: PermissionKind) {
                     if state.step_index == step_to_persist {
                         should_render = true;
                         if state.permission_states[idx] == PermissionUiStatus::Granted {
+                            reconcile_permission_runtime_after_grant(kind);
                             should_schedule = true;
                         }
                     }
@@ -1248,6 +1409,10 @@ fn handle_permission_primary(kind: PermissionKind) {
         let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let requested = state.requested_permissions[idx];
         state.permission_states[idx] = check_permission_state(kind, requested);
+    }
+
+    if permission_status(kind) == PermissionStatus::Granted {
+        reconcile_permission_runtime_after_grant(kind);
     }
 
     render_current_step();
@@ -1330,7 +1495,9 @@ fn maybe_schedule_auto_advance(step_index: usize) {
                     let requested = state.requested_permissions[idx];
                     let status = check_permission_state(kind, requested);
                     state.permission_states[idx] = status;
-                    if status == PermissionUiStatus::Granted {
+                    if status == PermissionUiStatus::Granted
+                        && !should_wait_for_restart(kind, status, requested)
+                    {
                         should_advance = true;
                     }
                 }
@@ -1375,7 +1542,7 @@ fn start_full_disk_polling() {
             }
 
             Queue::main().exec_async(|| {
-                let mut granted = false;
+                let mut should_schedule = false;
                 let mut should_render = false;
 
                 {
@@ -1386,7 +1553,13 @@ fn start_full_disk_polling() {
                         let idx = PermissionKind::FullDiskAccess.index();
                         state.permission_states[idx] =
                             check_permission_state(PermissionKind::FullDiskAccess, true);
-                        granted = state.permission_states[idx] == PermissionUiStatus::Granted;
+                        let granted = state.permission_states[idx] == PermissionUiStatus::Granted;
+                        should_schedule = granted
+                            && !should_wait_for_restart(
+                                PermissionKind::FullDiskAccess,
+                                state.permission_states[idx],
+                                state.requested_permissions[idx],
+                            );
                         if granted {
                             state.full_disk_polling = false;
                         }
@@ -1399,7 +1572,7 @@ fn start_full_disk_polling() {
                 if should_render {
                     render_current_step();
                 }
-                if granted {
+                if should_schedule {
                     maybe_schedule_auto_advance(FULL_DISK_STEP_INDEX);
                 }
             });
@@ -1539,6 +1712,7 @@ fn save_hotkey_mode() {
 
 fn finish_onboarding(completed: bool) {
     if completed {
+        reconcile_runtime_after_onboarding_completion();
         mark_onboarding_done();
     }
 
@@ -1846,7 +2020,7 @@ fn update_summary_view(
     set_text_if_present(
         ui.summary_config_label,
         &format!(
-            "Language: {}\nAPI key: {}\nMode profile: {}",
+            "Language: {}\nAPI key: {}\nMode profile: {}\nTruth model: Live preview stays local and provisional. CodeScribe only commits a final verdict after capture, and degraded fallback blocks silent auto-paste.",
             language.label(),
             api_status,
             hotkey_mode.label()
@@ -1859,24 +2033,37 @@ fn permission_instruction_text(
     status: PermissionUiStatus,
     requested: bool,
 ) -> Option<&'static str> {
-    match kind {
-        PermissionKind::FullDiskAccess => {
-            if status == PermissionUiStatus::Granted {
-                None
-            } else if requested {
+    match kind.recovery_strategy() {
+        PermissionRecoveryStrategy::AppRestartRequired => {
+            if should_wait_for_restart(kind, status, requested) {
                 Some(
-                    "After enabling CodeScribe in System Settings > Privacy & Security > Full Disk Access, return here and click Recheck. Status also refreshes automatically every few seconds.",
+                    "Permission granted. Restart CodeScribe to activate it. On relaunch onboarding will resume here automatically.",
+                )
+            } else if status == PermissionUiStatus::Granted {
+                None
+            } else if kind == PermissionKind::FullDiskAccess {
+                Some(
+                    "After enabling CodeScribe in System Settings > Privacy & Security > Full Disk Access, restart CodeScribe. On relaunch onboarding will resume here automatically.",
                 )
             } else {
                 Some(
-                    "Click Open Settings, enable CodeScribe in Full Disk Access, then return here.",
+                    "Enable this in System Settings, then restart CodeScribe. On relaunch onboarding will resume here automatically.",
                 )
             }
         }
-        _ => {
+        PermissionRecoveryStrategy::LiveReinitialize => {
             if status == PermissionUiStatus::Denied {
                 Some(
-                    "This permission is required to continue onboarding. Enable it in System Settings, then click Try Again.",
+                    "Enable this in System Settings. CodeScribe will reconnect global hotkeys live once Accessibility and Input Monitoring are both granted.",
+                )
+            } else {
+                None
+            }
+        }
+        PermissionRecoveryStrategy::LiveRecheck => {
+            if status == PermissionUiStatus::Denied {
+                Some(
+                    "This permission is required to continue onboarding. Enable it in System Settings, then click Try Again. CodeScribe rechecks microphone access live.",
                 )
             } else {
                 None
@@ -1891,11 +2078,10 @@ fn permission_status_text(
     requested: bool,
 ) -> &'static str {
     match (kind, status, requested) {
-        (PermissionKind::FullDiskAccess, PermissionUiStatus::NotDetermined, true) => {
-            STATUS_RECHECK_READY
-        }
-        (PermissionKind::FullDiskAccess, PermissionUiStatus::Denied, true) => {
-            STATUS_RECHECK_PENDING
+        (_, PermissionUiStatus::Granted, true)
+            if kind.recovery_strategy() == PermissionRecoveryStrategy::AppRestartRequired =>
+        {
+            STATUS_RESTART_REQUIRED
         }
         (_, PermissionUiStatus::NotDetermined, _) => STATUS_NOT_DETERMINED,
         (_, PermissionUiStatus::Granted, _) => STATUS_GRANTED,
@@ -1942,5 +2128,113 @@ fn get_text_field_string(field: Id) -> String {
         std::ffi::CStr::from_ptr(c_str)
             .to_string_lossy()
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use tempfile::TempDir;
+
+    fn setup_test_env() -> TempDir {
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("CODESCRIBE_DATA_DIR", tmp.path());
+        }
+        tmp
+    }
+
+    #[test]
+    #[serial]
+    fn fresh_install_requires_onboarding() {
+        let _tmp = setup_test_env();
+        assert!(should_show_onboarding());
+    }
+
+    #[test]
+    #[serial]
+    fn onboarding_completion_writes_canonical_setup_done() {
+        let _tmp = setup_test_env();
+
+        save_onboarding_progress(4);
+        mark_onboarding_done();
+
+        assert!(Config::config_dir().join("setup_done").exists());
+        assert!(!Config::config_dir().join("onboarding_done").exists());
+        assert!(!Config::config_dir().join("onboarding_progress").exists());
+        assert!(!should_show_onboarding());
+    }
+
+    #[test]
+    #[serial]
+    fn onboarding_progress_round_trips_for_resume() {
+        let _tmp = setup_test_env();
+
+        save_onboarding_progress(3);
+
+        assert_eq!(load_onboarding_progress(), 3);
+    }
+
+    #[test]
+    fn runtime_recovery_strategy_maps_permissions_to_runtime_truth() {
+        assert_eq!(
+            PermissionKind::Microphone.recovery_strategy(),
+            PermissionRecoveryStrategy::LiveRecheck
+        );
+        assert_eq!(
+            PermissionKind::Accessibility.recovery_strategy(),
+            PermissionRecoveryStrategy::LiveReinitialize
+        );
+        assert_eq!(
+            PermissionKind::InputMonitoring.recovery_strategy(),
+            PermissionRecoveryStrategy::LiveReinitialize
+        );
+        assert_eq!(
+            PermissionKind::ScreenRecording.recovery_strategy(),
+            PermissionRecoveryStrategy::AppRestartRequired
+        );
+        assert_eq!(
+            PermissionKind::FullDiskAccess.recovery_strategy(),
+            PermissionRecoveryStrategy::AppRestartRequired
+        );
+    }
+
+    #[test]
+    fn restart_required_permissions_wait_for_relaunch_only_after_same_process_grant() {
+        assert!(should_wait_for_restart(
+            PermissionKind::ScreenRecording,
+            PermissionUiStatus::Granted,
+            true
+        ));
+        assert!(!should_wait_for_restart(
+            PermissionKind::ScreenRecording,
+            PermissionUiStatus::Granted,
+            false
+        ));
+        assert!(!should_wait_for_restart(
+            PermissionKind::Accessibility,
+            PermissionUiStatus::Granted,
+            true
+        ));
+    }
+
+    #[test]
+    fn hotkey_runtime_refresh_waits_for_both_permissions() {
+        assert!(!should_refresh_hotkey_runtime_after_grant(
+            PermissionKind::Accessibility,
+            PermissionStatus::Granted,
+            PermissionStatus::Denied,
+        ));
+        assert!(!should_refresh_hotkey_runtime_after_grant(
+            PermissionKind::Microphone,
+            PermissionStatus::Granted,
+            PermissionStatus::Granted,
+        ));
+        assert!(should_refresh_hotkey_runtime_after_grant(
+            PermissionKind::InputMonitoring,
+            PermissionStatus::Granted,
+            PermissionStatus::Granted,
+        ));
     }
 }

@@ -14,8 +14,8 @@ flowchart TB
         CTRL[controller/]
         IPC_SERVER[ipc/server.rs]
         TRAY[ui/tray/]
-        OVERLAY[ui/voice_chat/]
-        BOOTSTRAP[ui/bootstrap/]
+        OVERLAY[ui/overlay/ + ui/voice_chat/]
+        SETTINGS[ui/settings/]
 
         subgraph CORE[core/ (portable)]
             direction LR
@@ -28,7 +28,7 @@ flowchart TB
         APP --> CORE
     end
 
-    WH --> MODEL[Whisper Model\nlarge-v3-turbo\nmlx-q8 ~888MB\nembedded in bin]
+    WH --> MODEL[Whisper Model\nlarge-v3-turbo\nmlx-q8\nruntime-loaded]
 
     subgraph TOOLS[Quality & CLI Tools]
         CLI[bin/codescribe_quality]
@@ -50,8 +50,8 @@ flowchart TB
        │                                    │                     │
        │                                    ▼                     ▼
        │                            ┌──────────────┐      ┌──────────────┐
-       │                            │ voice_chat   │      │ transcription│
-       │                            │ _ui/         │      │ _overlay.rs  │
+       │                            │ ui/voice_    │      │ ui/overlay/  │
+       │                            │ chat/        │      │              │
        │                            └──────────────┘      └──────────────┘
        │
   Fn hold → Raw mode (no AI)
@@ -97,8 +97,10 @@ CodeScribe/
 │   ├── controller/               # Recording state machine
 │   ├── os/                       # Hotkeys, permissions, clipboard
 │   └── ui/
+│       ├── overlay/              # Dictation overlay window
 │       ├── voice_chat/           # Overlay UI
-│       ├── bootstrap/            # Settings window + onboarding
+│       ├── settings/             # Persistent settings window
+│       ├── onboarding/           # First-run flow
 │       ├── tray/                 # Menu bar UI
 │       └── shared/               # UI helpers/tokens
 │
@@ -109,14 +111,13 @@ CodeScribe/
 │   │   └── types.rs              # MenuIds, TrayMenuEvent
 │   │
 │   ├── hotkeys.rs                # CGEventTap handler
-│   ├── transcription_overlay.rs  # Simple text overlay
 │   ├── ui.rs                     # Badge, Dock icon
 │   ├── ui_helpers.rs             # AppKit utilities
 │   ├── clipboard.rs              # Paste to active app
 │   ├── permissions.rs            # macOS permission checks
 │   └── ipc/                      # IPC server (Unix socket)
 │
-├── src/bin/                      # CLI tools
+├── bin/                          # CLI tools
 │   ├── codescribe_quality.rs     # Batch quality reports
 │   └── codescribe_loop.rs        # Self-improving loop
 │
@@ -188,22 +189,23 @@ match (hotkey, flags) {
 - **Singleton pattern**: One global instance, lazy initialized
 - **Metal acceleration**: Uses Apple GPU via candle-core
 - **Streaming**: Chunks processed during recording
-- **Embedded**: Model bytes in binary (~888MB)
+- **Embedded-first**: Builds embed Whisper when the snapshot is present at build time; runtime lookup from `CODESCRIBE_MODEL_PATH`, repo-local models, or HF cache remains the fallback path
 
 ## Implementation Status
 
 | Feature                                      | Status |
 | -------------------------------------------- | ------ |
 | Local Whisper STT (Metal GPU)                | ✅     |
-| Embedded model (~888MB binary)               | ✅     |
+| Runtime Whisper model lookup                 | ✅     |
 | Global hotkeys (CGEventTap)                  | ✅     |
 | Three recording modes (Raw/Assistive/Toggle) | ✅     |
 | Voice Chat UI (split panel)                  | ✅     |
 | Chat bubbles (NSStackView)                   | ✅     |
 | Drafts panel with tabs                       | ✅     |
-| Settings in overlay                          | ✅     |
+| Settings window from tray + overlay          | ✅     |
 | AI formatting (Responses API)                | ✅     |
 | Streaming AI responses                       | ✅     |
+| Attachments in chat                          | ✅     |
 | Tray app with submenus                       | ✅     |
 | History with slug filenames                  | ✅     |
 | IPC server (runtime interface)               | ✅     |
@@ -216,19 +218,20 @@ match (hotkey, flags) {
 
 ## Model Location
 
-**Release Builds**: Model embedded via `include_bytes!` (~888MB total).
-Zero disk I/O, model bytes loaded directly into GPU memory.
-
-**Development**: External model from:
+**Current runtime truth**: Whisper is embedded by default when the model snapshot is
+available at build time. Runtime lookup remains available as a fallback when
+embedding is disabled with `CODESCRIBE_NO_EMBED=1` or the build cannot embed the
+model:
 
 1. `CODESCRIBE_MODEL_PATH` environment variable
 2. `~/.codescribe/models/whisper-large-v3-turbo-mlx-q8/`
 3. `./models/whisper-large-v3-turbo-mlx-q8/` in repo
+4. Hugging Face cache snapshots for `LibraxisAI/whisper-large-v3-turbo-mlx-q8`
 
 ## Related Documentation
 
 - [`guide/README.md`](guide/README.md) — User documentation
-- [`WHISPER_LIVE.md`](WHISPER_LIVE.md) — Embedded + streaming transcription
+- [`WHISPER_LIVE.md`](WHISPER_LIVE.md) — Runtime Whisper + streaming transcription
 - [`TEAM_SETUP.md`](TEAM_SETUP.md) — Developer setup guide
 - [`BACKLOG.md`](BACKLOG.md) — Feature backlog
 - [`future/ARCHITECTURE_VISION.md`](future/ARCHITECTURE_VISION.md) — Libraxis Qube Protocol vision

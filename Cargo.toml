@@ -3,7 +3,7 @@ resolver = "2"
 members = [".", "core"]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.10.0"
 edition = "2024"
 authors = ["VetCoders <hello@vetcoders.io>"]
 
@@ -18,7 +18,7 @@ tracing = "0.1"
 
 [package]
 name = "codescribe"
-version = "0.8.0"
+version = "0.10.0"
 edition = "2024"
 description = "Speech-to-text tray app for macOS - Pure Rust"
 authors = ["VetCoders <hello@vetcoders.io>"]
@@ -34,12 +34,12 @@ name = "codescribe"
 path = "bin/codescribe.rs"
 
 [[bin]]
-name = "codescribe-quality"
-path = "bin/codescribe_quality.rs"
+name = "qube-report"
+path = "bin/qube_report.rs"
 
 [[bin]]
-name = "codescribe-loop"
-path = "bin/codescribe_loop.rs"
+name = "qube-daemon"
+path = "bin/qube_daemon.rs"
 
 [lib]
 path = "app/lib.rs"

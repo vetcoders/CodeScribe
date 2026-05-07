@@ -1,11 +1,11 @@
-//! E2E tests for Bootstrap lifecycle & Settings window persistence
+//! E2E tests for setup lifecycle & Settings window persistence
 //!
 //! Tests:
-//! - Setup sentinel creation/detection (`should_show_setup`)
+//! - Setup sentinel creation/detection (`should_show_onboarding`)
 //! - Settings persistence for mode-first bindings and tab-level fields
 //!
 //! Run with:
-//!   cargo test --test e2e_bootstrap_settings
+//!   cargo test --test e2e_settings_lifecycle
 //!
 //! Created by M&K (c)2026 VetCoders
 
@@ -25,6 +25,8 @@ fn setup_test_env() -> TempDir {
         std::env::remove_var("HOLD_EXCLUSIVE");
         std::env::remove_var("CODESCRIBE_TYPING_CPS");
         std::env::remove_var("USE_LOCAL_STT");
+        std::env::remove_var("HOLD_MODS");
+        std::env::remove_var("TOGGLE_TRIGGER");
     }
     tmp
 }
@@ -44,8 +46,8 @@ fn test_setup_should_show_when_no_sentinel() {
     let _tmp = setup_test_env();
 
     assert!(
-        codescribe::should_show_setup(),
-        "should_show_setup must be true on fresh install"
+        codescribe::should_show_onboarding(),
+        "should_show_onboarding must be true on fresh install"
     );
 }
 
@@ -59,8 +61,8 @@ fn test_setup_should_not_show_after_done() {
     fs::write(&sentinel, "done").expect("write sentinel");
 
     assert!(
-        !codescribe::should_show_setup(),
-        "should_show_setup must be false after setup_done exists"
+        !codescribe::should_show_onboarding(),
+        "should_show_onboarding must be false after setup_done exists"
     );
 }
 
@@ -70,13 +72,13 @@ fn test_setup_migrates_when_both_legacy_sentinels_exist() {
     let _tmp = setup_test_env();
 
     let onboarding = Config::config_dir().join("onboarding_done");
-    let bootstrap = Config::config_dir().join("bootstrap_done");
+    let legacy_settings = Config::config_dir().join("bootstrap_done");
     fs::create_dir_all(onboarding.parent().expect("onboarding parent")).expect("create config dir");
     fs::write(&onboarding, "done").expect("write onboarding_done");
-    fs::write(&bootstrap, "done").expect("write bootstrap_done");
+    fs::write(&legacy_settings, "done").expect("write bootstrap_done");
 
     assert!(
-        !codescribe::should_show_setup(),
+        !codescribe::should_show_onboarding(),
         "both legacy sentinels should migrate to setup_done and mark setup complete"
     );
 
@@ -96,22 +98,39 @@ fn test_setup_remains_incomplete_with_only_legacy_onboarding() {
     fs::write(&onboarding, "done").expect("write onboarding_done");
 
     assert!(
-        codescribe::should_show_setup(),
+        codescribe::should_show_onboarding(),
         "legacy onboarding_done alone means permissions were done, but setup is still pending"
     );
 }
 
 #[test]
 #[serial]
-fn test_setup_remains_incomplete_with_only_legacy_bootstrap() {
+fn test_setup_remains_incomplete_with_only_legacy_settings_sentinel() {
     let _tmp = setup_test_env();
-    let bootstrap = Config::config_dir().join("bootstrap_done");
-    fs::create_dir_all(bootstrap.parent().expect("bootstrap parent")).expect("create config dir");
-    fs::write(&bootstrap, "done").expect("write bootstrap_done");
+    let legacy_settings = Config::config_dir().join("bootstrap_done");
+    fs::create_dir_all(legacy_settings.parent().expect("bootstrap parent"))
+        .expect("create config dir");
+    fs::write(&legacy_settings, "done").expect("write bootstrap_done");
 
     assert!(
-        codescribe::should_show_setup(),
+        codescribe::should_show_onboarding(),
         "legacy bootstrap_done alone means settings were opened before, but setup is still pending"
+    );
+}
+
+#[test]
+#[serial]
+fn test_setup_done_blocks_onboarding_even_with_resume_checkpoint() {
+    let _tmp = setup_test_env();
+
+    let config_dir = Config::config_dir();
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    fs::write(config_dir.join("onboarding_progress"), "3").expect("write onboarding_progress");
+    fs::write(config_dir.join("setup_done"), "done").expect("write setup_done");
+
+    assert!(
+        !codescribe::should_show_onboarding(),
+        "setup_done must keep onboarding hidden even if a stale resume checkpoint exists"
     );
 }
 

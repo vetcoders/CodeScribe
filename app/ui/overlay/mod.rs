@@ -7,7 +7,7 @@
 //! - Auto-hides after recording completion
 //!
 //! Use this for: Ctrl hold (raw), Left ⌥⌥ toggle (normal)
-//! For agent chat conversations, use voice_chat_ui overlay.
+//! For agent chat conversations, use the `ui::voice_chat` overlay.
 //!
 //! Design: macOS Tahoe Liquid Glass (NSVisualEffectView, HudWindow material)
 
@@ -24,8 +24,8 @@ use objc2_app_kit::{
     NSBackingStoreType, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -65,10 +65,29 @@ const OVERLAY_BUTTON_HEIGHT: f64 = 28.0;
 const OVERLAY_BUTTON_MARGIN: f64 = 8.0;
 const OVERLAY_HEADER_LABEL: &str = "CodeScribe - Dictation Overlay";
 
-// Auto-hide delay after recording completes
-const AUTO_HIDE_DELAY_SECS: u64 = 5;
+// Auto-hide delay after recording completes (configurable via env)
+const DEFAULT_AUTO_HIDE_DELAY_SECS: u64 = 15;
+const MIN_AUTO_HIDE_DELAY_SECS: u64 = 3;
+const MAX_AUTO_HIDE_DELAY_SECS: u64 = 60;
 const OVERLAY_LAYOUT_THROTTLE_MS: u64 = 80;
 const OVERLAY_LAYOUT_HYSTERESIS_PX: f64 = 1.0;
+
+fn parse_auto_hide_delay_secs(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.clamp(MIN_AUTO_HIDE_DELAY_SECS, MAX_AUTO_HIDE_DELAY_SECS))
+        .unwrap_or(DEFAULT_AUTO_HIDE_DELAY_SECS)
+}
+
+fn auto_hide_delay_secs() -> u64 {
+    static DELAY: OnceLock<u64> = OnceLock::new();
+    *DELAY.get_or_init(|| {
+        parse_auto_hide_delay_secs(
+            std::env::var("TRANSCRIPTION_OVERLAY_AUTO_HIDE_SECS")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
 
 /// Configuration for the transcription overlay
 #[derive(Debug, Clone)]
@@ -116,6 +135,7 @@ struct TranscriptionOverlayState {
     hover_active: bool,
     action_handler: Option<usize>,
     action_contract_mode: TranscriptionActionContractMode,
+    display_status: String,
     raw_text: String,
     last_pass_text: String,
     accumulated_text: String,
@@ -146,6 +166,7 @@ lazy_static::lazy_static! {
         hover_active: false,
         action_handler: None,
         action_contract_mode: TranscriptionActionContractMode::Raw,
+        display_status: String::new(),
         raw_text: String::new(),
         last_pass_text: String::new(),
         accumulated_text: String::new(),
@@ -186,6 +207,7 @@ struct OverlaySnapshot {
     save_button: Option<usize>,
     commit_button: Option<usize>,
     progress_indicator: Option<usize>,
+    display_status: String,
     window_width: f64,
     min_height: f64,
     max_height: f64,
@@ -207,6 +229,7 @@ impl OverlaySnapshot {
             save_button: state.save_button,
             commit_button: state.commit_button,
             progress_indicator: state.progress_indicator,
+            display_status: state.display_status.clone(),
             window_width: state.window_width,
             min_height: state.min_height,
             max_height: state.max_height,
@@ -269,6 +292,15 @@ fn action_text_for_contract(state: &TranscriptionOverlayState) -> String {
     }
 }
 
+fn display_text_for_state(state: &TranscriptionOverlayState) -> String {
+    let text = if state.accumulated_text.trim().is_empty() {
+        action_text_for_contract(state)
+    } else {
+        state.accumulated_text.clone()
+    };
+    overlay_visible_text(&text, state.decision_mode).to_string()
+}
+
 /// Handler: Copy transcript using contract source of truth.
 extern "C" fn on_copy_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
     let (text, snap) = {
@@ -300,9 +332,9 @@ extern "C" fn on_augment_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
     if text.is_empty() {
         return;
     }
-    crate::show_voice_chat_overlay();
-    crate::show_agent_tab();
-    crate::voice_chat_ui::handoff_transcript_to_chat(&text);
+    crate::ui::voice_chat::show_voice_chat_overlay();
+    crate::ui::voice_chat::show_agent_tab();
+    crate::ui::voice_chat::handoff_transcript_to_chat(&text);
     hide_transcription_overlay();
 }
 
@@ -395,13 +427,25 @@ fn augment_action_tooltip(mode: TranscriptionActionContractMode) -> &'static str
     }
 }
 
-fn decision_hint_text(mode: TranscriptionActionContractMode, include_auto_hide: bool) -> String {
-    let base = format!(
-        "Dictation overlay | Source: {} | Save closes | Augment -> Agent",
-        action_contract_source_label(mode)
-    );
+fn decision_hint_text(
+    mode: TranscriptionActionContractMode,
+    display_status: &str,
+    include_auto_hide: bool,
+) -> String {
+    let mode_label = action_contract_source_label(mode);
+    let base = if display_status.is_empty() {
+        format!(
+            "Dictation overlay | {} | Save closes | Augment -> Agent",
+            mode_label
+        )
+    } else {
+        format!(
+            "Dictation overlay | {} | {} | Save closes | Augment -> Agent",
+            mode_label, display_status
+        )
+    };
     if include_auto_hide {
-        format!("{base} | Auto-hide {}s", AUTO_HIDE_DELAY_SECS)
+        format!("{base} | Auto-hide {}s", auto_hide_delay_secs())
     } else {
         base
     }
@@ -434,7 +478,7 @@ fn refresh_action_contract_ui_unlocked(
     if let Some(label_ptr) = snap.auto_hide_label {
         unsafe {
             if include_auto_hide_hint {
-                let hint = decision_hint_text(mode, true);
+                let hint = decision_hint_text(mode, &snap.display_status, true);
                 set_text(label_ptr as Id, &hint);
                 set_tooltip(label_ptr as Id, "Transcription overlay action contract");
                 set_hidden(label_ptr as Id, false);
@@ -1105,7 +1149,7 @@ fn show_transcription_overlay_impl() {
                 &CGPoint::new(OVERLAY_PADDING, info_y),
                 &CGSize::new(window_width - OVERLAY_PADDING * 2.0, OVERLAY_INFO_HEIGHT),
             ),
-            text: decision_hint_text(TranscriptionActionContractMode::Raw, true),
+            text: decision_hint_text(TranscriptionActionContractMode::Raw, "", true),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             bold: false,
             text_color: ui_colors::overlay_hint_text(),
@@ -1346,8 +1390,7 @@ fn append_transcription_delta_impl(delta: &str) {
         codescribe_core::pipeline::contracts::TranscriptDelta::from_raw(delta)
             .apply(&mut state.accumulated_text);
         let len_after = state.accumulated_text.len();
-        let visible =
-            overlay_visible_text(&state.accumulated_text, state.decision_mode).to_string();
+        let visible = display_text_for_state(&state);
         let snap = OverlaySnapshot::from_state(&state);
 
         // Throttled resize: trigger immediately on structural changes (newlines,
@@ -1387,8 +1430,7 @@ fn set_transcription_text_impl(text: &str) {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.accumulated_text = text.to_string();
         state.last_pass_text = text.to_string();
-        let visible =
-            overlay_visible_text(&state.accumulated_text, state.decision_mode).to_string();
+        let visible = display_text_for_state(&state);
         let snap = OverlaySnapshot::from_state(&state);
         state.last_layout_resize_at = Instant::now();
         state.pending_layout_resize = false;
@@ -1410,6 +1452,7 @@ pub fn set_transcription_action_contract(
     raw_text: &str,
     last_pass_text: &str,
     mode: TranscriptionActionContractMode,
+    display_status: String,
 ) {
     let raw_text_owned = raw_text.to_string();
     let last_pass_owned = last_pass_text.to_string();
@@ -1417,12 +1460,12 @@ pub fn set_transcription_action_contract(
     Queue::main().exec_async(move || {
         let (visible_text, snap, decision_mode) = {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.accumulated_text.clear();
             state.raw_text = raw_text_owned;
             state.last_pass_text = last_pass_owned;
             state.action_contract_mode = mode_copy;
-            state.accumulated_text = action_text_for_contract(&state);
-            let visible =
-                overlay_visible_text(&state.accumulated_text, state.decision_mode).to_string();
+            state.display_status = display_status;
+            let visible = display_text_for_state(&state);
             let dm = state.decision_mode;
             let snap = OverlaySnapshot::from_state(&state);
             state.last_layout_resize_at = Instant::now();
@@ -1508,13 +1551,13 @@ pub fn schedule_auto_hide() {
     });
 
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(AUTO_HIDE_DELAY_SECS));
+        std::thread::sleep(Duration::from_secs(auto_hide_delay_secs()));
 
         if should_auto_hide(generation) {
             hide_transcription_overlay();
             debug!(
                 "Transcription overlay auto-hidden after {}s",
-                AUTO_HIDE_DELAY_SECS
+                auto_hide_delay_secs()
             );
         } else {
             debug!("Auto-hide skipped");
@@ -1585,19 +1628,197 @@ pub fn hide_transcription_overlay() {
     });
 }
 
-/// Closes a window by raw pointer (used for delayed close after animation)
+/// Closes a window by raw pointer (used for delayed close after animation).
+///
+/// Sends `release` after `close` because the shared shell policy sets
+/// `released_when_closed = false`, so AppKit no longer auto-releases the
+/// initial alloc/init retain. Without this the NSWindow itself would leak.
 fn close_window_by_ptr(window_ptr: usize) {
     unsafe {
-        window_close(window_ptr as Id);
+        let window = window_ptr as Id;
+        window_close(window);
+        let _: () = msg_send![window, release];
     }
 }
 
 fn hide_transcription_overlay_impl() {
-    // DEADLOCK PREVENTION: extract window_ptr and clear state under lock,
+    // DEADLOCK PREVENTION: extract handles and clear state under lock,
     // then drop lock before the animate_fade AppKit call.
-    let window_ptr = {
+    let (window_ptr, tracking_area_ptr, action_handler_ptr) = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let wp = state.window.take();
+        let tap = state.tracking_area.take();
+        let ahp = state.action_handler.take();
+        state.header_label = None;
+        state.text_scroll_view = None;
+        state.text_view = None;
+        state.status_field = None;
+        state.auto_hide_label = None;
+        state.blur_view = None;
+        state.copy_button = None;
+        state.augment_button = None;
+        state.save_button = None;
+        state.commit_button = None;
+        state.progress_indicator = None;
+        state.decision_mode = false;
+        state.hover_active = false;
+        state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
+        state.last_layout_resize_at = Instant::now();
+        state.pending_layout_resize = false;
+        // Note: accumulated_text is NOT cleared here - it's needed for clipboard copy
+        (wp, tap, ahp)
+    }; // Lock dropped.
+
+    if let Some(window_ptr) = window_ptr {
+        let window = window_ptr as Id;
+
+        // Fade out animation (0.15s)
+        unsafe {
+            animate_fade(window, 0.0, 0.15);
+        }
+
+        // Release the tracking area and the action target before the window
+        // tears down. Detach the tracking area from the content view first so
+        // no further mouse events can fire on a freed pointer. The content
+        // view itself is owned by the window and will be released when the
+        // delayed close runs.
+        unsafe {
+            if let Some(ta_ptr) = tracking_area_ptr {
+                let ta = ta_ptr as Id;
+                let content_view: Id = msg_send![window, contentView];
+                if !content_view.is_null() {
+                    let _: () = msg_send![content_view, removeTrackingArea: ta];
+                }
+                let _: () = msg_send![ta, release];
+            }
+            if let Some(ah_ptr) = action_handler_ptr {
+                let _: () = msg_send![ah_ptr as Id, release];
+            }
+        }
+
+        // Close window after brief delay for animation. `close_window_by_ptr`
+        // sends `release` after `close` to balance the alloc/init retain
+        // (released_when_closed = false in the shared shell policy).
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            Queue::main().exec_async(move || {
+                close_window_by_ptr(window_ptr);
+            });
+        });
+
+        debug!("Transcription overlay hidden");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::presentation::emitter::PresentationEmitter;
+    use codescribe_core::audio::load_audio_file;
+    use codescribe_core::pipeline::contracts::{
+        DeltaSink, EngineEvent, EventSink, TranscriptDelta,
+    };
+    use codescribe_core::pipeline::streaming::collect_buffered_engine_events;
+    use serial_test::serial;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    const OVERLAY_REAL_FLOW_OPT_IN_ENV: &str = "CODESCRIBE_E2E_STT";
+
+    fn overlay_real_flow_enabled() -> bool {
+        std::env::var(OVERLAY_REAL_FLOW_OPT_IN_ENV)
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    fn canonical_data_assets_dir() -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        let dir = PathBuf::from(home).join(".codescribe/data_assets");
+        if dir.exists() { Some(dir) } else { None }
+    }
+
+    fn canonical_overlay_cases() -> Vec<(PathBuf, PathBuf)> {
+        let Some(dir) = canonical_data_assets_dir() else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => return Vec::new(),
+        };
+
+        for entry in entries.flatten() {
+            let wav = entry.path();
+            if wav.extension().and_then(|ext| ext.to_str()) != Some("wav") {
+                continue;
+            }
+
+            let Some(stem) = wav.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let reference = dir.join(format!(
+                "{stem}_codescribe_raw_human_transcription_from_wav.txt"
+            ));
+            if reference.exists() {
+                out.push((wav, reference));
+            }
+        }
+
+        out.sort();
+        out
+    }
+
+    fn append_utterance_text(rendered: &mut String, text: &str) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if !rendered.is_empty() {
+            rendered.push(' ');
+        }
+        rendered.push_str(trimmed);
+    }
+
+    fn final_transcript_from_events(events: &[EngineEvent]) -> String {
+        let mut transcript = String::new();
+        for event in events {
+            if let EngineEvent::UtteranceFinal { text, .. } = event {
+                append_utterance_text(&mut transcript, text);
+            }
+        }
+        transcript
+    }
+
+    fn normalize_overlay_text(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn human_reference_excerpt(path: &Path) -> String {
+        fs::read_to_string(path)
+            .map(|text| {
+                text.split_whitespace()
+                    .take(24)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+    }
+
+    fn reset_overlay_state_for_test() {
+        // Test fixture: pointers may be invalid (tests don't always wire a
+        // real AppKit window), so we intentionally do NOT send `release` for
+        // window / tracking_area / action_handler here. Production teardown
+        // lives in `hide_transcription_overlay_impl` + `close_window_by_ptr`.
+        AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
+        AUTO_HIDE_GENERATION.store(0, Ordering::SeqCst);
+
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.window = None;
         state.header_label = None;
         state.text_scroll_view = None;
         state.text_view = None;
@@ -1614,37 +1835,53 @@ fn hide_transcription_overlay_impl() {
         state.hover_active = false;
         state.action_handler = None;
         state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.raw_text.clear();
+        state.last_pass_text.clear();
+        state.accumulated_text.clear();
+        state.window_width = OVERLAY_WINDOW_WIDTH;
+        state.min_height = OVERLAY_WINDOW_MIN_HEIGHT;
+        state.max_height = OVERLAY_WINDOW_MIN_HEIGHT;
         state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
         state.last_layout_resize_at = Instant::now();
         state.pending_layout_resize = false;
-        // Note: accumulated_text is NOT cleared here - it's needed for clipboard copy
-        wp
-    }; // Lock dropped.
+    }
 
-    if let Some(window_ptr) = window_ptr {
-        let window = window_ptr as Id;
+    fn overlay_visible_text_now() -> String {
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        display_text_for_state(&state)
+    }
 
-        // Fade out animation (0.15s)
-        unsafe {
-            animate_fade(window, 0.0, 0.15);
+    fn has_one_to_three_word_collapse(snapshots: &[String]) -> bool {
+        let mut saw_substantial_text = false;
+
+        for snapshot in snapshots {
+            let words = snapshot.split_whitespace().count();
+            if words >= 6 || snapshot.chars().count() >= 30 {
+                saw_substantial_text = true;
+            }
+
+            if saw_substantial_text && (1..=3).contains(&words) {
+                return true;
+            }
         }
 
-        // Close window after brief delay for animation
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
-            Queue::main().exec_async(move || {
-                close_window_by_ptr(window_ptr);
-            });
-        });
-
-        debug!("Transcription overlay hidden");
+        false
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serial_test::serial;
+    struct OverlayReplaySink {
+        snapshots: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl DeltaSink for OverlayReplaySink {
+        fn apply(&self, delta: &TranscriptDelta) {
+            append_transcription_delta_impl(&delta.delta);
+            let visible = overlay_visible_text_now();
+            self.snapshots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(visible);
+        }
+    }
 
     #[test]
     fn test_transcription_text() {
@@ -1678,7 +1915,19 @@ mod tests {
 
     #[test]
     fn test_auto_hide_delay_seconds() {
-        assert_eq!(AUTO_HIDE_DELAY_SECS, 5);
+        assert_eq!(
+            parse_auto_hide_delay_secs(None),
+            DEFAULT_AUTO_HIDE_DELAY_SECS
+        );
+        assert_eq!(
+            parse_auto_hide_delay_secs(Some("2")),
+            MIN_AUTO_HIDE_DELAY_SECS
+        );
+        assert_eq!(
+            parse_auto_hide_delay_secs(Some("999")),
+            MAX_AUTO_HIDE_DELAY_SECS
+        );
+        assert_eq!(parse_auto_hide_delay_secs(Some("18")), 18);
     }
 
     #[test]
@@ -1788,6 +2037,34 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_display_text_prefers_live_preview_over_action_contract() {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.decision_mode = true;
+        state.action_contract_mode = TranscriptionActionContractMode::AiFormat;
+        state.raw_text = "raw transcript".to_string();
+        state.accumulated_text = "overlay preview".to_string();
+        state.last_pass_text = "final last-pass".to_string();
+
+        let text = display_text_for_state(&state);
+        assert_eq!(text, "overlay preview");
+    }
+
+    #[test]
+    #[serial]
+    fn test_display_text_falls_back_to_action_contract_when_preview_empty() {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.decision_mode = true;
+        state.action_contract_mode = TranscriptionActionContractMode::AiFormat;
+        state.raw_text = "raw transcript".to_string();
+        state.accumulated_text.clear();
+        state.last_pass_text = "final last-pass".to_string();
+
+        let text = display_text_for_state(&state);
+        assert_eq!(text, "final last-pass");
+    }
+
+    #[test]
     fn test_stable_overlay_preview_text_keeps_complete_tail() {
         let text = "To jest stabilne zdanie.";
         assert_eq!(stable_overlay_preview_text(text), text);
@@ -1804,15 +2081,143 @@ mod tests {
         assert_eq!(stable_overlay_preview_text("partial"), "partial");
     }
 
+    /// Scoped env var guard — saves the prior value and restores it on Drop.
+    ///
+    /// Required because `CODESCRIBE_OVERLAY_STABLE_PREVIEW` is read by
+    /// `overlay_live_preview_uses_stable_text()` as process-global state, so
+    /// parallel tests without isolation can observe values left over by siblings.
+    struct OverlayStablePreviewEnvGuard {
+        prev: Option<String>,
+    }
+
+    impl OverlayStablePreviewEnvGuard {
+        fn unset() -> Self {
+            let prev = std::env::var("CODESCRIBE_OVERLAY_STABLE_PREVIEW").ok();
+            // SAFETY: `#[serial]` on every caller enforces single-threaded access to
+            // this env var for the duration of the test, and Drop restores the prior
+            // value before any other test resumes.
+            unsafe { std::env::remove_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW") };
+            Self { prev }
+        }
+    }
+
+    impl Drop for OverlayStablePreviewEnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                // SAFETY: see OverlayStablePreviewEnvGuard::unset — serial test scope.
+                Some(v) => unsafe { std::env::set_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW", v) },
+                // SAFETY: see OverlayStablePreviewEnvGuard::unset — serial test scope.
+                None => unsafe { std::env::remove_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW") },
+            }
+        }
+    }
+
     #[test]
+    #[serial]
     fn test_overlay_visible_text_decision_mode_uses_exact_text() {
+        let _guard = OverlayStablePreviewEnvGuard::unset();
         let text = "pełny tekst kontraktu bez trimowania";
         assert_eq!(overlay_visible_text(text, true), text);
     }
 
     #[test]
+    #[serial]
     fn test_overlay_visible_text_live_mode_defaults_to_exact_text() {
+        let _guard = OverlayStablePreviewEnvGuard::unset();
         let text = "To jest stabilne zda";
         assert_eq!(overlay_visible_text(text, false), text);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn overlay_real_flow_from_canonical_assets_never_collapses_to_1_3_words() {
+        if !overlay_real_flow_enabled() {
+            eprintln!(
+                "Skipping overlay real-flow E2E (set {}=1 to enable)",
+                OVERLAY_REAL_FLOW_OPT_IN_ENV
+            );
+            return;
+        }
+
+        if let Err(err) = codescribe_core::stt::whisper::singleton::get_model_path() {
+            eprintln!("Skipping overlay real-flow E2E: local Whisper model unavailable: {err}");
+            return;
+        }
+
+        let cases = canonical_overlay_cases();
+        if cases.is_empty() {
+            eprintln!("Skipping overlay real-flow E2E: no canonical data assets found");
+            return;
+        }
+
+        let previous_stable_preview = std::env::var("CODESCRIBE_OVERLAY_STABLE_PREVIEW").ok();
+        unsafe {
+            std::env::set_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW", "0");
+        }
+
+        for (audio_path, reference_path) in cases {
+            reset_overlay_state_for_test();
+
+            let (samples, sample_rate) =
+                load_audio_file(&audio_path).expect("load canonical audio asset");
+            let events =
+                collect_buffered_engine_events(&samples, sample_rate, Some("pl".to_string()))
+                    .await
+                    .expect("collect engine events for overlay replay");
+
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, EngineEvent::Preview { .. })),
+                "expected Preview events for canonical asset {}",
+                audio_path.display()
+            );
+
+            let expected_final = final_transcript_from_events(&events);
+            assert!(
+                !expected_final.trim().is_empty(),
+                "expected non-empty final transcript for {}",
+                audio_path.display()
+            );
+
+            let transcript_buffer = Arc::new(Mutex::new(String::new()));
+            let snapshots = Arc::new(StdMutex::new(Vec::<String>::new()));
+            let sink: Arc<dyn DeltaSink> = Arc::new(OverlayReplaySink {
+                snapshots: Arc::clone(&snapshots),
+            });
+            let mut emitter = PresentationEmitter::new(transcript_buffer, Some(sink), None);
+
+            for event in &events {
+                emitter.on_event(event);
+            }
+            emitter.finish().await;
+
+            let final_visible = overlay_visible_text_now();
+            let snapshot_list = snapshots.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+            assert!(
+                !snapshot_list.is_empty(),
+                "expected visible overlay snapshots for {}",
+                audio_path.display()
+            );
+            assert!(
+                !has_one_to_three_word_collapse(&snapshot_list),
+                "overlay collapsed to 1-3 words for {} (reference excerpt: {})",
+                audio_path.display(),
+                human_reference_excerpt(&reference_path)
+            );
+            assert_eq!(
+                normalize_overlay_text(&final_visible),
+                normalize_overlay_text(&expected_final),
+                "overlay final visible transcript diverged for {}",
+                audio_path.display()
+            );
+        }
+
+        match previous_stable_preview {
+            Some(value) => unsafe { std::env::set_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW", value) },
+            None => unsafe { std::env::remove_var("CODESCRIBE_OVERLAY_STABLE_PREVIEW") },
+        }
+        reset_overlay_state_for_test();
     }
 }

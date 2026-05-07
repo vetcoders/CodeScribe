@@ -317,6 +317,11 @@ mod tests {
             start_ts: 0.0,
             end_ts: 1.0,
             segments: Vec::new(),
+            vad_speech_pct: Some(100.0),
+            avg_logprob: None,
+            compression_ratio: None,
+            quality_gate_dropped: false,
+            confidence_flags: Vec::new(),
         });
 
         // After final, last_text resets — next preview starts fresh
@@ -404,6 +409,11 @@ mod tests {
             start_ts: 0.0,
             end_ts: 2.0,
             segments: Vec::new(),
+            vad_speech_pct: Some(100.0),
+            avg_logprob: None,
+            compression_ratio: None,
+            quality_gate_dropped: false,
+            confidence_flags: Vec::new(),
         });
 
         assert_eq!(sink.events().len(), 3);

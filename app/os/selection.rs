@@ -5,16 +5,63 @@
 //! - Avoid clipboard pollution by snapshot+restore.
 //! - Best-effort only: failure should never break recording/transcription.
 
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tracing::{debug, warn};
 
 use crate::os::clipboard::{self, ClipboardSnapshot};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AssistiveContext {
     pub frontmost_app: Option<String>,
     pub selected_text: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TimedAssistiveContext {
+    captured_at: std::time::Instant,
+    ctx: AssistiveContext,
+}
+
+fn recent_assistive_context_store() -> &'static Mutex<Option<TimedAssistiveContext>> {
+    static STORE: OnceLock<Mutex<Option<TimedAssistiveContext>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(None))
+}
+
+/// Store the latest assistive context for short-lived follow-up prompts in chat.
+pub fn store_recent_assistive_context(ctx: &AssistiveContext) {
+    let mut guard = recent_assistive_context_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = Some(TimedAssistiveContext {
+        captured_at: std::time::Instant::now(),
+        ctx: ctx.clone(),
+    });
+}
+
+/// Return the latest assistive context if it is still fresh.
+pub fn get_recent_assistive_context(max_age: Duration) -> Option<AssistiveContext> {
+    let mut guard = recent_assistive_context_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let entry = guard.as_ref()?;
+
+    if entry.captured_at.elapsed() <= max_age {
+        return Some(entry.ctx.clone());
+    }
+
+    // Drop stale data to avoid leaking old context into later prompts.
+    *guard = None;
+    None
+}
+
+#[cfg(test)]
+fn clear_recent_assistive_context_for_tests() {
+    let mut guard = recent_assistive_context_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = None;
 }
 
 fn env_flag(key: &str, default: bool) -> bool {
@@ -123,6 +170,46 @@ pub fn capture_frontmost_app_only() -> AssistiveContext {
         frontmost_app,
         selected_text: None,
     }
+}
+
+/// Best-effort app activation by localized app name.
+///
+/// Used to recover focus before synthetic paste when frontmost temporarily flips to CodeScribe.
+#[cfg(target_os = "macos")]
+pub fn activate_app_by_name(app_name: &str) -> bool {
+    use std::process::Command;
+
+    let app_name = app_name.trim();
+    if app_name.is_empty() || app_name.eq_ignore_ascii_case("codescribe") {
+        return false;
+    }
+
+    let escaped = app_name.replace('\\', "\\\\").replace('\"', "\\\"");
+    let script = format!("tell application \"{}\" to activate", escaped);
+
+    match Command::new("osascript").args(["-e", &script]).output() {
+        Ok(out) => {
+            if out.status.success() {
+                true
+            } else {
+                debug!(
+                    "App activation failed for '{}': exit={:?}",
+                    app_name,
+                    out.status.code()
+                );
+                false
+            }
+        }
+        Err(e) => {
+            debug!("App activation failed for '{}': {}", app_name, e);
+            false
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn activate_app_by_name(_app_name: &str) -> bool {
+    false
 }
 
 /// Build the LLM input for assistive mode, including optional selection context.
@@ -277,4 +364,46 @@ fn selected_text_from_frontmost(
     _frontmost_app: Option<&str>,
 ) -> Option<String> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn recent_assistive_context_roundtrips_while_fresh() {
+        clear_recent_assistive_context_for_tests();
+
+        let ctx = AssistiveContext {
+            frontmost_app: Some("Safari".to_string()),
+            selected_text: Some("selected".to_string()),
+        };
+        store_recent_assistive_context(&ctx);
+
+        assert_eq!(
+            get_recent_assistive_context(Duration::from_secs(1)),
+            Some(ctx)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn stale_recent_assistive_context_is_cleared() {
+        clear_recent_assistive_context_for_tests();
+
+        let ctx = AssistiveContext {
+            frontmost_app: Some("CodeScribe".to_string()),
+            selected_text: Some("old".to_string()),
+        };
+        store_recent_assistive_context(&ctx);
+
+        assert_eq!(get_recent_assistive_context(Duration::ZERO), None);
+        assert_eq!(
+            get_recent_assistive_context(Duration::from_secs(1)),
+            None,
+            "stale entry should be cleared from the cache"
+        );
+    }
 }

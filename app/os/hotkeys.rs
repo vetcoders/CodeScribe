@@ -16,6 +16,7 @@
 use crate::config::{Config, ShortcutBinding, UserSettings, WorkMode};
 use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const BIND_DISABLED: u16 = 0;
@@ -338,10 +339,6 @@ impl HotkeyPhysicalKey {
 
     fn is_ctrl(self) -> bool {
         matches!(self, Self::LeftControl | Self::RightControl)
-    }
-
-    fn is_fn(self) -> bool {
-        matches!(self, Self::Fn)
     }
 }
 
@@ -1124,6 +1121,11 @@ mod macos {
     }
 
     /// CGEventTap callback - thin adapter from CoreGraphics events to HotkeyDetector input.
+    ///
+    /// Note: the tap is created with `K_CG_EVENT_TAP_OPTION_LISTEN_ONLY`
+    /// (see `run_event_tap`), so CoreGraphics ignores our return value and
+    /// we cannot suppress events here. If real Fn-emoji-picker suppression
+    /// is ever needed, the tap shape must change to an active tap first.
     extern "C" fn event_callback(
         _proxy: CGEventTapProxy,
         event_type: CGEventType,
@@ -1146,8 +1148,8 @@ mod macos {
         let now = Instant::now();
         let runtime_config = get_hotkey_runtime_config();
 
-        let (input, swallow_fn_event) = match event_type {
-            K_CG_EVENT_KEY_DOWN => (HotkeyDetectorInput::KeyDown { now, modifiers }, false),
+        let input = match event_type {
+            K_CG_EVENT_KEY_DOWN => HotkeyDetectorInput::KeyDown { now, modifiers },
             K_CG_EVENT_FLAGS_CHANGED => {
                 let keycode =
                     unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) };
@@ -1164,26 +1166,17 @@ mod macos {
                     modifiers.fn_key
                 );
 
-                (
-                    HotkeyDetectorInput::FlagsChanged {
-                        now,
-                        key,
-                        modifiers,
-                    },
-                    runtime_config.mode_bindings.dictation == ShortcutBinding::HoldFn
-                        && key.is_fn(),
-                )
+                HotkeyDetectorInput::FlagsChanged {
+                    now,
+                    key,
+                    modifiers,
+                }
             }
             _ => return event,
         };
 
         if let Some(hotkey_event) = state.detector.feed(input, runtime_config) {
             let _ = state.tx.send(hotkey_event);
-        }
-
-        if swallow_fn_event {
-            // Swallow Fn events to avoid the system emoji picker.
-            return ptr::null_mut();
         }
 
         event
@@ -1509,6 +1502,68 @@ pub fn disable_hotkeys() {
 /// Check if hotkeys are currently enabled (thread-safe, global)
 pub fn are_hotkeys_enabled() -> bool {
     macos::is_enabled()
+}
+
+#[derive(Default)]
+struct GlobalHotkeyService {
+    tx: Option<Sender<HotkeyEvent>>,
+    manager: Option<HotkeyManager>,
+}
+
+fn global_hotkey_service() -> &'static Mutex<GlobalHotkeyService> {
+    static GLOBAL_HOTKEY_SERVICE: OnceLock<Mutex<GlobalHotkeyService>> = OnceLock::new();
+    GLOBAL_HOTKEY_SERVICE.get_or_init(|| Mutex::new(GlobalHotkeyService::default()))
+}
+
+fn replace_global_hotkey_manager(guard: &mut GlobalHotkeyService) -> Result<(), String> {
+    let Some(tx) = guard.tx.clone() else {
+        return Err("Hotkey runtime not initialized".to_string());
+    };
+
+    if let Some(manager) = guard.manager.as_mut() {
+        manager.shutdown();
+    }
+    guard.manager = None;
+    guard.manager = Some(HotkeyManager::new(tx)?);
+    Ok(())
+}
+
+/// Install the process-global hotkey runtime owner.
+///
+/// The sender is retained even when startup fails so a later live reinit can retry
+/// once permissions become available.
+pub fn install_global_hotkey_manager(tx: Sender<HotkeyEvent>) -> Result<(), String> {
+    let mut guard = global_hotkey_service()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    guard.tx = Some(tx);
+    replace_global_hotkey_manager(&mut guard)
+}
+
+/// Recreate the process-global hotkey runtime after permissions or settings change.
+pub fn refresh_global_hotkey_manager() -> Result<(), String> {
+    let mut guard = global_hotkey_service()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    replace_global_hotkey_manager(&mut guard)
+}
+
+pub fn shutdown_global_hotkey_manager() {
+    let mut guard = global_hotkey_service()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(manager) = guard.manager.as_mut() {
+        manager.shutdown();
+    }
+    guard.manager = None;
+}
+
+pub fn is_global_hotkey_manager_active() -> bool {
+    global_hotkey_service()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .manager
+        .is_some()
 }
 
 /// Manages global hotkey runtime ownership.

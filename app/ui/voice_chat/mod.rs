@@ -3,7 +3,7 @@
 //! This module provides a floating overlay window with:
 //! - Drawer tab: clipboard-style transcription cards
 //! - Agent tab: chat bubbles with streaming LLM responses
-//! - Settings: routes to settings window/onboarding
+//! - Settings button: opens the persistent settings window
 
 mod api;
 mod handlers;
@@ -16,11 +16,11 @@ pub use api::{
     dispatch_voice_chat_send, filter_drawer, finalize_voice_chat_assistant_message,
     finalize_voice_chat_user_message, handoff_transcript_to_chat, hide_voice_chat_overlay,
     is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
-    request_settings_tab_on_open, reset_voice_chat_activity, send_voice_chat_draft,
-    set_voice_chat_runtime_degraded, set_voice_chat_send_callback, set_voice_chat_sending,
-    set_voice_chat_target_app, set_voice_chat_text, set_voice_chat_user_text, show_agent_tab,
-    show_drawer_tab, show_settings_tab, update_conversation_state, update_drawer_after_save,
-    update_voice_chat_context_summary, update_voice_chat_status,
+    reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_runtime_degraded,
+    set_voice_chat_send_callback, set_voice_chat_sending, set_voice_chat_target_app,
+    set_voice_chat_text, set_voice_chat_user_text, show_agent_tab, show_drawer_tab,
+    update_conversation_state, update_drawer_after_save, update_voice_chat_context_summary,
+    update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 
@@ -29,10 +29,7 @@ use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use dispatch::Queue;
 use objc::runtime::{Class, Object};
 use objc::{msg_send, sel, sel_impl};
-use objc2_app_kit::{
-    NSBackingStoreType, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
-};
+use objc2_app_kit::{NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -41,13 +38,14 @@ use crate::config::ShortcutBinding;
 use crate::os::hotkeys::ModeHotkeyBindings;
 
 use crate::ui_helpers::{
-    LabelConfig, NS_FLOATING_WINDOW_LEVEL, add_subview, apply_tafla_surface, button_set_action,
-    button_style, chat_header_layout, chat_input_row_layout, color_clear, color_label,
-    color_secondary_label, create_button, create_flipped_vertical_stack_view,
-    create_glass_effect_view_with, create_label, create_scrollable_text_view,
-    create_vertical_stack_view, layout_region_frame_for_view, ns_string, set_button_symbol,
+    LabelConfig, add_subview, agent_chat_shell_frame, agent_chat_shell_panel_policy,
+    apply_shared_shell_panel_policy, apply_tafla_surface, button_set_action, button_style,
+    chat_header_layout, chat_input_row_layout, color_clear, color_secondary_label, create_button,
+    create_flipped_vertical_stack_view, create_glass_effect_view_with, create_label,
+    create_scrollable_text_view, create_vertical_stack_view, layout_region_frame_for_view,
+    main_screen_visible_frame, ns_string, present_shared_shell_panel, set_button_symbol,
     set_focus_ring, set_glass_effect_content_view, set_hidden, set_tooltip,
-    style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha, window_show,
+    style_toolbar_icon_button, ui_colors, ui_tokens, window_set_alpha,
 };
 
 use api::update_active_tab_impl;
@@ -132,11 +130,12 @@ fn show_voice_chat_overlay_impl() {
                     let blur_ptr = state.blur_view;
                     drop(state);
 
-                    let _: () = msg_send![window, orderFrontRegardless];
+                    if let Some(visible_frame) = main_screen_visible_frame() {
+                        let shell_policy = agent_chat_shell_panel_policy(visible_frame);
+                        apply_shared_shell_panel_policy(window, &shell_policy);
+                    }
+                    present_shared_shell_panel(window);
                     let _: () = msg_send![window, setAlphaValue: 1.0f64];
-                    let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
-                        | NSWindowCollectionBehavior::FullScreenAuxiliary;
-                    let _: () = msg_send![window, setCollectionBehavior: collection_behavior];
 
                     if let Some(blur_ptr) = blur_ptr {
                         let blur_view = blur_ptr as Id;
@@ -157,16 +156,21 @@ fn show_voice_chat_overlay_impl() {
         } // OVERLAY_STATE released — UI construction below is lock-free.
 
         // Phase 2 — build the entire overlay UI without holding OVERLAY_STATE.
-        let ns_screen = Class::get("NSScreen").unwrap();
         let config = VoiceChatOverlayConfig::default();
         let window_width = config.width;
         let window_height = config.height;
         let margin = 20.0;
 
-        let main_screen: Id = msg_send![ns_screen, mainScreen];
-        let visible_frame: CGRect = msg_send![main_screen, visibleFrame];
+        let Some(visible_frame) = main_screen_visible_frame() else {
+            warn!("No NSScreen available for voice chat overlay");
+            return;
+        };
 
-        let (raw_x, raw_y) = match Config::load().overlay_position_mode {
+        // Single Config::load(): both arms need it, and `Config::load` walks
+        // the filesystem (env + settings.json). Hoisting trims a redundant
+        // disk read per overlay open.
+        let config = Config::load();
+        let (raw_x, raw_y) = match config.overlay_position_mode {
             OverlayPositionMode::SnappedTopRight => {
                 let right_x = visible_frame.origin.x + visible_frame.size.width;
                 let top_y = visible_frame.origin.y + visible_frame.size.height;
@@ -180,7 +184,6 @@ fn show_voice_chat_overlay_impl() {
                 let top_y = visible_frame.origin.y + visible_frame.size.height;
                 let def_x = right_x - window_width - margin;
                 let def_y = top_y - window_height - margin;
-                let config = Config::load();
                 (
                     config.overlay_custom_x.unwrap_or(def_x),
                     config.overlay_custom_y.unwrap_or(def_y),
@@ -188,7 +191,7 @@ fn show_voice_chat_overlay_impl() {
             }
         };
 
-        let (x, y) = crate::ui_helpers::clamp_overlay_position(
+        let frame = agent_chat_shell_frame(
             visible_frame,
             window_width,
             window_height,
@@ -199,54 +202,22 @@ fn show_voice_chat_overlay_impl() {
 
         info!(
             "Voice chat overlay frame x={:.1} y={:.1} w={:.1} h={:.1}",
-            x, y, window_width, window_height
+            frame.origin.x, frame.origin.y, window_width, window_height
         );
 
-        let frame = CGRect {
-            origin: CGPoint { x, y },
-            size: CGSize {
-                width: window_width,
-                height: window_height,
-            },
-        };
-
+        let shell_policy = agent_chat_shell_panel_policy(visible_frame);
         let overlay_window_class = overlay_window_class();
         let window: Id = msg_send![overlay_window_class, alloc];
-        let style_mask = NSWindowStyleMask::Borderless
-            | NSWindowStyleMask::FullSizeContentView
-            | NSWindowStyleMask::Resizable;
-        let backing = NSBackingStoreType::Buffered;
         let window: Id = msg_send![
             window,
             initWithContentRect: frame
-            styleMask: style_mask
-            backing: backing
+            styleMask: shell_policy.style_mask
+            backing: shell_policy.backing_store
             defer: false
         ];
 
-        let _: () = msg_send![window, setTitleVisibility: 1];
-        let _: () = msg_send![window, setTitlebarAppearsTransparent: true];
-        let _: () = msg_send![window, setMovableByWindowBackground: true];
-        let _: () = msg_send![window, setOpaque: false];
-        let _: () = msg_send![window, setBackgroundColor: color_clear()];
-        let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
-        // Keep the window instance alive even after close; we manage lifecycle explicitly.
-        let _: () = msg_send![window, setReleasedWhenClosed: false];
-        let _: () = msg_send![window, setContentMinSize: CGSize::new(380.0, 360.0)];
-        // Cap at sensible max: width 1000px (chat bubbles don't need more),
-        // height = screen visible height (scrolling handles overflow).
-        let ns_screen = Class::get("NSScreen").unwrap();
-        let screen: Id = msg_send![ns_screen, mainScreen];
-        if !screen.is_null() {
-            let visible: CGRect = msg_send![screen, visibleFrame];
-            let max_w = visible.size.width.min(1000.0);
-            let _: () =
-                msg_send![window, setContentMaxSize: CGSize::new(max_w, visible.size.height)];
-        }
-        // Make sure the overlay shows up even when the user is in a fullscreen Space.
-        let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary;
-        let _: () = msg_send![window, setCollectionBehavior: collection_behavior];
+        let _: () = msg_send![window, setTitle: ns_string("CodeScribe")];
+        apply_shared_shell_panel_policy(window, &shell_policy);
 
         let delegate_class = window_delegate_class();
         let window_delegate: Id = msg_send![delegate_class, new];
@@ -355,30 +326,6 @@ fn show_voice_chat_overlay_impl() {
             header_controls,
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_HEIGHT_SIZABLE
         ];
-        let title_x = if header_frame.size.width >= 620.0 {
-            ui_tokens::TRAFFIC_LIGHTS_SPACER_WIDTH + 6.0
-        } else {
-            ui_tokens::EDGE_PADDING_TIGHT
-        };
-        let title_y = ((header_height - 20.0) / 2.0).max(0.0);
-        // Keep enough width so "CodeScribe" is not clipped at default window sizes.
-        let title_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH;
-        let title_label = create_label(LabelConfig {
-            frame: CGRect::new(&CGPoint::new(title_x, title_y), &CGSize::new(title_w, 20.0)),
-            text: "CodeScribe".to_string(),
-            font_size: ui_tokens::TITLE_FONT_SIZE,
-            bold: true,
-            text_color: color_label(),
-            background_color: None,
-            selectable: false,
-            editable: false,
-        });
-        let _: () = msg_send![
-            title_label,
-            setAutoresizingMask: NSVIEW_MAX_X_MARGIN | NSVIEW_MIN_Y_MARGIN
-        ];
-        add_subview(header_controls, title_label);
-
         // Header right-side controls (right-aligned, consistent spacing).
         let btn_w = ui_tokens::CHAT_HEADER_BUTTON_SIZE;
         let btn_h = ui_tokens::CHAT_HEADER_BUTTON_SIZE;
@@ -387,8 +334,6 @@ fn show_voice_chat_overlay_impl() {
         let header_btn_y = ((header_height - btn_h) / 2.0).max(0.0);
 
         let mut x = header_frame.size.width - right_pad - btn_w;
-        let close_button_x = x;
-        x -= gap + btn_w;
         let more_button_x = x;
         x -= gap + btn_w;
         let help_button_x = x;
@@ -397,9 +342,12 @@ fn show_voice_chat_overlay_impl() {
         x -= gap + btn_w;
         let record_button_x = x;
 
-        // Keep the tab control between the title and the right-side icon cluster.
+        // Keep the tab control outside the native traffic-light zone and before
+        // the right-side icon cluster. The visible brand label lives in the
+        // footer, because the native titlebar owns the top-left corner.
         let right_cluster_start_x = record_button_x;
-        let header_layout = chat_header_layout(title_x, title_w, right_cluster_start_x);
+        let header_safe_x = ui_tokens::TRAFFIC_LIGHTS_SPACER_WIDTH + 6.0;
+        let header_layout = chat_header_layout(header_safe_x, 0.0, right_cluster_start_x);
         let tab_cluster_x = header_layout.tab_cluster_x;
         let tab_btn_w = header_layout.tab_button_width;
         let tab_gap = header_layout.tab_button_gap;
@@ -622,7 +570,7 @@ fn show_voice_chat_overlay_impl() {
 
         let close_button = create_button(
             CGRect::new(
-                &CGPoint::new(close_button_x, header_btn_y),
+                &CGPoint::new(header_frame.size.width + btn_w, header_btn_y),
                 &CGSize::new(btn_w, btn_h),
             ),
             "",
@@ -635,6 +583,7 @@ fn show_voice_chat_overlay_impl() {
         style_toolbar_icon_button(close_button);
         button_set_action(close_button, action_handler, sel!(onClose:));
         set_tooltip(close_button, "Close window");
+        let _: () = msg_send![close_button, setHidden: true];
         let _: () = msg_send![
             close_button,
             setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MIN_Y_MARGIN
@@ -852,24 +801,9 @@ fn show_voice_chat_overlay_impl() {
         let search_w = content_frame.size.width.max(160.0);
         let footer_base_y = content_bounds.origin.y;
 
-        let search_label = create_label(LabelConfig {
-            frame: CGRect::new(
-                &CGPoint::new(search_x, footer_base_y + footer_height - 20.0),
-                &CGSize::new(search_w, 16.0),
-            ),
-            text: "Filter transcripts".to_string(),
-            font_size: ui_tokens::SMALL_FONT_SIZE,
-            bold: false,
-            text_color: color_secondary_label(),
-            background_color: None,
-            selectable: false,
-            editable: false,
-        });
-        let _: () = msg_send![
-            search_label,
-            setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MAX_Y_MARGIN
-        ];
-        add_subview(glass_content_view, search_label);
+        // Search label removed: NSSearchField.setPlaceholderString("Filter transcripts")
+        // on the field below already renders the same text; the redundant label
+        // produced a visual duplicate/ghosting under Liquid Glass (Image #16/#17).
 
         let ns_search = Class::get("NSSearchField").unwrap();
         let search_field: Id = msg_send![ns_search, alloc];
@@ -902,6 +836,31 @@ fn show_voice_chat_overlay_impl() {
         ];
         set_focus_ring(search_field);
         add_subview(glass_content_view, search_field);
+
+        let footer_brand_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH;
+        let footer_brand_h = 16.0;
+        let footer_brand_frame = CGRect::new(
+            &CGPoint::new(
+                content_bounds.origin.x + content_bounds.size.width - content_pad - footer_brand_w,
+                content_bounds.origin.y + ((footer_height - footer_brand_h) / 2.0).max(4.0),
+            ),
+            &CGSize::new(footer_brand_w, footer_brand_h),
+        );
+        let title_label = create_label(LabelConfig {
+            frame: footer_brand_frame,
+            text: "CodeScribe".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: color_secondary_label(),
+            background_color: None,
+            selectable: false,
+            editable: false,
+        });
+        let _: () = msg_send![
+            title_label,
+            setAutoresizingMask: NSVIEW_MIN_X_MARGIN | NSVIEW_MAX_Y_MARGIN
+        ];
+        add_subview(glass_content_view, title_label);
 
         // Agent input bar
         let drop_target_cls = drop_target_view_class();
@@ -1055,9 +1014,10 @@ fn show_voice_chat_overlay_impl() {
         // Initial visibility
         set_hidden(agent_scroll, true);
         set_hidden(input_bar, true);
+        set_hidden(title_label, true);
 
         // Phase 3 — store widget pointers into state (short lock scope).
-        let (has_messages, desired_tab, status_base_text, open_settings) = {
+        let (has_messages, desired_tab, status_base_text) = {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.window = Some(window as usize);
             state.window_delegate = Some(window_delegate as usize);
@@ -1081,7 +1041,6 @@ fn show_voice_chat_overlay_impl() {
             state.drawer_container = Some(drawer_container as usize);
             state.drawer_edge_effect = Some(drawer_edge_effect as usize);
             state.search_field = Some(search_field as usize);
-            state.search_label = Some(search_label as usize);
             state.agent_scroll_view = Some(agent_scroll as usize);
             state.agent_container = Some(agent_container as usize);
             state.agent_input_bar = Some(input_bar as usize);
@@ -1097,21 +1056,9 @@ fn show_voice_chat_overlay_impl() {
                 state.zoom_level = zoom.clamp(0.75, 2.0);
             }
             let pending_tab = state.pending_tab.take();
-            state.active_tab = pending_tab.unwrap_or(Tab::Drawer);
-
             let has_messages = !state.messages.is_empty();
-            let mut open_settings = false;
             let desired_tab = if let Some(tab) = pending_tab {
-                if tab == Tab::Settings {
-                    open_settings = true;
-                    if has_messages {
-                        Tab::Agent
-                    } else {
-                        Tab::Drawer
-                    }
-                } else {
-                    tab
-                }
+                tab
             } else if has_messages {
                 Tab::Agent
             } else {
@@ -1119,12 +1066,12 @@ fn show_voice_chat_overlay_impl() {
             };
             state.active_tab = desired_tab;
             let status_base_text = state.status_base_text.clone();
-            (has_messages, desired_tab, status_base_text, open_settings)
+            (has_messages, desired_tab, status_base_text)
         }; // OVERLAY_STATE released — safe to perform AppKit window operations.
 
         // Phase 4 — show window (no lock held; avoids nested-runloop deadlock).
         window_set_alpha(window, 0.0);
-        window_show(window);
+        present_shared_shell_panel(window);
         crate::ui_helpers::animate_fade(window, 1.0, 0.2);
         let is_visible: bool = msg_send![window, isVisible];
         let alpha: f64 = msg_send![window, alphaValue];
@@ -1152,7 +1099,7 @@ fn show_voice_chat_overlay_impl() {
                     return;
                 }
                 let _: () = msg_send![window, setAlphaValue: 1.0f64];
-                let _: () = msg_send![window, orderFrontRegardless];
+                present_shared_shell_panel(window);
             });
         });
 
@@ -1160,9 +1107,6 @@ fn show_voice_chat_overlay_impl() {
         api::refresh_drawer();
         api::update_voice_chat_status(&status_base_text);
         update_active_tab_impl(desired_tab);
-        if open_settings {
-            crate::show_bootstrap_overlay();
-        }
         if has_messages || matches!(desired_tab, Tab::Agent) {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             api::update_chat_view_with_state(&mut state, true);

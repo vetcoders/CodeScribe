@@ -1,7 +1,7 @@
 # CodeScribe - Pure Rust Build System
 # Speech-to-text tray app for macOS
 
-.PHONY: all build release install install-no-embed config bundle install-app \
+.PHONY: all build release release-codescribe release-qube install install-no-embed config bundle install-app \
         start stop restart status logs logs-follow \
         bump bump-patch bump-minor bump-major version \
         lint format test test-quick test-e2e test-e2e-real test-sse test-formatting test-all \
@@ -13,10 +13,15 @@ SHELL := /bin/bash
 VERSION_FILE := Cargo.toml
 EDITOR ?= $(shell command -v code || command -v nvim || command -v vim || echo nano)
 ENV_LOAD := set -a; [ -f $$HOME/.codescribe/.env ] && source $$HOME/.codescribe/.env; set +a
-# macOS: use a stable codesign identity to avoid TCC (Accessibility/Input Monitoring) resets after rebuilds.
+# macOS: TCC tracks a stable code identity, not just bundle path. Prefer a stable
+# Apple-issued signing identity automatically, and only fall back to ad-hoc when
+# there is genuinely nothing usable in the keychain.
+CODESCRIBE_APPLE_DEVELOPMENT_IDENTITY := $(shell security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)"/\1/p' | head -n 1)
+CODESCRIBE_DEVELOPER_ID_IDENTITY := $(shell security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)"/\1/p' | head -n 1)
+CODESCRIBE_AUTO_CODESIGN_IDENTITY := $(if $(strip $(CODESCRIBE_APPLE_DEVELOPMENT_IDENTITY)),$(strip $(CODESCRIBE_APPLE_DEVELOPMENT_IDENTITY)),$(strip $(CODESCRIBE_DEVELOPER_ID_IDENTITY)))
 # Example:
 #   CODESCRIBE_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" make install-app
-CODESCRIBE_CODESIGN_IDENTITY ?= -
+CODESCRIBE_CODESIGN_IDENTITY ?= $(if $(CODESCRIBE_AUTO_CODESIGN_IDENTITY),$(CODESCRIBE_AUTO_CODESIGN_IDENTITY),-)
 CODESCRIBE_APP_NAME ?= CodeScribe
 CODESCRIBE_DISPLAY_NAME ?= CodeScribe
 CODESCRIBE_BUNDLE_ID ?= com.codescribe.app
@@ -55,12 +60,18 @@ build:
 	@echo "Building (debug)..."
 	@cargo build
 
-release:
-	@echo "Building (release)..."
-	@cargo build --release
+release-codescribe:
+	@echo "Building codescribe (release, embedded models)..."
+	@cargo build --release --bin codescribe
+
+release-qube:
+	@echo "Building qube-* (release, runtime model resolve from HF cache)..."
+	@CODESCRIBE_NO_EMBED=1 cargo build --release --target-dir target-noembed --bin qube-daemon --bin qube-report
+
+release: release-codescribe release-qube
 
 install:
-	@echo "Installing CodeScribe (with embedded model)..."
+	@echo "Installing CodeScribe (embedded-first Whisper + embedded support assets)..."
 	@./scripts/ensure-models.sh
 	@cargo install --path . --force
 	@mkdir -p ~/.codescribe
@@ -68,7 +79,7 @@ install:
 	@echo "Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
 
 install-no-embed:
-	@echo "Installing CodeScribe (no embedded model)..."
+	@echo "Installing CodeScribe (runtime Whisper fallback + no optional embedded support assets)..."
 	@./scripts/ensure-models.sh
 	@CODESCRIBE_NO_EMBED=1 cargo install --path . --force
 	@mkdir -p ~/.codescribe
@@ -86,10 +97,11 @@ config:
 
 bundle: ensure-models release
 	@echo "Creating macOS app bundle..."
+	@rm -rf bundle/$(CODESCRIBE_APP_NAME).app
 	@mkdir -p bundle/$(CODESCRIBE_APP_NAME).app/Contents/{MacOS,Resources}
 	@cp target/release/codescribe bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/
-	@cp target/release/codescribe-loop bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/ 2>/dev/null || true
-	@cp target/release/codescribe-quality bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/ 2>/dev/null || true
+	@cp target-noembed/release/qube-daemon bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/ 2>/dev/null || true
+	@cp target-noembed/release/qube-report bundle/$(CODESCRIBE_APP_NAME).app/Contents/MacOS/ 2>/dev/null || true
 	@cp assets/AppIcon.icns bundle/$(CODESCRIBE_APP_NAME).app/Contents/Resources/ 2>/dev/null || true
 	@VERSION=$$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*"\(.*\)"/\1/'); \
 	printf '%s\n' \
@@ -123,12 +135,12 @@ install-app: bundle
 	@mkdir -p /Applications
 	@rsync -a --delete bundle/$(CODESCRIBE_APP_NAME).app/ /Applications/$(CODESCRIBE_APP_NAME).app/
 	@if [ "$(CODESCRIBE_CODESIGN_IDENTITY)" = "-" ]; then \
-		echo "Codesigning ad-hoc (no signing identity found)."; \
+		echo "Codesigning ad-hoc (no stable signing identity found in keychain)."; \
 		echo "NOTE: macOS Accessibility/Input Monitoring may need re-grant after reinstall."; \
-		echo "TIP: create a local codesign cert (e.g. 'CodeScribe Dev') and set CODESCRIBE_CODESIGN_IDENTITY to keep permissions stable."; \
+		echo "TIP: add an Apple Development or Developer ID Application certificate, or set CODESCRIBE_CODESIGN_IDENTITY explicitly."; \
 		codesign --force --deep --sign - --identifier $(CODESCRIBE_BUNDLE_ID) /Applications/$(CODESCRIBE_APP_NAME).app; \
 	else \
-		echo "Codesigning with identity: $(CODESCRIBE_CODESIGN_IDENTITY)"; \
+		echo "Codesigning with stable identity: $(CODESCRIBE_CODESIGN_IDENTITY)"; \
 		codesign --force --deep --options runtime --entitlements "$(CODESCRIBE_ENTITLEMENTS)" --sign "$(CODESCRIBE_CODESIGN_IDENTITY)" --identifier $(CODESCRIBE_BUNDLE_ID) /Applications/$(CODESCRIBE_APP_NAME).app; \
 	fi
 	@echo "Codesign summary:"
@@ -348,9 +360,9 @@ help:
 	@echo ""
 	@echo "Build & Install:"
 	@echo "  make build           Build debug binary"
-	@echo "  make release         Build release binary (with embedded model)"
-	@echo "  make install         Install CLI (~888MB with embedded model)"
-	@echo "  make install-no-embed Install without model (needs CODESCRIBE_MODEL_PATH)"
+	@echo "  make release         Build release binary (embedded-first Whisper + embedded support assets)"
+	@echo "  make install         Install CLI with embedded-first Whisper"
+	@echo "  make install-no-embed Install without optional embedded assets (needs CODESCRIBE_MODEL_PATH)"
 	@echo "  make config          Edit ~/.codescribe/.env"
 	@echo "  make bundle          Create CodeScribe.app bundle"
 	@echo "  make install-app     Install to /Applications"

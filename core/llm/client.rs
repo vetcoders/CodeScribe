@@ -19,6 +19,8 @@ use tokio::io::AsyncReadExt;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
+use crate::pipeline::contracts::{TranscriptionConfidenceFlag, TranscriptionSource};
+
 /// Canonicalize path before async file operations (defense-in-depth).
 /// Uses sync std::fs::canonicalize which is fast, then async open.
 fn canonicalize_path(path: &Path) -> Result<PathBuf> {
@@ -38,6 +40,31 @@ const TRANSCRIPTION_RETRY_DELAY_MS: u64 = 500;
 #[derive(Debug, Deserialize)]
 struct TranscribeResponse {
     text: String,
+}
+
+/// Typed cloud-STT verdict emitted at the client boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudTranscriptionVerdict {
+    pub text: String,
+    pub source: TranscriptionSource,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confidence_flags: Vec<TranscriptionConfidenceFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+}
+
+impl CloudTranscriptionVerdict {
+    fn new(text: String, latency_ms: Option<u64>, model_name: Option<String>) -> Self {
+        Self {
+            text,
+            source: TranscriptionSource::Cloud,
+            confidence_flags: Vec::new(),
+            latency_ms,
+            model_name,
+        }
+    }
 }
 
 // ============================================================================
@@ -221,7 +248,7 @@ pub async fn check_health() -> Result<bool> {
 ///     "https://api.example.com/v1/audio/transcriptions",
 ///     "api-key",
 /// ).await?;
-/// println!("Transcript: {}", transcript);
+/// println!("Transcript: {}", transcript.text);
 /// # Ok(())
 /// # }
 /// ```
@@ -230,7 +257,7 @@ pub async fn transcribe_cloud(
     language: Option<&str>,
     endpoint_url: &str,
     api_key: &str,
-) -> Result<String> {
+) -> Result<CloudTranscriptionVerdict> {
     info!("transcribe_cloud() START for path: {:?}", path);
 
     transcribe_external(path, language, endpoint_url, api_key).await
@@ -282,7 +309,7 @@ async fn transcribe_external(
     language: Option<&str>,
     endpoint_url: &str,
     api_key: &str,
-) -> Result<String> {
+) -> Result<CloudTranscriptionVerdict> {
     info!("Using external STT endpoint: {}", endpoint_url);
 
     // Read file into memory (shared by all protocols)
@@ -342,7 +369,7 @@ async fn transcribe_websocket(
     api_key: &str,
     audio_data: Vec<u8>,
     language: &str,
-) -> Result<String> {
+) -> Result<CloudTranscriptionVerdict> {
     let start = Instant::now();
     info!(
         "[WS STT] Connecting to {} ({} bytes, lang={})",
@@ -450,7 +477,11 @@ async fn transcribe_websocket(
         anyhow::bail!("No transcription received from WebSocket STT");
     }
 
-    Ok(final_text)
+    Ok(CloudTranscriptionVerdict::new(
+        final_text,
+        Some(duration_ms.min(u128::from(u64::MAX)) as u64),
+        None,
+    ))
 }
 
 // ============================================================================
@@ -468,7 +499,7 @@ async fn transcribe_ndjson(
     api_key: &str,
     audio_data: Vec<u8>,
     language: &str,
-) -> Result<String> {
+) -> Result<CloudTranscriptionVerdict> {
     use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
     let start = Instant::now();
@@ -633,7 +664,11 @@ async fn transcribe_ndjson(
         anyhow::bail!("No transcription received from NDJSON STT");
     }
 
-    Ok(final_text)
+    Ok(CloudTranscriptionVerdict::new(
+        final_text,
+        Some(duration_ms.min(u128::from(u64::MAX)) as u64),
+        None,
+    ))
 }
 
 // ============================================================================
@@ -652,7 +687,8 @@ async fn transcribe_multipart(
     audio_data: Vec<u8>,
     language: &str,
     filename: &str,
-) -> Result<String> {
+) -> Result<CloudTranscriptionVerdict> {
+    let start = Instant::now();
     info!(
         "[Multipart STT] POST {} ({} bytes, lang={})",
         url,
@@ -676,7 +712,7 @@ async fn transcribe_multipart(
 
         let form = Form::new()
             .part("file", file_part)
-            .text("model", whisper_model)
+            .text("model", whisper_model.clone())
             .text("language", language.to_string());
 
         debug!(
@@ -692,7 +728,11 @@ async fn transcribe_multipart(
                         attempt, TRANSCRIPTION_MAX_RETRIES
                     );
                 }
-                return Ok(text);
+                return Ok(CloudTranscriptionVerdict::new(
+                    text,
+                    Some(start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+                    Some(whisper_model.clone()),
+                ));
             }
             Err(e) => {
                 let is_retryable = is_retryable_error(&e);
@@ -835,5 +875,41 @@ mod tests {
         // 413 should not be retried - file too large is a client issue
         let error = anyhow::anyhow!("status 413: Payload Too Large");
         assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn cloud_transcription_verdict_serde_roundtrip() {
+        let verdict = CloudTranscriptionVerdict::new(
+            "Hello cloud".to_string(),
+            Some(187),
+            Some("whisper-large-v3".to_string()),
+        );
+        let json = serde_json::to_string(&verdict).expect("serialize verdict");
+        let restored: CloudTranscriptionVerdict =
+            serde_json::from_str(&json).expect("deserialize verdict");
+        assert_eq!(restored, verdict);
+        assert_eq!(restored.text, "Hello cloud");
+        assert_eq!(restored.source, TranscriptionSource::Cloud);
+        assert_eq!(restored.latency_ms, Some(187));
+        assert_eq!(restored.model_name, Some("whisper-large-v3".to_string()));
+        assert!(restored.confidence_flags.is_empty());
+    }
+
+    #[test]
+    fn cloud_transcription_verdict_omits_empty_optional_fields_in_json() {
+        let verdict = CloudTranscriptionVerdict::new("Just text".to_string(), None, None);
+        let json = serde_json::to_string(&verdict).expect("serialize");
+        assert!(
+            !json.contains("latency_ms"),
+            "None latency_ms must be omitted (got {json})"
+        );
+        assert!(
+            !json.contains("model_name"),
+            "None model_name must be omitted (got {json})"
+        );
+        assert!(
+            !json.contains("confidence_flags"),
+            "empty confidence_flags must be omitted (got {json})"
+        );
     }
 }

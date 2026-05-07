@@ -1,73 +1,70 @@
 # ⌜ CodeScribe ⌟
 
-**Native macOS Audio Intelligence Platform — Embedded Whisper Live, Quality Loop & Semantic Postprocessing.**
+**Native macOS tray dictation and assistive voice overlay with local Whisper live preview, optional cloud final transcript paths, and quality tooling.**
 
 ## Overview
 
-CodeScribe is a native macOS menu-bar application that captures audio through global hotkeys, transcribes it locally
-using Whisper with Metal GPU acceleration, and pastes the transcript directly into the focused application. Optional AI
-formatting via LLM polishes the output while keeping everything private and local.
+CodeScribe is a native macOS menu-bar application that captures audio through global hotkeys, shows live local
+transcription while you speak, and pastes or routes the final result into the focused application. The shipped product
+in this repo is a tray app with three explicit surfaces: onboarding, settings, and overlays.
+
+Local Whisper is the low-latency path. Cloud STT is optional and currently used as a post-capture transcript backend,
+not as live cloud preview. AI formatting and assistive mode use OpenAI-compatible Responses API endpoints configured in
+Settings or `~/.codescribe/.env`.
 
 ```mermaid
 flowchart TB
-    %% Minimal monochrome styling
     classDef default fill:#fff,stroke:#333,stroke-width:1px;
     classDef box fill:#fafafa,stroke:#666,stroke-width:1px,stroke-dasharray: 0;
 
-    subgraph APP[CodeScribe Application]
-        direction TB
-
-        subgraph UI[Leptos WASM Frontend]
-            direction LR
-            VL[Voice Lab] --- TE[Teacher] --- SET[Settings]
-        end
-
-        subgraph BACKEND[Tauri Rust Backend]
-            CMD[Command Handlers]
-        end
-
-        UI -->|IPC invoke| BACKEND
-
-        subgraph CORE[Core Library]
-            direction TB
-            REC[Streaming Recorder]
-            POST[Stream Postprocess]
-            WH[Whisper Engine]
-            IPC[IPC Server]
-            QL[Quality Loop]
-
-            REC -->|Live Chunks| POST
-            POST -->|Semantic Gating| WH
-            WH -->|Transcript| IPC
-            QL -.->|Self-Improvement| WH
-        end
-
-        BACKEND --> CORE
+    subgraph APP[CodeScribe Runtime]
+        direction LR
+        TRAY[Tray + Hotkeys]
+        ONB[Onboarding]
+        SET[Settings Window]
+        OVL[Dictation Overlay]
+        CHAT[Assistive Voice Overlay]
     end
 
-    MODEL["Embedded Whisper Model<br/>large-v3-turbo-mlx-q8<br/>~888MB"]
-    WH === MODEL
+    subgraph CORE[Core Pipeline]
+        direction TB
+        REC[Streaming Recorder]
+        POST[Stream Postprocess]
+        STT[Whisper / Cloud Final Pass]
+        LLM[Responses API Formatting / Assistive]
+        QL[Quality Loop]
+    end
 
     subgraph TOOLS[CLI Suite]
-        QCLI[codescribe-quality]
-        LCLI[codescribe-loop]
+        QCLI[qube-report]
+        LCLI[qube-daemon]
     end
 
+    TRAY --> ONB
+    TRAY --> SET
+    TRAY --> OVL
+    TRAY --> CHAT
+    TRAY --> CORE
+    SET --> CORE
+    OVL --> CORE
+    CHAT --> CORE
+    REC --> POST --> STT
+    STT --> LLM
+    QL -.-> STT
     CORE -.-> TOOLS
 
-    class APP,UI,BACKEND,CORE,TOOLS box
+    class APP,CORE,TOOLS box
 ```
 
-> **Note:** The diagram above shows the **target architecture** with Tauri GUI (Voice Lab / Teacher / Settings). Current release is a **native macOS tray app** (without Tauri), and the Lab UI is **future-only**. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for current implementation details.
+> **Current runtime truth:** live overlay preview is local Whisper. Cloud STT is configurable in Settings, but in the current build it is still a **post-capture** path rather than live cloud preview.
 
-> **Status:** current release (see `Cargo.toml`) — **Embedded Whisper + MiniLM** + _Whisper Live_ (streaming transcription) + tiered settings (settings.json + Keychain).
+> **Status:** current release (see `Cargo.toml`) ships as a native macOS tray/settings/overlay app with local live preview, tiered settings (`settings.json` + Keychain + optional `.env`), and quality-loop tooling.
 
-See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md) | [`docs/BACKLOG.md`](docs/BACKLOG.md) | [`docs/ARCHITECTURE_VISION.md`](docs/ARCHITECTURE_VISION.md)
+See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md) | [`docs/BACKLOG.md`](docs/BACKLOG.md) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## API Provider
 
-CodeScribe uses the **Responses API** (`/v1/responses`) for AI formatting. Compatible with OpenAI, LibraxisAI,
-Anthropic, and any provider supporting this format.
+CodeScribe uses **OpenAI-compatible Responses API** (`/v1/responses`) endpoints for AI formatting and assistive mode.
 
 ### Multi-Provider Setup (Recommended)
 
@@ -97,13 +94,13 @@ LLM_ASSISTIVE_API_KEY=sk-proj-xxx
 ## Features
 
 - **Pure Rust Implementation** — Native macOS app built entirely in Rust with candle-core + Metal GPU
-- **Strictly Embedded Whisper** — Model is welded into the binary (~888MB). No external files, zero disk I/O, no exceptions.
+- **Embedded-first Whisper** — Builds embed the Whisper payload by default whenever the model is available at build time. Runtime resolution from `CODESCRIBE_MODEL_PATH`, `~/.codescribe/models`, repo-local `models/`, or the Hugging Face cache remains available for `CODESCRIBE_NO_EMBED=1` builds and recovery fallback.
 - **Whisper Live** — Streaming transcription happens _during recording_ (chunks + overlap), so `stop()` is
   near-instant
 - **Stream postprocess** — semantic gating + cleanup of live chunks before final output
 - **IPC Server** — Stable runtime interface for GUI/clients
 - **Quality Loop + Report** — Automated quality scoring and batch reports
-- **CLI Suite** — `codescribe`, `codescribe-quality`, `codescribe-loop`
+- **CLI Suite** — `codescribe`, `qube-report`, `qube-daemon` (renamed from `codescribe-quality` / `codescribe-loop` in 0.8.1)
 - **Metal GPU Acceleration** — Hardware-accelerated inference on Apple Silicon
 - **System Tray App** — Minimal menu-bar presence with animated status glyphs
 - **Global Hotkeys** — Hold Fn (default) or double‑tap Option to record
@@ -141,7 +138,7 @@ LLM_ASSISTIVE_API_KEY=sk-proj-xxx
 git clone https://github.com/VetCoders/CodeScribe.git
 cd CodeScribe
 
-# Install CLI (embedded Whisper + MiniLM)
+# Install CLI (embedded-first Whisper + support assets — single-binary distribution)
 make install
 
 # Verify installation
@@ -161,11 +158,11 @@ Tagged builds can publish a signed-or-ad-hoc DMG through GitHub Releases:
 ### Build Options
 
 ```bash
-make build              # Debug build (external model)
-make release            # Release build (embedded Whisper + MiniLM)
-make install            # Install CLI with embedded models
+make build              # Debug build (embedded-first Whisper with runtime fallback)
+make release            # Release build (embedded-first Whisper + embedded support assets)
+make install            # Install CLI with embedded-first Whisper; runtime fallback stays available
 make install-app        # Build + install macOS .app (auto-downloads models if missing)
-make install-no-embed   # Dev-only: install without embedding (needs CODESCRIBE_MODEL_PATH)
+make install-no-embed   # Install without optional embedding (runtime lookup required)
 ```
 
 ## Quick Start
@@ -218,9 +215,23 @@ flowchart TD
     I --> K[Paste to Active App]
     J --> K
 
-    E -.- E1[Metal GPU • embedded model]
+    E -.- E1[Metal GPU • runtime model]
     I -.- I1[Responses API • previous_response_id]
 ```
+
+### Transcription Pipeline
+
+Live transcription is now modeled as:
+
+- committed utterances already safe to keep
+- one active preview tail for the current utterance
+- corrections that rewrite only that active tail
+
+That means streaming partials are appended session-wide, but partial-pass fixes
+only backspace inside the current tail instead of overwriting earlier committed
+text. Final utterances keep their timestamp/segment metadata through the event
+pipeline, while overlays/chat bubbles still receive only backspace-encoded
+`TranscriptDelta` payloads.
 
 ### Recording Modes
 
@@ -246,12 +257,14 @@ make config
 ```env
 # STT (Speech-to-Text)
 WHISPER_LANGUAGE=pl                  # pl | en | de | fr (no auto!)
-# CODESCRIBE_MODEL_PATH=             # Override embedded model
+# CODESCRIBE_MODEL_PATH=             # Override runtime Whisper model lookup
 
-# Hotkeys
-HOLD_MODS=ctrl                       # ctrl | ctrl_alt | ctrl_shift | ctrl_cmd
-TOGGLE_TRIGGER=double_option         # double_option | double_ralt | none
+# Hotkeys behavior
+# Per-mode bindings live in Settings -> Modes & Shortcuts (settings.json)
+HOLD_EXCLUSIVE=1                     # ignore extra modifiers during hold
 HOLD_START_DELAY_MS=800              # Delay before recording starts
+DOUBLE_TAP_INTERVAL_MS=200           # Toggle gesture timing
+TOGGLE_SILENCE_SEC=5.0               # Auto-send after silence in toggle modes
 
 # AI Formatting
 AI_FORMATTING_ENABLED=1              # 1=format via LLM, 0=raw transcript
@@ -323,22 +336,18 @@ CodeScribe uses **whisper-large-v3-turbo-mlx-q8**:
 - ~10x faster than whisper-large-v3
 - Metal GPU acceleration
 
-### Embedded Model (Default)
+### Runtime Whisper (Current)
 
-Release builds include the model via `include_bytes!`:
-
-```bash
-cargo build --release          # ~888MB binary with model
-CODESCRIBE_NO_EMBED=1 cargo build --release  # Dev-only experiment (not supported for distribution)
-```
-
-### External Model (Development)
-
-For development or custom models:
+Whisper is embedded by default when the model snapshot is available at build time.
+Runtime resolves the model from the locations below only when embedding is disabled
+with `CODESCRIBE_NO_EMBED=1` or the build falls back because the snapshot is missing:
 
 1. `CODESCRIBE_MODEL_PATH` environment variable
 2. `~/.codescribe/models/whisper-large-v3-turbo-mlx-q8/`
 3. `./models/whisper-large-v3-turbo-mlx-q8/`
+4. Hugging Face cache snapshots for `LibraxisAI/whisper-large-v3-turbo-mlx-q8`
+
+MiniLM semantic gating and Silero VAD still ship as embedded support assets in the default release path.
 
 Model files required:
 
@@ -349,28 +358,21 @@ Model files required:
 
 ## Architecture
 
-```
+```text
 CodeScribe/
-├── codescribe-core/           # Core library (Whisper, audio, config, quality)
-│   ├── src/
-│   │   ├── lib.rs             # Core exports
-│   │   ├── whisper/           # Embedded Whisper engine
-│   │   ├── audio/             # Recorder + streaming
-│   │   ├── config/            # Config + prompts
-│   │   ├── quality_loop.rs    # Self-improvement loop
-│   │   └── ...
-├── src/
-│   ├── lib.rs                 # App exports (macOS tray/hotkeys/UI)
-│   ├── main.rs                # CLI entry point
-│   ├── controller.rs          # Recording/transcription orchestration
-│   ├── tray/                  # Tray menu + handlers
-│   ├── hotkeys.rs             # CGEventTap hotkey handler
-│   └── ...
-├── models/                    # Whisper model files (build-time only)
-├── tests/                     # Unit + E2E tests
-└── docs/
-    ├── WHISPER_LIVE.md        # Embedded + streaming transcription (DONE)
-    └── ARCHITECTURE.md        # Technical documentation
+├── core/                      # Portable pipeline, STT, config, quality
+├── app/                       # macOS app shell
+│   ├── controller/            # Recording/transcription orchestration
+│   ├── os/                    # Hotkeys, permissions, clipboard
+│   └── ui/
+│       ├── settings/          # Persistent settings window
+│       ├── onboarding/        # First-run flow
+│       ├── overlay/           # Dictation overlay
+│       ├── voice_chat/        # Assistive overlay
+│       └── tray/              # Menu bar UI
+├── bin/                       # CLI entry points
+├── tests/                     # Integration + E2E tests
+└── docs/                      # Product + technical docs
 ```
 
 ## Development
@@ -380,7 +382,7 @@ CodeScribe/
 git clone https://github.com/VetCoders/CodeScribe.git
 cd CodeScribe
 
-# Development build (external model)
+# Development build with explicit runtime Whisper fallback
 CODESCRIBE_MODEL_PATH=./models/whisper-large-v3-turbo-mlx-q8 cargo run
 
 # Quality checks
@@ -397,9 +399,9 @@ make format         # cargo fmt
 
 ```
 make build            # Debug build
-make release          # Release build (embedded model)
-make install          # Install CLI (~888MB)
-make install-no-embed # Dev-only: install without embedding
+make release          # Release build (embedded-first Whisper + embedded support assets)
+make install          # Install CLI with embedded-first Whisper
+make install-no-embed # Install without optional embedding
 make config           # Edit ~/.codescribe/.env
 make start            # Start as daemon
 make stop             # Stop running instance
@@ -428,39 +430,13 @@ CodeScribe requires macOS permissions for:
 
 Grant permissions in System Settings > Privacy & Security when prompted.
 
-## Roadmap
+## Current Focus
 
-### Implemented
+- Keep the VAD auto-stop path honest and fully integrated before presenting it as the default hands-off mode.
+- Preserve the explicit split between onboarding, settings, dictation overlay, and assistive overlay.
+- Ship the macOS distribution path cleanly: bundle, sign, and notarize the DMG story.
 
-- [x] Local Whisper STT (Metal GPU)
-- [x] Embedded model in binary (~888MB)
-- [x] Global hotkeys (CGEventTap)
-- [x] AI formatting (Responses API)
-- [x] Provider separation (formatting/assistive)
-- [x] Conversation chaining (previous_response_id)
-- [x] Tray app with submenus
-- [x] CLI transcribe command
-- [x] History with slug filenames
-- [x] Keep Audio toggle
-- [x] CodeScribe Core separation (`codescribe-core` crate)
-- [x] Quality Loop & Quality Report CLI tools
-
-### In Progress
-
-- [ ] Voice Activity Detection (VAD) for auto-stop — _implemented but not integrated_
-- [ ] Overlay text preview — _code exists, not fully integrated_
-
-### Planned
-
-- [ ] Hands-off mode with VAD + Overlay integration
-- [ ] Tauri GUI (Voice Lab, Teacher, Settings)
-- [ ] TTS integration for assistive mode
-- [ ] Libraxis Qube Protocol (WebSocket streaming architecture)
-- [ ] Custom prompt editing in GUI
-- [ ] More languages for prompts
-- [ ] DMG distribution with notarization
-
-See [`docs/BACKLOG.md`](docs/BACKLOG.md) for detailed backlog and [`docs/ARCHITECTURE_VISION.md`](docs/ARCHITECTURE_VISION.md) for future architecture.
+See [`docs/BACKLOG.md`](docs/BACKLOG.md) for the working backlog and [`docs/ARCHITECTURE_VISION.md`](docs/ARCHITECTURE_VISION.md) for longer-range ideas that are not part of the current shipped surface.
 
 ## License
 

@@ -72,6 +72,7 @@ mod tests {
             Ok(RawTranscript {
                 text: self.response.clone(),
                 segments: Vec::new(),
+                ..Default::default()
             })
         }
     }

@@ -807,7 +807,10 @@ fn create_typed_glass_effect_view(frame: CGRect, material: NSVisualEffectMateria
     );
     let view = NSGlassEffectView::initWithFrame(mtm.alloc(), frame);
     view.setStyle(glass_effect_style_for_material(material));
-    let view: Id = Retained::into_raw(view).cast::<Object>();
+    // Hand the +1 retain to the autorelease pool so the parent's `addSubview:`
+    // (which adds its own retain) becomes the sole owner. Without this, the
+    // initial alloc/init retain leaked one NSGlassEffectView per call.
+    let view: Id = Retained::autorelease_return(view).cast::<Object>();
     unsafe {
         let _: () = msg_send![view, setWantsLayer: true];
         let supports_corner_radius: bool =
@@ -1555,68 +1558,6 @@ pub fn create_scrollable_text_view(frame: CGRect, editable: bool) -> (Id, Id) {
 // Window Helpers
 // ============================================================================
 
-/// Create a floating overlay window
-pub fn create_floating_window(
-    frame: CGRect,
-    title: &str,
-    transparent_titlebar: bool,
-    resizable: bool,
-) -> Id {
-    unsafe {
-        let ns_window = Class::get("NSWindow").unwrap();
-
-        let mut style = NSWindowStyleMask::Titled
-            | NSWindowStyleMask::Closable
-            | NSWindowStyleMask::Miniaturizable;
-        if transparent_titlebar {
-            style |= NSWindowStyleMask::FullSizeContentView;
-        }
-        if resizable {
-            style |= NSWindowStyleMask::Resizable;
-        }
-
-        let window: Id = msg_send![ns_window, alloc];
-        let window: Id = msg_send![
-            window,
-            initWithContentRect: frame
-            styleMask: style
-            backing: NSBackingStoreType::Buffered
-            defer: false
-        ];
-
-        if transparent_titlebar {
-            // Re-apply FullSizeContentView post-init to avoid AppKit falling back to
-            // separate titlebar/content regions (which visually looks like a duplicate top bar).
-            let current_style: NSWindowStyleMask = msg_send![window, styleMask];
-            let full_style = current_style | NSWindowStyleMask::FullSizeContentView;
-            let _: () = msg_send![window, setStyleMask: full_style];
-            let _: () = msg_send![window, setTitleVisibility: 1_isize]; // NSWindowTitleHidden
-            let _: () = msg_send![window, setTitlebarAppearsTransparent: true];
-            let _: () = msg_send![window, setOpaque: false];
-            let ns_color = Class::get("NSColor").unwrap();
-            let clear: Id = msg_send![ns_color, clearColor];
-            let _: () = msg_send![window, setBackgroundColor: clear];
-        }
-
-        let _: () = msg_send![window, setMovableByWindowBackground: true];
-        let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
-        // Keep the window instance alive even after close; we manage lifecycle explicitly.
-        let _: () = msg_send![window, setReleasedWhenClosed: false];
-
-        // Can join all spaces
-        let collection = NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary;
-        let _: () = msg_send![window, setCollectionBehavior: collection];
-
-        if !title.is_empty() {
-            let title_str = ns_string(title);
-            let _: () = msg_send![window, setTitle: title_str];
-        }
-
-        window
-    }
-}
-
 /// Get window's content view
 /// # Safety
 /// `window` must be a valid `NSWindow` instance.
@@ -1638,6 +1579,38 @@ pub unsafe fn add_subview(parent: Id, child: Id) {
 /// `window` must be a valid `NSWindow` instance.
 pub unsafe fn window_show(window: Id) {
     unsafe {
+        let _: () = msg_send![window, orderFrontRegardless];
+    }
+}
+
+/// Present a first-class CodeScribe panel like a normal AppKit window.
+///
+/// Unlike overlay-only `orderFrontRegardless`, this makes the window key and
+/// activates the app so text fields, scroll views, and standard controls behave
+/// like Settings/Onboarding.
+///
+/// # Safety
+/// `window` must be a valid `NSWindow` instance.
+pub unsafe fn present_shared_shell_panel(window: Id) {
+    // SAFETY: per the function contract, `window` is a valid `NSWindow`
+    // instance. `NSApplication.sharedApplication` returns a singleton retained
+    // by the runtime. Caller MUST be on the main thread; `msg_send!` is only
+    // valid for AppKit objects from the main thread.
+    unsafe {
+        if let Some(ns_app) = Class::get("NSApplication") {
+            let shared_app: Id = msg_send![ns_app, sharedApplication];
+            if !shared_app.is_null() {
+                let supports_activate: bool =
+                    msg_send![shared_app, respondsToSelector: sel!(activate)];
+                if supports_activate {
+                    let _: () = msg_send![shared_app, activate];
+                } else {
+                    let _: () = msg_send![shared_app, activateIgnoringOtherApps: true];
+                }
+            }
+        }
+        let nil: *mut Object = std::ptr::null_mut();
+        let _: () = msg_send![window, makeKeyAndOrderFront: nil];
         let _: () = msg_send![window, orderFrontRegardless];
     }
 }
@@ -1670,6 +1643,142 @@ pub unsafe fn window_set_alpha(window: Id, alpha: f64) {
     }
 }
 
+/// Shared AppKit shell policy for first-class CodeScribe panels.
+///
+/// The intent is to keep chat, Settings, and Onboarding in one explicit
+/// window-policy matrix while callers continue to own their content trees.
+pub struct SharedShellPanelPolicy {
+    pub style_mask: NSWindowStyleMask,
+    pub backing_store: NSBackingStoreType,
+    pub collection_behavior: NSWindowCollectionBehavior,
+    pub level: i64,
+    pub min_content_size: Option<CGSize>,
+    pub max_content_size: Option<CGSize>,
+    pub hides_title: bool,
+    pub transparent_titlebar: bool,
+    pub movable_by_window_background: bool,
+    pub opaque: bool,
+    pub released_when_closed: bool,
+}
+
+/// Visible frame for the main screen, if AppKit can provide one.
+pub fn main_screen_visible_frame() -> Option<CGRect> {
+    // SAFETY: `Class::get("NSScreen")` returns `None` if the runtime class is
+    // not registered (e.g. headless test). When present, `+[NSScreen mainScreen]`
+    // is a documented Foundation API returning either nil or a singleton owned
+    // by AppKit. Must be called from the main thread; this helper is invoked
+    // exclusively by AppKit-side code paths that already hold the main thread.
+    unsafe {
+        let ns_screen = Class::get("NSScreen")?;
+        let screen: Id = msg_send![ns_screen, mainScreen];
+        if screen.is_null() {
+            None
+        } else {
+            Some(msg_send![screen, visibleFrame])
+        }
+    }
+}
+
+/// Shared policy for the Agent chat shell.
+pub fn agent_chat_shell_panel_policy(visible_frame: CGRect) -> SharedShellPanelPolicy {
+    SharedShellPanelPolicy {
+        style_mask: NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::FullSizeContentView
+            | NSWindowStyleMask::Resizable,
+        backing_store: NSBackingStoreType::Buffered,
+        collection_behavior: NSWindowCollectionBehavior::FullScreenNone,
+        level: NS_NORMAL_WINDOW_LEVEL,
+        min_content_size: Some(CGSize::new(380.0, 360.0)),
+        max_content_size: Some(CGSize::new(
+            visible_frame.size.width.min(1000.0),
+            visible_frame.size.height,
+        )),
+        hides_title: true,
+        transparent_titlebar: true,
+        movable_by_window_background: true,
+        opaque: false,
+        released_when_closed: false,
+    }
+}
+
+/// Shared policy for the native Settings preferences shell.
+pub fn settings_shell_panel_policy(fixed_size: CGSize) -> SharedShellPanelPolicy {
+    SharedShellPanelPolicy {
+        style_mask: NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::FullSizeContentView,
+        backing_store: NSBackingStoreType::Buffered,
+        collection_behavior: NSWindowCollectionBehavior::FullScreenNone,
+        level: NS_NORMAL_WINDOW_LEVEL,
+        min_content_size: Some(fixed_size),
+        max_content_size: Some(fixed_size),
+        hides_title: false,
+        transparent_titlebar: true,
+        movable_by_window_background: false,
+        opaque: true,
+        released_when_closed: false,
+    }
+}
+
+/// Frame an Agent chat shell from the persisted/raw position and clamp to screen.
+pub fn agent_chat_shell_frame(
+    visible_frame: CGRect,
+    window_width: f64,
+    window_height: f64,
+    margin: f64,
+    raw_x: f64,
+    raw_y: f64,
+) -> CGRect {
+    let (x, y) = clamp_overlay_position(
+        visible_frame,
+        window_width,
+        window_height,
+        margin,
+        raw_x,
+        raw_y,
+    );
+    CGRect::new(
+        &CGPoint::new(x, y),
+        &CGSize::new(window_width, window_height),
+    )
+}
+
+/// Apply the shared shell policy to an already-allocated `NSWindow`.
+///
+/// # Safety
+/// `window` must be a valid initialized `NSWindow` instance.
+pub unsafe fn apply_shared_shell_panel_policy(window: Id, policy: &SharedShellPanelPolicy) {
+    // SAFETY: per the function contract, `window` is a valid initialized
+    // `NSWindow`. `policy` is a Rust borrow held for the entire call. Each
+    // `msg_send!` setter mutates AppKit-internal state; this MUST run on the
+    // main thread (AppKit affinity).
+    unsafe {
+        let title_visibility = if policy.hides_title { 1_isize } else { 0_isize };
+        let _: () = msg_send![window, setTitleVisibility: title_visibility];
+        let _: () = msg_send![window, setTitlebarAppearsTransparent: policy.transparent_titlebar];
+        let _: () = msg_send![
+            window,
+            setMovableByWindowBackground: policy.movable_by_window_background
+        ];
+        let _: () = msg_send![window, setOpaque: policy.opaque];
+        if !policy.opaque {
+            let _: () = msg_send![window, setBackgroundColor: color_clear()];
+        }
+        let _: () = msg_send![window, setLevel: policy.level];
+        let _: () = msg_send![window, setReleasedWhenClosed: policy.released_when_closed];
+        if let Some(min_size) = policy.min_content_size {
+            let _: () = msg_send![window, setContentMinSize: min_size];
+        }
+        if let Some(max_size) = policy.max_content_size {
+            let _: () = msg_send![window, setContentMaxSize: max_size];
+        }
+        let _: () = msg_send![window, setCollectionBehavior: policy.collection_behavior];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1685,11 +1794,66 @@ mod tests {
     }
 
     #[test]
+    fn native_markdown_is_bypassed_for_tables() {
+        let table = "# Report\n\n| Name | Value |\n| ---- | ----- |\n| A | 1 |";
+        assert!(!should_apply_native_markdown(table));
+
+        let inline_markdown = "**bold** `code`";
+        assert!(should_apply_native_markdown(inline_markdown));
+    }
+
+    #[test]
     fn clamp_overlay_position_keeps_window_inside_frame() {
         let visible = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(100.0, 100.0));
         let (x, y) = clamp_overlay_position(visible, 60.0, 60.0, 10.0, 1000.0, -1000.0);
         assert_eq!(x, 30.0);
         assert_eq!(y, 10.0);
+    }
+
+    #[test]
+    fn agent_chat_shell_policy_caps_to_visible_frame() {
+        let visible = CGRect::new(&CGPoint::new(0.0, 0.0), &CGSize::new(1200.0, 700.0));
+        let policy = agent_chat_shell_panel_policy(visible);
+
+        let min_size = policy.min_content_size.expect("min size");
+        assert_eq!(min_size.width, 380.0);
+        assert_eq!(min_size.height, 360.0);
+
+        let max_size = policy.max_content_size.expect("max size");
+        assert_eq!(max_size.width, 1000.0);
+        assert_eq!(max_size.height, 700.0);
+        assert_eq!(policy.level, NS_NORMAL_WINDOW_LEVEL);
+        assert!(policy.hides_title);
+        assert!(!policy.opaque);
+        assert!(policy.style_mask.contains(NSWindowStyleMask::Titled));
+        assert!(policy.style_mask.contains(NSWindowStyleMask::Closable));
+    }
+
+    #[test]
+    fn settings_shell_policy_is_fixed_native_panel() {
+        let fixed = CGSize::new(840.0, 700.0);
+        let policy = settings_shell_panel_policy(fixed);
+
+        assert_eq!(policy.level, NS_NORMAL_WINDOW_LEVEL);
+        assert_eq!(
+            policy.collection_behavior,
+            NSWindowCollectionBehavior::FullScreenNone
+        );
+        let min_size = policy.min_content_size.expect("min size");
+        assert_eq!(min_size.width, fixed.width);
+        assert_eq!(min_size.height, fixed.height);
+        let max_size = policy.max_content_size.expect("max size");
+        assert_eq!(max_size.width, fixed.width);
+        assert_eq!(max_size.height, fixed.height);
+        assert!(policy.opaque);
+        assert!(!policy.hides_title);
+        assert!(policy.style_mask.contains(NSWindowStyleMask::Titled));
+        assert!(
+            policy
+                .style_mask
+                .contains(NSWindowStyleMask::FullSizeContentView)
+        );
+        assert!(!policy.style_mask.contains(NSWindowStyleMask::Resizable));
     }
 
     #[test]
@@ -2052,7 +2216,15 @@ fn looks_like_markdown_table(text: &str) -> bool {
     })
 }
 
-fn markdown_options_with_base_font(text: &str, font: Id) -> Option<Id> {
+fn should_apply_native_markdown(text: &str) -> bool {
+    // AppKit's native Markdown importer does not render Markdown tables as tables in
+    // NSTextField. It strips the pipe/separator structure and concatenates cells, which
+    // makes table-heavy assistant answers unreadable. Keep table Markdown raw until we
+    // replace chat bubbles with a real block Markdown renderer.
+    !looks_like_markdown_table(text)
+}
+
+fn markdown_options_with_base_font(_text: &str, font: Id) -> Option<Id> {
     unsafe {
         let options_cls = Class::get("NSAttributedStringMarkdownParsingOptions")?;
         let options: Id = msg_send![options_cls, alloc];
@@ -2064,17 +2236,13 @@ fn markdown_options_with_base_font(text: &str, font: Id) -> Option<Id> {
         if responds_base && !font.is_null() {
             let _: () = msg_send![options, setBaseFont: font];
         }
-        // Use full markdown mode when table syntax is detected; otherwise keep the
-        // inline-preserving mode to avoid whitespace regressions in regular bubbles.
+        // Keep inline-preserving mode for chat bubbles. Table Markdown is intentionally
+        // bypassed before this point because AppKit collapses tables in NSTextField.
         let responds_syntax: bool =
             msg_send![options, respondsToSelector: sel!(setInterpretedSyntax:)];
         if responds_syntax {
             // 0 = .full, 1 = .inlineOnly, 2 = .inlineOnlyPreservingWhitespace
-            let syntax: isize = if looks_like_markdown_table(text) {
-                0
-            } else {
-                2
-            };
+            let syntax: isize = 2;
             let _: () = msg_send![options, setInterpretedSyntax: syntax];
         }
         Some(options)
@@ -2429,7 +2597,10 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
 
         let _: () = msg_send![text_label, setFont: font];
         let allow_markdown = matches!(config.role, BubbleRole::Assistant | BubbleRole::System);
-        if !(allow_markdown && apply_markdown_to_text_field(text_label, &display_text, font)) {
+        if !(allow_markdown
+            && should_apply_native_markdown(&display_text)
+            && apply_markdown_to_text_field(text_label, &display_text, font))
+        {
             let _: () = msg_send![text_label, setStringValue: text_str];
         }
         let _: () = msg_send![text_label, setLineBreakMode: 0_isize]; // NSLineBreakByWordWrapping
@@ -2676,7 +2847,10 @@ pub unsafe fn update_bubble_text(
             jb_font
         };
         let _: () = msg_send![text_label, setFont: font];
-        if !(allow_markdown && apply_markdown_to_text_field(text_label, &display_text, font)) {
+        if !(allow_markdown
+            && should_apply_native_markdown(&display_text)
+            && apply_markdown_to_text_field(text_label, &display_text, font))
+        {
             let text_str = ns_string(&display_text);
             let _: () = msg_send![text_label, setStringValue: text_str];
         }
@@ -3179,7 +3353,7 @@ pub fn list_draft_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         .collect();
 
     // Sort by modification time, newest first
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     files.into_iter().map(|(path, _)| path).collect()
 }

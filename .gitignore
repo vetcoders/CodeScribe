@@ -4,6 +4,10 @@ dist/
 *.spec
 *.dmg
 *.app/
+target-noembed/
+
+# Cargo lockfile (per latest GitHub security recommendations for libraries/apps)
+Cargo.lock
 __pycache__/
 *.pyc
 .venv/
@@ -85,3 +89,5 @@ docs/runtime-diagnosis.md
 !.ai-context/share/summary.md
 !.ai-context/share/timeline.md
 AGENTS.md
+/.vibecrafted
+/*test*.rs

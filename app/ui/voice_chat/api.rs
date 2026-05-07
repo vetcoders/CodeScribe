@@ -394,19 +394,6 @@ pub fn show_drawer_tab() {
     });
 }
 
-/// Switch to Settings tab programmatically
-pub fn show_settings_tab() {
-    Queue::main().exec_async(|| {
-        update_active_tab_impl(Tab::Settings);
-    });
-}
-
-/// Request Settings tab to be shown the next time the overlay is created.
-/// This is used when routing tray "Settings" to the overlay before it exists.
-pub fn request_settings_tab_on_open() {
-    show_settings_tab();
-}
-
 /// Set the target app name to re-activate for paste actions.
 ///
 /// This is best-effort and primarily used to paste assistant output back into
@@ -448,12 +435,6 @@ pub fn is_conversation_active() -> bool {
 // ═══════════════════════════════════════════════════════════
 
 pub fn update_active_tab_impl(tab: Tab) {
-    if tab == Tab::Settings {
-        // Settings lives in a separate NSWindow; keep chat overlay alive.
-        crate::show_bootstrap_overlay();
-        return;
-    }
-
     // DEADLOCK PREVENTION: extract widget pointers under lock, drop lock before
     // AppKit calls (setCollapsed can animate and spin a nested run-loop).
     let (
@@ -473,6 +454,7 @@ pub fn update_active_tab_impl(tab: Tab) {
         agent_bar,
         agent_attach,
         agent_send,
+        title_label,
         window_ptr,
         agent_input_tv,
         need_chat_update,
@@ -497,6 +479,7 @@ pub fn update_active_tab_impl(tab: Tab) {
             state.agent_input_bar,
             state.agent_attach_button,
             state.agent_send_button,
+            state.title_label,
             state.window,
             state.agent_input_text_view,
             tab == Tab::Agent && prev != Tab::Agent,
@@ -555,6 +538,9 @@ pub fn update_active_tab_impl(tab: Tab) {
         if let Some(p) = agent_send {
             crate::ui_helpers::set_hidden(p as Id, !show_agent);
         }
+        if let Some(p) = title_label {
+            crate::ui_helpers::set_hidden(p as Id, !show_agent);
+        }
 
         // Complex agent-tab operations need full state access; re-lock briefly.
         if show_agent {
@@ -580,9 +566,6 @@ pub fn update_active_tab_impl(tab: Tab) {
 
 fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
     unsafe {
-        if tab == Tab::Settings {
-            return;
-        }
         let prev_tab = state.active_tab;
         state.active_tab = tab;
 
@@ -640,6 +623,9 @@ fn update_active_tab_locked(state: &mut VoiceChatOverlayState, tab: Tab) {
         if let Some(agent_send) = state.agent_send_button {
             crate::ui_helpers::set_hidden(agent_send as Id, !show_agent);
         }
+        if let Some(title_label) = state.title_label {
+            crate::ui_helpers::set_hidden(title_label as Id, !show_agent);
+        }
 
         if show_agent {
             // Populate the Agent view on tab switch so the empty-state CTA is visible.
@@ -694,14 +680,12 @@ pub(super) fn reflow_overlay_after_resize_impl() {
 fn reflow_header_controls_locked(state: &mut VoiceChatOverlayState) {
     unsafe {
         let (
-            Some(title_ptr),
             Some(drawer_ptr),
             Some(agent_ptr),
             Some(settings_ptr),
             Some(favorites_ptr),
             Some(status_ptr),
         ) = (
-            state.title_label,
             state.tab_drawer_button,
             state.tab_agent_button,
             state.tab_settings_button,
@@ -712,7 +696,6 @@ fn reflow_header_controls_locked(state: &mut VoiceChatOverlayState) {
             return;
         };
 
-        let title_label = title_ptr as Id;
         let tab_drawer_button = drawer_ptr as Id;
         let tab_agent_button = agent_ptr as Id;
         let tab_settings_button = settings_ptr as Id;
@@ -723,38 +706,8 @@ fn reflow_header_controls_locked(state: &mut VoiceChatOverlayState) {
         let right_cluster_start_x = favorites_frame.origin.x
             - (ui_tokens::CHAT_HEADER_BUTTON_SIZE + ui_tokens::CHAT_HEADER_BUTTON_GAP);
 
-        let title_frame: CGRect = msg_send![title_label, frame];
-        let header_controls: Id = msg_send![title_label, superview];
-        let header_width = if header_controls.is_null() {
-            0.0
-        } else {
-            let bounds: CGRect = msg_send![header_controls, bounds];
-            bounds.size.width
-        };
-        let title_x = if header_width >= 620.0 {
-            ui_tokens::TRAFFIC_LIGHTS_SPACER_WIDTH + 6.0
-        } else {
-            ui_tokens::EDGE_PADDING_TIGHT
-        };
-        let title_max_w =
-            (right_cluster_start_x - title_x - ui_tokens::CHAT_HEADER_GROUP_GAP * 2.0).max(56.0);
-        let title_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH.min(title_max_w);
-        if (title_w - title_frame.size.width).abs() > 0.5
-            || (title_x - title_frame.origin.x).abs() > 0.5
-        {
-            let resized_title = CGRect::new(
-                &CGPoint::new(title_x, title_frame.origin.y),
-                &CGSize::new(title_w, title_frame.size.height),
-            );
-            let _: () = msg_send![title_label, setFrame: resized_title];
-        }
-        let title_frame: CGRect = msg_send![title_label, frame];
-
-        let layout = chat_header_layout(
-            title_frame.origin.x,
-            title_frame.size.width,
-            right_cluster_start_x,
-        );
+        let header_safe_x = ui_tokens::TRAFFIC_LIGHTS_SPACER_WIDTH + 6.0;
+        let layout = chat_header_layout(header_safe_x, 0.0, right_cluster_start_x);
 
         let drawer_frame: CGRect = msg_send![tab_drawer_button, frame];
         let tab_y = drawer_frame.origin.y;
@@ -848,6 +801,20 @@ fn reflow_footer_controls_locked(state: &mut VoiceChatOverlayState) {
                 &CGSize::new(search_w, 24.0),
             );
             let _: () = msg_send![field, setFrame: frame];
+        }
+
+        if let Some(label_ptr) = state.title_label {
+            let label = label_ptr as Id;
+            let label_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH;
+            let label_h = 16.0;
+            let frame = CGRect::new(
+                &CGPoint::new(
+                    content_bounds.origin.x + content_bounds.size.width - content_pad - label_w,
+                    footer_base_y + ((footer_height - label_h) / 2.0).max(4.0),
+                ),
+                &CGSize::new(label_w, label_h),
+            );
+            let _: () = msg_send![label, setFrame: frame];
         }
 
         let header_height = ui_tokens::HEADER_HEIGHT_COMPACT;
@@ -2677,32 +2644,97 @@ fn create_commit_action_bar(action_handler: Option<usize>) -> Id {
     }
 }
 
+/// ObjC handles owned by the overlay state via `[cls new]` (+1 retain each).
+/// These must receive a balancing `release` exactly once when the overlay is
+/// permanently torn down. Subviews (`blur_view`, pills, drawer, etc.) are
+/// retained by the window and need no explicit release.
+///
+/// The reuse path in `voice_chat/mod.rs` and the AppKit `windowWillClose`
+/// delegate callback in `voice_chat/handlers.rs` both clear the state without
+/// taking ownership of these pointers — they call the lighter
+/// `clear_overlay_state` directly. Only `hide_voice_chat_overlay_impl` is
+/// authoritative for releasing them, so handle ownership transfer happens
+/// here and nowhere else.
+struct ReleasedOverlayHandles {
+    window_delegate: Option<usize>,
+    action_handler: Option<usize>,
+    window: Option<usize>,
+}
+
+/// Drain the three owned ObjC handles out of the overlay state and clear all
+/// other fields. Returns the handles for the caller to release after dropping
+/// the state lock. Calling code MUST eventually `release` each `Some(ptr)`
+/// exactly once or leak the underlying object.
+fn take_handles_and_clear_overlay_state(
+    state: &mut VoiceChatOverlayState,
+) -> ReleasedOverlayHandles {
+    let handles = ReleasedOverlayHandles {
+        window_delegate: state.window_delegate.take(),
+        action_handler: state.action_handler.take(),
+        window: state.window.take(),
+    };
+    clear_overlay_state(state);
+    handles
+}
+
 fn hide_voice_chat_overlay_impl() {
     // IMPORTANT: do not hold OVERLAY_STATE while calling `window_close`.
     // `window_close` triggers AppKit notifications/delegate callbacks (windowWillClose),
     // and those callbacks also lock OVERLAY_STATE. Holding the lock here can deadlock
     // the main thread (observed as a hard freeze/hang).
-    let window_ptr = {
+    let handles = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let window_ptr = state.window.take();
-        clear_overlay_state(&mut state);
-        window_ptr
+        take_handles_and_clear_overlay_state(&mut state)
     };
 
-    if let Some(window_ptr) = window_ptr {
+    if let Some(window_ptr) = handles.window {
+        // SAFETY: `window_ptr` was obtained from `[NSWindow alloc] init...]`
+        // / `[cls new]` on the main thread and stored in `handles.window`
+        // while still retained. We are on the main thread (overlay teardown
+        // runs from the AppKit run loop) and the pointer has not yet been
+        // released.
         unsafe {
             let window = window_ptr as Id;
             crate::ui_helpers::animate_fade(window, 0.0, 0.15);
+            // The shared overlay shell sets `releasedWhenClosed = false`
+            // (see `app/ui/shared/helpers.rs`), so `window_close` does NOT
+            // balance the +1 retain from window construction. We must
+            // `release` the window pointer ourselves below.
             crate::ui_helpers::window_close(window);
+        }
+    }
+
+    // Balance the +1 retain count from `[cls new]` on each owned handle.
+    // Subviews are owned by the window and released transitively.
+    // SAFETY: each pointer below was obtained from `[cls new]` (or equivalent
+    // alloc/init pair) on the main thread, retained at +1, and is still alive
+    // because `take_handles_and_clear_overlay_state` is the unique teardown
+    // site. Caller invariants guarantee single-threaded main-thread access.
+    unsafe {
+        if let Some(ptr) = handles.window_delegate {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = handles.action_handler {
+            let _: () = msg_send![ptr as Id, release];
+        }
+        if let Some(ptr) = handles.window {
+            let _: () = msg_send![ptr as Id, release];
         }
     }
 
     clear_search_field();
 }
 
+/// Reset the overlay state to its default shape. Does NOT release ObjC retains
+/// on `window`, `window_delegate`, or `action_handler` — the caller is
+/// responsible for that via `take_handles_and_clear_overlay_state` when the
+/// overlay is being permanently torn down. This entry point is safe for the
+/// reuse path (stale dangling pointers) and the `windowWillClose` callback
+/// (release already in flight from `hide_voice_chat_overlay_impl`).
 pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
     state.window = None;
     state.window_delegate = None;
+    state.action_handler = None;
     state.blur_view = None;
     state.split_view_controller = None;
     state.split_sidebar_item = None;
@@ -3453,10 +3485,10 @@ mod tests {
     }
 
     #[test]
-    fn update_active_tab_handles_settings_without_views() {
+    fn update_active_tab_switches_between_drawer_and_agent() {
         let mut state = VoiceChatOverlayState::default();
-        update_active_tab_locked(&mut state, Tab::Settings);
-        assert_eq!(state.active_tab, Tab::Drawer);
+        update_active_tab_locked(&mut state, Tab::Agent);
+        assert_eq!(state.active_tab, Tab::Agent);
 
         update_active_tab_locked(&mut state, Tab::Drawer);
         assert_eq!(state.active_tab, Tab::Drawer);
@@ -3807,7 +3839,7 @@ pub fn load_drawer_entries() -> Vec<DrawerEntry> {
 fn load_drawer_entries_with_query(query: &str) -> Vec<DrawerEntry> {
     let favorites = load_favorites_from_disk();
     let mut entries = load_thread_drawer_entries(&favorites);
-    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
     let query_lower = query.trim().to_ascii_lowercase();
     if !query_lower.is_empty() {
@@ -4044,10 +4076,8 @@ fn thread_message_text_for_copy(message: &codescribe_core::agent::ThreadMessage)
 
 fn collect_copy_text(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
-        serde_json::Value::String(text) => {
-            if !text.trim().is_empty() {
-                out.push(text.to_string());
-            }
+        serde_json::Value::String(text) if !text.trim().is_empty() => {
+            out.push(text.to_string());
         }
         serde_json::Value::Array(items) => {
             if items.iter().all(serde_json::Value::is_number) {
