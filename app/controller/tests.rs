@@ -11,6 +11,60 @@ async fn test_initial_state() {
 }
 
 #[tokio::test]
+async fn test_last_segment_audio_offset_initialized_to_zero() {
+    // commit_segment relies on this starting at 0 — the first segment of a
+    // toggle session clips from sample 0. start_toggle_recording then resets
+    // it to 0 again (defensive against leaking offset across sessions).
+    let controller = RecordingController::new();
+    assert_eq!(
+        controller
+            .last_segment_audio_offset
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "last_segment_audio_offset must start at 0 — commit_segment first-call \
+         contract requires snapshot from buffer start of the active toggle session"
+    );
+}
+
+#[tokio::test]
+async fn test_last_segment_audio_offset_atomic_advance_and_reset() {
+    // Smoke for the atomic ops that commit_segment + start_toggle_recording use.
+    // commit_segment: load(SeqCst) → snapshot → store(end_offset, SeqCst).
+    // start_toggle_recording: store(0, SeqCst).
+    use std::sync::atomic::Ordering;
+    let controller = RecordingController::new();
+
+    controller
+        .last_segment_audio_offset
+        .store(48000, Ordering::SeqCst);
+    assert_eq!(
+        controller.last_segment_audio_offset.load(Ordering::SeqCst),
+        48000
+    );
+
+    // Simulate start_toggle_recording's reset on new session.
+    controller
+        .last_segment_audio_offset
+        .store(0, Ordering::SeqCst);
+    assert_eq!(
+        controller.last_segment_audio_offset.load(Ordering::SeqCst),
+        0
+    );
+}
+
+#[test]
+fn test_renamed_request_recording_stop_is_callable() {
+    // Compile-time guard that the rename `request_recording_commit` →
+    // `request_recording_stop` shipped intact. If anyone re-renames or
+    // removes the function this test stops compiling. Body doesn't have to
+    // execute (OVERLAY_CONTROLLER won't be registered in tests, so the call
+    // gates out early with a warn!) — we just need the symbol to resolve.
+    let _: fn() = request_recording_stop;
+    let _: fn() = request_segment_commit;
+    let _: fn() = request_segment_commit_and_augment;
+}
+
+#[tokio::test]
 #[serial]
 async fn test_hold_down_schedules_delayed_start() {
     let controller = RecordingController::new();

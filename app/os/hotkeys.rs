@@ -1649,6 +1649,18 @@ mod tests {
     }
 
     #[test]
+    fn is_global_hotkey_manager_active_returns_bool_safely() {
+        // Smoke: getter must not panic on a fresh test runtime. The actual
+        // value depends on whether prior tests have spun up the global hotkey
+        // service (process-global Mutex), so we just assert the call returns
+        // a bool without crashing. This guards the dedup path in
+        // `app/ui/onboarding/mod.rs::reconcile_permission_runtime_after_grant`
+        // which calls this helper before deciding to refresh the manager.
+        let active: bool = is_global_hotkey_manager_active();
+        let _ = active;
+    }
+
+    #[test]
     fn test_modifier_flags_ctrl_only() {
         let flags = ModifierFlags::ctrl_only();
         assert!(flags.ctrl);

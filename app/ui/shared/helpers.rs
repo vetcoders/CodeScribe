@@ -1829,6 +1829,28 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    fn release_object_is_null_safe() {
+        // Null pointer should be a no-op (no segfault, no msg_send to nil).
+        // Documented contract: `if object.is_null() { return; }`.
+        // Test passes by virtue of completing without segfault — no panic
+        // means the null guard worked.
+        unsafe {
+            release_object(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn window_discard_is_null_safe() {
+        // Same null-safety contract — window_discard guards null before
+        // window_close + release_object. Critical because teardown call
+        // sites may pass a freshly-taken Option<usize>::None as null Id.
+        // Reaching the end of the function without segfault = pass.
+        unsafe {
+            window_discard(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
     fn markdown_table_detection_handles_common_patterns() {
         let table = "| Name | Value |\n| ---- | ----- |\n| A | 1 |";
         assert!(looks_like_markdown_table(table));
