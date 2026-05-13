@@ -3031,7 +3031,24 @@ impl RecordingController {
     }
 
     async fn stop_toggle_and_adjudicate_inner(&self) -> Result<()> {
+        // Phase-timed instrumentation: the watchdog above wraps this entire fn
+        // in a 45s timeout, but until now we couldn't tell WHICH await hung.
+        // Operator reported "hands-off, double option, który potrafi wywołać
+        // nagrywanie, ale nie potrafi zakończyć nagrywania" — confirmed in
+        // /Users/maciejgad/.codescribe/logs/codescribe.log @ 2026-05-13 23:03:22 PDT
+        // where "Stopping toggle recording with final-pass adjudication" was
+        // followed by 41s of silence before watchdog forced recovery.
+        // These per-phase elapsed logs will identify the exact hang point next
+        // time it reproduces. Logs MUST stay info! so they survive at default
+        // tracing level — debug! gets filtered out in release.
+        let stop_start = std::time::Instant::now();
+        info!("stop_toggle_inner: PHASE 0 — acquiring serial_lock");
         let _guard = self.serial_lock.lock().await;
+        info!(
+            "stop_toggle_inner: PHASE 0 — serial_lock acquired in {:?}",
+            stop_start.elapsed()
+        );
+
         if *self.state.read().await != State::RecToggle {
             return Ok(());
         }
@@ -3051,31 +3068,65 @@ impl RecordingController {
         show_badge_for_mode(BadgeMode::Processing);
 
         let result = {
+            let phase1 = std::time::Instant::now();
+            info!("stop_toggle_inner: PHASE 1 — locking recorder mutex");
             let mut recorder_guard = self.recorder.lock().await;
+            info!(
+                "stop_toggle_inner: PHASE 1 — recorder mutex acquired in {:?}",
+                phase1.elapsed()
+            );
+
             let recorder = Self::recorder_from_guard_mut(&mut recorder_guard, "Toggle-adjudicate")?;
+
+            let phase2 = std::time::Instant::now();
+            info!("stop_toggle_inner: PHASE 2 — calling recorder.stop() (cpal drain + WAV save)");
             let (streaming_text, raw_audio_path_opt) =
                 recorder.stop().await.context("Failed to stop recorder")?;
+            info!(
+                "stop_toggle_inner: PHASE 2 — recorder.stop() returned in {:?} (streaming_text={} chars, has_wav={})",
+                phase2.elapsed(),
+                streaming_text.len(),
+                raw_audio_path_opt.is_some()
+            );
+
             Self::clear_recorder_callbacks(recorder);
             drop(recorder_guard);
 
-            self.process_stopped_recording(
-                streaming_text,
-                raw_audio_path_opt,
-                assistive,
-                hold_mode,
-                force_raw,
-                force_ai,
-                Some(RecordingTranscriptSource::ToggleSessionAdjudicated),
-            )
-            .await
+            let phase3 = std::time::Instant::now();
+            info!(
+                "stop_toggle_inner: PHASE 3 — process_stopped_recording (Whisper final-pass + post-process + paste/handoff decision)"
+            );
+            let r = self
+                .process_stopped_recording(
+                    streaming_text,
+                    raw_audio_path_opt,
+                    assistive,
+                    hold_mode,
+                    force_raw,
+                    force_ai,
+                    Some(RecordingTranscriptSource::ToggleSessionAdjudicated),
+                )
+                .await;
+            info!(
+                "stop_toggle_inner: PHASE 3 — process_stopped_recording completed in {:?} (ok={})",
+                phase3.elapsed(),
+                r.is_ok()
+            );
+            r
         };
 
+        let phase4 = std::time::Instant::now();
         self.toggle_user_has_text.store(false, Ordering::SeqCst);
         self.toggle_assistant_has_text
             .store(false, Ordering::SeqCst);
         self.reset_finished_recording_state().await;
         self.handle_processed_recording_result(assistive, &result)
             .await;
+        info!(
+            "stop_toggle_inner: PHASE 4 — cleanup + result handler completed in {:?} (total stop time: {:?})",
+            phase4.elapsed(),
+            stop_start.elapsed()
+        );
 
         result.map(|_| ())
     }
