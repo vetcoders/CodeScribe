@@ -558,11 +558,17 @@ async fn run_agent_stream(
                 response_id = Some(response_meta.id.clone());
             }
 
+            debug!("Agent SSE received event type={}", chunk.chunk_type);
+
             if let Some(event) =
                 parse_agent_event(&chunk, &mut tool_tracker, response_id.as_deref())
             {
                 match &event {
                     AgentEvent::TextDelta(delta) => {
+                        debug!(
+                            "Agent SSE dispatch response.output_text.delta ({}B)",
+                            delta.len()
+                        );
                         if let Some(callback) = &callbacks.assistant {
                             callback(delta);
                         }

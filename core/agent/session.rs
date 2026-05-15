@@ -351,7 +351,12 @@ impl AgentSession {
 async fn send_ui_event(tx: &Sender<AgentUiEvent>, event: AgentUiEvent) {
     if tx.send(event).await.is_err() {
         debug!("Dropping UI event because receiver is closed");
+        return;
     }
+
+    // Let the controller's select! drain UI events between immediately-ready
+    // provider chunks, preserving live rendering instead of end-of-stream dumps.
+    tokio::task::yield_now().await;
 }
 
 fn is_transient_stream_start_error(error: &anyhow::Error) -> bool {
@@ -749,6 +754,44 @@ mod tests {
             ui_events.contains(&AgentUiEvent::Done),
             "expected Done event, got {ui_events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn send_yields_after_text_delta_before_finishing_buffered_stream() {
+        let provider = ScriptedProvider::new(vec![vec![
+            AgentEvent::TextDelta("Hel".to_string()),
+            AgentEvent::TextDelta("lo".to_string()),
+            AgentEvent::TextDone("Hello".to_string()),
+            AgentEvent::ResponseDone {
+                response_id: Some("resp_buffered".to_string()),
+            },
+        ]]);
+        let (ui_tx, mut ui_rx) = mpsc::channel(16);
+        let mut session =
+            AgentSession::new(Box::new(provider), Arc::new(ToolRegistry::new()), ui_tx);
+
+        let options = StreamOptions {
+            model: "gpt-test".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            temperature: None,
+        };
+        let send_future = session.send("buffered stream".to_string(), Vec::new(), &options);
+        tokio::pin!(send_future);
+
+        tokio::select! {
+            biased;
+            result = &mut send_future => {
+                panic!("send completed before UI could drain first delta: {result:?}");
+            }
+            maybe_event = ui_rx.recv() => {
+                assert_eq!(maybe_event, Some(AgentUiEvent::TextDelta("Hel".to_string())));
+            }
+        }
+
+        send_future
+            .await
+            .expect("agent session should complete after yielding first delta");
     }
 
     #[tokio::test]
