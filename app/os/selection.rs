@@ -97,6 +97,14 @@ fn env_u64(key: &str, default: u64) -> u64 {
 /// - `ASSISTIVE_CONTEXT_COPY_DELAY_MS` (default: 150)
 /// - `ASSISTIVE_CONTEXT_COPY_FALLBACK` (default: auto) - enable Cmd+C fallback when AX selection is unavailable
 pub fn capture_assistive_context() -> AssistiveContext {
+    capture_assistive_context_with_prior_frontmost(None)
+}
+
+/// Capture assistive context while preferring the app that was frontmost before
+/// CodeScribe UI could activate.
+pub fn capture_assistive_context_with_prior_frontmost(
+    prior_frontmost_app: Option<String>,
+) -> AssistiveContext {
     // Unit tests should not trigger osascript / clipboard / event simulation.
     if cfg!(test) {
         return AssistiveContext::default();
@@ -110,40 +118,23 @@ pub fn capture_assistive_context() -> AssistiveContext {
     let include_app = env_flag("ASSISTIVE_CONTEXT_INCLUDE_APP", true);
     let copy_delay_ms = env_u64("ASSISTIVE_CONTEXT_COPY_DELAY_MS", 150);
 
-    let frontmost_app = if include_app {
+    let current_frontmost_app = if include_app {
         frontmost_app_name()
     } else {
         None
     };
-
-    // Avoid capturing from ourselves (frontmost can temporarily become CodeScribe)
-    if matches!(
-        frontmost_app.as_deref(),
-        Some("CodeScribe") | Some("codescribe")
-    ) {
-        debug!("Assistive context: frontmost is CodeScribe, skipping selection capture");
-        return AssistiveContext {
-            frontmost_app,
-            selected_text: None,
-        };
-    }
-
-    let selected_text =
-        selected_text_from_frontmost(max_chars, copy_delay_ms, frontmost_app.as_deref());
-
-    debug!(
-        "Assistive context captured (app_present={}, selected_chars={})",
-        frontmost_app.is_some(),
-        selected_text
-            .as_ref()
-            .map(|s| s.chars().count())
-            .unwrap_or(0)
-    );
-
-    AssistiveContext {
-        frontmost_app,
-        selected_text,
-    }
+    capture_assistive_context_from_parts(
+        current_frontmost_app,
+        prior_frontmost_app,
+        |frontmost_app, should_restore_prior_app| {
+            capture_selected_text_with_effective_frontmost(
+                max_chars,
+                copy_delay_ms,
+                frontmost_app,
+                should_restore_prior_app,
+            )
+        },
+    )
 }
 
 /// Capture only the frontmost app name (no selection, no clipboard).
@@ -151,6 +142,14 @@ pub fn capture_assistive_context() -> AssistiveContext {
 /// This is used to make paste actions (⇲) target the right app even when we're not in Assistive
 /// selection mode.
 pub fn capture_frontmost_app_only() -> AssistiveContext {
+    capture_frontmost_app_only_with_prior_frontmost(None)
+}
+
+/// Capture only the frontmost app name, using a pre-overlay app if CodeScribe is
+/// currently frontmost.
+pub fn capture_frontmost_app_only_with_prior_frontmost(
+    prior_frontmost_app: Option<String>,
+) -> AssistiveContext {
     if cfg!(test) {
         return AssistiveContext::default();
     }
@@ -160,11 +159,13 @@ pub fn capture_frontmost_app_only() -> AssistiveContext {
     }
 
     let include_app = env_flag("ASSISTIVE_CONTEXT_INCLUDE_APP", true);
-    let frontmost_app = if include_app {
+    let current_frontmost_app = if include_app {
         frontmost_app_name()
     } else {
         None
     };
+    let (frontmost_app, _) =
+        resolve_effective_frontmost_app(current_frontmost_app, prior_frontmost_app);
 
     AssistiveContext {
         frontmost_app,
@@ -210,6 +211,91 @@ pub fn activate_app_by_name(app_name: &str) -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn activate_app_by_name(_app_name: &str) -> bool {
     false
+}
+
+fn normalized_app_name(app_name: Option<String>) -> Option<String> {
+    app_name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn is_codescribe_app(app_name: &str) -> bool {
+    app_name.trim().eq_ignore_ascii_case("codescribe")
+}
+
+fn resolve_effective_frontmost_app(
+    current_frontmost_app: Option<String>,
+    prior_frontmost_app: Option<String>,
+) -> (Option<String>, bool) {
+    let current_frontmost_app = normalized_app_name(current_frontmost_app);
+    let prior_frontmost_app =
+        normalized_app_name(prior_frontmost_app).filter(|app_name| !is_codescribe_app(app_name));
+
+    let should_use_prior = match (
+        current_frontmost_app.as_deref(),
+        prior_frontmost_app.as_deref(),
+    ) {
+        (Some(current), Some(_)) if is_codescribe_app(current) => true,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+
+    if should_use_prior {
+        (prior_frontmost_app, true)
+    } else {
+        (current_frontmost_app, false)
+    }
+}
+
+fn capture_assistive_context_from_parts(
+    current_frontmost_app: Option<String>,
+    prior_frontmost_app: Option<String>,
+    selected_text_reader: impl FnOnce(Option<&str>, bool) -> Option<String>,
+) -> AssistiveContext {
+    let (frontmost_app, should_restore_prior_app) =
+        resolve_effective_frontmost_app(current_frontmost_app, prior_frontmost_app);
+
+    // Avoid capturing from ourselves (frontmost can temporarily become CodeScribe)
+    if frontmost_app.as_deref().is_some_and(is_codescribe_app) {
+        debug!("Assistive context: frontmost is CodeScribe, skipping selection capture");
+        return AssistiveContext {
+            frontmost_app,
+            selected_text: None,
+        };
+    }
+
+    let selected_text = selected_text_reader(frontmost_app.as_deref(), should_restore_prior_app);
+
+    debug!(
+        "Assistive context captured (app_present={}, selected_chars={})",
+        frontmost_app.is_some(),
+        selected_text
+            .as_ref()
+            .map(|s| s.chars().count())
+            .unwrap_or(0)
+    );
+
+    AssistiveContext {
+        frontmost_app,
+        selected_text,
+    }
+}
+
+fn capture_selected_text_with_effective_frontmost(
+    max_chars: usize,
+    copy_delay_ms: u64,
+    frontmost_app: Option<&str>,
+    should_restore_prior_app: bool,
+) -> Option<String> {
+    if should_restore_prior_app && let Some(app_name) = frontmost_app {
+        if activate_app_by_name(app_name) {
+            std::thread::sleep(Duration::from_millis(copy_delay_ms.min(80)));
+        } else {
+            debug!("Assistive context: prior app activation failed before selection capture");
+        }
+    }
+
+    selected_text_from_frontmost(max_chars, copy_delay_ms, frontmost_app)
 }
 
 /// Build the LLM input for assistive mode, including optional selection context.
@@ -370,6 +456,44 @@ fn selected_text_from_frontmost(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn effective_frontmost_prefers_prior_when_codescribe_is_current() {
+        let (app, should_restore) = resolve_effective_frontmost_app(
+            Some("CodeScribe".to_string()),
+            Some("Terminal".to_string()),
+        );
+
+        assert_eq!(app.as_deref(), Some("Terminal"));
+        assert!(should_restore);
+    }
+
+    #[test]
+    fn assistive_capture_uses_prior_frontmost_after_overlay_activation() {
+        let ctx = capture_assistive_context_from_parts(
+            Some("CodeScribe".to_string()),
+            Some("Terminal".to_string()),
+            |frontmost_app, should_restore_prior_app| {
+                assert_eq!(frontmost_app, Some("Terminal"));
+                assert!(should_restore_prior_app);
+                Some("selected terminal text".to_string())
+            },
+        );
+
+        assert_eq!(ctx.frontmost_app.as_deref(), Some("Terminal"));
+        assert_eq!(ctx.selected_text.as_deref(), Some("selected terminal text"));
+        let input = build_assistive_input("opisz zaznaczenie", &ctx);
+        assert!(input.contains("selected terminal text"));
+    }
+
+    #[test]
+    fn effective_frontmost_preserves_codescribe_guard_without_prior_app() {
+        let (app, should_restore) =
+            resolve_effective_frontmost_app(Some("CodeScribe".to_string()), None);
+
+        assert_eq!(app.as_deref(), Some("CodeScribe"));
+        assert!(!should_restore);
+    }
 
     #[test]
     #[serial]

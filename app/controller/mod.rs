@@ -51,8 +51,10 @@ use crate::os::permissions::{
     PermissionStatus, check_accessibility, check_input_monitoring, check_microphone,
 };
 use crate::os::selection::{
-    AssistiveContext, build_assistive_input, capture_assistive_context, capture_frontmost_app_only,
-    get_recent_assistive_context, store_recent_assistive_context,
+    AssistiveContext, build_assistive_input, capture_assistive_context,
+    capture_assistive_context_with_prior_frontmost, capture_frontmost_app_only,
+    capture_frontmost_app_only_with_prior_frontmost, get_recent_assistive_context,
+    store_recent_assistive_context,
 };
 use crate::{BadgeMode, hide_hold_badge, show_badge_for_mode};
 
@@ -945,6 +947,9 @@ pub struct RecordingController {
     /// Must be captured BEFORE showing any overlay window, because overlays
     /// may steal focus and destroy the user's selection context.
     assistive_context: Arc<RwLock<Option<AssistiveContext>>>,
+    /// App that was frontmost when the user initiated a hold session, before
+    /// CodeScribe badge/overlay UI can become frontmost.
+    pre_overlay_frontmost_app: Arc<RwLock<Option<String>>>,
     /// True when we opened the unified overlay solely to show a raw transcription preview.
     ///
     /// This lets us preserve the old behavior:
@@ -1202,6 +1207,7 @@ impl RecordingController {
             toggle_user_has_text: Arc::new(AtomicBool::new(false)),
             toggle_assistant_has_text: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
+            pre_overlay_frontmost_app: Arc::new(RwLock::new(None)),
             opened_voice_chat_overlay_for_transcription: Arc::new(AtomicBool::new(false)),
             last_segment_audio_offset: Arc::new(AtomicUsize::new(0)),
             // Conversation mode (lazy init)
@@ -1277,6 +1283,7 @@ impl RecordingController {
             toggle_user_has_text: Arc::new(AtomicBool::new(false)),
             toggle_assistant_has_text: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
+            pre_overlay_frontmost_app: Arc::new(RwLock::new(None)),
             opened_voice_chat_overlay_for_transcription: Arc::new(AtomicBool::new(false)),
             last_segment_audio_offset: Arc::new(AtomicUsize::new(0)),
             // Conversation mode (lazy init)
@@ -1378,6 +1385,7 @@ impl RecordingController {
                 debug!("Invalidated pending hold-start task (generation={generation})");
             }
         }
+        *self.pre_overlay_frontmost_app.write().await = None;
     }
 
     fn clear_recorder_callbacks(recorder: &mut StreamingRecorder) {
@@ -1414,6 +1422,7 @@ impl RecordingController {
         *self.force_ai_mode.write().await = false;
         *self.session_id.write().await = None;
         *self.assistive_context.write().await = None;
+        *self.pre_overlay_frontmost_app.write().await = None;
         self.start_transition_in_flight
             .store(false, Ordering::SeqCst);
         self.assistive_loop_active.store(false, Ordering::SeqCst);
@@ -1434,6 +1443,7 @@ impl RecordingController {
         *self.force_ai_mode.write().await = false;
         *self.session_id.write().await = None;
         *self.assistive_context.write().await = None;
+        *self.pre_overlay_frontmost_app.write().await = None;
         self.start_transition_in_flight
             .store(false, Ordering::SeqCst);
         self.assistive_loop_active.store(false, Ordering::SeqCst);
@@ -1739,9 +1749,15 @@ impl RecordingController {
 
                             // If we switch modes while already recording, update UI immediately.
                             if matches!(current_state, State::RecHold | State::RecToggle) {
-                                let ctx = tokio::task::spawn_blocking(capture_frontmost_app_only)
-                                    .await
-                                    .unwrap_or_default();
+                                let prior_frontmost_app =
+                                    self.pre_overlay_frontmost_app.read().await.clone();
+                                let ctx = tokio::task::spawn_blocking(move || {
+                                    capture_frontmost_app_only_with_prior_frontmost(
+                                        prior_frontmost_app,
+                                    )
+                                })
+                                .await
+                                .unwrap_or_default();
                                 *self.assistive_context.write().await = Some(ctx);
                                 crate::ui::voice_chat::set_voice_chat_target_app(
                                     self.assistive_context
@@ -1766,9 +1782,15 @@ impl RecordingController {
 
                             // If we switch modes while already recording, update UI immediately.
                             if matches!(current_state, State::RecHold | State::RecToggle) {
-                                let ctx = tokio::task::spawn_blocking(capture_assistive_context)
-                                    .await
-                                    .unwrap_or_default();
+                                let prior_frontmost_app =
+                                    self.pre_overlay_frontmost_app.read().await.clone();
+                                let ctx = tokio::task::spawn_blocking(move || {
+                                    capture_assistive_context_with_prior_frontmost(
+                                        prior_frontmost_app,
+                                    )
+                                })
+                                .await
+                                .unwrap_or_default();
                                 *self.assistive_context.write().await = Some(ctx);
                                 crate::ui::voice_chat::set_voice_chat_target_app(
                                     self.assistive_context
@@ -2374,6 +2396,12 @@ impl RecordingController {
         self.cancel_pending_hold_start().await;
         let task_generation = self.hold_start_generation.load(Ordering::SeqCst);
 
+        let pre_overlay_frontmost_app = tokio::task::spawn_blocking(capture_frontmost_app_only)
+            .await
+            .ok()
+            .and_then(|ctx| ctx.frontmost_app);
+        *self.pre_overlay_frontmost_app.write().await = pre_overlay_frontmost_app;
+
         // Reset VAD flag for new session
         self.vad_triggered.store(false, Ordering::SeqCst);
 
@@ -2383,6 +2411,7 @@ impl RecordingController {
         let delay = Duration::from_millis(delay_ms);
         let vad_flag = Arc::clone(&self.vad_triggered);
         let assistive_context = Arc::clone(&self.assistive_context);
+        let pre_overlay_frontmost_app = Arc::clone(&self.pre_overlay_frontmost_app);
         let event_broadcast = self.event_broadcast.clone();
         let serial_lock = Arc::clone(&self.serial_lock);
         let hold_start_generation = Arc::clone(&self.hold_start_generation);
@@ -2580,16 +2609,18 @@ impl RecordingController {
             if is_assistive {
                 opened_overlay_for_transcription.store(false, Ordering::SeqCst);
                 // Capture context BEFORE showing any overlay (overlays can steal focus).
+                let prior_frontmost_app = pre_overlay_frontmost_app.read().await.clone();
                 let ctx = match hold_mode {
-                    HoldMode::Selection => tokio::task::spawn_blocking(capture_assistive_context)
-                        .await
-                        .unwrap_or_default(),
-                    HoldMode::Chat => tokio::task::spawn_blocking(capture_frontmost_app_only)
-                        .await
-                        .unwrap_or_default(),
-                    HoldMode::Raw => tokio::task::spawn_blocking(capture_frontmost_app_only)
-                        .await
-                        .unwrap_or_default(),
+                    HoldMode::Selection => tokio::task::spawn_blocking(move || {
+                        capture_assistive_context_with_prior_frontmost(prior_frontmost_app)
+                    })
+                    .await
+                    .unwrap_or_default(),
+                    HoldMode::Chat | HoldMode::Raw => tokio::task::spawn_blocking(move || {
+                        capture_frontmost_app_only_with_prior_frontmost(prior_frontmost_app)
+                    })
+                    .await
+                    .unwrap_or_default(),
                 };
                 *assistive_context.write().await = Some(ctx);
                 crate::ui::voice_chat::set_voice_chat_target_app(
@@ -4329,6 +4360,7 @@ impl RecordingController {
         *self.force_ai_mode.write().await = false;
         *self.session_id.write().await = None;
         *self.assistive_context.write().await = None;
+        *self.pre_overlay_frontmost_app.write().await = None;
 
         // Hide UI indicators
         hide_hold_badge();
