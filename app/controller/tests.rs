@@ -71,6 +71,14 @@ fn test_assistive_hold_delay_floor_preserves_higher_configured_delay() {
     assert_eq!(effective_hold_start_delay_ms(800, true), 800);
 }
 
+#[test]
+fn test_toggle_stop_watchdog_allows_default_ai_attempt_budget() {
+    assert!(
+        toggle_stop_adjudicate_timeout() >= Duration::from_secs(90),
+        "toggle stop watchdog must not fire before the default AI attempt/inter-chunk budget"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn test_hold_down_schedules_delayed_start() {

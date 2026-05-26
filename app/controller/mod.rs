@@ -96,6 +96,13 @@ fn effective_hold_start_delay_ms(configured_ms: u64, assistive: bool) -> u64 {
     }
 }
 
+const TOGGLE_STOP_ADJUDICATE_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[cfg(test)]
+fn toggle_stop_adjudicate_timeout() -> Duration {
+    TOGGLE_STOP_ADJUDICATE_TIMEOUT
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ActionQualityProbe {
     raw_chars: usize,
@@ -3077,7 +3084,7 @@ impl RecordingController {
         // on Metal device, RwLock contention, recorder.stop blocked on cpal callback —
         // force recovery to Idle so subsequent toggle presses register, badge clears,
         // and tray reflects truth instead of showing Idle while recording is hung.
-        const STOP_TIMEOUT: Duration = Duration::from_secs(45);
+        const STOP_TIMEOUT: Duration = TOGGLE_STOP_ADJUDICATE_TIMEOUT;
         match tokio::time::timeout(STOP_TIMEOUT, self.stop_toggle_and_adjudicate_inner()).await {
             Ok(result) => result,
             Err(_) => {
@@ -3139,6 +3146,7 @@ impl RecordingController {
 
         self.set_state(State::Busy).await;
         show_badge_for_mode(BadgeMode::Processing);
+        crate::ui::overlay::enter_processing_mode();
 
         let result = {
             let phase1 = std::time::Instant::now();

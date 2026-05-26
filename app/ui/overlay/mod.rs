@@ -34,7 +34,7 @@ use crate::ui_helpers::{
     add_subview, animate_fade, button_set_action, button_style, clamp_overlay_position,
     create_button, create_glass_effect_view_with, create_label, create_scrollable_text_view,
     ns_string, set_glass_effect_content_view, set_hidden, set_text, set_text_view_string,
-    set_tooltip, ui_colors, ui_tokens, window_close, window_set_alpha, window_show,
+    set_tooltip, ui_colors, ui_tokens, window_discard, window_set_alpha, window_show,
 };
 use objc::declare::ClassDecl;
 use objc::runtime::Sel;
@@ -250,6 +250,12 @@ static AUTO_HIDE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 static ACTION_HANDLER_INIT: Once = Once::new();
 static mut ACTION_HANDLER_CLASS: *const Class = std::ptr::null();
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AugmentAction {
+    CommitLiveSegment,
+    HandoffDecisionText(String),
+}
+
 fn action_handler_class() -> *const Class {
     ACTION_HANDLER_INIT.call_once(|| unsafe {
         let superclass = Class::get("NSObject").unwrap();
@@ -289,6 +295,18 @@ fn action_text_for_contract(state: &TranscriptionOverlayState) -> String {
     match state.action_contract_mode {
         TranscriptionActionContractMode::Raw => state.raw_text.clone(),
         TranscriptionActionContractMode::AiFormat => state.last_pass_text.clone(),
+    }
+}
+
+fn augment_action_for_state(state: &TranscriptionOverlayState) -> Option<AugmentAction> {
+    let text = action_text_for_contract(state);
+    if text.trim().is_empty() {
+        return None;
+    }
+    if state.decision_mode {
+        Some(AugmentAction::HandoffDecisionText(text))
+    } else {
+        Some(AugmentAction::CommitLiveSegment)
     }
 }
 
@@ -337,11 +355,24 @@ extern "C" fn on_copy_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
 /// recorder buffer and routed through controller for save + LLM handoff
 /// (off-main-thread to avoid AppKit deadlock).
 extern "C" fn on_augment_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
-    let text = current_segment_text();
-    if text.is_empty() {
+    let action = {
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        augment_action_for_state(&state)
+    };
+    let Some(action) = action else {
         return;
+    };
+
+    match action {
+        AugmentAction::CommitLiveSegment => {
+            crate::controller::request_segment_commit_and_augment();
+        }
+        AugmentAction::HandoffDecisionText(text) => {
+            crate::ui::voice_chat::show_voice_chat_overlay();
+            crate::ui::voice_chat::show_agent_tab();
+            crate::ui::voice_chat::handoff_transcript_to_chat(&text);
+        }
     }
-    crate::controller::request_segment_commit_and_augment();
     hide_transcription_overlay();
 }
 
@@ -1066,6 +1097,7 @@ fn show_transcription_overlay_impl() {
         let _: () = msg_send![window, setLevel: NS_FLOATING_WINDOW_LEVEL];
         let _: () = msg_send![window, setMovableByWindowBackground: true];
         let _: () = msg_send![window, setHasShadow: true];
+        let _: () = msg_send![window, setReleasedWhenClosed: false];
 
         // Join all spaces (follow focus)
         // Make sure the overlay shows up even when the user is in a fullscreen Space.
@@ -1324,7 +1356,7 @@ fn show_transcription_overlay_impl() {
         if state.window.is_some() {
             drop(state);
             warn!("Overlay window created concurrently; discarding duplicate");
-            window_close(window);
+            window_discard(window);
             return;
         }
         state.window = Some(window as usize);
@@ -1628,6 +1660,26 @@ pub fn enter_recording_mode() {
     });
 }
 
+/// Enter processing mode: recording has stopped, but final transcription /
+/// formatting work is still running.
+pub fn enter_processing_mode() {
+    Queue::main().exec_async(|| {
+        let (snap, mode) = {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.decision_mode = false;
+            state.hover_active = false;
+            (
+                OverlaySnapshot::from_state(&state),
+                state.action_contract_mode,
+            )
+        }; // Lock dropped before AppKit calls.
+        set_action_buttons_visible_unlocked(&snap, false);
+        set_auto_hide_hint_visible_unlocked(&snap, mode, false);
+        set_recording_button_visible_unlocked(&snap, false);
+        set_status_message_unlocked(&snap, "Thinking", true);
+    });
+}
+
 /// Hide the transcription overlay window (with fade-out animation)
 pub fn hide_transcription_overlay() {
     // Cancel any pending auto-hide
@@ -1665,21 +1717,29 @@ fn close_window_by_ptr(window_ptr: usize) {
 fn hide_transcription_overlay_impl() {
     // DEADLOCK PREVENTION: extract handles and clear state under lock,
     // then drop lock before the animate_fade AppKit call.
-    let (window_ptr, tracking_area_ptr, action_handler_ptr) = {
+    let (
+        window_ptr,
+        tracking_area_ptr,
+        action_handler_ptr,
+        copy_button_ptr,
+        augment_button_ptr,
+        save_button_ptr,
+        commit_button_ptr,
+    ) = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let wp = state.window.take();
         let tap = state.tracking_area.take();
         let ahp = state.action_handler.take();
+        let cbp = state.copy_button.take();
+        let abp = state.augment_button.take();
+        let sbp = state.save_button.take();
+        let cmp = state.commit_button.take();
         state.header_label = None;
         state.text_scroll_view = None;
         state.text_view = None;
         state.status_field = None;
         state.auto_hide_label = None;
         state.blur_view = None;
-        state.copy_button = None;
-        state.augment_button = None;
-        state.save_button = None;
-        state.commit_button = None;
         state.progress_indicator = None;
         state.decision_mode = false;
         state.hover_active = false;
@@ -1688,7 +1748,7 @@ fn hide_transcription_overlay_impl() {
         state.last_layout_resize_at = Instant::now();
         state.pending_layout_resize = false;
         // Note: accumulated_text is NOT cleared here - it's needed for clipboard copy
-        (wp, tap, ahp)
+        (wp, tap, ahp, cbp, abp, sbp, cmp)
     }; // Lock dropped.
 
     if let Some(window_ptr) = window_ptr {
@@ -1700,11 +1760,22 @@ fn hide_transcription_overlay_impl() {
         }
 
         // Release the tracking area and the action target before the window
-        // tears down. Detach the tracking area from the content view first so
-        // no further mouse events can fire on a freed pointer. The content
-        // view itself is owned by the window and will be released when the
-        // delayed close runs.
+        // tears down. Detach every unretained target first so no queued AppKit
+        // control/tracking callback can fire on a freed pointer during fade-out.
         unsafe {
+            let nil_target: Id = std::ptr::null_mut();
+            for button_ptr in [
+                copy_button_ptr,
+                augment_button_ptr,
+                save_button_ptr,
+                commit_button_ptr,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let button = button_ptr as Id;
+                let _: () = msg_send![button, setTarget: nil_target];
+            }
             if let Some(ta_ptr) = tracking_area_ptr {
                 let ta = ta_ptr as Id;
                 let content_view: Id = msg_send![window, contentView];
@@ -2045,6 +2116,38 @@ mod tests {
 
         let text = action_text_for_contract(&state);
         assert_eq!(text, "raw transcript");
+    }
+
+    #[test]
+    #[serial]
+    fn test_augment_decision_mode_hands_off_existing_transcript() {
+        reset_overlay_state_for_test();
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.decision_mode = true;
+        state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.raw_text = "saved decision transcript".to_string();
+
+        assert_eq!(
+            augment_action_for_state(&state),
+            Some(AugmentAction::HandoffDecisionText(
+                "saved decision transcript".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_augment_live_recording_commits_current_segment() {
+        reset_overlay_state_for_test();
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.decision_mode = false;
+        state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.raw_text = "live segment transcript".to_string();
+
+        assert_eq!(
+            augment_action_for_state(&state),
+            Some(AugmentAction::CommitLiveSegment)
+        );
     }
 
     #[test]
