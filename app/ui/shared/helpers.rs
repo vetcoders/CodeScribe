@@ -1725,23 +1725,16 @@ pub fn main_screen_visible_frame() -> Option<CGRect> {
 
 /// Shared policy for the Agent chat shell.
 ///
-/// **Multi-Space visibility, NORMAL window level.** Operator's directive
+/// **Multi-Space visibility, FLOATING window level.** Operator's directive
 /// 2026-05-13: chat overlay must be reachable from any Space and not pin
 /// itself to the Space where it was last shown. Prior `FullScreenNone`
 /// caused that pinning bug.
 ///
-/// IMPORTANT — level is kept at `NS_NORMAL_WINDOW_LEVEL`. The first attempt
-/// (commit `dc0f9ee`) used `NS_FLOATING_WINDOW_LEVEL` to put the chat above
-/// editor windows, but at that level + `FullScreenAuxiliary` collection
-/// behavior, macOS treats the window as a palette/inspector and refuses to
-/// give it `canBecomeKeyWindow: true` — chat showed on top but input field
-/// silently dropped every keystroke (operator observed 2026-05-13 19:11
-/// "w tej chwili czat nie przyjmuje inputu" with screenshot proof).
-///
-/// Real always-on-top with working input requires overriding
-/// `canBecomeKeyWindow` on an NSWindow subclass via ClassDecl, which is a
-/// separate cut. For now: multi-Space ✓, above-editor ✗ — we trade level
-/// for input.
+/// The earlier floating attempt (commit `dc0f9ee`) regressed text input because
+/// AppKit would not make the floating overlay keyable. The voice chat window is
+/// now allocated through `VoiceChatOverlayWindow`, an `NSWindow` subclass that
+/// overrides `canBecomeKeyWindow` and `canBecomeMainWindow`, so the overlay can
+/// stay truly always-on-top without dropping Agent input keystrokes.
 ///
 /// `CanJoinAllSpaces` — window follows Space switches.
 /// `FullScreenAuxiliary` — window draws over fullscreen apps instead of
@@ -1756,7 +1749,7 @@ pub fn agent_chat_shell_panel_policy(visible_frame: CGRect) -> SharedShellPanelP
         backing_store: NSBackingStoreType::Buffered,
         collection_behavior: NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
-        level: NS_NORMAL_WINDOW_LEVEL,
+        level: NS_FLOATING_WINDOW_LEVEL,
         min_content_size: Some(CGSize::new(380.0, 360.0)),
         max_content_size: Some(CGSize::new(
             visible_frame.size.width.min(1000.0),
@@ -1911,7 +1904,17 @@ mod tests {
         let max_size = policy.max_content_size.expect("max size");
         assert_eq!(max_size.width, 1000.0);
         assert_eq!(max_size.height, 700.0);
-        assert_eq!(policy.level, NS_NORMAL_WINDOW_LEVEL);
+        assert_eq!(policy.level, NS_FLOATING_WINDOW_LEVEL);
+        assert!(
+            policy
+                .collection_behavior
+                .contains(NSWindowCollectionBehavior::CanJoinAllSpaces)
+        );
+        assert!(
+            policy
+                .collection_behavior
+                .contains(NSWindowCollectionBehavior::FullScreenAuxiliary)
+        );
         assert!(policy.hides_title);
         assert!(!policy.opaque);
         assert!(policy.style_mask.contains(NSWindowStyleMask::Titled));
