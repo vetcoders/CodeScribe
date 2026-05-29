@@ -71,6 +71,7 @@ fn draw_status_glyph(rgba: &mut [u8], width: u32, height: u32, status: TrayStatu
         TrayStatus::Thinking => (255, 165, 0),  // Orange - processing
         TrayStatus::Success => (80, 220, 100),  // Bright green - done
         TrayStatus::Error => (255, 50, 50),     // Bright red - error
+        TrayStatus::Thermal => (255, 210, 40),  // Yellow - thermal pressure
     };
 
     let params = GlyphParams {
@@ -157,6 +158,7 @@ pub fn create_fallback_icon(status: TrayStatus) -> Result<Icon> {
         TrayStatus::Thinking => (60, 130, 220), // Blue
         TrayStatus::Success => (60, 200, 100),  // Green
         TrayStatus::Error => (255, 50, 50),     // Bright red
+        TrayStatus::Thermal => (255, 210, 40),  // Yellow
     };
 
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];

@@ -960,6 +960,7 @@ pub(crate) async fn transcription_session(
     let mut pipeline = TranscriptionPipeline::new(language);
     let mut preview_rev: u64 = 0;
     let mut utterance_id: u64 = 0;
+    let mut scheduler_utterance_id: u64 = 1;
     let mut total_utterances: u64 = 0;
     let semantic_gate_drops: u64 = 0;
     let mut filtered_empty_drops: u64 = 0;
@@ -1052,6 +1053,7 @@ pub(crate) async fn transcription_session(
                 audio,
                 inference_audio,
                 is_final,
+                scheduler_utterance_id: work_utterance_id,
                 max_speech_prob,
                 speech_vad_samples,
             } = item;
@@ -1120,7 +1122,13 @@ pub(crate) async fn transcription_session(
                 speech_vad_samples,
             };
 
-            match stt_scheduler.submit(lane, inference_audio, output_sample_rate, lang) {
+            match stt_scheduler.submit_for_utterance(
+                lane,
+                inference_audio,
+                output_sample_rate,
+                lang,
+                work_utterance_id,
+            ) {
                 Ok(mut handle) => {
                     // Wrap the handle and item into a future for FuturesOrdered.
                     // This preserves the item context (is_final, audio len) for the result.
@@ -1238,6 +1246,7 @@ pub(crate) async fn transcription_session(
                                                 audio: buf,
                                                 inference_audio: speech,
                                                 is_final: false,
+                                                scheduler_utterance_id,
                                                 max_speech_prob,
                                                 speech_vad_samples: buf_vad,
                                             },
@@ -1277,11 +1286,14 @@ pub(crate) async fn transcription_session(
                                             audio: u,
                                             inference_audio: full,
                                             is_final: true,
+                                            scheduler_utterance_id,
                                             max_speech_prob,
                                             speech_vad_samples,
                                         },
                                         MAX_PENDING_UTTERANCES,
                                     );
+                                    scheduler_utterance_id =
+                                        scheduler_utterance_id.saturating_add(1);
                                     if outcome.dropped > 0 {
                                         dropped_utterances = dropped_utterances.saturating_add(outcome.dropped);
                                         let message = if outcome.enqueued {
@@ -1356,11 +1368,14 @@ pub(crate) async fn transcription_session(
                                         audio: utterance,
                                         inference_audio,
                                         is_final: true,
+                                        scheduler_utterance_id,
                                         max_speech_prob,
                                         speech_vad_samples,
                                     },
                                     MAX_PENDING_UTTERANCES,
                                 );
+                                scheduler_utterance_id =
+                                    scheduler_utterance_id.saturating_add(1);
                                 if outcome.dropped > 0 {
                                     dropped_utterances = dropped_utterances.saturating_add(outcome.dropped);
                                     let message = if outcome.enqueued {
@@ -1914,6 +1929,7 @@ struct PendingUtteranceWorkItem {
     audio: Vec<f32>,
     inference_audio: Vec<f32>,
     is_final: bool,
+    scheduler_utterance_id: u64,
     max_speech_prob: f32,
     speech_vad_samples: u64,
 }
@@ -2323,6 +2339,7 @@ mod tests {
             audio: vec![marker; 32],
             inference_audio: vec![marker; 32],
             is_final,
+            scheduler_utterance_id: if is_final { 1 } else { 0 },
             max_speech_prob: 0.9,
             speech_vad_samples: 512,
         }

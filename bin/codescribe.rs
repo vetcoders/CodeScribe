@@ -542,6 +542,7 @@ async fn run_daemon() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
+        codescribe::os::thermal::install_thermal_probe();
         codescribe::set_dock_icon();
         codescribe::apply_dock_icon_visibility(config.show_dock_icon);
         codescribe::install_basic_edit_menu();

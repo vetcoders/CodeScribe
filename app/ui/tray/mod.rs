@@ -259,6 +259,10 @@ mod tests {
         assert_eq!(TrayStatus::Listening.tooltip(), "CodeScribe - Recording...");
         assert_eq!(TrayStatus::Thinking.tooltip(), "CodeScribe - Processing...");
         assert_eq!(TrayStatus::Success.tooltip(), "CodeScribe - Done!");
+        assert_eq!(
+            TrayStatus::Thermal.tooltip(),
+            "CodeScribe - Thermal throttling"
+        );
     }
 
     #[test]
@@ -267,5 +271,9 @@ mod tests {
         assert_eq!(TrayStatus::Listening.menu_label(), "Status: Recording...");
         assert_eq!(TrayStatus::Thinking.menu_label(), "Status: Processing...");
         assert_eq!(TrayStatus::Success.menu_label(), "Status: Done!");
+        assert_eq!(
+            TrayStatus::Thermal.menu_label(),
+            "Status: Thermal throttling"
+        );
     }
 }

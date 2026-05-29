@@ -22,6 +22,8 @@ pub enum TrayStatus {
     Success,
     /// Error state - backend not available
     Error,
+    /// System thermal pressure is high enough to throttle STT.
+    Thermal,
 }
 
 impl TrayStatus {
@@ -33,6 +35,7 @@ impl TrayStatus {
             TrayStatus::Thinking => "CodeScribe - Processing...".to_string(),
             TrayStatus::Success => "CodeScribe - Done!".to_string(),
             TrayStatus::Error => "CodeScribe - Backend unavailable!".to_string(),
+            TrayStatus::Thermal => "CodeScribe - Thermal throttling".to_string(),
         }
     }
 
@@ -44,6 +47,7 @@ impl TrayStatus {
             TrayStatus::Thinking => "Status: Processing...",
             TrayStatus::Success => "Status: Done!",
             TrayStatus::Error => "Status: Error",
+            TrayStatus::Thermal => "Status: Thermal throttling",
         }
     }
 
