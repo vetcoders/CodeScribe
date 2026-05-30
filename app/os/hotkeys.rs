@@ -101,7 +101,10 @@ pub fn get_mode_hotkey_bindings() -> ModeHotkeyBindings {
 // When enabled, we ignore Shift/Cmd and keep hold mode as RAW.
 
 /// Atomic storage for exclusive mode (Shift/Cmd mode modifiers disabled)
-static EXCLUSIVE_MODE: AtomicBool = AtomicBool::new(true);
+// Default FALSE so the documented Fn+Shift→Chat / Fn+Cmd→Selection modifiers work
+// out of the box (HOTKEYS_CONTRACT.md §"Mode modifiers"). Matches Config::default's
+// `hold_exclusive: false`. Exclusive (Fn-hold is raw-only) is opt-in via HOLD_EXCLUSIVE=1.
+static EXCLUSIVE_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Set exclusive mode (thread-safe)
 /// When true, Shift/Cmd modifiers are ignored for hold mode

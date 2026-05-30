@@ -489,7 +489,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::ShortcutBinding;
+    use super::{Config, ShortcutBinding};
 
     #[test]
     fn shortcut_binding_parser_rejects_legacy_aliases() {
@@ -497,5 +497,18 @@ mod tests {
         assert!("fn".parse::<ShortcutBinding>().is_err());
         assert!("double_lalt".parse::<ShortcutBinding>().is_err());
         assert!("double_ralt".parse::<ShortcutBinding>().is_err());
+    }
+
+    #[test]
+    fn default_config_keeps_hold_modifiers_enabled() {
+        // hold_exclusive=true makes Fn-hold RAW-only and disables the documented
+        // Fn+Shift→Chat / Fn+Cmd→Selection modifiers (HOTKEYS_CONTRACT.md). The
+        // canonical default MUST stay false so those combos work out of the box;
+        // exclusive is opt-in (HOLD_EXCLUSIVE=1). Guards the 2026-05-30 regression
+        // where the runtime default / .env.example shipped exclusive ON.
+        assert!(
+            !Config::default().hold_exclusive,
+            "Config default must keep hold modifiers enabled (hold_exclusive=false)"
+        );
     }
 }

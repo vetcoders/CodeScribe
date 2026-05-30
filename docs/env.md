@@ -30,7 +30,7 @@ Poniższe działają „same z siebie” — jeśli ich nie ustawisz, aplikacja 
 **Hotkeys / UI / zachowanie podstawowe**
 
 - mode bindings (`Dictation`, `Formatting`, `Assistive`) – konfigurowane w `settings.json` przez GUI
-- `HOLD_EXCLUSIVE` – domyślnie `1` (RESTART NEEDED)
+- `HOLD_EXCLUSIVE` – domyślnie `0` (RESTART NEEDED) — `1` robi Fn-hold RAW-only i wyłącza modyfikatory Fn+Shift→Chat / Fn+Cmd→Selection
 - `HOLD_START_DELAY_MS` – domyślnie `800` (RESTART NEEDED)
 - `DOUBLE_TAP_INTERVAL_MS` – domyślnie `200` (RESTART NEEDED)
 - `TOGGLE_SILENCE_SEC` – domyślnie `5.0` (RESTART NEEDED)
