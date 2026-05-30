@@ -121,6 +121,13 @@ struct InteractionV2 {
     hold: Option<HoldV2>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mode_bindings: Option<Vec<ModeBinding>>,
+    // De-ghosted (2026-05-30): these user-facing knobs existed in UserSettings + were
+    // promoted, but the V2 schema dropped them on every round-trip — settings.json could
+    // not actually express them. settings.json must support ALL non-secret parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_enter_sends: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -154,6 +161,12 @@ struct SpeechV2 {
     assistive: Option<AssistiveV2>,
     #[serde(skip_serializing_if = "Option::is_none")]
     emission: Option<EmissionV2>,
+    // De-ghosted (2026-05-30): base/default LLM endpoint + model (distinct from the
+    // formatting/assistive overrides). Previously dropped on V2 round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -167,6 +180,9 @@ struct SpeechEngineV2 {
     cloud_transcription_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cloud_max_upload_mb: Option<u64>,
+    // De-ghosted (2026-05-30): Whisper model id (distinct from local_model_id path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    whisper_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -194,8 +210,6 @@ struct AssistiveV2 {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct EmissionV2 {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     buffer_delay_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -244,6 +258,9 @@ struct FeaturesV2 {
     history_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quick_notes_enabled: Option<bool>,
+    // De-ghosted (2026-05-30): previously dropped on V2 round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quick_notes_save_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -327,6 +344,8 @@ impl UserSettings {
                     start_delay_ms: self.hold_start_delay_ms,
                 }),
                 mode_bindings: Some(normalized_mode_bindings),
+                send_mode: self.transcript_send_mode.clone(),
+                agent_enter_sends: self.agent_enter_sends,
             }),
             speech: Some(SpeechV2 {
                 language: self.whisper_language.clone(),
@@ -337,6 +356,7 @@ impl UserSettings {
                     local_model_id: self.local_model.clone(),
                     cloud_transcription_endpoint: self.stt_endpoint.clone(),
                     cloud_max_upload_mb: self.backend_max_upload_mb,
+                    whisper_model: self.whisper_model.clone(),
                 }),
                 formatting: Some(FormattingV2 {
                     enabled: self.ai_formatting_enabled,
@@ -349,12 +369,13 @@ impl UserSettings {
                     llm_model: self.llm_assistive_model.clone(),
                 }),
                 emission: Some(EmissionV2 {
-                    mode: None,
                     buffer_delay_ms: self.buffer_delay_ms,
                     typing_cps: self.typing_cps,
                     emit_words_max: self.emit_words_max,
                     interim_cadence_sec: self.buffered_interim_sec,
                 }),
+                llm_endpoint: self.llm_endpoint.clone(),
+                llm_model: self.llm_model.clone(),
             }),
             audio: Some(AudioV2 {
                 input_device_id: self.audio_input_device.clone(),
@@ -372,6 +393,7 @@ impl UserSettings {
             features: Some(FeaturesV2 {
                 history_enabled: self.history_enabled,
                 quick_notes_enabled: self.quick_notes_enabled,
+                quick_notes_save_only: self.quick_notes_save_only,
             }),
             system: Some(SystemV2 {
                 start_at_login: self.start_at_login,
@@ -427,8 +449,8 @@ impl UserSettings {
                 .as_ref()
                 .and_then(|s| s.formatting.as_ref())
                 .and_then(|f| f.level.clone()),
-            llm_endpoint: None,
-            llm_model: None,
+            llm_endpoint: v2.speech.as_ref().and_then(|s| s.llm_endpoint.clone()),
+            llm_model: v2.speech.as_ref().and_then(|s| s.llm_model.clone()),
             llm_assistive_endpoint: v2
                 .speech
                 .as_ref()
@@ -471,7 +493,7 @@ impl UserSettings {
                 .as_ref()
                 .and_then(|s| s.engine.as_ref())
                 .and_then(|e| e.cloud_transcription_endpoint.clone()),
-            transcript_send_mode: None,
+            transcript_send_mode: v2.interaction.as_ref().and_then(|i| i.send_mode.clone()),
             audio_input_device: v2.audio.as_ref().and_then(|a| a.input_device_id.clone()),
             sound_name: v2
                 .audio
@@ -480,10 +502,10 @@ impl UserSettings {
                 .and_then(|f| f.sound_name.clone()),
             history_enabled: v2.features.as_ref().and_then(|f| f.history_enabled),
             quick_notes_enabled: v2.features.as_ref().and_then(|f| f.quick_notes_enabled),
-            quick_notes_save_only: None,
+            quick_notes_save_only: v2.features.as_ref().and_then(|f| f.quick_notes_save_only),
             start_at_login: v2.system.as_ref().and_then(|s| s.start_at_login),
             qube_daemon_autostart: v2.system.as_ref().and_then(|s| s.qube_daemon_autostart),
-            agent_enter_sends: None,
+            agent_enter_sends: v2.interaction.as_ref().and_then(|i| i.agent_enter_sends),
             buffer_delay_ms: v2
                 .speech
                 .as_ref()
@@ -504,7 +526,11 @@ impl UserSettings {
                 .as_ref()
                 .and_then(|s| s.emission.as_ref())
                 .and_then(|e| e.interim_cadence_sec),
-            whisper_model: None,
+            whisper_model: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.engine.as_ref())
+                .and_then(|e| e.whisper_model.clone()),
             backend_max_upload_mb: v2
                 .speech
                 .as_ref()
@@ -911,6 +937,38 @@ mod tests {
 
         let loaded = UserSettings::load();
         assert_eq!(loaded.show_dock_icon, Some(false));
+    }
+
+    #[test]
+    #[serial]
+    fn test_deghosted_keys_survive_settings_json_roundtrip() {
+        // Regression guard (2026-05-30): these keys existed in UserSettings and were
+        // promoted, but to_v2/from_v2 dropped them — save→load silently reverted them to
+        // default. settings.json must support ALL non-secret parameters (operator's
+        // "settings musi obsługiwać wszystkie parametry"). Exercises the real on-disk path.
+        let _tmp = setup_isolated_data_dir();
+        let mut settings = UserSettings::default();
+        settings.transcript_send_mode = Some("paste".to_string());
+        settings.quick_notes_save_only = Some(true);
+        settings.agent_enter_sends = Some(false);
+        settings.whisper_model = Some("whisper-large-v3-turbo".to_string());
+        settings.llm_endpoint = Some("https://api.example/v1/responses".to_string());
+        settings.llm_model = Some("programmer".to_string());
+        settings.save().expect("save settings");
+
+        let loaded = UserSettings::load();
+        assert_eq!(loaded.transcript_send_mode.as_deref(), Some("paste"));
+        assert_eq!(loaded.quick_notes_save_only, Some(true));
+        assert_eq!(loaded.agent_enter_sends, Some(false));
+        assert_eq!(
+            loaded.whisper_model.as_deref(),
+            Some("whisper-large-v3-turbo")
+        );
+        assert_eq!(
+            loaded.llm_endpoint.as_deref(),
+            Some("https://api.example/v1/responses")
+        );
+        assert_eq!(loaded.llm_model.as_deref(), Some("programmer"));
     }
 
     #[test]

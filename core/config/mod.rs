@@ -45,6 +45,7 @@ pub use prompts::{
 mod tests {
     use super::models;
     use super::*;
+    use serial_test::serial;
     #[test]
     fn test_default_config() {
         let config = Config::default();
@@ -108,7 +109,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_dir() {
+        // #[serial]: reads the global CODESCRIBE_DATA_DIR env var, which the
+        // setup_isolated_data_dir() tests mutate — without serialization this races
+        // and flakes (config_dir() vs env::var() observing different values).
         let dir = Config::config_dir();
         if let Ok(custom) = std::env::var("CODESCRIBE_DATA_DIR") {
             assert_eq!(dir, std::path::PathBuf::from(custom));
