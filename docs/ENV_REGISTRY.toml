@@ -254,6 +254,48 @@ reload = "restart"
 category = "stt"
 description = "STT engine: candle (default), onnx, or apple (SpeechAnalyzer on macOS 26+)"
 
+[vars.CODESCRIBE_STT_THERMAL_GOVERNOR_ENABLED]
+default = "1"
+type = "bool"
+reload = "restart"
+category = "stt"
+description = "Enable thermal-aware STT scheduling backoff"
+
+[vars.CODESCRIBE_STT_MIN_INFER_INTERVAL_MS]
+default = "180"
+type = "int"
+reload = "restart"
+category = "stt"
+description = "Minimum interval between live STT inference jobs in milliseconds"
+
+[vars.CODESCRIBE_STT_COMMIT_MIN_INTERVAL_MS]
+default = "350"
+type = "int"
+reload = "restart"
+category = "stt"
+description = "Minimum interval between committed STT inference jobs in milliseconds"
+
+[vars.CODESCRIBE_STT_THERMAL_FAIR_MULT]
+default = "1.0"
+type = "float"
+reload = "restart"
+category = "stt"
+description = "Thermal multiplier for fair system thermal pressure"
+
+[vars.CODESCRIBE_STT_THERMAL_SERIOUS_MULT]
+default = "2.0"
+type = "float"
+reload = "restart"
+category = "stt"
+description = "Thermal multiplier for serious system thermal pressure"
+
+[vars.CODESCRIBE_STT_THERMAL_CRITICAL_MULT]
+default = "4.0"
+type = "float"
+reload = "restart"
+category = "stt"
+description = "Thermal multiplier for critical system thermal pressure"
+
 [vars.CODESCRIBE_APPLE_STT_BRIDGE]
 default = "codescribe-stt-bridge"
 type = "string"

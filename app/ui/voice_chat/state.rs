@@ -169,6 +169,9 @@ pub struct VoiceChatOverlayState {
     pub active_assistant_stream_index: Option<usize>,
     pub manual_draft: String,
     pub is_sending: bool,
+    /// True while the agent is reasoning after a voice transcript was handed off / sent.
+    /// Used to show "Thinking..." / reasoning indicator in the Agent tab.
+    pub is_agent_thinking: bool,
     pub auto_send_enabled: bool,
     /// Last status text provided by caller before runtime-health decoration is applied.
     pub status_base_text: String,
@@ -248,6 +251,7 @@ impl Default for VoiceChatOverlayState {
             active_assistant_stream_index: None,
             manual_draft: String::new(),
             is_sending: false,
+            is_agent_thinking: false,
             auto_send_enabled: true,
             status_base_text: "Ready".to_string(),
             status_text: "Ready".to_string(),

@@ -121,6 +121,7 @@ pub fn add_voice_chat_error_message(text: &str) {
     Queue::main().exec_async(move || {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.active_assistant_stream_index = None;
+        clear_agent_thinking_state(&mut state);
         let mode = message_mode_label(&state);
         state.messages.push(ChatMessage {
             role: ChatRole::System,
@@ -232,6 +233,22 @@ pub fn set_voice_chat_sending(is_sending: bool) {
     Queue::main().exec_async(move || {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.is_sending = is_sending;
+        update_send_button_with_state(&mut state);
+    });
+}
+
+/// Mark that the agent is currently thinking/reasoning after a voice transcript was sent.
+/// Used to drive "Thinking..." UI in the Agent tab of the voice chat overlay.
+pub fn set_voice_chat_agent_thinking(thinking: bool) {
+    Queue::main().exec_async(move || {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if thinking {
+            state.is_agent_thinking = true;
+            state.status_base_text = "Thinking…".to_string();
+        } else {
+            clear_agent_thinking_state(&mut state);
+        }
+        update_voice_chat_status_impl(&state.status_base_text);
         update_send_button_with_state(&mut state);
     });
 }
@@ -1091,6 +1108,10 @@ fn append_voice_chat_user_delta_impl(delta: &str) {
 fn append_voice_chat_assistant_delta_impl(delta: &str) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     ensure_agent_tab_visible(&mut state);
+
+    // First assistant token → stop the "Thinking" indicator.
+    clear_agent_thinking_state(&mut state);
+
     let idx = get_or_create_streaming_message_index(&mut state, ChatRole::Assistant);
     if let Some(msg) = state.messages.get_mut(idx) {
         codescribe_core::pipeline::contracts::TranscriptDelta::from_raw(delta).apply(&mut msg.text);
@@ -1392,6 +1413,7 @@ fn finalize_assistant_message_impl(text: &str, is_error: bool) {
         msg.is_streaming = false;
         msg.is_error = is_error;
     }
+    clear_agent_thinking_state(&mut state);
     state.is_sending = false;
     update_chat_view_with_state(&mut state, true);
     update_send_button_with_state(&mut state);
@@ -1410,9 +1432,28 @@ fn finalize_assistant_message_state_only_impl(is_error: bool) {
         last.is_streaming = false;
         last.is_error = is_error;
     }
+    clear_agent_thinking_state(&mut state);
     state.is_sending = false;
     update_chat_view_with_state(&mut state, true);
     update_send_button_with_state(&mut state);
+}
+
+fn clear_agent_thinking_state(state: &mut VoiceChatOverlayState) {
+    if state.is_agent_thinking {
+        state.is_agent_thinking = false;
+        if state.status_base_text == "Thinking…" {
+            state.status_base_text = "Ready".to_string();
+        }
+        state.status_text = compose_runtime_status_text(
+            &state.status_base_text,
+            state.is_agent_degraded,
+            state.runtime_degraded_reason.as_deref(),
+        );
+        state.status_kind =
+            status_kind_for_runtime(&state.status_base_text, state.is_agent_degraded);
+        apply_status_pill(state);
+        let _ = crate::tray::update_tray_status(state.status_kind.to_tray());
+    }
 }
 
 fn ensure_agent_tab_visible(state: &mut VoiceChatOverlayState) {
@@ -3591,6 +3632,25 @@ mod tests {
         let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(state.status_base_text, "AI Response:");
         assert_eq!(state.status_text, "AI Response:");
+        assert_eq!(state.status_kind, UiStatus::Idle);
+    }
+
+    #[test]
+    #[serial]
+    fn clear_agent_thinking_state_restores_ready_status() {
+        let mut state = VoiceChatOverlayState {
+            is_agent_thinking: true,
+            status_base_text: "Thinking…".to_string(),
+            status_text: "Thinking…".to_string(),
+            status_kind: UiStatus::Processing,
+            ..VoiceChatOverlayState::default()
+        };
+
+        clear_agent_thinking_state(&mut state);
+
+        assert!(!state.is_agent_thinking);
+        assert_eq!(state.status_base_text, "Ready");
+        assert_eq!(state.status_text, "Ready");
         assert_eq!(state.status_kind, UiStatus::Idle);
     }
 

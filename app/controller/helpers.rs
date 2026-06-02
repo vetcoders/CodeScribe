@@ -763,7 +763,8 @@ pub fn setup_voice_chat_send_callback(config: Arc<RwLock<Config>>) {
         let config = Arc::clone(&callback_config);
         let runtime_state = Arc::clone(&callback_runtime_state);
         tokio::spawn(async move {
-            crate::ui::voice_chat::update_voice_chat_status("Sending...");
+            crate::ui::voice_chat::set_voice_chat_agent_thinking(true);
+            crate::ui::voice_chat::update_voice_chat_status("Thinking…");
             crate::ui::voice_chat::set_voice_chat_sending(true);
 
             let (whisper_language, ai_assistive_max_tokens) = {

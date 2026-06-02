@@ -1,5 +1,6 @@
 pub mod clipboard;
 pub mod filesystem;
+pub mod github;
 pub mod screenshot;
 pub mod selection;
 pub mod typing;
@@ -12,6 +13,7 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     selection::register(registry);
     filesystem::register(registry);
     typing::register(registry);
+    github::register(registry);
 }
 
 #[cfg(test)]
@@ -33,6 +35,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "fetch_github_file".to_string(),
                 "get_frontmost_app".to_string(),
                 "get_selected_text".to_string(),
                 "read_clipboard".to_string(),
