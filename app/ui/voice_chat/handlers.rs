@@ -17,7 +17,8 @@ use codescribe_core::config::UserSettings;
 
 use crate::config::Config;
 use crate::ui_helpers::{
-    clamp_overlay_position, get_text_field_string, ns_string, set_hidden, set_text_field_string,
+    clamp_overlay_position, copy_to_clipboard, get_text_field_string, ns_string, set_hidden,
+    set_text_field_string,
 };
 
 use super::api::{
@@ -2083,27 +2084,6 @@ unsafe fn read_image_from_pasteboard(pasteboard: Id) -> Option<Vec<u8>> {
         return None;
     }
     Some(unsafe { std::slice::from_raw_parts(bytes, length) }.to_vec())
-}
-
-// ═══════════════════════════════════════════════════════════
-// Utilities
-// ═══════════════════════════════════════════════════════════
-
-pub fn copy_to_clipboard(text: &str) {
-    unsafe {
-        let ns_pasteboard = Class::get("NSPasteboard").unwrap();
-        let pasteboard: Id = msg_send![ns_pasteboard, generalPasteboard];
-        let _: () = msg_send![pasteboard, clearContents];
-
-        let ns_array = Class::get("NSArray").unwrap();
-        let ns_string_class = Class::get("NSString").unwrap();
-
-        let text_str = ns_string(text);
-        let array: Id = msg_send![ns_array, arrayWithObject: text_str];
-        let _: () = msg_send![pasteboard, writeObjects: array];
-        let _: Id =
-            msg_send![ns_string_class, stringWithUTF8String: c"NSStringPboardType".as_ptr()];
-    }
 }
 
 pub fn clear_search_field() {

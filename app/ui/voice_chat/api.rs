@@ -21,14 +21,14 @@ use crate::ui::shared::status::{UiStatus, status_from_detail};
 use crate::ui_helpers::{
     BubbleConfig, BubbleRole, LabelConfig, add_subview, apply_tafla_surface, button_set_action,
     button_style, chat_header_layout, color_label, color_rgba, color_secondary_label,
-    create_bubble_view, create_button, create_card_view, create_label, get_text_field_string,
-    get_text_view_string, layout_region_frame_for_view, ns_string, open_file_in_editor,
-    resize_bubble_container_for_text, set_button_symbol, set_text_field_string,
-    set_text_view_string, set_tooltip, stack_view_add, stack_view_clear, ui_colors, ui_tokens,
-    update_bubble_text, window_set_alpha, window_show,
+    copy_to_clipboard, create_bubble_view, create_button, create_card_view, create_label,
+    get_text_field_string, get_text_view_string, layout_region_frame_for_view, ns_string,
+    open_file_in_editor, resize_bubble_container_for_text, set_button_symbol,
+    set_text_field_string, set_text_view_string, set_tooltip, stack_view_add, stack_view_clear,
+    ui_colors, ui_tokens, update_bubble_text, window_set_alpha, window_show,
 };
 
-use super::handlers::{clear_search_field, copy_to_clipboard};
+use super::handlers::clear_search_field;
 use super::state::{
     ChatMessage, ChatRole, ConversationModeState, DrawerEntry, DrawerEntrySource, OVERLAY_STATE,
     SEND_CALLBACK, Tab, TranscriptionMode, VoiceChatOverlayState,
