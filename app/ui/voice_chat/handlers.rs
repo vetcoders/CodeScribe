@@ -22,12 +22,12 @@ use crate::ui_helpers::{
 };
 
 use super::api::{
-    clear_overlay_state, commit_last_user_message_impl, copy_assistant_bubble_from_recognizer,
-    discard_last_message_impl, filter_drawer, handle_card_copy, handle_card_delete,
-    handle_card_edit, handle_card_favorite, handle_card_restore, reflow_agent_after_resize_impl,
-    reflow_overlay_after_resize_impl, render_attachment_chips, send_draft_message_impl,
-    start_new_thread_impl, toggle_drawer_favorites_only_impl, update_active_tab_impl,
-    update_attach_button_ui,
+    clear_overlay_state, commit_last_user_message_impl, discard_last_message_impl, filter_drawer,
+    handle_card_copy, handle_card_delete, handle_card_edit, handle_card_favorite,
+    handle_card_restore, handle_message_bubble_click_from_recognizer,
+    reflow_agent_after_resize_impl, reflow_overlay_after_resize_impl, render_attachment_chips,
+    send_draft_message_impl, start_new_thread_impl, toggle_drawer_favorites_only_impl,
+    update_active_tab_impl, update_attach_button_ui,
 };
 use super::state::{ChatRole, OVERLAY_STATE, Tab, VoiceChatOverlayState};
 
@@ -1159,7 +1159,7 @@ extern "C" fn on_copy_message(_this: &Object, _cmd: Sel, sender: Id) {
 }
 
 extern "C" fn on_assistant_bubble_click(_this: &Object, _cmd: Sel, sender: Id) {
-    copy_assistant_bubble_from_recognizer(sender);
+    handle_message_bubble_click_from_recognizer(sender);
 }
 
 extern "C" fn on_card_copy(_this: &Object, _cmd: Sel, sender: Id) {

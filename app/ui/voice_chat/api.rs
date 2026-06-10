@@ -41,11 +41,41 @@ pub type Id = *mut Object;
 // Public API
 // ═══════════════════════════════════════════════════════════
 
+/// Run `f` on the main queue only when `OVERLAY_STATE` is not already held.
+///
+/// DEADLOCK PREVENTION: AppKit can spin a nested run-loop while an OUTER frame
+/// on this same main thread still holds `OVERLAY_STATE` (see module docs). A
+/// queued block that then calls `.lock()` self-deadlocks the non-reentrant
+/// Mutex — this froze the whole app (sample: main thread 100% in
+/// __psynch_mutexwait inside _dispatch_main_queue_drain). Instead of blocking,
+/// probe with `try_lock`; if busy, requeue after a short delay and let the
+/// holder finish its AppKit call.
+fn run_when_overlay_unlocked<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    match OVERLAY_STATE.try_lock() {
+        Ok(guard) => {
+            drop(guard);
+            f();
+        }
+        Err(std::sync::TryLockError::Poisoned(err)) => {
+            drop(err);
+            f();
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            Queue::main().exec_after(Duration::from_millis(5), move || {
+                run_when_overlay_unlocked(f);
+            });
+        }
+    }
+}
+
 /// Update the status text in the overlay
 pub fn update_voice_chat_status(status: &str) {
     let status_owned = status.to_string();
     Queue::main().exec_async(move || {
-        update_voice_chat_status_impl(&status_owned);
+        run_when_overlay_unlocked(move || update_voice_chat_status_impl(&status_owned));
     });
 }
 
@@ -73,7 +103,7 @@ pub fn update_voice_chat_context_summary(summary: &str) {
 pub fn append_voice_chat_user_delta(delta: &str) {
     let delta_owned = delta.to_string();
     Queue::main().exec_async(move || {
-        append_voice_chat_user_delta_impl(&delta_owned);
+        run_when_overlay_unlocked(move || append_voice_chat_user_delta_impl(&delta_owned));
     });
 }
 
@@ -96,7 +126,7 @@ pub fn finalize_voice_chat_user_message() {
 pub fn append_voice_chat_assistant_delta(delta: &str) {
     let delta_owned = delta.to_string();
     Queue::main().exec_async(move || {
-        append_voice_chat_assistant_delta_impl(&delta_owned);
+        run_when_overlay_unlocked(move || append_voice_chat_assistant_delta_impl(&delta_owned));
     });
 }
 
@@ -109,7 +139,7 @@ pub fn append_voice_chat_assistant_delta(delta: &str) {
 pub fn append_voice_chat_reasoning_delta(delta: &str) {
     let delta_owned = delta.to_string();
     Queue::main().exec_async(move || {
-        append_voice_chat_reasoning_delta_impl(&delta_owned);
+        run_when_overlay_unlocked(move || append_voice_chat_reasoning_delta_impl(&delta_owned));
     });
 }
 
@@ -134,12 +164,14 @@ pub fn add_voice_chat_error_message(text: &str) {
     Queue::main().exec_async(move || {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.active_assistant_stream_index = None;
+        state.active_reasoning_stream_index = None;
         clear_agent_thinking_state(&mut state);
         let mode = message_mode_label(&state);
         state.messages.push(ChatMessage {
             role: ChatRole::System,
             text: text_owned.clone(),
             is_streaming: false,
+            is_collapsed: false,
             is_error: true,
             timestamp: SystemTime::now(),
             mode: Some(mode),
@@ -160,6 +192,7 @@ pub fn add_voice_chat_system_message(text: &str) {
             role: ChatRole::System,
             text: text_owned.clone(),
             is_streaming: false,
+            is_collapsed: false,
             is_error: false,
             timestamp: SystemTime::now(),
             mode: Some(mode),
@@ -179,6 +212,7 @@ pub fn add_voice_chat_user_message(text: &str) {
             role: ChatRole::User,
             text: text_owned,
             is_streaming: false,
+            is_collapsed: false,
             is_error: false,
             timestamp: SystemTime::now(),
             mode: Some(mode),
@@ -367,27 +401,41 @@ pub fn export_chat_markdown(assistant_only: bool) -> String {
     chat_markdown_from_messages(&state.messages, assistant_only)
 }
 
-pub(super) fn copy_assistant_bubble_from_recognizer(sender: Id) {
+pub(super) fn handle_message_bubble_click_from_recognizer(sender: Id) {
     if sender.is_null() {
         return;
     }
     let recognizer_ptr = sender as usize;
-    let text = {
-        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state
-            .agent_bubble_click_recognizers
-            .iter()
-            .find(|(ptr, _)| *ptr == recognizer_ptr)
-            .and_then(|(_, index)| state.messages.get(*index))
-            .filter(|message| message.role == ChatRole::Assistant && !message.text.is_empty())
-            .map(|message| message.text.clone())
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(index) = state
+        .agent_bubble_click_recognizers
+        .iter()
+        .find(|(ptr, _)| *ptr == recognizer_ptr)
+        .map(|(_, index)| *index)
+    else {
+        debug!("Bubble click did not resolve to a message recognizer");
+        return;
     };
 
-    if let Some(text) = text {
-        copy_to_clipboard(&text);
-        info!("Copied assistant bubble to clipboard");
-    } else {
-        debug!("Assistant bubble click did not resolve to copyable message text");
+    let Some(message) = state.messages.get_mut(index) else {
+        debug!("Bubble click pointed outside message list");
+        return;
+    };
+
+    match message.role {
+        ChatRole::Reasoning => {
+            message.is_collapsed = !message.is_collapsed;
+            update_chat_view_with_state(&mut state, false);
+        }
+        ChatRole::Assistant if !message.text.is_empty() => {
+            let text = message.text.clone();
+            drop(state);
+            copy_to_clipboard(&text);
+            info!("Copied assistant bubble to clipboard");
+        }
+        _ => {
+            debug!("Bubble click had no action for role {:?}", message.role);
+        }
     }
 }
 
@@ -1111,19 +1159,21 @@ fn apply_delta_and_layout(state: &mut VoiceChatOverlayState, updated_index: Opti
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(millis));
                 Queue::main().exec_async(|| {
-                    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.layout_pending {
-                        state.layout_pending = false;
-                        state.last_layout_time = Some(Instant::now());
-                        let index = resolve_delta_index(&state, state.pending_delta_index);
-                        state.pending_delta_index = None;
-                        if !index
-                            .map(|idx| try_update_message_view_in_place(&mut state, idx))
-                            .unwrap_or(false)
-                        {
-                            update_chat_view_with_state(&mut state, false);
+                    run_when_overlay_unlocked(|| {
+                        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                        if state.layout_pending {
+                            state.layout_pending = false;
+                            state.last_layout_time = Some(Instant::now());
+                            let index = resolve_delta_index(&state, state.pending_delta_index);
+                            state.pending_delta_index = None;
+                            if !index
+                                .map(|idx| try_update_message_view_in_place(&mut state, idx))
+                                .unwrap_or(false)
+                            {
+                                update_chat_view_with_state(&mut state, false);
+                            }
                         }
-                    }
+                    })
                 });
             });
         }
@@ -1137,6 +1187,7 @@ fn append_voice_chat_user_delta_impl(delta: &str) {
     if let Some(msg) = state.messages.get_mut(idx) {
         codescribe_core::pipeline::contracts::TranscriptDelta::from_raw(delta).apply(&mut msg.text);
         msg.is_streaming = true;
+        msg.is_collapsed = false;
     }
     apply_delta_and_layout(&mut state, Some(idx));
 }
@@ -1178,18 +1229,44 @@ fn finalize_streaming_reasoning(state: &mut VoiceChatOverlayState) {
     for msg in state.messages.iter_mut() {
         if msg.role == ChatRole::Reasoning && msg.is_streaming {
             msg.is_streaming = false;
+            msg.is_collapsed = true;
         }
     }
+    state.active_reasoning_stream_index = None;
 }
 
 fn display_text_for_message(message: &ChatMessage) -> String {
-    if message.is_streaming && message.text.is_empty() {
+    if message.role == ChatRole::Reasoning && message.is_collapsed {
+        reasoning_summary_header(message)
+    } else if message.is_streaming && message.text.is_empty() {
         "• • •".to_string()
     } else if message.is_streaming {
         format!("{} …", message.text)
     } else {
         message.text.clone()
     }
+}
+
+fn bubble_text_for_message(message: &ChatMessage) -> String {
+    if message.role == ChatRole::Reasoning && message.is_collapsed {
+        reasoning_summary_header(message)
+    } else {
+        message.text.clone()
+    }
+}
+
+fn bubble_streaming_for_message(message: &ChatMessage) -> bool {
+    !(message.role == ChatRole::Reasoning && message.is_collapsed) && message.is_streaming
+}
+
+fn reasoning_summary_header(message: &ChatMessage) -> String {
+    let elapsed = SystemTime::now()
+        .duration_since(message.timestamp)
+        .unwrap_or_default()
+        .as_secs()
+        .max(1);
+    let chars = message.text.chars().count();
+    format!("Reasoning · {elapsed}s / {chars} chars")
 }
 
 fn message_mode_label(state: &VoiceChatOverlayState) -> String {
@@ -1313,6 +1390,8 @@ fn try_update_message_view_in_place(state: &mut VoiceChatOverlayState, index: us
 
         let container = bubble_ptr as Id;
         let label = label_ptr as Id;
+        let bubble_text = bubble_text_for_message(message);
+        let bubble_is_streaming = bubble_streaming_for_message(message);
         let bubble_role = match message.role {
             ChatRole::User => BubbleRole::User,
             ChatRole::Assistant => BubbleRole::Assistant,
@@ -1321,9 +1400,9 @@ fn try_update_message_view_in_place(state: &mut VoiceChatOverlayState, index: us
         };
         update_bubble_text(
             label,
-            &message.text,
+            &bubble_text,
             bubble_role,
-            message.is_streaming,
+            bubble_is_streaming,
             message.is_error,
         );
         let display_text = display_text_for_message(message);
@@ -1356,7 +1435,7 @@ fn release_agent_bubble_click_recognizers(state: &mut VoiceChatOverlayState) {
     }
 }
 
-unsafe fn attach_assistant_bubble_click_recognizer(
+unsafe fn attach_message_bubble_click_recognizer(
     state: &mut VoiceChatOverlayState,
     bubble: Id,
     message_index: usize,
@@ -1373,9 +1452,9 @@ unsafe fn attach_assistant_bubble_click_recognizer(
             return;
         }
         let recognizer: Id = msg_send![
-            recognizer,
-            initWithTarget: target_ptr as Id
-            action: sel!(onAssistantBubbleClick:)
+                recognizer,
+                initWithTarget: target_ptr as Id
+                action: sel!(onAssistantBubbleClick:)
         ];
         if recognizer.is_null() {
             return;
@@ -1400,6 +1479,7 @@ fn finalize_user_message_impl(text: &str) {
                 role: ChatRole::User,
                 text: String::new(),
                 is_streaming: false,
+                is_collapsed: false,
                 is_error: false,
                 timestamp: SystemTime::now(),
                 mode: Some(mode),
@@ -1412,6 +1492,7 @@ fn finalize_user_message_impl(text: &str) {
             role: ChatRole::User,
             text: String::new(),
             is_streaming: false,
+            is_collapsed: false,
             is_error: false,
             timestamp: SystemTime::now(),
             mode: Some(mode),
@@ -1454,6 +1535,7 @@ fn finalize_assistant_message_impl(text: &str, is_error: bool) {
                 role: ChatRole::Assistant,
                 text: String::new(),
                 is_streaming: false,
+                is_collapsed: false,
                 is_error,
                 timestamp: SystemTime::now(),
                 mode: Some(mode),
@@ -1466,6 +1548,7 @@ fn finalize_assistant_message_impl(text: &str, is_error: bool) {
             role: ChatRole::Assistant,
             text: String::new(),
             is_streaming: false,
+            is_collapsed: false,
             is_error,
             timestamp: SystemTime::now(),
             mode: Some(mode),
@@ -1546,6 +1629,7 @@ fn handoff_transcript_to_chat_impl(transcript: &str) {
             role: ChatRole::User,
             text: transcript.to_string(),
             is_streaming: false,
+            is_collapsed: false,
             is_error: false,
             timestamp: SystemTime::now(),
             mode: Some(mode),
@@ -1574,6 +1658,7 @@ pub(super) fn clear_voice_chat_text_impl() {
         state.messages.clear();
         state.active_user_stream_index = None;
         state.active_assistant_stream_index = None;
+        state.active_reasoning_stream_index = None;
         state.manual_draft.clear();
         state.is_sending = false;
         state.attachments.clear();
@@ -1631,6 +1716,7 @@ pub fn send_draft_message_impl() {
                 role: ChatRole::System,
                 text: format!("Attachments (sent once): {}", summary),
                 is_streaming: false,
+                is_collapsed: false,
                 is_error: false,
                 timestamp: SystemTime::now(),
                 mode: Some(mode),
@@ -1642,6 +1728,7 @@ pub fn send_draft_message_impl() {
             role: ChatRole::User,
             text: draft.clone(),
             is_streaming: false,
+            is_collapsed: false,
             is_error: false,
             timestamp: SystemTime::now(),
             mode: Some(mode),
@@ -1706,6 +1793,7 @@ pub(super) fn commit_last_user_message_impl() {
                 role: ChatRole::System,
                 text: format!("Attachments (sent once): {}", summary),
                 is_streaming: false,
+                is_collapsed: false,
                 is_error: false,
                 timestamp: SystemTime::now(),
                 mode: Some(mode),
@@ -1745,6 +1833,11 @@ pub(super) fn discard_last_message_impl() {
             && idx >= state.messages.len()
         {
             state.active_assistant_stream_index = None;
+        }
+        if let Some(idx) = state.active_reasoning_stream_index
+            && idx >= state.messages.len()
+        {
+            state.active_reasoning_stream_index = None;
         }
         update_chat_view_with_state(&mut state, true);
     }
@@ -1794,6 +1887,7 @@ fn get_or_create_streaming_message_index(
         role,
         text: String::new(),
         is_streaming: true,
+        is_collapsed: false,
         is_error: false,
         timestamp: SystemTime::now(),
         mode: Some(mode),
@@ -1842,10 +1936,14 @@ pub(super) fn update_chat_view_with_state(
         for index in 0..message_count {
             let message = &state.messages[index];
             let message_role = message.role;
-            let message_text = message.text.clone();
-            let message_is_streaming = message.is_streaming;
+            let message_text = bubble_text_for_message(message);
+            let message_is_streaming = bubble_streaming_for_message(message);
             let message_is_error = message.is_error;
-            let message_metadata = message_metadata(message);
+            let message_metadata = if message_role == ChatRole::Reasoning && message.is_collapsed {
+                None
+            } else {
+                Some(message_metadata(message))
+            };
             let role = match message_role {
                 ChatRole::User => BubbleRole::User,
                 ChatRole::Assistant => BubbleRole::Assistant,
@@ -1859,12 +1957,12 @@ pub(super) fn update_chat_view_with_state(
                 font_size: base_font * zoom,
                 is_streaming: message_is_streaming,
                 is_error: message_is_error,
-                metadata: Some(message_metadata),
+                metadata: message_metadata,
                 message_index: Some(index),
                 copy_action_target: state.action_handler.map(|p| p as Id),
             });
-            if message_role == ChatRole::Assistant {
-                attach_assistant_bubble_click_recognizer(state, bubble, index);
+            if matches!(message_role, ChatRole::Assistant | ChatRole::Reasoning) {
+                attach_message_bubble_click_recognizer(state, bubble, index);
             }
             stack_view_add(container, bubble);
             last_bubble = Some(bubble);
@@ -2981,6 +3079,7 @@ pub fn clear_overlay_state(state: &mut VoiceChatOverlayState) {
     state.pending_tab = None;
     state.active_user_stream_index = None;
     state.active_assistant_stream_index = None;
+    state.active_reasoning_stream_index = None;
     state.is_sending = false;
     state.manual_draft.clear();
     state.conversation_state = ConversationModeState::Inactive;
@@ -3053,6 +3152,7 @@ pub fn handle_card_restore(index: usize) {
             role: ChatRole::System,
             text: "Restored thread has no messages.".to_string(),
             is_streaming: false,
+            is_collapsed: false,
             is_error: false,
             timestamp: SystemTime::now(),
             mode: Some(mode_label(transcription_mode_from_thread_mode(&thread.mode)).to_string()),
@@ -3895,6 +3995,7 @@ mod tests {
             role: ChatRole::Assistant,
             text: String::new(),
             is_streaming: true,
+            is_collapsed: false,
             is_error: false,
             timestamp: SystemTime::now(),
             mode: None,
@@ -3909,9 +4010,33 @@ mod tests {
 
         let finished = ChatMessage {
             is_streaming: false,
+            is_collapsed: false,
             ..streaming
         };
         assert_eq!(display_text_for_message(&finished), "hello");
+    }
+
+    #[test]
+    fn streaming_reasoning_collapses_when_finalized() {
+        let mut state = VoiceChatOverlayState::default();
+        state.messages.push(ChatMessage {
+            role: ChatRole::Reasoning,
+            text: "checking patient context".to_string(),
+            is_streaming: true,
+            is_collapsed: false,
+            is_error: false,
+            timestamp: SystemTime::now(),
+            mode: Some("AI".to_string()),
+        });
+        state.active_reasoning_stream_index = Some(0);
+
+        finalize_streaming_reasoning(&mut state);
+
+        let message = &state.messages[0];
+        assert!(!message.is_streaming);
+        assert!(message.is_collapsed);
+        assert_eq!(state.active_reasoning_stream_index, None);
+        assert!(display_text_for_message(message).starts_with("Reasoning · "));
     }
 
     #[test]
@@ -4511,6 +4636,7 @@ fn thread_messages_for_restore(thread: &Thread) -> Vec<ChatMessage> {
                 role: chat_role_from_thread_role(&message.role),
                 text,
                 is_streaming: false,
+                is_collapsed: false,
                 is_error: false,
                 timestamp: system_time_from_unix_millis(message.timestamp.timestamp_millis()),
                 mode: Some(mode.clone()),

@@ -52,6 +52,7 @@ pub struct ChatMessage {
     pub role: ChatRole,
     pub text: String,
     pub is_streaming: bool,
+    pub is_collapsed: bool,
     pub is_error: bool,
     pub timestamp: SystemTime,
     pub mode: Option<String>,
