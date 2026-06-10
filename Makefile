@@ -61,8 +61,12 @@ build:
 	@cargo build
 
 release-codescribe:
-	@echo "Building codescribe (release, embedded models)..."
+	@echo "Building codescribe (release, runtime Whisper from HF cache)..."
 	@cargo build --release --bin codescribe
+
+release-codescribe-embedded:
+	@echo "Building codescribe (release, EMBEDDED Whisper — distribution)..."
+	@CODESCRIBE_EMBED_WHISPER=1 cargo build --release --bin codescribe
 
 release-qube:
 	@echo "Building qube-* (release, runtime model resolve from HF cache)..."
