@@ -405,6 +405,16 @@ fn persist_config(config: &Config) -> Result<()> {
         &mut env_vars,
     );
     put(
+        "TRANSCRIPT_TAGGING_ENABLED",
+        bool_to_env(config.transcript_tagging_enabled),
+        &mut env_vars,
+    );
+    put(
+        "TRANSCRIPT_TAG_TEMPLATE",
+        config.transcript_tag_template.clone(),
+        &mut env_vars,
+    );
+    put(
         "AI_MAX_TOKENS",
         config.ai_max_tokens.to_string(),
         &mut env_vars,
@@ -605,6 +615,7 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
         "LLM_FORMATTING_ENDPOINT" => settings.llm_formatting_endpoint = Some(value.to_string()),
         "LLM_FORMATTING_MODEL" => settings.llm_formatting_model = Some(value.to_string()),
         "TRANSCRIPT_SEND_MODE" => settings.transcript_send_mode = Some(value.to_string()),
+        "TRANSCRIPT_TAG_TEMPLATE" => settings.transcript_tag_template = Some(value.to_string()),
         "WHISPER_MODEL" => settings.whisper_model = Some(value.to_string()),
         // u64 fields
         "HOLD_START_DELAY_MS" => {
@@ -656,6 +667,7 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
         // bool fields
         "HOLD_EXCLUSIVE"
         | "AI_FORMATTING_ENABLED"
+        | "TRANSCRIPT_TAGGING_ENABLED"
         | "BEEP_ON_START"
         | "USE_LOCAL_STT"
         | "HISTORY_ENABLED"
@@ -669,6 +681,9 @@ fn persist_promoted_setting(settings: &mut UserSettings, key: &str, value: &str)
             match key {
                 "HOLD_EXCLUSIVE" => settings.hold_exclusive = Some(bool_val),
                 "AI_FORMATTING_ENABLED" => settings.ai_formatting_enabled = Some(bool_val),
+                "TRANSCRIPT_TAGGING_ENABLED" => {
+                    settings.transcript_tagging_enabled = Some(bool_val)
+                }
                 "BEEP_ON_START" => settings.beep_on_start = Some(bool_val),
                 "USE_LOCAL_STT" => settings.use_local_stt = Some(bool_val),
                 "HISTORY_ENABLED" => settings.history_enabled = Some(bool_val),

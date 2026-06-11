@@ -438,6 +438,20 @@ reload = "restart"
 category = "llm"
 description = "Enable AI formatting of transcripts"
 
+[vars.CODESCRIBE_TRANSCRIPT_TAGGING]
+default = "0"
+type = "bool"
+reload = "hot"
+category = "llm"
+description = "Override settings.json to wrap pasted dictation transcripts in an epistemic CodeScribe tag"
+
+[vars.CODESCRIBE_TRANSCRIPT_TAG_TEMPLATE]
+default = "<codescribe mode=\"{mode}\" lang=\"{lang}\">\\n{text}\\n</codescribe>"
+type = "string"
+reload = "hot"
+category = "llm"
+description = "Template for transcript tagging; supports {text}, {mode}, and {lang} placeholders"
+
 [vars.AI_MAX_TOKENS]
 default = "0"
 type = "u64"

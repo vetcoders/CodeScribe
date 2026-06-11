@@ -19,8 +19,8 @@ use super::{
     on_prompt_reset, on_prompt_save, on_prompt_type_changed, on_quality_refresh,
     on_qube_daemon_toggled, on_refresh_permissions, on_save_api_settings,
     on_show_dock_icon_toggled, on_show_hotkey_conflicts, on_stt_endpoint_changed,
-    on_stt_key_changed, on_stt_provider_changed, on_transcription_overlay_toggled,
-    on_ultra_quality_toggled, on_volume_changed, switch_tab,
+    on_stt_key_changed, on_stt_provider_changed, on_transcript_tagging_toggled,
+    on_transcription_overlay_toggled, on_ultra_quality_toggled, on_volume_changed, switch_tab,
 };
 
 pub use crate::ui_helpers::Id;
@@ -96,6 +96,10 @@ pub fn action_handler_class() -> *const Class {
             decl.add_method(
                 sel!(onFormattingToggled:),
                 on_formatting_toggled as extern "C" fn(&Object, Sel, Id),
+            );
+            decl.add_method(
+                sel!(onTranscriptTaggingToggled:),
+                on_transcript_tagging_toggled as extern "C" fn(&Object, Sel, Id),
             );
             decl.add_method(
                 sel!(onFormattingLevelChanged:),

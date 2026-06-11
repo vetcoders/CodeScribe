@@ -62,6 +62,24 @@ pub(super) extern "C" fn on_formatting_toggled(
     }
 }
 
+pub(super) extern "C" fn on_transcript_tagging_toggled(
+    _this: &Object,
+    _cmd: objc::runtime::Sel,
+    sender: Id,
+) {
+    // SAFETY: see module-level # Safety doc — main-thread AppKit / msg_send! access on retained `Id` pointers.
+    unsafe {
+        let state: isize = msg_send![sender, state];
+        let enabled = state == 1;
+        info!("Settings: transcript tagging -> {}", enabled);
+        let config = Config::load();
+        let _ = config.save_to_env(
+            "TRANSCRIPT_TAGGING_ENABLED",
+            if enabled { "1" } else { "0" },
+        );
+    }
+}
+
 pub(super) extern "C" fn on_formatting_level_changed(
     _this: &Object,
     _cmd: objc::runtime::Sel,

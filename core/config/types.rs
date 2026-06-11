@@ -284,6 +284,14 @@ pub struct Config {
     #[serde(default)]
     pub transcript_send_mode: TranscriptSendMode,
 
+    /// Whether pasted dictation transcripts are wrapped in an epistemic tag.
+    #[serde(default)]
+    pub transcript_tagging_enabled: bool,
+
+    /// Template used when transcript tagging is enabled.
+    #[serde(default = "default_transcript_tag_template")]
+    pub transcript_tag_template: String,
+
     /// Maximum tokens for regular AI completions
     #[serde(default = "default_ai_max_tokens")]
     pub ai_max_tokens: i32,
@@ -431,6 +439,8 @@ impl Default for Config {
             whisper_language: Language::default(),
             ai_formatting_enabled: false,
             transcript_send_mode: TranscriptSendMode::default(),
+            transcript_tagging_enabled: false,
+            transcript_tag_template: default_transcript_tag_template(),
             ai_max_tokens: default_ai_max_tokens(),
             ai_assistive_max_tokens: default_ai_assistive_max_tokens(),
             show_tray_glyph: default_show_tray_glyph(),

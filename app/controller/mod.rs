@@ -601,6 +601,19 @@ fn recording_mode_label(
     }
 }
 
+fn maybe_wrap_transcript_for_delivery(text: &str, config: &Config, mode: &str) -> String {
+    if !config.transcript_tagging_enabled {
+        return text.to_string();
+    }
+
+    codescribe_core::transcript_tagging::wrap_transcript(
+        text,
+        &config.transcript_tag_template,
+        mode,
+        config.whisper_language.as_str(),
+    )
+}
+
 fn toggle_final_pass_enabled() -> bool {
     std::env::var("CODESCRIBE_TOGGLE_FINAL_PASS")
         .ok()
@@ -955,7 +968,9 @@ pub fn request_overlay_paste(text: String) {
         };
         let prior_target = { controller.pre_overlay_frontmost_app.read().await.clone() };
         let target_app = context_target.or(prior_target);
-        paste_overlay_text_with_target(text, target_app);
+        let config = { controller.config.read().await.clone() };
+        let paste_text = maybe_wrap_transcript_for_delivery(&text, &config, "dictation");
+        paste_overlay_text_with_target(paste_text, target_app);
     });
 }
 
@@ -4384,8 +4399,10 @@ impl RecordingController {
         if cfg!(test) {
             info!("Skipping paste in tests (mode={})", mode_label);
         } else if should_auto_paste {
+            let paste_text =
+                maybe_wrap_transcript_for_delivery(&final_formatted_text, &config, &mode_label);
             // Paste the text into the active application
-            clipboard::paste_text(&final_formatted_text).context("Failed to paste text")?;
+            clipboard::paste_text(&paste_text).context("Failed to paste text")?;
             info!("Text pasted successfully");
         } else {
             info!("Auto-paste skipped (mode={})", mode_label);

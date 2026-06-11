@@ -29,6 +29,10 @@ pub struct UserSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_formatting_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_tagging_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_tag_template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub beep_on_start: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sound_volume: Option<f32>,
@@ -191,6 +195,10 @@ struct FormattingV2 {
     #[serde(skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_tagging_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript_tag_template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     llm_endpoint: Option<String>,
@@ -288,6 +296,8 @@ pub const PROMOTED_SETTINGS_KEYS: &[&str] = &[
     "HOLD_EXCLUSIVE",
     // AI / Formatting
     "AI_FORMATTING_ENABLED",
+    "TRANSCRIPT_TAGGING_ENABLED",
+    "TRANSCRIPT_TAG_TEMPLATE",
     "FORMATTING_LEVEL",
     // Sound
     "BEEP_ON_START",
@@ -360,6 +370,8 @@ impl UserSettings {
                 }),
                 formatting: Some(FormattingV2 {
                     enabled: self.ai_formatting_enabled,
+                    transcript_tagging_enabled: self.transcript_tagging_enabled,
+                    transcript_tag_template: self.transcript_tag_template.clone(),
                     level: self.formatting_level.clone(),
                     llm_endpoint: self.llm_formatting_endpoint.clone(),
                     llm_model: self.llm_formatting_model.clone(),
@@ -434,6 +446,16 @@ impl UserSettings {
                 .as_ref()
                 .and_then(|s| s.formatting.as_ref())
                 .and_then(|f| f.enabled),
+            transcript_tagging_enabled: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.formatting.as_ref())
+                .and_then(|f| f.transcript_tagging_enabled),
+            transcript_tag_template: v2
+                .speech
+                .as_ref()
+                .and_then(|s| s.formatting.as_ref())
+                .and_then(|f| f.transcript_tag_template.clone()),
             beep_on_start: v2
                 .audio
                 .as_ref()
@@ -762,6 +784,7 @@ impl UserSettings {
             "LLM_ASSISTIVE_ENDPOINT" => self.llm_assistive_endpoint = Some(value.to_owned()),
             "LLM_ASSISTIVE_MODEL" => self.llm_assistive_model = Some(value.to_owned()),
             "FORMATTING_LEVEL" => self.formatting_level = Some(value.to_owned()),
+            "TRANSCRIPT_TAG_TEMPLATE" => self.transcript_tag_template = Some(value.to_owned()),
             "LLM_FORMATTING_ENDPOINT" => self.llm_formatting_endpoint = Some(value.to_owned()),
             "LLM_FORMATTING_MODEL" => self.llm_formatting_model = Some(value.to_owned()),
             "LOCAL_MODEL" => self.local_model = Some(value.to_owned()),
@@ -783,6 +806,7 @@ impl UserSettings {
         let before = self.clone();
         match key {
             "AI_FORMATTING_ENABLED" => self.ai_formatting_enabled = Some(value),
+            "TRANSCRIPT_TAGGING_ENABLED" => self.transcript_tagging_enabled = Some(value),
             "BEEP_ON_START" => self.beep_on_start = Some(value),
             "SHOW_DOCK_ICON" => self.show_dock_icon = Some(value),
             "TRANSCRIPTION_OVERLAY_ENABLED" => self.transcription_overlay_enabled = Some(value),

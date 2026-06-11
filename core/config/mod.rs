@@ -52,6 +52,7 @@ mod tests {
         assert_eq!(config.whisper_language, Language::Polish); // Polish is default
         assert_eq!(config.ai_max_tokens, 0); // 0 = no limit (API decides)
         assert!(!config.ai_formatting_enabled);
+        assert!(!config.transcript_tagging_enabled);
         assert_eq!(config.double_tap_interval_ms, 200);
         assert_eq!(config.toggle_silence_sec, 5.0);
         assert!(config.show_dock_icon);
@@ -71,6 +72,35 @@ mod tests {
             unsafe { std::env::set_var("SHOW_DOCK_ICON", value) };
         } else {
             unsafe { std::env::remove_var("SHOW_DOCK_ICON") };
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_transcript_tagging_env_override_applies() {
+        let previous_enabled = std::env::var("CODESCRIBE_TRANSCRIPT_TAGGING").ok();
+        let previous_template = std::env::var("CODESCRIBE_TRANSCRIPT_TAG_TEMPLATE").ok();
+        unsafe {
+            std::env::set_var("CODESCRIBE_TRANSCRIPT_TAGGING", "1");
+            std::env::set_var(
+                "CODESCRIBE_TRANSCRIPT_TAG_TEMPLATE",
+                "[{mode}/{lang}] {text}",
+            );
+        }
+
+        let config = Config::load();
+        assert!(config.transcript_tagging_enabled);
+        assert_eq!(config.transcript_tag_template, "[{mode}/{lang}] {text}");
+
+        match previous_enabled {
+            Some(value) => unsafe { std::env::set_var("CODESCRIBE_TRANSCRIPT_TAGGING", value) },
+            None => unsafe { std::env::remove_var("CODESCRIBE_TRANSCRIPT_TAGGING") },
+        }
+        match previous_template {
+            Some(value) => unsafe {
+                std::env::set_var("CODESCRIBE_TRANSCRIPT_TAG_TEMPLATE", value)
+            },
+            None => unsafe { std::env::remove_var("CODESCRIBE_TRANSCRIPT_TAG_TEMPLATE") },
         }
     }
 

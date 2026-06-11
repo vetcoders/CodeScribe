@@ -51,6 +51,7 @@ pub mod pipeline;
 pub mod quality;
 pub mod state;
 pub mod stt;
+pub mod transcript_tagging;
 pub mod tts;
 pub mod util;
 pub mod vad;

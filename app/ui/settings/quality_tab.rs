@@ -322,6 +322,25 @@ pub(super) unsafe fn build_quality_tab(
             },
         );
 
+        let _tagging_check = add_toggle_row(
+            container,
+            action_handler,
+            pad,
+            &mut y,
+            field_w,
+            secondary,
+            ToggleRowSpec {
+                title: "Tag transcripts for AI agents",
+                checked: _config.transcript_tagging_enabled,
+                action: sel!(onTranscriptTaggingToggled:),
+                description: Some(
+                    "Pastes speech as <codescribe mode=\"dictation\" lang=\"pl\">... so agents treat dictated text as spoken, revisable input.",
+                ),
+                tag: None,
+                gap,
+            },
+        );
+
         let fmt_level_label = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(120.0, 18.0)),
             text: "Formatting level:".to_string(),
