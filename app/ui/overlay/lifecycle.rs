@@ -18,14 +18,15 @@ use super::layout::{
 };
 use super::preview::display_text_for_state;
 use super::state::{
-    AUTO_HIDE_GENERATION, AUTO_HIDE_PENDING, OVERLAY_STATE, OverlaySnapshot,
+    AUTO_HIDE_GENERATION, AUTO_HIDE_PENDING, FormatPhase, OVERLAY_STATE, OverlaySnapshot,
     TranscriptionActionContractMode, auto_hide_delay_secs,
 };
 use super::widgets::{
     refresh_action_contract_ui_unlocked, reset_overlay_to_idle_unlocked,
     set_action_buttons_visible_unlocked, set_auto_hide_hint_visible_unlocked,
-    set_recording_button_visible_unlocked, set_recording_status_unlocked,
-    set_status_message_unlocked, set_text_view_editable_unlocked, update_overlay_text_unlocked,
+    set_format_phase_ui_unlocked, set_recording_button_visible_unlocked,
+    set_recording_status_unlocked, set_status_message_unlocked, set_text_view_editable_unlocked,
+    update_overlay_text_unlocked,
 };
 use crate::ui_helpers::{Id, animate_fade, set_hidden};
 
@@ -135,6 +136,7 @@ pub fn set_transcription_action_contract(
             state.raw_text = raw_text_owned;
             state.last_pass_text = last_pass_owned;
             state.action_contract_mode = mode_copy;
+            state.format_phase = FormatPhase::Idle;
             state.display_status = display_status;
             let visible = display_text_for_state(&state);
             let dm = state.decision_mode;
@@ -145,6 +147,7 @@ pub fn set_transcription_action_contract(
         }; // Lock dropped.
 
         refresh_action_contract_ui_unlocked(&snap, mode_copy, decision_mode);
+        set_format_phase_ui_unlocked(&snap, mode_copy);
         set_text_view_editable_unlocked(&snap, decision_mode);
         update_overlay_text_unlocked(snap.text_view, &visible_text);
         let new_h = resize_overlay_unlocked(&snap);
@@ -175,6 +178,8 @@ fn clear_transcription_text_impl() {
         state.raw_text.clear();
         state.last_pass_text.clear();
         state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.format_phase = FormatPhase::Idle;
+        state.display_status.clear();
         state.decision_mode = false;
         state.hover_active = false;
         state.last_layout_resize_at = Instant::now();
@@ -247,10 +252,72 @@ pub(super) fn should_auto_hide(expected_generation: u64) -> bool {
 
     let hovered = {
         let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if state.format_phase != FormatPhase::Idle {
+            return false;
+        }
         state.hover_active
     };
 
     !hovered
+}
+
+pub fn enter_overlay_formatting() {
+    AUTO_HIDE_GENERATION.fetch_add(1, Ordering::SeqCst);
+    AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
+
+    Queue::main().exec_async(|| {
+        let (snap, mode) = {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.format_phase = FormatPhase::Formatting;
+            state.display_status = "Formatting...".to_string();
+            (
+                OverlaySnapshot::from_state(&state),
+                state.action_contract_mode,
+            )
+        };
+
+        set_action_buttons_visible_unlocked(&snap, true);
+        set_auto_hide_hint_visible_unlocked(&snap, mode, false);
+        set_format_phase_ui_unlocked(&snap, mode);
+        set_text_view_editable_unlocked(&snap, false);
+        set_status_message_unlocked(&snap, "Formatting...", true);
+    });
+}
+
+pub fn apply_overlay_format_result(formatted_text: &str) {
+    let formatted_text = formatted_text.to_string();
+    AUTO_HIDE_GENERATION.fetch_add(1, Ordering::SeqCst);
+    AUTO_HIDE_PENDING.store(false, Ordering::SeqCst);
+
+    Queue::main().exec_async(move || {
+        let (visible_text, snap, mode) = {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.accumulated_text = formatted_text.clone();
+            state.last_pass_text = formatted_text;
+            state.action_contract_mode = TranscriptionActionContractMode::AiFormat;
+            state.format_phase = FormatPhase::Formatted;
+            state.display_status = "Formatted".to_string();
+            let visible = display_text_for_state(&state);
+            let snap = OverlaySnapshot::from_state(&state);
+            state.last_layout_resize_at = Instant::now();
+            state.pending_layout_resize = false;
+            (visible, snap, state.action_contract_mode)
+        };
+
+        refresh_action_contract_ui_unlocked(&snap, mode, true);
+        set_auto_hide_hint_visible_unlocked(&snap, mode, true);
+        set_format_phase_ui_unlocked(&snap, mode);
+        set_action_buttons_visible_unlocked(&snap, true);
+        set_recording_button_visible_unlocked(&snap, false);
+        set_text_view_editable_unlocked(&snap, true);
+        set_status_message_unlocked(&snap, "Formatted", false);
+        update_overlay_text_unlocked(snap.text_view, &visible_text);
+        let new_h = resize_overlay_unlocked(&snap);
+        {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            state.last_applied_height = new_h;
+        }
+    });
 }
 
 /// Enter decision mode: show actions on hover for the current transcript
@@ -259,6 +326,9 @@ pub fn enter_decision_mode() {
         let (snap, mode) = {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.decision_mode = true;
+            if state.format_phase != FormatPhase::Formatted {
+                state.format_phase = FormatPhase::Idle;
+            }
             (
                 OverlaySnapshot::from_state(&state),
                 state.action_contract_mode,
@@ -266,6 +336,7 @@ pub fn enter_decision_mode() {
         }; // Lock dropped before AppKit calls.
         set_action_buttons_visible_unlocked(&snap, true);
         set_auto_hide_hint_visible_unlocked(&snap, mode, true);
+        set_format_phase_ui_unlocked(&snap, mode);
         set_recording_button_visible_unlocked(&snap, false);
         set_recording_status_unlocked(&snap, false);
         set_text_view_editable_unlocked(&snap, true);
@@ -279,6 +350,7 @@ pub fn enter_recording_mode() {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.decision_mode = false;
             state.hover_active = false;
+            state.format_phase = FormatPhase::Idle;
             (
                 OverlaySnapshot::from_state(&state),
                 state.action_contract_mode,
@@ -286,6 +358,7 @@ pub fn enter_recording_mode() {
         }; // Lock dropped before AppKit calls.
         set_action_buttons_visible_unlocked(&snap, false);
         set_auto_hide_hint_visible_unlocked(&snap, mode, false);
+        set_format_phase_ui_unlocked(&snap, mode);
         set_recording_button_visible_unlocked(&snap, true);
         set_text_view_editable_unlocked(&snap, false);
         // Show recording indicator (red dot + text), no spinner
@@ -301,6 +374,7 @@ pub fn enter_processing_mode() {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.decision_mode = false;
             state.hover_active = false;
+            state.format_phase = FormatPhase::Idle;
             (
                 OverlaySnapshot::from_state(&state),
                 state.action_contract_mode,
@@ -308,6 +382,7 @@ pub fn enter_processing_mode() {
         }; // Lock dropped before AppKit calls.
         set_action_buttons_visible_unlocked(&snap, false);
         set_auto_hide_hint_visible_unlocked(&snap, mode, false);
+        set_format_phase_ui_unlocked(&snap, mode);
         set_recording_button_visible_unlocked(&snap, false);
         set_text_view_editable_unlocked(&snap, false);
         set_status_message_unlocked(&snap, "Thinking", true);
@@ -384,6 +459,7 @@ fn hide_transcription_overlay_impl() {
         state.decision_mode = false;
         state.hover_active = false;
         state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.format_phase = FormatPhase::Idle;
         state.last_applied_height = OVERLAY_WINDOW_MIN_HEIGHT;
         state.last_layout_resize_at = Instant::now();
         state.pending_layout_resize = false;

@@ -8,9 +8,11 @@
 use objc::runtime::Object;
 use objc::{msg_send, sel, sel_impl};
 
-use super::state::{OverlaySnapshot, TranscriptionActionContractMode, auto_hide_delay_secs};
+use super::state::{
+    FormatPhase, OverlaySnapshot, TranscriptionActionContractMode, auto_hide_delay_secs,
+};
 use crate::ui::shared::status::{UiStatus, status_from_detail};
-use crate::ui_helpers::{Id, set_hidden, set_text, set_text_view_string, set_tooltip};
+use crate::ui_helpers::{Id, ns_string, set_hidden, set_text, set_text_view_string, set_tooltip};
 
 /// Show/hide action buttons. Call ONLY outside the `OVERLAY_STATE` lock.
 pub(super) fn set_action_buttons_visible_unlocked(snap: &OverlaySnapshot, visible: bool) {
@@ -50,45 +52,60 @@ fn action_contract_source_label(mode: TranscriptionActionContractMode) -> &'stat
 pub(super) fn copy_action_tooltip(mode: TranscriptionActionContractMode) -> &'static str {
     match mode {
         TranscriptionActionContractMode::Raw => "Copy RAW transcript",
-        TranscriptionActionContractMode::AiFormat => "Copy last-pass/formatted transcript",
+        TranscriptionActionContractMode::AiFormat => "Copy current editable transcript",
     }
 }
 
-pub(super) fn augment_action_tooltip(mode: TranscriptionActionContractMode) -> &'static str {
+pub(super) fn augment_action_tooltip(
+    mode: TranscriptionActionContractMode,
+    phase: FormatPhase,
+) -> &'static str {
+    if phase == FormatPhase::Formatted {
+        return "Close the formatted transcript overlay";
+    }
+
     match mode {
         TranscriptionActionContractMode::Raw => "Open Agent overlay and hand off RAW transcript",
-        TranscriptionActionContractMode::AiFormat => {
-            "Open Agent overlay and hand off last-pass/formatted transcript"
-        }
+        TranscriptionActionContractMode::AiFormat => "Open Agent overlay and hand off transcript",
     }
 }
 
 /// Tooltip for the `[Format]` action (decision-mode). ADR 2026-05-28 Faza 1:
-/// Format is an on-demand AI polish + paste — it works on the RAW transcript too,
-/// it is NOT the old "Save closes" no-op. (Completes the Save->Format rename: the
+/// Format is an on-demand AI polish into the overlay — it works on the RAW
+/// transcript too, it is NOT the old "Save closes" no-op. (Completes the Save->Format rename: the
 /// creation-time tooltip was being clobbered back to the old Save text on every
 /// action-contract refresh.)
-fn format_action_tooltip(_mode: TranscriptionActionContractMode) -> &'static str {
-    "Format the transcript with AI, then paste"
+fn format_action_tooltip(phase: FormatPhase) -> &'static str {
+    match phase {
+        FormatPhase::Idle => "Format the transcript with AI in the overlay",
+        FormatPhase::Formatting => "Formatting in progress",
+        FormatPhase::Formatted => "Paste the current editable transcript",
+    }
 }
 
 pub(super) fn decision_hint_text(
     mode: TranscriptionActionContractMode,
+    phase: FormatPhase,
     display_status: &str,
     include_auto_hide: bool,
 ) -> String {
     let mode_label = action_contract_source_label(mode);
-    // Action-driven contract (ADR 2026-05-28 Faza 1): [Format] polishes via AI + pastes,
+    // Action-driven contract (ADR 2026-05-28 Faza 1): [Format] polishes via AI,
     // [Copy] copies, [Agent] hands off. No more "Save closes" — Format is a real action.
-    let base = if display_status.is_empty() {
-        format!("Dictation overlay | {} | Format · Copy · Agent", mode_label)
-    } else {
-        format!(
-            "Dictation overlay | {} | {} | Format · Copy · Agent",
-            mode_label, display_status
-        )
+    let actions = match phase {
+        FormatPhase::Idle => "Format · Copy · Agent",
+        FormatPhase::Formatting => "Formatting...",
+        FormatPhase::Formatted => "Paste · Copy · Close",
     };
-    if include_auto_hide {
+    let base = match (display_status.is_empty(), phase) {
+        (_, FormatPhase::Formatted) => format!("Dictation overlay | FORMATTED | {actions}"),
+        (true, _) => format!("Dictation overlay | {} | {actions}", mode_label),
+        (false, _) => format!(
+            "Dictation overlay | {} | {} | {actions}",
+            mode_label, display_status
+        ),
+    };
+    if include_auto_hide && phase == FormatPhase::Idle {
         format!("{base} | Auto-hide {}s", auto_hide_delay_secs())
     } else {
         base
@@ -108,7 +125,10 @@ pub(super) fn refresh_action_contract_ui_unlocked(
     }
     if let Some(augment_ptr) = snap.augment_button {
         unsafe {
-            set_tooltip(augment_ptr as Id, augment_action_tooltip(mode));
+            set_tooltip(
+                augment_ptr as Id,
+                augment_action_tooltip(mode, snap.format_phase),
+            );
         }
     }
     if let Some(save_ptr) = snap.save_button {
@@ -116,19 +136,69 @@ pub(super) fn refresh_action_contract_ui_unlocked(
         // It must advertise the format action, not the old Save "close" semantics —
         // otherwise this refresh clobbers the creation-time tooltip back to "Save".
         unsafe {
-            set_tooltip(save_ptr as Id, format_action_tooltip(mode));
+            set_tooltip(save_ptr as Id, format_action_tooltip(snap.format_phase));
         }
     }
     if let Some(label_ptr) = snap.auto_hide_label {
         unsafe {
             if include_auto_hide_hint {
-                let hint = decision_hint_text(mode, &snap.display_status, true);
+                let hint = decision_hint_text(mode, snap.format_phase, &snap.display_status, true);
                 set_text(label_ptr as Id, &hint);
                 set_tooltip(label_ptr as Id, "Transcription overlay action contract");
                 set_hidden(label_ptr as Id, false);
             } else {
                 set_hidden(label_ptr as Id, true);
             }
+        }
+    }
+}
+
+fn set_button_title(button: Id, title: &str) {
+    unsafe {
+        let title = ns_string(title);
+        let _: () = msg_send![button, setTitle: title];
+    }
+}
+
+fn set_button_enabled(button: Id, enabled: bool) {
+    unsafe {
+        let _: () = msg_send![button, setEnabled: enabled];
+    }
+}
+
+pub(super) fn set_format_phase_ui_unlocked(
+    snap: &OverlaySnapshot,
+    mode: TranscriptionActionContractMode,
+) {
+    if let Some(format_ptr) = snap.save_button {
+        let title = match snap.format_phase {
+            FormatPhase::Idle => "Format",
+            FormatPhase::Formatting => "Formatting...",
+            FormatPhase::Formatted => "Paste",
+        };
+        let button = format_ptr as Id;
+        set_button_title(button, title);
+        set_button_enabled(button, snap.format_phase != FormatPhase::Formatting);
+        unsafe {
+            set_tooltip(button, format_action_tooltip(snap.format_phase));
+        }
+    }
+
+    if let Some(copy_ptr) = snap.copy_button {
+        set_button_enabled(copy_ptr as Id, snap.format_phase != FormatPhase::Formatting);
+    }
+
+    if let Some(augment_ptr) = snap.augment_button {
+        let button = augment_ptr as Id;
+        let title = if snap.format_phase == FormatPhase::Formatted {
+            "Close"
+        } else {
+            "Agent"
+        };
+        set_button_title(button, title);
+        set_button_enabled(button, snap.format_phase != FormatPhase::Formatting);
+        unsafe {
+            set_tooltip(button, augment_action_tooltip(mode, snap.format_phase));
         }
     }
 }

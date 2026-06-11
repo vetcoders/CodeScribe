@@ -121,3 +121,10 @@ Po zrobieniu tego porządku (najpierw ciągłość, potem korekty) dostajemy:
 **Data:** 2026-05-28
 **Autor:** Operator
 **Status:** PROPOSED — wymaga implementacji w ścisłej kolejności z gate'em po Fazie 1.
+
+## Revision 2026-06-11: Format is in-overlay
+
+The Phase 1 assumption that `[Format]` closes the transcription overlay immediately is superseded by C5
+(`bolaczki-8/dispatch/C5_prompt.md`). `[Format]` now keeps the overlay open, shows an in-flight formatting
+state, returns the formatted result into the same editable text view, and exposes `[Paste]`, `[Copy]`, and
+`[Close]` actions with auto-hide disabled for the formatted result.

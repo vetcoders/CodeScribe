@@ -11,7 +11,7 @@ use super::layout::{
 use super::lifecycle::{append_transcription_delta_impl, should_auto_hide};
 use super::preview::{display_text_for_state, overlay_visible_text, stable_overlay_preview_text};
 use super::state::{
-    AUTO_HIDE_GENERATION, AUTO_HIDE_PENDING, DEFAULT_AUTO_HIDE_DELAY_SECS,
+    AUTO_HIDE_GENERATION, AUTO_HIDE_PENDING, DEFAULT_AUTO_HIDE_DELAY_SECS, FormatPhase,
     MAX_AUTO_HIDE_DELAY_SECS, MIN_AUTO_HIDE_DELAY_SECS, OVERLAY_STATE, action_text_for_contract,
     parse_auto_hide_delay_secs,
 };
@@ -140,6 +140,8 @@ fn reset_overlay_state_for_test() {
     state.hover_active = false;
     state.action_handler = None;
     state.action_contract_mode = TranscriptionActionContractMode::Raw;
+    state.format_phase = FormatPhase::Idle;
+    state.display_status.clear();
     state.raw_text.clear();
     state.last_pass_text.clear();
     state.accumulated_text.clear();
@@ -267,6 +269,33 @@ fn test_auto_hide_hover_guard() {
         state.hover_active = false;
     }
     assert!(should_auto_hide(42));
+}
+
+#[test]
+#[serial]
+fn test_auto_hide_skips_overlay_format_phases() {
+    reset_overlay_state_for_test();
+    AUTO_HIDE_GENERATION.store(7, Ordering::SeqCst);
+    AUTO_HIDE_PENDING.store(true, Ordering::SeqCst);
+
+    {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.hover_active = false;
+        state.format_phase = FormatPhase::Formatting;
+    }
+    assert!(!should_auto_hide(7));
+
+    {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.format_phase = FormatPhase::Formatted;
+    }
+    assert!(!should_auto_hide(7));
+
+    {
+        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.format_phase = FormatPhase::Idle;
+    }
+    assert!(should_auto_hide(7));
 }
 
 #[test]

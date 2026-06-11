@@ -79,6 +79,48 @@ fn test_toggle_stop_watchdog_allows_default_ai_attempt_budget() {
     );
 }
 
+#[test]
+fn test_overlay_format_result_marks_failed_formatting_raw() {
+    let out = overlay_format_result_text(
+        "raw transcript",
+        crate::ai_formatting::AiFormatResult {
+            text: "raw transcript".to_string(),
+            reasoning_text: None,
+            status: crate::ai_formatting::AiFormatStatus::Failed,
+        },
+    );
+
+    assert_eq!(out, "raw transcript\n\n(raw — formatting failed)");
+}
+
+#[test]
+fn test_overlay_format_result_marks_empty_formatting_output() {
+    let out = overlay_format_result_text(
+        "raw transcript",
+        crate::ai_formatting::AiFormatResult {
+            text: "   ".to_string(),
+            reasoning_text: None,
+            status: crate::ai_formatting::AiFormatStatus::Applied,
+        },
+    );
+
+    assert_eq!(out, "raw transcript\n\n(raw — formatting failed)");
+}
+
+#[test]
+fn test_overlay_format_result_keeps_applied_formatting() {
+    let out = overlay_format_result_text(
+        "raw transcript",
+        crate::ai_formatting::AiFormatResult {
+            text: "Formatted transcript.".to_string(),
+            reasoning_text: None,
+            status: crate::ai_formatting::AiFormatStatus::Applied,
+        },
+    );
+
+    assert_eq!(out, "Formatted transcript.");
+}
+
 #[tokio::test]
 #[serial]
 async fn test_hold_down_schedules_delayed_start() {

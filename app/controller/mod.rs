@@ -33,6 +33,11 @@ pub use types::{HotkeyAction, HotkeyInput, HotkeyType, State};
 use crate::presentation::emitter::PresentationEmitter;
 use crate::stream_postprocess::StreamPostProcessor;
 use anyhow::{Context, Result};
+use dispatch::Queue;
+#[cfg(target_os = "macos")]
+use objc::runtime::Class;
+#[cfg(target_os = "macos")]
+use objc::{msg_send, sel, sel_impl};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -119,6 +124,26 @@ fn normalize_for_diff(s: &str) -> String {
     match chars.next() {
         Some(c) => c.to_lowercase().chain(chars).collect(),
         None => String::new(),
+    }
+}
+
+const OVERLAY_FORMAT_FAILED_MARKER: &str = "(raw — formatting failed)";
+
+fn overlay_format_result_text(
+    raw_text: &str,
+    result: crate::ai_formatting::AiFormatResult,
+) -> String {
+    if result.text.trim().is_empty()
+        || result.status == crate::ai_formatting::AiFormatStatus::Failed
+    {
+        let raw = raw_text.trim_end();
+        if raw.is_empty() {
+            OVERLAY_FORMAT_FAILED_MARKER.to_string()
+        } else {
+            format!("{raw}\n\n{OVERLAY_FORMAT_FAILED_MARKER}")
+        }
+    } else {
+        result.text
     }
 }
 
@@ -886,25 +911,110 @@ pub fn request_segment_commit_and_augment() {
     });
 }
 
-/// Format the decision-mode transcript with AI, then paste it into the active app.
+/// Format the decision-mode transcript with AI and return the result to the overlay.
 ///
-/// ADR 2026-05-28 Faza 1: the overlay `[Format]` action. Formatting is an explicit
-/// post-recording choice — it runs on demand here, not on every stop. Runs
-/// off-main-thread to avoid AppKit deadlock; falls back to the raw transcript if AI
-/// formatting is unavailable or fails.
-pub fn request_format_and_paste() {
-    let text = crate::ui::overlay::current_segment_text();
+/// Revision 2026-06-11: `[Format]` stays in the overlay and becomes editable
+/// after the async formatting pass. The callback is executed on the main queue.
+pub fn request_format_for_overlay<F>(text: String, on_done: F)
+where
+    F: FnOnce(String) + Send + 'static,
+{
     if text.trim().is_empty() {
         return;
     }
     let Some(controller) = OVERLAY_CONTROLLER.get().cloned() else {
-        warn!("Overlay controller not registered; cannot format+paste");
+        warn!("Overlay controller not registered; cannot format overlay transcript");
         return;
     };
 
     tokio::spawn(async move {
-        controller.format_decision_text_and_paste(text).await;
+        let formatted = controller.format_decision_text(text).await;
+        Queue::main().exec_async(move || on_done(formatted));
     });
+}
+
+/// Paste the current editable overlay text into the app captured before the overlay.
+pub fn request_overlay_paste(text: String) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let Some(controller) = OVERLAY_CONTROLLER.get().cloned() else {
+        warn!("Overlay controller not registered; pasting without target reactivation");
+        paste_overlay_text_with_target(text, None);
+        return;
+    };
+
+    tokio::spawn(async move {
+        let context_target = {
+            controller
+                .assistive_context
+                .read()
+                .await
+                .clone()
+                .and_then(|ctx| ctx.frontmost_app)
+        };
+        let prior_target = { controller.pre_overlay_frontmost_app.read().await.clone() };
+        let target_app = context_target.or(prior_target);
+        paste_overlay_text_with_target(text, target_app);
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn activate_target_app(app_name: &str) {
+    unsafe {
+        let Some(ns_workspace) = Class::get("NSWorkspace") else {
+            return;
+        };
+        let workspace: crate::ui_helpers::Id = msg_send![ns_workspace, sharedWorkspace];
+        let running: crate::ui_helpers::Id = msg_send![workspace, runningApplications];
+        let count: usize = msg_send![running, count];
+        for i in 0..count {
+            let app: crate::ui_helpers::Id = msg_send![running, objectAtIndex: i];
+            let name: crate::ui_helpers::Id = msg_send![app, localizedName];
+            if !name.is_null() {
+                let name_cstr: *const std::ffi::c_char = msg_send![name, UTF8String];
+                if !name_cstr.is_null() {
+                    let name_str = std::ffi::CStr::from_ptr(name_cstr).to_string_lossy();
+                    if name_str == app_name {
+                        let _: bool = msg_send![app, activateWithOptions: 1u64];
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn paste_overlay_text_with_target(text: String, target_app: Option<String>) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(app_name) = target_app {
+            Queue::main().exec_async(move || activate_target_app(&app_name));
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                Queue::main().exec_async(move || paste_overlay_text_now(&text));
+            });
+        } else {
+            Queue::main().exec_async(move || paste_overlay_text_now(&text));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        paste_overlay_text_now(&text);
+    }
+}
+
+fn paste_overlay_text_now(text: &str) {
+    if cfg!(test) {
+        info!("Skipping overlay paste in tests ({} chars)", text.len());
+        return;
+    }
+    if let Err(e) = clipboard::paste_text(text) {
+        warn!("Overlay paste failed: {e}");
+    } else {
+        info!("Overlay transcript pasted ({} chars)", text.len());
+    }
 }
 
 /// Start a toggle recording session from the UI (CTA).
@@ -3058,34 +3168,21 @@ impl RecordingController {
         Ok(())
     }
 
-    /// Format the given transcript with AI and paste it (overlay `[Format]` action).
+    /// Format the given transcript with AI for the overlay `[Format]` action.
     ///
     /// On-demand formatting for the decision-mode transcript. Falls back to the raw
-    /// text if AI formatting is unavailable or returns empty. (ADR 2026-05-28 Faza 1.)
-    async fn format_decision_text_and_paste(&self, text: String) {
+    /// text with a visible marker if AI formatting is unavailable or returns empty.
+    async fn format_decision_text(&self, text: String) -> String {
         let language = self.config.read().await.whisper_language;
         let lang_str = language.as_str().to_string();
-        let formatted = crate::ai_formatting::format_text_with_status(
+        let result = crate::ai_formatting::format_text_with_status(
             &text,
             Some(lang_str.as_str()),
             false,
             None,
         )
         .await;
-        let out = if formatted.text.trim().is_empty() {
-            text
-        } else {
-            formatted.text
-        };
-        if cfg!(test) {
-            info!("Skipping format+paste in tests ({} chars)", out.len());
-            return;
-        }
-        if let Err(e) = clipboard::paste_text(&out) {
-            warn!("Format+paste failed: {e}");
-        } else {
-            info!("Formatted transcript pasted ({} chars)", out.len());
-        }
+        overlay_format_result_text(&text, result)
     }
 
     async fn stop_toggle_and_adjudicate(&self) -> Result<()> {

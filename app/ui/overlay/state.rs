@@ -56,6 +56,13 @@ pub enum TranscriptionActionContractMode {
     AiFormat,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FormatPhase {
+    Idle,
+    Formatting,
+    Formatted,
+}
+
 /// Transcription overlay state
 pub(super) struct TranscriptionOverlayState {
     pub(super) window: Option<usize>,
@@ -75,6 +82,7 @@ pub(super) struct TranscriptionOverlayState {
     pub(super) hover_active: bool,
     pub(super) action_handler: Option<usize>,
     pub(super) action_contract_mode: TranscriptionActionContractMode,
+    pub(super) format_phase: FormatPhase,
     pub(super) display_status: String,
     pub(super) raw_text: String,
     pub(super) last_pass_text: String,
@@ -105,6 +113,7 @@ lazy_static::lazy_static! {
         hover_active: false,
         action_handler: None,
         action_contract_mode: TranscriptionActionContractMode::Raw,
+        format_phase: FormatPhase::Idle,
         display_status: String::new(),
         raw_text: String::new(),
         last_pass_text: String::new(),
@@ -138,6 +147,7 @@ pub(super) struct OverlaySnapshot {
     pub(super) save_button: Option<usize>,
     pub(super) commit_button: Option<usize>,
     pub(super) progress_indicator: Option<usize>,
+    pub(super) format_phase: FormatPhase,
     pub(super) display_status: String,
     pub(super) min_height: f64,
     pub(super) max_height: f64,
@@ -159,6 +169,7 @@ impl OverlaySnapshot {
             save_button: state.save_button,
             commit_button: state.commit_button,
             progress_indicator: state.progress_indicator,
+            format_phase: state.format_phase,
             display_status: state.display_status.clone(),
             min_height: state.min_height,
             max_height: state.max_height,

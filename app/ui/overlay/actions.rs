@@ -14,7 +14,7 @@ use super::lifecycle::{hide_transcription_overlay, schedule_auto_hide};
 #[cfg(test)]
 use super::state::TranscriptionOverlayState;
 use super::state::{
-    AUTO_HIDE_GENERATION, AUTO_HIDE_PENDING, OVERLAY_STATE, OverlaySnapshot,
+    AUTO_HIDE_GENERATION, AUTO_HIDE_PENDING, FormatPhase, OVERLAY_STATE, OverlaySnapshot,
     action_text_for_contract,
 };
 use super::widgets::{set_action_buttons_visible_unlocked, set_status_message_unlocked};
@@ -119,7 +119,11 @@ extern "C" fn on_copy_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
     }
 
     info!("Copied transcript ({} chars)", text.len());
-    hide_transcription_overlay();
+    if snap.format_phase == FormatPhase::Formatted {
+        set_status_message_unlocked(&snap, "Copied", false);
+    } else {
+        hide_transcription_overlay();
+    }
 }
 
 /// Handler: Agent = hand the whole transcript to the Agent (Emil).
@@ -129,7 +133,12 @@ extern "C" fn on_copy_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
 /// and commits the current segment, then augments. ADR 2026-05-28 Faza 1 renames
 /// the former "Augment" action to "Agent" — same handoff, clearer contract.
 extern "C" fn on_agent_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
-    let (text, decision_mode, _) = current_action_text_snapshot();
+    let (text, decision_mode, snap) = current_action_text_snapshot();
+    if snap.format_phase == FormatPhase::Formatted {
+        hide_transcription_overlay();
+        return;
+    }
+
     if text.trim().is_empty() {
         return;
     }
@@ -144,14 +153,30 @@ extern "C" fn on_agent_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
     hide_transcription_overlay();
 }
 
-/// Handler: Format = run AI formatting on the decision transcript, then paste.
+/// Handler: Format = run AI formatting on the decision transcript in-place.
 ///
 /// ADR 2026-05-28 Faza 1: formatting is a post-recording CHOICE, not something the
-/// dictation does mid-stream. The async format + paste runs off the main thread via
-/// the controller; the overlay closes immediately.
+/// dictation does mid-stream. Revision 2026-06-11 keeps the overlay open: Format
+/// enters a disabled "Formatting..." phase, then returns editable text for Paste.
 extern "C" fn on_format_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
-    crate::controller::request_format_and_paste();
-    hide_transcription_overlay();
+    let (text, _, snap) = current_action_text_snapshot();
+    if text.trim().is_empty() {
+        return;
+    }
+
+    match snap.format_phase {
+        FormatPhase::Formatting => {}
+        FormatPhase::Formatted => {
+            crate::controller::request_overlay_paste(text);
+            set_status_message_unlocked(&snap, "Pasted", false);
+        }
+        FormatPhase::Idle => {
+            crate::ui::overlay::enter_overlay_formatting();
+            crate::controller::request_format_for_overlay(text, |formatted_text| {
+                crate::ui::overlay::apply_overlay_format_result(&formatted_text);
+            });
+        }
+    }
 }
 
 /// Handler: Commit segment = save WAV + transcript + Quick Notes WITHOUT
@@ -177,14 +202,20 @@ extern "C" fn on_mouse_entered(_this: &Object, _cmd: Sel, _sender: Id) {
 }
 
 extern "C" fn on_mouse_exited(_this: &Object, _cmd: Sel, _sender: Id) {
-    let (decision_mode, snap) = {
+    let (decision_mode, format_phase, snap) = {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.hover_active = false;
-        (state.decision_mode, OverlaySnapshot::from_state(&state))
+        (
+            state.decision_mode,
+            state.format_phase,
+            OverlaySnapshot::from_state(&state),
+        )
     }; // Lock dropped before AppKit calls.
     if decision_mode {
         set_action_buttons_visible_unlocked(&snap, true);
-        schedule_auto_hide();
+        if format_phase == FormatPhase::Idle {
+            schedule_auto_hide();
+        }
     } else {
         set_action_buttons_visible_unlocked(&snap, false);
     }

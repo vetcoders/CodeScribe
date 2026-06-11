@@ -39,10 +39,11 @@ mod window;
 
 pub use self::actions::current_segment_text;
 pub use self::lifecycle::{
-    append_transcription_delta, clear_transcription_text, enter_decision_mode,
-    enter_processing_mode, enter_recording_mode, get_transcription_text,
-    hide_transcription_overlay, is_transcription_overlay_visible, schedule_auto_hide,
-    set_transcription_action_contract, set_transcription_text, update_transcription_status,
+    append_transcription_delta, apply_overlay_format_result, clear_transcription_text,
+    enter_decision_mode, enter_overlay_formatting, enter_processing_mode, enter_recording_mode,
+    get_transcription_text, hide_transcription_overlay, is_transcription_overlay_visible,
+    schedule_auto_hide, set_transcription_action_contract, set_transcription_text,
+    update_transcription_status,
 };
 pub use self::state::{TranscriptionActionContractMode, TranscriptionOverlayConfig};
 pub use self::window::show_transcription_overlay;

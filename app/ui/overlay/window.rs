@@ -27,7 +27,7 @@ use super::layout::{
     resize_overlay_unlocked,
 };
 use super::state::{
-    AUTO_HIDE_GENERATION, AUTO_HIDE_PENDING, OVERLAY_STATE, OverlaySnapshot,
+    AUTO_HIDE_GENERATION, AUTO_HIDE_PENDING, FormatPhase, OVERLAY_STATE, OverlaySnapshot,
     TranscriptionActionContractMode,
 };
 use super::widgets::{
@@ -87,6 +87,7 @@ fn show_transcription_overlay_impl() {
         state.raw_text.clear();
         state.last_pass_text.clear();
         state.action_contract_mode = TranscriptionActionContractMode::Raw;
+        state.format_phase = FormatPhase::Idle;
         drop(state); // Release lock BEFORE heavy AppKit widget creation.
 
         // Get classes
@@ -306,7 +307,12 @@ fn show_transcription_overlay_impl() {
                 &CGPoint::new(OVERLAY_PADDING, info_y),
                 &CGSize::new(window_width - OVERLAY_PADDING * 2.0, OVERLAY_INFO_HEIGHT),
             ),
-            text: decision_hint_text(TranscriptionActionContractMode::Raw, "", true),
+            text: decision_hint_text(
+                TranscriptionActionContractMode::Raw,
+                FormatPhase::Idle,
+                "",
+                true,
+            ),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             bold: false,
             text_color: ui_colors::overlay_hint_text(),
@@ -457,9 +463,12 @@ fn show_transcription_overlay_impl() {
         );
         set_tooltip(
             agent_button,
-            augment_action_tooltip(TranscriptionActionContractMode::Raw),
+            augment_action_tooltip(TranscriptionActionContractMode::Raw, FormatPhase::Idle),
         );
-        set_tooltip(format_button, "Format the transcript with AI, then paste");
+        set_tooltip(
+            format_button,
+            "Format the transcript with AI in the overlay",
+        );
         set_tooltip(commit_button, "Stop recording and enter decision mode");
 
         button_set_action(format_button, action_handler, sel!(onFormatTranscript:));
