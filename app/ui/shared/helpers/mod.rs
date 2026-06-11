@@ -63,6 +63,10 @@ pub mod ui_tokens {
 
     pub const HEADER_HEIGHT: f64 = 44.0;
     pub const FOOTER_HEIGHT: f64 = 40.0;
+    /// Slim brand-only footer for the voice-chat window: just tall enough for
+    /// the watermark label, so chat content scrolls beneath the input bar to
+    /// (almost) the window edge instead of clipping high above it.
+    pub const CHAT_FOOTER_HEIGHT: f64 = 20.0;
     pub const EDGE_PADDING: f64 = 16.0;
     pub const EDGE_PADDING_TIGHT: f64 = 12.0;
 

@@ -283,7 +283,10 @@ fn show_voice_chat_overlay_impl() {
         let content_pad = ui_tokens::EDGE_PADDING;
 
         let header_height = ui_tokens::HEADER_HEIGHT_COMPACT;
-        let footer_height = ui_tokens::FOOTER_HEIGHT;
+        // Slim, brand-only footer: the transcript filter lives in the sidebar
+        // column, so the chat pane (and the scroll-under-input effect) reaches
+        // almost to the window edge instead of dying on a 40pt dead strip.
+        let footer_height = ui_tokens::CHAT_FOOTER_HEIGHT;
         // Start compact; grows dynamically as the user types/pastes more content.
         // Agent input starts compact and can grow with content (see `resize_agent_input_locked`).
         let agent_input_height = ui_tokens::AGENT_INPUT_HEIGHT;
@@ -737,11 +740,16 @@ fn show_voice_chat_overlay_impl() {
         add_subview(header_bg, header_controls);
 
         let inner_pad = ui_tokens::EDGE_PADDING_TIGHT;
+        // The transcript filter sits at the bottom of the sidebar column (it
+        // filters the drawer, and its width tracks the split divider); the
+        // drawer scroll starts above it.
+        let search_field_height = 24.0;
+        let drawer_bottom_inset = inner_pad + search_field_height + 8.0;
         let drawer_frame = CGRect::new(
-            &CGPoint::new(inner_pad, inner_pad),
+            &CGPoint::new(inner_pad, drawer_bottom_inset),
             &CGSize::new(
                 (content_frame.size.width - inner_pad * 2.0).max(0.0),
-                (content_frame.size.height - inner_pad * 2.0).max(0.0),
+                (content_frame.size.height - drawer_bottom_inset - inner_pad).max(0.0),
             ),
         );
 
@@ -827,10 +835,10 @@ fn show_voice_chat_overlay_impl() {
         let _: () = msg_send![agent_scroll, setDocumentView: agent_container];
         add_subview(content_view, agent_scroll);
 
-        // Drawer footer (search)
-        let search_x = content_frame.origin.x;
-        let search_w = content_frame.size.width.max(160.0);
-        let footer_base_y = content_bounds.origin.y;
+        // Drawer footer (search) — lives inside the sidebar column so its
+        // width tracks the split divider and it collapses with the drawer.
+        let search_x = inner_pad;
+        let search_w = (sidebar_frame.size.width - inner_pad * 2.0).max(160.0);
 
         // Search label removed: NSSearchField.setPlaceholderString("Filter transcripts")
         // on the field below already renders the same text; the redundant label
@@ -839,8 +847,8 @@ fn show_voice_chat_overlay_impl() {
         let ns_search = Class::get("NSSearchField").unwrap();
         let search_field: Id = msg_send![ns_search, alloc];
         let search_frame = CGRect::new(
-            &CGPoint::new(search_x, footer_base_y + 12.0),
-            &CGSize::new(search_w, 24.0),
+            &CGPoint::new(search_x, inner_pad),
+            &CGSize::new(search_w, search_field_height),
         );
         let search_field: Id = msg_send![search_field, initWithFrame: search_frame];
         let placeholder = ns_string("Filter transcripts");
@@ -866,7 +874,7 @@ fn show_voice_chat_overlay_impl() {
             setAutoresizingMask: NSVIEW_WIDTH_SIZABLE | NSVIEW_MAX_Y_MARGIN
         ];
         set_focus_ring(search_field);
-        add_subview(glass_content_view, search_field);
+        add_subview(sidebar_view, search_field);
 
         let footer_brand_w = ui_tokens::CHAT_TITLE_LABEL_WIDTH;
         let footer_brand_h = 16.0;
@@ -1258,5 +1266,37 @@ mod tests {
         assert_eq!(inset, 66.0);
         assert_eq!(inset, old_frame_bottom);
         assert_eq!(chat_scroll_inset_above_input(-100.0, 12.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn chat_pane_bottom_band_is_slim() {
+        // The dead strip below the chat pane (footer + gap) must stay a slim
+        // watermark line, not the full drawer footer — otherwise content
+        // scrolling under the input bar clips visibly far above the window
+        // edge (Image #6/#7).
+        let band = crate::ui_helpers::ui_tokens::CHAT_FOOTER_HEIGHT
+            + crate::ui_helpers::ui_tokens::CONTENT_GAP;
+        assert!(band <= 24.0, "bottom band grew back to {band}pt");
+        assert!(
+            crate::ui_helpers::ui_tokens::CHAT_FOOTER_HEIGHT
+                < crate::ui_helpers::ui_tokens::FOOTER_HEIGHT
+        );
+
+        // Pane height gained exactly the footer slimming delta.
+        let tall = chat_content_height_under_header(
+            720.0,
+            crate::ui_helpers::ui_tokens::FOOTER_HEIGHT,
+            crate::ui_helpers::ui_tokens::CONTENT_GAP,
+        );
+        let slim = chat_content_height_under_header(
+            720.0,
+            crate::ui_helpers::ui_tokens::CHAT_FOOTER_HEIGHT,
+            crate::ui_helpers::ui_tokens::CONTENT_GAP,
+        );
+        assert_eq!(
+            slim - tall,
+            crate::ui_helpers::ui_tokens::FOOTER_HEIGHT
+                - crate::ui_helpers::ui_tokens::CHAT_FOOTER_HEIGHT
+        );
     }
 }
