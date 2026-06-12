@@ -25,6 +25,7 @@ use image::imageops::FilterType;
 use serde_json::{Value, json};
 
 const MAX_SCREENSHOT_EDGE: u32 = 1568;
+const MAX_SCREENSHOT_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 enum CaptureRegion {
@@ -81,16 +82,26 @@ fn capture_and_encode(input: Value) -> Result<Vec<u8>> {
     let region = parse_region(&input)?;
     let image = capture_image(region)?;
 
-    if longest_edge(&image)? <= MAX_SCREENSHOT_EDGE {
-        return encode_png(&image);
+    let encoded = encode_png(&image)?;
+    if longest_edge(&image)? <= MAX_SCREENSHOT_EDGE && encoded.len() <= MAX_SCREENSHOT_BYTES {
+        return Ok(encoded);
     }
 
     let rgba = cgimage_to_rgba(&image)?;
-    let (target_width, target_height) = scaled_dimensions(rgba.width(), rgba.height());
-    let resized = image::imageops::resize(&rgba, target_width, target_height, FilterType::Lanczos3);
-    let cg_image = rgba_to_cgimage(&resized)?;
+    let (mut target_width, mut target_height) = scaled_dimensions(rgba.width(), rgba.height());
+    let mut encoded = encode_resized_png(&rgba, target_width, target_height)?;
 
-    encode_png(&cg_image)
+    while encoded.len() > MAX_SCREENSHOT_BYTES && target_width > 1 && target_height > 1 {
+        (target_width, target_height) = shrink_dimensions_for_byte_cap(
+            target_width,
+            target_height,
+            encoded.len(),
+            MAX_SCREENSHOT_BYTES,
+        );
+        encoded = encode_resized_png(&rgba, target_width, target_height)?;
+    }
+
+    Ok(encoded)
 }
 
 fn parse_region(input: &Value) -> Result<CaptureRegion> {
@@ -193,6 +204,37 @@ fn scaled_dimensions(width: u32, height: u32) -> (u32, u32) {
     let scaled_width = (f64::from(width) * scale).round().max(1.0) as u32;
     let scaled_height = (f64::from(height) * scale).round().max(1.0) as u32;
     (scaled_width, scaled_height)
+}
+
+fn shrink_dimensions_for_byte_cap(
+    width: u32,
+    height: u32,
+    current_bytes: usize,
+    max_bytes: usize,
+) -> (u32, u32) {
+    if current_bytes <= max_bytes || width <= 1 || height <= 1 {
+        return (width, height);
+    }
+
+    let byte_ratio = max_bytes.max(1) as f64 / current_bytes.max(1) as f64;
+    let scale = byte_ratio.sqrt().clamp(0.5, 0.9);
+    let scaled_width = (f64::from(width) * scale).floor().max(1.0) as u32;
+    let scaled_height = (f64::from(height) * scale).floor().max(1.0) as u32;
+
+    if scaled_width == width && scaled_height == height {
+        (
+            width.saturating_sub(1).max(1),
+            height.saturating_sub(1).max(1),
+        )
+    } else {
+        (scaled_width, scaled_height)
+    }
+}
+
+fn encode_resized_png(image: &RgbaImage, width: u32, height: u32) -> Result<Vec<u8>> {
+    let resized = image::imageops::resize(image, width, height, FilterType::Lanczos3);
+    let cg_image = rgba_to_cgimage(&resized)?;
+    encode_png(&cg_image)
 }
 
 fn cgimage_to_rgba(image: &CGImage) -> Result<RgbaImage> {
@@ -356,5 +398,15 @@ mod tests {
         let (w, h) = scaled_dimensions(4000, 2000);
         assert_eq!(w, 1568);
         assert_eq!(h, 784);
+    }
+
+    #[test]
+    fn shrink_dimensions_for_byte_cap_reduces_large_pngs_progressively() {
+        let (w, h) = shrink_dimensions_for_byte_cap(1568, 784, 10 * 1024 * 1024, 5 * 1024 * 1024);
+
+        assert!(w < 1568);
+        assert!(h < 784);
+        assert!(w >= 1);
+        assert!(h >= 1);
     }
 }
