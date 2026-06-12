@@ -437,8 +437,10 @@ fn tool_result_image_content(content: &[ContentBlock]) -> Result<Vec<Value>> {
 }
 
 fn image_asset_input_content(asset: &ImageAsset) -> Result<Value> {
-    let data = std::fs::read(&asset.path)
-        .with_context(|| format!("Failed to read image asset {}", asset.path.display()))?;
+    // Tainted-path guard: asset paths ride through conversation state, so the
+    // read goes through the store, which honors only the file name re-rooted
+    // under the canonical assets dir.
+    let data = codescribe_core::agent::AgentAssetStore::read_image(&asset.path)?;
     Ok(json!({
         "type": "input_image",
         "image_url": to_data_uri(&data, &asset.media_type)

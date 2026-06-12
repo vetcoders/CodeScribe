@@ -36,6 +36,36 @@ impl AgentAssetStore {
             size_bytes: u64::try_from(data.len()).expect("usize length should fit in u64"),
         })
     }
+
+    /// Read an asset previously stored by `save_image`. Asset paths travel
+    /// through conversation state, so the requested path is never handed to
+    /// the filesystem: only its file name is matched against the actual
+    /// entries of the canonical assets dir, and the read uses the enumerated
+    /// entry's own path. Directory components (including any `..`) cannot
+    /// influence what gets opened.
+    pub fn read_image(path: &Path) -> Result<Vec<u8>> {
+        let requested = path
+            .file_name()
+            .with_context(|| format!("Asset path has no file name: {}", path.display()))?
+            .to_owned();
+        let dir = Self::assets_dir();
+        let entries = std::fs::read_dir(&dir)
+            .with_context(|| format!("Failed to list agent assets dir {}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.context("Failed to enumerate agent assets dir")?;
+            if entry.file_name() == requested {
+                let contained = entry.path();
+                return std::fs::read(&contained).with_context(|| {
+                    format!("Failed to read image asset {}", contained.display())
+                });
+            }
+        }
+        anyhow::bail!(
+            "Unknown image asset: {} (not present in {})",
+            requested.to_string_lossy(),
+            dir.display()
+        )
+    }
 }
 
 fn normalize_media_type(media_type: &str) -> String {
@@ -83,5 +113,35 @@ mod tests {
         assert_eq!(extension_for_media_type("image/png"), "png");
         assert_eq!(extension_for_media_type(""), "png");
         assert_eq!(extension_for_media_type("image/jpeg"), "jpg");
+    }
+
+    #[test]
+    fn read_image_strips_directory_components() {
+        // A traversal-shaped path must never reach the attacker-chosen
+        // location: only the leaf is matched against real assets-dir
+        // entries, so /etc/passwd is unreachable by construction.
+        let err = AgentAssetStore::read_image(Path::new("../../etc/passwd"))
+            .expect_err("uncontained read must not succeed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unknown image asset: passwd") || msg.contains("assets dir"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn read_image_roundtrips_saved_asset() {
+        let asset = AgentAssetStore::save_image(b"png-bytes", "image/png")
+            .expect("save_image should succeed");
+        let data = AgentAssetStore::read_image(&asset.path).expect("saved asset must be readable");
+        assert_eq!(data, b"png-bytes");
+        std::fs::remove_file(&asset.path).ok();
+    }
+
+    #[test]
+    fn read_image_rejects_paths_without_file_name() {
+        let err = AgentAssetStore::read_image(Path::new("/tmp/.."))
+            .expect_err("path without file name must be rejected");
+        assert!(err.to_string().contains("no file name"));
     }
 }
