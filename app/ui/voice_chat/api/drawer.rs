@@ -30,12 +30,12 @@ pub fn refresh_drawer() {
 
 pub fn drawer_row_action_layout(row_width: f64) -> DrawerRowActionLayout {
     let pad = ui_tokens::DRAWER_ROW_PAD_X;
-    let title_x = pad + ui_tokens::DRAWER_BADGE_WIDTH + 8.0;
+    let title_x = pad + ui_tokens::DRAWER_BADGE_WIDTH + 7.0;
     let button_size = ui_tokens::DRAWER_ACTION_BUTTON_SIZE;
     let button_gap = ui_tokens::DRAWER_ACTION_BUTTON_GAP;
     let actions_width = button_size * 4.0 + button_gap * 3.0;
-    let actions_x = (row_width - pad - actions_width).max(title_x);
-    let title_width = (actions_x - title_x - pad).max(24.0);
+    let actions_x = (row_width - ui_tokens::DRAWER_ACTION_RIGHT_INSET - actions_width).max(title_x);
+    let title_width = (actions_x - title_x - 8.0).max(24.0);
 
     DrawerRowActionLayout {
         title_x,
@@ -618,7 +618,7 @@ pub fn create_drawer_row(
             let border_cg: Id = msg_send![border, CGColor];
             let _: () = msg_send![layer, setBorderColor: border_cg];
             let _: () = msg_send![layer, setBorderWidth: ui_tokens::SURFACE_BORDER_WIDTH];
-            let _: () = msg_send![layer, setCornerRadius: ui_tokens::SURFACE_RADIUS];
+            let _: () = msg_send![layer, setCornerRadius: ui_tokens::DRAWER_ROW_RADIUS];
             apply_tafla_surface(layer, true);
         }
 
@@ -627,7 +627,7 @@ pub fn create_drawer_row(
         let pad = ui_tokens::DRAWER_ROW_PAD_X;
         let badge = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(pad, frame.size.height - 26.0),
+                &CGPoint::new(pad, frame.size.height - 23.0),
                 &CGSize::new(
                     ui_tokens::DRAWER_BADGE_WIDTH,
                     ui_tokens::DRAWER_BADGE_HEIGHT,
@@ -637,15 +637,14 @@ pub fn create_drawer_row(
             font_size: ui_tokens::MICRO_FONT_SIZE,
             bold: true,
             text_color: color_label(),
-            background_color: Some(ui_colors::accent_tint(0.18)),
+            background_color: Some(ui_colors::accent_tint(0.12)),
             selectable: false,
             editable: false,
         });
         let _: () = msg_send![badge, setWantsLayer: true];
         let badge_layer: Id = msg_send![badge, layer];
         if !badge_layer.is_null() {
-            let _: () =
-                msg_send![badge_layer, setCornerRadius: ui_tokens::DRAWER_BADGE_HEIGHT / 2.0];
+            let _: () = msg_send![badge_layer, setCornerRadius: ui_tokens::DRAWER_ROW_RADIUS - 2.0];
             let _: () = msg_send![badge_layer, setMasksToBounds: true];
         }
         add_subview(row, badge);
@@ -655,8 +654,8 @@ pub fn create_drawer_row(
         let text_w = row_action_layout.title_width;
         let title = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(text_x, frame.size.height - 27.0),
-                &CGSize::new(text_w, 18.0),
+                &CGPoint::new(text_x, frame.size.height - 24.0),
+                &CGSize::new(text_w, 17.0),
             ),
             text: drawer_entry_title(entry),
             font_size: ui_tokens::BODY_FONT_SIZE,
@@ -677,7 +676,7 @@ pub fn create_drawer_row(
         let preview = entry.preview.clone();
         let preview_field = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(pad, frame.size.height - 44.0),
+                &CGPoint::new(pad, frame.size.height - 40.0),
                 &CGSize::new(frame.size.width - pad * 2.0, 15.0),
             ),
             text: preview.clone(),
@@ -695,7 +694,7 @@ pub fn create_drawer_row(
         let subtitle = drawer_entry_subtitle(entry);
         let subtitle_field = create_label(LabelConfig {
             frame: CGRect::new(
-                &CGPoint::new(pad, 8.0),
+                &CGPoint::new(pad, 6.0),
                 &CGSize::new(frame.size.width - pad * 2.0, 14.0),
             ),
             text: subtitle,
@@ -719,7 +718,7 @@ pub fn create_drawer_row(
         let button_size = ui_tokens::DRAWER_ACTION_BUTTON_SIZE;
         let button_gap = ui_tokens::DRAWER_ACTION_BUTTON_GAP;
         let actions_frame = core_graphics::geometry::CGRect::new(
-            &CGPoint::new(row_action_layout.actions_x, frame.size.height - 36.0),
+            &CGPoint::new(row_action_layout.actions_x, frame.size.height - 31.0),
             &core_graphics::geometry::CGSize::new(row_action_layout.actions_width, button_size),
         );
         let actions_container: Id = msg_send![actions_container, initWithFrame: actions_frame];
@@ -749,6 +748,11 @@ pub fn create_drawer_row(
             );
             let _ = set_button_symbol(button, button_symbols[idx]);
             crate::ui_helpers::style_toolbar_icon_button(button);
+            let supports_image_scaling: bool =
+                msg_send![button, respondsToSelector: sel!(setImageScaling:)];
+            if supports_image_scaling {
+                let _: () = msg_send![button, setImageScaling: 2_isize];
+            }
             let supports_control_size: bool =
                 msg_send![button, respondsToSelector: sel!(setControlSize:)];
             if supports_control_size {
@@ -1091,13 +1095,14 @@ pub fn format_token_count(tokens: u64) -> String {
 }
 
 pub fn drawer_entry_title(entry: &DrawerEntry) -> String {
-    if let Some(title) = entry
+    if let Some(display_title) = entry
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .and_then(drawer_display_title_from_candidate)
     {
-        return normalize_preview(title, 64);
+        return display_title;
     }
     let fallback = normalize_preview(&entry.preview, 64);
     if fallback.trim().is_empty() {
@@ -1105,6 +1110,17 @@ pub fn drawer_entry_title(entry: &DrawerEntry) -> String {
     } else {
         fallback
     }
+}
+
+fn drawer_display_title_from_candidate(title: &str) -> Option<String> {
+    if title.starts_with('/') {
+        return std::path::Path::new(title)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| normalize_preview(name, 64))
+            .filter(|name| !name.trim().is_empty());
+    }
+    Some(normalize_preview(title, 64))
 }
 
 fn drawer_badge_label(entry: &DrawerEntry) -> &'static str {

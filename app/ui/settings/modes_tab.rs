@@ -26,7 +26,7 @@ pub(super) unsafe fn build_modes_shortcuts_tab(
 
         let title = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 24.0)),
-            text: "Modes & Shortcuts".to_string(),
+            text: "Keys".to_string(),
             font_size: ui_tokens::TITLE_FONT_SIZE,
             bold: true,
             text_color: primary,
@@ -40,9 +40,8 @@ pub(super) unsafe fn build_modes_shortcuts_tab(
 
         let subtitle = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
-            text:
-                "Mode-first shortcut model. Each mode has one binding you can customize or disable."
-                    .to_string(),
+            text: "Mode hotkeys, trigger timing, and AI provider keys live together here."
+                .to_string(),
             font_size: ui_tokens::MICRO_FONT_SIZE,
             text_color: secondary,
             ..Default::default()
@@ -50,7 +49,18 @@ pub(super) unsafe fn build_modes_shortcuts_tab(
         add_subview(container, subtitle);
         y -= 16.0 + gap;
 
-        add_settings_group_card(container, pad - 10.0, y + 28.0, content_w + 20.0, 334.0);
+        add_settings_group_card(container, pad - 10.0, y + 28.0, content_w + 20.0, 358.0);
+        let bindings_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Mode Bindings".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, bindings_header);
+        y -= 18.0 + gap;
+
         let usage_hint = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 28.0)),
             text: "Hold records while pressed. Double-tap records hands-free; repeat the gesture to stop.".to_string(),

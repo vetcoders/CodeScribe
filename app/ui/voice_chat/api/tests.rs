@@ -364,6 +364,21 @@ fn drawer_entry_title_prefers_thread_title_then_preview() {
 }
 
 #[test]
+fn drawer_entry_title_compacts_absolute_path_titles() {
+    let mut entry = sample_drawer_entry(
+        "thread.md",
+        "preview fallback text",
+        TranscriptionMode::Assistive,
+        true,
+        false,
+    );
+    entry.title =
+        Some("/Users/maciejgad/Library/Application Support/CodeScribe/thread.json".to_string());
+
+    assert_eq!(drawer_entry_title(&entry), "thread.json");
+}
+
+#[test]
 fn drawer_row_action_layout_reserves_title_truncation_space() {
     let layout = drawer_row_action_layout(280.0);
 

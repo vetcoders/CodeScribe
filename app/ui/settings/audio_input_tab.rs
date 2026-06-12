@@ -48,7 +48,29 @@ pub(super) unsafe fn build_audio_input_tab(
         add_subview(container, subtitle);
         y -= 16.0 + gap;
 
-        add_settings_group_card(container, pad - 10.0, y + 28.0, content_w + 20.0, 244.0);
+        add_settings_group_card(container, pad - 10.0, y + 28.0, content_w + 20.0, 284.0);
+        let capture_header = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 18.0)),
+            text: "Capture Defaults".to_string(),
+            font_size: ui_tokens::SMALL_FONT_SIZE,
+            bold: true,
+            text_color: primary,
+            ..Default::default()
+        });
+        add_subview(container, capture_header);
+        y -= 18.0 + gap;
+
+        let capture_hint = create_label(LabelConfig {
+            frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(content_w, 16.0)),
+            text: "Language, capture feedback, overlay visibility, and agent send behavior."
+                .to_string(),
+            font_size: ui_tokens::MICRO_FONT_SIZE,
+            text_color: secondary,
+            ..Default::default()
+        });
+        add_subview(container, capture_hint);
+        y -= 16.0 + gap;
+
         // Language dropdown
         let lang_label = create_label(LabelConfig {
             frame: CGRect::new(&CGPoint::new(pad, y), &CGSize::new(130.0, 18.0)),
