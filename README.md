@@ -440,7 +440,18 @@ See [`docs/BACKLOG.md`](docs/BACKLOG.md) for the working backlog and [`docs/ARCH
 
 ## License
 
-Apache License 2.0
+CodeScribe is licensed under the Functional Source License 1.1, ALv2 Future
+License (FSL-1.1-ALv2).
+
+This is a Fair Source / source-available license while the current FSL terms
+apply. You may read, fork, build, and modify the source for permitted purposes
+including personal use, education, research, and professional services.
+Competing Use is not permitted: do not make CodeScribe available as a
+commercial product or service that substitutes for CodeScribe.
+
+Each released version automatically converts to Apache-2.0 two years after the
+date we make that version available. See [`LICENSE`](LICENSE) and
+<https://fsl.software> for the full terms.
 
 ---
 
