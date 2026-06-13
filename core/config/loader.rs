@@ -1041,6 +1041,25 @@ mod tests {
         }
     }
 
+    struct TestEnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl TestEnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            remove_env_for_test(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            restore_env_for_test(self.key, self.previous.take());
+        }
+    }
+
     fn setup_isolated_data_dir() -> TempDir {
         let tmp = TempDir::new().expect("tempdir");
         set_env_for_test("CODESCRIBE_DATA_DIR", tmp.path());
@@ -1103,6 +1122,7 @@ mod tests {
     #[serial]
     fn test_load_respects_transcription_overlay_enabled_from_settings_json() {
         let _tmp = setup_isolated_data_dir();
+        let _overlay_env = TestEnvGuard::unset("TRANSCRIPTION_OVERLAY_ENABLED");
 
         let mut settings = UserSettings::load();
         settings.transcription_overlay_enabled = Some(false);

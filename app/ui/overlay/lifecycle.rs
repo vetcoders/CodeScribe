@@ -26,7 +26,7 @@ use super::widgets::{
     set_action_buttons_visible_unlocked, set_auto_hide_hint_visible_unlocked,
     set_format_phase_ui_unlocked, set_recording_button_visible_unlocked,
     set_recording_status_unlocked, set_status_message_unlocked, set_text_view_editable_unlocked,
-    update_overlay_text_unlocked,
+    transcript_text_view_editable, update_overlay_text_unlocked,
 };
 use crate::ui_helpers::{Id, animate_fade, set_hidden};
 
@@ -148,7 +148,10 @@ pub fn set_transcription_action_contract(
 
         refresh_action_contract_ui_unlocked(&snap, mode_copy, decision_mode);
         set_format_phase_ui_unlocked(&snap, mode_copy);
-        set_text_view_editable_unlocked(&snap, decision_mode);
+        set_text_view_editable_unlocked(
+            &snap,
+            transcript_text_view_editable(decision_mode, snap.format_phase),
+        );
         update_overlay_text_unlocked(snap.text_view, &visible_text);
         let new_h = resize_overlay_unlocked(&snap);
         {
@@ -252,7 +255,7 @@ pub(super) fn should_auto_hide(expected_generation: u64) -> bool {
 
     let hovered = {
         let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if state.format_phase != FormatPhase::Idle {
+        if state.format_phase == FormatPhase::Formatting {
             return false;
         }
         state.hover_active
@@ -294,6 +297,7 @@ pub fn apply_overlay_format_result(formatted_text: &str) {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.accumulated_text = formatted_text.clone();
             state.last_pass_text = formatted_text;
+            state.decision_mode = true;
             state.action_contract_mode = TranscriptionActionContractMode::AiFormat;
             state.format_phase = FormatPhase::Formatted;
             state.display_status = "Formatted".to_string();
@@ -317,6 +321,7 @@ pub fn apply_overlay_format_result(formatted_text: &str) {
             let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
             state.last_applied_height = new_h;
         }
+        schedule_auto_hide();
     });
 }
 
@@ -339,7 +344,10 @@ pub fn enter_decision_mode() {
         set_format_phase_ui_unlocked(&snap, mode);
         set_recording_button_visible_unlocked(&snap, false);
         set_recording_status_unlocked(&snap, false);
-        set_text_view_editable_unlocked(&snap, true);
+        set_text_view_editable_unlocked(
+            &snap,
+            transcript_text_view_editable(true, snap.format_phase),
+        );
     });
 }
 

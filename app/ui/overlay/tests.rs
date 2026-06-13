@@ -18,7 +18,7 @@ use super::state::{
     MAX_AUTO_HIDE_DELAY_SECS, MIN_AUTO_HIDE_DELAY_SECS, OVERLAY_STATE, action_text_for_contract,
     parse_auto_hide_delay_secs,
 };
-use super::widgets::overlay_status_label;
+use super::widgets::{decision_hint_text, overlay_status_label, transcript_text_view_editable};
 use super::{
     TranscriptionActionContractMode, TranscriptionOverlayConfig, current_segment_text,
     get_transcription_text, is_transcription_overlay_visible,
@@ -204,8 +204,8 @@ fn test_overlay_button_routes_are_distinct_from_settings_handler() {
         (
             OverlayActionButtonRole::FormatPaste,
             FormatPhase::Formatted,
-            OverlayButtonAction::Paste,
-            "onPasteTranscript:",
+            OverlayButtonAction::Copy,
+            "onCopyTranscript:",
         ),
         (
             OverlayActionButtonRole::Copy,
@@ -216,8 +216,8 @@ fn test_overlay_button_routes_are_distinct_from_settings_handler() {
         (
             OverlayActionButtonRole::Copy,
             FormatPhase::Formatted,
-            OverlayButtonAction::Copy,
-            "onCopyTranscript:",
+            OverlayButtonAction::Agent,
+            "onAgentTranscript:",
         ),
         (
             OverlayActionButtonRole::AgentClose,
@@ -246,16 +246,52 @@ fn test_overlay_button_routes_are_distinct_from_settings_handler() {
         assert_ne!(route.selector_name, SETTINGS_SELECTOR_NAME);
     }
 
-    assert_ne!(
-        overlay_button_route(OverlayActionButtonRole::FormatPaste, FormatPhase::Idle).selector_name,
-        overlay_button_route(OverlayActionButtonRole::FormatPaste, FormatPhase::Formatted)
-            .selector_name
+    assert_eq!(
+        [
+            overlay_button_route(OverlayActionButtonRole::FormatPaste, FormatPhase::Idle).action,
+            overlay_button_route(OverlayActionButtonRole::Copy, FormatPhase::Idle).action,
+            overlay_button_route(OverlayActionButtonRole::AgentClose, FormatPhase::Idle).action,
+        ],
+        [
+            OverlayButtonAction::Format,
+            OverlayButtonAction::Copy,
+            OverlayButtonAction::Agent
+        ]
     );
-    assert_ne!(
-        overlay_button_route(OverlayActionButtonRole::AgentClose, FormatPhase::Idle).selector_name,
-        overlay_button_route(OverlayActionButtonRole::AgentClose, FormatPhase::Formatted)
-            .selector_name
+    assert_eq!(
+        [
+            overlay_button_route(OverlayActionButtonRole::FormatPaste, FormatPhase::Formatted)
+                .action,
+            overlay_button_route(OverlayActionButtonRole::Copy, FormatPhase::Formatted).action,
+            overlay_button_route(OverlayActionButtonRole::AgentClose, FormatPhase::Formatted)
+                .action,
+        ],
+        [
+            OverlayButtonAction::Copy,
+            OverlayButtonAction::Agent,
+            OverlayButtonAction::Close
+        ]
     );
+    assert_eq!(
+        decision_hint_text(
+            TranscriptionActionContractMode::AiFormat,
+            FormatPhase::Formatted,
+            "",
+            true
+        ),
+        "Dictation overlay | FORMATTED | Copy · Agent · Close"
+    );
+}
+
+#[test]
+fn test_transcript_text_view_editability_policy() {
+    assert!(transcript_text_view_editable(true, FormatPhase::Idle));
+    assert!(!transcript_text_view_editable(false, FormatPhase::Idle));
+    assert!(!transcript_text_view_editable(
+        true,
+        FormatPhase::Formatting
+    ));
+    assert!(transcript_text_view_editable(false, FormatPhase::Formatted));
 }
 
 #[test]
@@ -342,7 +378,7 @@ fn test_auto_hide_hover_guard() {
 
 #[test]
 #[serial]
-fn test_auto_hide_skips_overlay_format_phases() {
+fn test_auto_hide_suppresses_only_in_progress_formatting() {
     reset_overlay_state_for_test();
     AUTO_HIDE_GENERATION.store(7, Ordering::SeqCst);
     AUTO_HIDE_PENDING.store(true, Ordering::SeqCst);
@@ -358,7 +394,7 @@ fn test_auto_hide_skips_overlay_format_phases() {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.format_phase = FormatPhase::Formatted;
     }
-    assert!(!should_auto_hide(7));
+    assert!(should_auto_hide(7));
 
     {
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());

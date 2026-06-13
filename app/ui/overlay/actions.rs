@@ -42,7 +42,6 @@ pub(super) enum OverlayActionButtonRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OverlayButtonAction {
     Format,
-    Paste,
     Copy,
     Agent,
     Close,
@@ -64,17 +63,23 @@ pub(super) fn overlay_button_route(
     match role {
         OverlayActionButtonRole::FormatPaste => match phase {
             FormatPhase::Formatted => OverlayButtonRoute {
-                action: OverlayButtonAction::Paste,
-                selector_name: "onPasteTranscript:",
+                action: OverlayButtonAction::Copy,
+                selector_name: "onCopyTranscript:",
             },
             FormatPhase::Idle | FormatPhase::Formatting => OverlayButtonRoute {
                 action: OverlayButtonAction::Format,
                 selector_name: "onFormatTranscript:",
             },
         },
-        OverlayActionButtonRole::Copy => OverlayButtonRoute {
-            action: OverlayButtonAction::Copy,
-            selector_name: "onCopyTranscript:",
+        OverlayActionButtonRole::Copy => match phase {
+            FormatPhase::Formatted => OverlayButtonRoute {
+                action: OverlayButtonAction::Agent,
+                selector_name: "onAgentTranscript:",
+            },
+            FormatPhase::Idle | FormatPhase::Formatting => OverlayButtonRoute {
+                action: OverlayButtonAction::Copy,
+                selector_name: "onCopyTranscript:",
+            },
         },
         OverlayActionButtonRole::AgentClose => match phase {
             FormatPhase::Formatted => OverlayButtonRoute {
@@ -98,7 +103,6 @@ pub(super) fn overlay_button_selector(role: OverlayActionButtonRole, phase: Form
     debug_assert_ne!(route.selector_name, SETTINGS_SELECTOR_NAME);
     match route.action {
         OverlayButtonAction::Format => sel!(onFormatTranscript:),
-        OverlayButtonAction::Paste => sel!(onPasteTranscript:),
         OverlayButtonAction::Copy => sel!(onCopyTranscript:),
         OverlayButtonAction::Agent => sel!(onAgentTranscript:),
         OverlayButtonAction::Close => sel!(onCloseTranscript:),
@@ -235,7 +239,8 @@ extern "C" fn on_agent_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
 ///
 /// ADR 2026-05-28 Faza 1: formatting is a post-recording CHOICE, not something the
 /// dictation does mid-stream. Revision 2026-06-11 keeps the overlay open: Format
-/// enters a disabled "Formatting..." phase, then returns editable text for Paste.
+/// enters a disabled "Formatting..." phase, then returns editable text for
+/// Copy / Agent / Close.
 extern "C" fn on_format_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
     let (text, _, snap) = current_action_text_snapshot();
     if text.trim().is_empty() {
@@ -245,7 +250,7 @@ extern "C" fn on_format_transcript(_this: &Object, _cmd: Sel, _sender: Id) {
     match snap.format_phase {
         FormatPhase::Formatting => {}
         FormatPhase::Formatted => {
-            on_paste_transcript(_this, _cmd, _sender);
+            on_copy_transcript(_this, _cmd, _sender);
         }
         FormatPhase::Idle => {
             crate::ui::overlay::enter_overlay_formatting();

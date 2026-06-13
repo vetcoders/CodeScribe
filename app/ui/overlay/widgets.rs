@@ -59,16 +59,16 @@ pub(super) fn copy_action_tooltip(mode: TranscriptionActionContractMode) -> &'st
 
 pub(super) fn augment_action_tooltip(
     mode: TranscriptionActionContractMode,
-    phase: FormatPhase,
+    _phase: FormatPhase,
 ) -> &'static str {
-    if phase == FormatPhase::Formatted {
-        return "Close the formatted transcript overlay";
-    }
-
     match mode {
         TranscriptionActionContractMode::Raw => "Open Agent overlay and hand off RAW transcript",
         TranscriptionActionContractMode::AiFormat => "Open Agent overlay and hand off transcript",
     }
+}
+
+fn close_action_tooltip() -> &'static str {
+    "Close the formatted transcript overlay"
 }
 
 /// Tooltip for the `[Format]` action (decision-mode). ADR 2026-05-28 Faza 1:
@@ -80,7 +80,15 @@ fn format_action_tooltip(phase: FormatPhase) -> &'static str {
     match phase {
         FormatPhase::Idle => "Format the transcript with AI in the overlay",
         FormatPhase::Formatting => "Formatting in progress",
-        FormatPhase::Formatted => "Paste the current editable transcript",
+        FormatPhase::Formatted => "Copy current editable transcript",
+    }
+}
+
+pub(super) fn transcript_text_view_editable(decision_mode: bool, phase: FormatPhase) -> bool {
+    match phase {
+        FormatPhase::Formatting => false,
+        FormatPhase::Formatted => true,
+        FormatPhase::Idle => decision_mode,
     }
 }
 
@@ -96,7 +104,7 @@ pub(super) fn decision_hint_text(
     let actions = match phase {
         FormatPhase::Idle => "Format · Copy · Agent",
         FormatPhase::Formatting => "Formatting...",
-        FormatPhase::Formatted => "Paste · Copy · Close",
+        FormatPhase::Formatted => "Copy · Agent · Close",
     };
     let base = match (display_status.is_empty(), phase) {
         (_, FormatPhase::Formatted) => format!("Dictation overlay | FORMATTED | {actions}"),
@@ -126,10 +134,12 @@ pub(super) fn refresh_action_contract_ui_unlocked(
     }
     if let Some(augment_ptr) = snap.augment_button {
         unsafe {
-            set_tooltip(
-                augment_ptr as Id,
-                augment_action_tooltip(mode, snap.format_phase),
-            );
+            let tooltip = if snap.format_phase == FormatPhase::Formatted {
+                close_action_tooltip()
+            } else {
+                augment_action_tooltip(mode, snap.format_phase)
+            };
+            set_tooltip(augment_ptr as Id, tooltip);
         }
     }
     if let Some(save_ptr) = snap.save_button {
@@ -190,7 +200,7 @@ pub(super) fn set_format_phase_ui_unlocked(
         let title = match snap.format_phase {
             FormatPhase::Idle => "Format",
             FormatPhase::Formatting => "Formatting...",
-            FormatPhase::Formatted => "Paste",
+            FormatPhase::Formatted => "Copy",
         };
         let button = format_ptr as Id;
         set_button_title(button, title);
@@ -208,6 +218,12 @@ pub(super) fn set_format_phase_ui_unlocked(
 
     if let Some(copy_ptr) = snap.copy_button {
         let button = copy_ptr as Id;
+        let title = if snap.format_phase == FormatPhase::Formatted {
+            "Agent"
+        } else {
+            "Copy"
+        };
+        set_button_title(button, title);
         set_button_enabled(button, snap.format_phase != FormatPhase::Formatting);
         set_button_route(
             button,
@@ -215,6 +231,14 @@ pub(super) fn set_format_phase_ui_unlocked(
             OverlayActionButtonRole::Copy,
             snap.format_phase,
         );
+        unsafe {
+            let tooltip = if snap.format_phase == FormatPhase::Formatted {
+                augment_action_tooltip(mode, snap.format_phase)
+            } else {
+                copy_action_tooltip(mode)
+            };
+            set_tooltip(button, tooltip);
+        }
     }
 
     if let Some(augment_ptr) = snap.augment_button {
@@ -233,7 +257,12 @@ pub(super) fn set_format_phase_ui_unlocked(
             snap.format_phase,
         );
         unsafe {
-            set_tooltip(button, augment_action_tooltip(mode, snap.format_phase));
+            let tooltip = if snap.format_phase == FormatPhase::Formatted {
+                close_action_tooltip()
+            } else {
+                augment_action_tooltip(mode, snap.format_phase)
+            };
+            set_tooltip(button, tooltip);
         }
     }
 }
