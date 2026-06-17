@@ -424,6 +424,18 @@ pub fn render_attachment_chips(state: &mut VoiceChatOverlayState) {
     render_attachment_chips_locked(state);
 }
 
+/// Rebuild the chip strip while `OVERLAY_STATE` is held by the caller.
+///
+/// P2.11 (run-loop safety): this is intentionally safe to call under the lock.
+/// It performs ONLY synchronous AppKit view mutations via `msg_send!`
+/// (clear arranged subviews, `create_chip_view`, `addArrangedSubview:`, frame
+/// reads/writes) plus `resize_agent_input_locked`. None of these — nor
+/// `create_chip_view` — spin a nested run-loop (no `runModal`/`NSAlert`/
+/// `beginSheet`/`nextEventMatchingMask`), so AppKit cannot re-enter a queued
+/// block that would try to re-`.lock()` the non-reentrant `OVERLAY_STATE` and
+/// self-deadlock. Verifier: grep for run-loop primitives in this file returns 0.
+/// If a future change adds a modal/sheet to the chip path, render OUTSIDE the
+/// lock (snapshot state, drop guard, then render) instead.
 pub fn render_attachment_chips_locked(state: &mut VoiceChatOverlayState) {
     unsafe {
         let Some(strip_ptr) = state.attachment_chip_strip else {
