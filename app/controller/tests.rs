@@ -1482,14 +1482,12 @@ fn test_quality_gate_catches_short_ai_rewrites_in_danger_zone() {
 #[test]
 fn test_delta_first_guards_block_full_rewrite_in_live_stream() {
     assert!(!should_allow_full_user_bubble_rewrite(false, false, true));
-    assert!(!should_allow_full_assistant_rewrite(false, true));
     assert!(!should_apply_transcription_action_contract(false, true));
 }
 
 #[test]
 fn test_delta_first_guards_allow_full_rewrite_offline() {
     assert!(should_allow_full_user_bubble_rewrite(false, false, false));
-    assert!(should_allow_full_assistant_rewrite(false, false));
     assert!(should_apply_transcription_action_contract(false, false));
 }
 

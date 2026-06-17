@@ -780,15 +780,6 @@ fn should_allow_full_user_bubble_rewrite(
     !skip_user_bubble && !append_mode && !live_stream_session
 }
 
-// FORGOTTEN-GEM(vc-prune 2026-06-10): rewrite-permission policy written and
-// unit-tested below, but never wired into the assistant rewrite path — zero
-// runtime callers. Wire it where full-rewrite is decided or delete it with
-// its tests; operator decision tracked in the forgotten-gems report.
-#[allow(dead_code)]
-fn should_allow_full_assistant_rewrite(append_mode: bool, live_stream_session: bool) -> bool {
-    !append_mode && !live_stream_session
-}
-
 fn should_apply_transcription_action_contract(assistive: bool, live_stream_session: bool) -> bool {
     !assistive && !live_stream_session
 }
