@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use codescribe_core::agent::{AgentAssetStore, ToolDefinition, ToolRegistry, ToolResultContent};
+
+use crate::os::permissions::{self, PermissionStatus};
 use core_foundation::base::{CFRelease, CFType, TCFType, kCFAllocatorDefault};
 use core_foundation::data::{CFData, CFDataCreateMutable, CFDataRef, CFMutableDataRef};
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -78,7 +80,30 @@ async fn handle_take_screenshot(input: Value) -> Vec<ToolResultContent> {
     }
 }
 
+const SCREEN_RECORDING_DENIED_MESSAGE: &str = "Screen Recording permission is required to capture screenshots. \
+Grant it in System Settings > Privacy & Security > Screen Recording, \
+then restart the app and try again.";
+
 fn capture_and_encode(input: Value) -> Result<Vec<u8>> {
+    let granted = permissions::check_screen_recording() == PermissionStatus::Granted;
+    capture_and_encode_with_permission(granted, input)
+}
+
+/// Capture and encode a screenshot, gated on Screen Recording permission.
+///
+/// When `granted` is false we refuse to call into `CGDisplay::screenshot` at all:
+/// a blind capture without permission returns an empty/desktop-only image that
+/// would silently leak a useless frame to the LLM. Instead we surface a clear,
+/// actionable error. The `granted` parameter is split out so the denied branch
+/// is unit-testable without touching real TCC state.
+fn capture_and_encode_with_permission(granted: bool, input: Value) -> Result<Vec<u8>> {
+    if !granted {
+        // Trigger a one-shot system prompt so the user can grant access for the
+        // next attempt; this is idempotent and never loops per-capture.
+        permissions::request_screen_recording();
+        bail!(SCREEN_RECORDING_DENIED_MESSAGE);
+    }
+
     let region = parse_region(&input)?;
     let image = capture_image(region)?;
 
@@ -408,5 +433,17 @@ mod tests {
         assert!(h < 784);
         assert!(w >= 1);
         assert!(h >= 1);
+    }
+
+    #[test]
+    fn capture_refuses_when_screen_recording_denied() {
+        // granted=false must short-circuit BEFORE any capture and return an
+        // actionable permission error instead of a blind/empty frame.
+        let error = capture_and_encode_with_permission(false, json!({"region": "full"}))
+            .expect_err("denied permission must yield an error");
+        assert!(
+            error.to_string().contains("Screen Recording permission"),
+            "error should mention Screen Recording permission, got: {error}"
+        );
     }
 }
