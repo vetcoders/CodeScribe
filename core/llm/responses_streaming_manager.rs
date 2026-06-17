@@ -681,6 +681,30 @@ async fn run_agent_stream(
             debug!("Agent SSE received event type={}", chunk.chunk_type);
             log_sse_lifecycle_event("Agent SSE", &chunk);
 
+            // P2.13: a failed/incomplete/cancelled terminal maps (below) to an
+            // `AgentEvent::Error`, but the chain reset is keyed on a dirty
+            // `ResponseDone`. Emit `ResponseDone { clean: false }` FIRST so both
+            // the session `thread_id` and the provider `previous_response_id`
+            // reset through the existing P1.6 machinery before the Error
+            // surfaces; otherwise the next turn resumes a poisoned chain.
+            if let Some(terminal_id) = dirty_terminal_response_id(&chunk, response_id.as_deref()) {
+                warn!(
+                    "Agent SSE dirty terminal (type={}); emitting ResponseDone(clean=false) to reset chain before surfacing error",
+                    chunk.chunk_type
+                );
+                sent_done_event = true;
+                if tx
+                    .send(AgentEvent::ResponseDone {
+                        response_id: terminal_id,
+                        clean: false,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+
             if let Some(event) =
                 parse_agent_event(&chunk, &mut tool_tracker, response_id.as_deref())
             {
@@ -932,6 +956,47 @@ fn parse_agent_event(
         "response.failed" => Some(response_failed_event(chunk)),
         "response.incomplete" => Some(response_incomplete_event(chunk)),
         _ => None,
+    }
+}
+
+/// P2.13: classify whether a chunk is a DIRTY terminal — i.e. a terminal
+/// (`response.completed` / `response.done` with a non-`completed` status, or a
+/// top-level `response.failed` / `response.incomplete`) whose final state is
+/// failed / incomplete / cancelled.
+///
+/// `parse_agent_event` maps these to an `AgentEvent::Error` so the failure is
+/// surfaced. But an Error alone does NOT reset the chain: the dirty-terminal
+/// reset machinery (P1.6) — both `AgentSession`'s `thread_id` reset and the
+/// provider forwarder's `previous_response_id` reset — is keyed on
+/// `ResponseDone { clean: false }`. So `run_agent_stream` must emit a
+/// `ResponseDone { clean: false }` BEFORE the Error for these terminals, which
+/// drives BOTH chains back to a clean reset through the existing, tested path.
+///
+/// Returns `Some(response_id)` (the terminal's resolved id, used only for the
+/// reset log) when the chunk is a dirty terminal, `None` otherwise.
+fn dirty_terminal_response_id(
+    chunk: &StreamChunk,
+    fallback_response_id: Option<&str>,
+) -> Option<Option<String>> {
+    let is_dirty = match chunk.chunk_type.as_str() {
+        "response.completed" | "response.done" => {
+            let status = chunk
+                .response
+                .as_ref()
+                .and_then(|response| response.status.as_deref());
+            matches!(
+                status,
+                Some("failed") | Some("incomplete") | Some("cancelled")
+            )
+        }
+        "response.failed" | "response.incomplete" => true,
+        _ => false,
+    };
+
+    if is_dirty {
+        Some(terminal_response_id(chunk, fallback_response_id))
+    } else {
+        None
     }
 }
 
@@ -1391,8 +1456,8 @@ fn extract_output_channels(output: &[StreamOutputItem]) -> (String, Option<Strin
 mod tests {
     use super::{
         AgentEvent, ResponsesStreamingManager, StreamCallbacks, StreamChunk, StreamOutputItem,
-        ToolCallTracker, apply_auth_headers, extract_output_channels, fallback_reasoning,
-        parse_agent_event, reasoning_content_available, validated_endpoint_url,
+        ToolCallTracker, apply_auth_headers, dirty_terminal_response_id, extract_output_channels,
+        fallback_reasoning, parse_agent_event, reasoning_content_available, validated_endpoint_url,
     };
     use reqwest::Client;
     use serde_json::json;
@@ -1862,6 +1927,124 @@ mod tests {
 
         let event = parse_agent_event(&chunk, &mut tracker, None).expect("expected Error event");
         assert!(matches!(event, AgentEvent::Error(_)));
+    }
+
+    /// P2.13: `dirty_terminal_response_id` classifies failed/incomplete/cancelled
+    /// terminals as dirty (so a `ResponseDone { clean: false }` is emitted to
+    /// reset both chains), and a `completed` terminal as NOT dirty.
+    #[test]
+    fn dirty_terminal_response_id_classifies_terminal_states() {
+        let failed: StreamChunk = serde_json::from_value(json!({
+            "type": "response.done",
+            "response": { "id": "resp_fail", "status": "failed" }
+        }))
+        .expect("valid failed chunk");
+        assert_eq!(
+            dirty_terminal_response_id(&failed, None),
+            Some(Some("resp_fail".to_string())),
+            "failed terminal must be dirty and carry its id"
+        );
+
+        let incomplete: StreamChunk = serde_json::from_value(json!({
+            "type": "response.incomplete",
+            "response": { "id": "resp_inc", "status": "incomplete" }
+        }))
+        .expect("valid incomplete chunk");
+        assert_eq!(
+            dirty_terminal_response_id(&incomplete, None),
+            Some(Some("resp_inc".to_string())),
+        );
+
+        let cancelled: StreamChunk = serde_json::from_value(json!({
+            "type": "response.done",
+            "response": { "id": "resp_cancel", "status": "cancelled" }
+        }))
+        .expect("valid cancelled chunk");
+        assert_eq!(
+            dirty_terminal_response_id(&cancelled, None),
+            Some(Some("resp_cancel".to_string())),
+        );
+
+        let completed: StreamChunk = serde_json::from_value(json!({
+            "type": "response.completed",
+            "response": { "id": "resp_ok", "status": "completed" }
+        }))
+        .expect("valid completed chunk");
+        assert_eq!(
+            dirty_terminal_response_id(&completed, None),
+            None,
+            "a clean completed terminal must NOT be classified as dirty"
+        );
+    }
+
+    /// P2.13 end-to-end (agent stream): a `response.failed` terminal arriving on
+    /// the agent SSE path must surface BOTH a dirty `ResponseDone { clean: false }`
+    /// (which drives the chain reset machinery in session + provider) AND the
+    /// `Error`, in that order.
+    #[tokio::test]
+    async fn agent_stream_failed_terminal_emits_dirty_responsedone_then_error() {
+        let mut server = mockito::Server::new_async().await;
+        let body = [
+            r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_e2e_fail"}}"#,
+            "",
+            r#"data: {"type":"response.failed","sequence_number":1,"response":{"id":"resp_e2e_fail","status":"failed","error":{"code":"server_error","message":"boom"}}}"#,
+            "",
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
+            .create_async()
+            .await;
+        let endpoint = format!("{}/v1/responses", server.url());
+        let client = Client::new();
+        let manager = ResponsesStreamingManager::new(
+            &client,
+            &endpoint,
+            "test-key",
+            StreamCallbacks {
+                assistant: None,
+                reasoning: None,
+            },
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        );
+
+        let mut rx = manager
+            .stream_agent(&json!({"model": "programmer", "stream": true}))
+            .await
+            .expect("agent stream should start");
+
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("first agent event should arrive")
+            .expect("first agent event should be present");
+        assert_eq!(
+            first,
+            AgentEvent::ResponseDone {
+                response_id: Some("resp_e2e_fail".to_string()),
+                clean: false,
+            },
+            "dirty ResponseDone must be emitted BEFORE the error so both chains reset"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("second agent event should arrive")
+            .expect("second agent event should be present");
+        match second {
+            AgentEvent::Error(message) => {
+                assert!(message.contains("server_error"), "got: {message}");
+                assert!(message.contains("boom"), "got: {message}");
+            }
+            other => panic!("expected AgentEvent::Error after dirty ResponseDone, got {other:?}"),
+        }
+
+        mock.assert_async().await;
     }
 
     #[test]

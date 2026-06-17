@@ -1067,6 +1067,85 @@ mod tests {
         );
     }
 
+    /// P2.13 end-to-end (provider): a `response.failed` terminal arriving over
+    /// the real `stream()` path must reset the provider's stored
+    /// `previous_response_id`. The parser emits a dirty `ResponseDone` ahead of
+    /// the error, the forwarder consumes it, and the chain returns to None so the
+    /// next turn full-replays instead of resuming a poisoned chain.
+    #[tokio::test]
+    async fn failed_terminal_resets_provider_chain_end_to_end() {
+        let mut server = mockito::Server::new_async().await;
+        let body = [
+            r#"data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_e2e_fail"}}"#,
+            "",
+            r#"data: {"type":"response.failed","sequence_number":1,"response":{"id":"resp_e2e_fail","status":"failed","error":{"code":"server_error","message":"boom"}}}"#,
+            "",
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        // Pre-existing chain from a prior clean turn — this is the poisoned id.
+        let stored_chain = Arc::new(Mutex::new(Some("resp_prev_clean".to_string())));
+        let provider = OpenAiProvider {
+            client: Client::new(),
+            endpoint: format!("{}/v1/responses", server.url()),
+            api_key: "test-key".to_string(),
+            default_model: "programmer".to_string(),
+            use_previous_response_id: true,
+            previous_response_id: Arc::clone(&stored_chain),
+            initial_response_timeout: Duration::from_secs(2),
+            inter_chunk_timeout: Duration::from_secs(2),
+        };
+        let messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text("hello".to_string())],
+        )];
+
+        let mut rx = provider
+            .stream(&messages, &[], &StreamOptions::default())
+            .await
+            .expect("agent provider stream should start");
+
+        // Drain the dirty ResponseDone (resets the chain) and the Error.
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("first event should arrive")
+            .expect("first event present");
+        assert!(
+            matches!(first, AgentEvent::ResponseDone { clean: false, .. }),
+            "expected dirty ResponseDone first, got {first:?}"
+        );
+        let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("second event should arrive")
+            .expect("second event present");
+        assert!(
+            matches!(second, AgentEvent::Error(_)),
+            "expected Error after dirty terminal, got {second:?}"
+        );
+        // Drain any trailing events until the channel closes so the forwarder
+        // has committed the reset.
+        while tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("recv should not time out while draining")
+            .is_some()
+        {}
+
+        assert!(
+            stored_chain.lock().await.is_none(),
+            "failed terminal must reset the provider chain to None for full replay"
+        );
+        mock.assert_async().await;
+    }
+
     /// P1.6 counterpart: a clean terminal must NOT be downgraded — the chain
     /// advances even when a prior chain id was present.
     #[tokio::test]
