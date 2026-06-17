@@ -437,13 +437,9 @@ impl OnnxEngine {
                 .context("Decoder missing 'logits'")?;
             let (logits_shape, logits_data) = logits_value.try_extract_tensor::<f32>()?;
 
-            let vocab_size = *logits_shape.last().unwrap() as usize;
-            let out_seq_len = logits_shape[1] as usize;
-            let last_pos_offset = (out_seq_len - 1) * vocab_size;
-            let last_logits = &logits_data[last_pos_offset..last_pos_offset + vocab_size];
-
-            // Copy logits to mutable vec for manipulation
-            let mut logits_vec: Vec<f32> = last_logits.to_vec();
+            // Guard against malformed model output: shape values come from the model
+            // and must not be trusted to panic-index. See `last_position_logits`.
+            let mut logits_vec: Vec<f32> = last_position_logits(logits_shape, logits_data)?;
 
             // No-speech check on first step (proper softmax, matching candle engine)
             if step == 0
@@ -756,6 +752,44 @@ fn build_whisper_config(config_json: &serde_json::Value) -> WhisperConfig {
     }
 }
 
+// ── Decoder logits extraction ────────────────────────────────────────────────
+
+/// Extract the logits row for the last sequence position from a decoder output
+/// tensor, validating the shape so malformed model output yields a readable
+/// `Err` instead of a panic.
+///
+/// Expected layout: `[batch, seq_len, vocab_size]` (rank >= 2; the last axis is
+/// vocab, the second axis is the sequence length). Shape values originate from
+/// the ONNX model and must not be trusted to panic-index.
+fn last_position_logits(shape: &[i64], data: &[f32]) -> Result<Vec<f32>> {
+    let vocab_size = *shape
+        .last()
+        .ok_or_else(|| anyhow!("decoder logits tensor has empty shape"))?
+        as usize;
+    ensure!(
+        shape.len() >= 2,
+        "decoder logits tensor has rank {} (expected >= 2): {:?}",
+        shape.len(),
+        shape
+    );
+    ensure!(vocab_size > 0, "decoder logits vocab dimension is 0");
+    let out_seq_len = shape[1] as usize;
+    let last_index = out_seq_len
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("decoder logits seq_len is 0"))?;
+    let last_pos_offset = last_index * vocab_size;
+    let range = last_pos_offset..last_pos_offset + vocab_size;
+    let last_logits = data.get(range.clone()).ok_or_else(|| {
+        anyhow!(
+            "decoder logits slice {:?} out of bounds (data len {}, shape {:?})",
+            range,
+            data.len(),
+            shape
+        )
+    })?;
+    Ok(last_logits.to_vec())
+}
+
 // ── Mel filterbank computation ───────────────────────────────────────────────
 
 /// Compute standard mel filterbank matrix.
@@ -890,6 +924,28 @@ mod tests {
             "softmax sum={}, expected 1.0",
             total
         );
+    }
+
+    #[test]
+    fn last_position_logits_extracts_last_row() {
+        // shape [1, 2, 3]: two positions, vocab=3. Last row is [4,5,6].
+        let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let out = last_position_logits(&[1, 2, 3], &data).expect("valid shape");
+        assert_eq!(out, vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn onnx_decode_malformed_shape() {
+        // Rank 1 (len < 2) → Err, not panic.
+        assert!(last_position_logits(&[5], &[0.0f32; 5]).is_err());
+        // Empty shape → Err.
+        assert!(last_position_logits(&[], &[0.0f32; 4]).is_err());
+        // seq_len == 0 → Err (no underflow on (out_seq_len - 1)).
+        assert!(last_position_logits(&[1, 0, 3], &[0.0f32; 0]).is_err());
+        // vocab == 0 → Err.
+        assert!(last_position_logits(&[1, 2, 0], &[0.0f32; 4]).is_err());
+        // Shape claims more than data holds → Err (slice OOB), not panic.
+        assert!(last_position_logits(&[1, 2, 3], &[0.0f32; 2]).is_err());
     }
 
     /// Verify adapter satisfies Send + Sync (required by TranscriptionAdapter).
