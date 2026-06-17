@@ -33,6 +33,29 @@ use super::quality_gate::{
 use super::stream_log::append_to_stream_log;
 use super::tuning::{inference_max_concurrency, interim_vad_accumulate_samples};
 
+/// Maximum audio retained in the Refine correction buffer, in seconds.
+///
+/// The Refine lane re-transcribes `correction_audio_buf` to correct the recent
+/// suffix of an utterance. Without a cap the buffer grows for the whole
+/// utterance, so each Refine re-decodes from the very start (O(n) per pass).
+/// Bounding it to a trailing window keeps Refine focused on the fresh tail —
+/// which is all `strip_overlap` needs — at constant cost. Sized to comfortably
+/// exceed the partial-pass cadence so no spoken tail is ever dropped before a
+/// Refine consumes it.
+const CORRECTION_WINDOW_SEC: f32 = 18.0;
+
+/// Trim `buf` in place so it retains at most `window_sec` of trailing audio at
+/// `sample_rate`. Returns the number of leading samples drained.
+fn cap_correction_buffer(buf: &mut Vec<f32>, sample_rate: u32, window_sec: f32) -> usize {
+    let cap = (window_sec * sample_rate as f32) as usize;
+    if cap == 0 || buf.len() <= cap {
+        return 0;
+    }
+    let drain_n = buf.len() - cap;
+    buf.drain(..drain_n);
+    drain_n
+}
+
 // ── Unified session config ───────────────────────────────────────────────────
 
 /// Configuration for a transcription session.
@@ -721,6 +744,13 @@ pub(crate) async fn transcription_session(
                     suffix_snapshot = pipeline.last_suffix.clone();
                 }
                 correction_audio_buf.extend_from_slice(&item.audio);
+                // Bound the Refine buffer to a trailing window so corrections
+                // re-decode the fresh suffix, not the whole utterance (P2.17).
+                cap_correction_buffer(
+                    &mut correction_audio_buf,
+                    output_sample_rate,
+                    CORRECTION_WINDOW_SEC,
+                );
                 partial_trigger_state.observe_speech_event(item.is_final, item.speech_vad_samples);
                 utterance_vad_speech_samples = utterance_vad_speech_samples
                     .saturating_add(item.speech_vad_samples);
@@ -1270,4 +1300,43 @@ pub async fn collect_buffered_engine_events(
         .map_err(|e| anyhow!("Transcription session join error: {}", e))?;
 
     Ok(collector.events())
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn correction_buffer_window_cap() {
+        let sr = 16_000u32;
+        let window = CORRECTION_WINDOW_SEC;
+        let cap = (window * sr as f32) as usize;
+
+        // Under cap: untouched, nothing drained.
+        let mut buf: Vec<f32> = vec![0.0; cap / 2];
+        let len_before = buf.len();
+        assert_eq!(cap_correction_buffer(&mut buf, sr, window), 0);
+        assert_eq!(buf.len(), len_before);
+
+        // Grow well past the cap across several 1s extends (25s > 18s window):
+        // buffer must never exceed cap.
+        let chunks = 25u32;
+        let mut buf: Vec<f32> = Vec::new();
+        for chunk in 0..chunks {
+            let chunk_samples: Vec<f32> = (0..sr).map(|i| (chunk * sr + i) as f32).collect();
+            buf.extend_from_slice(&chunk_samples);
+            cap_correction_buffer(&mut buf, sr, window);
+            assert!(buf.len() <= cap, "buffer {} exceeds cap {}", buf.len(), cap);
+        }
+        // After overflow it is pinned to exactly the cap...
+        assert_eq!(buf.len(), cap);
+        // ...and holds the freshest tail (last sample is the most recent one).
+        let last = *buf.last().unwrap();
+        assert_eq!(last, (chunks * sr - 1) as f32);
+
+        // Zero window disables capping (no panic, no drain).
+        let mut buf: Vec<f32> = vec![1.0; 100];
+        assert_eq!(cap_correction_buffer(&mut buf, sr, 0.0), 0);
+        assert_eq!(buf.len(), 100);
+    }
 }
