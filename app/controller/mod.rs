@@ -3136,7 +3136,15 @@ impl RecordingController {
             let assistive_input = build_assistive_input(&session_transcript, &ctx);
             crate::ui::voice_chat::show_voice_chat_overlay();
             crate::ui::voice_chat::show_agent_tab();
-            crate::ui::voice_chat::finalize_voice_chat_user_message();
+            // Single source of truth: set the user bubble to EXACTLY the
+            // session_transcript that is sent to the agent. The streaming lane
+            // (`append_voice_chat_user_utterance`) skips empty utterances, so a
+            // state-only finalize could leave the bubble empty/absent while the
+            // agent still received the final-pass transcript. `finalize_user_message_impl`
+            // (via `set_voice_chat_user_text`) reuses the active streaming index if
+            // present, so this REPLACES the existing bubble rather than creating a
+            // second one — exactly one user bubble whose text == agent input.
+            crate::ui::voice_chat::set_voice_chat_user_text(&session_transcript);
             crate::ui::voice_chat::set_voice_chat_sending(true);
             crate::ui::voice_chat::update_voice_chat_status("Thinking…");
             helpers::send_assistive_with_agent_runtime(
