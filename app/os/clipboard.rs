@@ -306,6 +306,20 @@ fn simulate_right_arrow() -> Result<()> {
 ///
 /// # Errors
 /// Returns error if clipboard or keyboard simulation fails
+///
+/// # Focus / scope note (E: focus-confirm)
+/// This module only sets the clipboard and posts the synthetic Cmd+V; it does
+/// NOT activate or focus-confirm a target window. The "Cmd+C robustness" work
+/// (cut E: `changeCount` + `wait_for_frontmost_app` focus-confirm backoff,
+/// commit 65e713a) hardened the *selection capture* path (Cmd+C) in
+/// `crate::os::selection`. The *paste* path (Cmd+V) that activates a target app
+/// before pasting lives in `app/controller/mod.rs`
+/// (`paste_overlay_text_with_target`) and still uses a fixed `sleep(80ms)`
+/// after `activate_target_app` — it has the same activation→focus race but is
+/// owned by a different module, so E does not rewire it here. The reusable
+/// `crate::os::selection::wait_for_frontmost_app` (now `pub(crate)`) is the
+/// intended drop-in replacement for that fixed sleep in a controller-owned
+/// follow-up.
 pub fn paste(text: &str) -> Result<()> {
     if text.is_empty() {
         warn!("Paste called with empty text");

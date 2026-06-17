@@ -273,8 +273,18 @@ fn nsworkspace_frontmost_app_name() -> Option<String> {
 /// on timeout. If the runtime focus signal is unavailable (`None`), we cannot
 /// confirm and fall through after the budget so the caller may still attempt the
 /// copy (best-effort, never break recording).
+///
+/// This is the shared focus-confirm primitive. It already backs the Cmd+C
+/// selection-capture path (`capture_selected_text_with_effective_frontmost`).
+/// The Cmd+V *paste* path has the same activation→focus race but lives in
+/// `app/controller/mod.rs` (`paste_overlay_text_with_target`) and still uses a
+/// fixed `sleep(80ms)` after `activate_target_app`. It is exposed `pub(crate)`
+/// so that paste path can reuse this confirm instead of the fixed sleep; that
+/// rewire is deferred to a controller-owned follow-up (single-file ownership:
+/// the sleep is not in this module). See the scope note on
+/// `crate::os::clipboard::paste` / `paste_text_smart`.
 #[cfg(target_os = "macos")]
-fn wait_for_frontmost_app(expected_app: &str, budget: Duration) -> bool {
+pub(crate) fn wait_for_frontmost_app(expected_app: &str, budget: Duration) -> bool {
     let expected = expected_app.trim();
     if expected.is_empty() {
         return false;
@@ -303,7 +313,7 @@ fn wait_for_frontmost_app(expected_app: &str, budget: Duration) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn wait_for_frontmost_app(_expected_app: &str, _budget: Duration) -> bool {
+pub(crate) fn wait_for_frontmost_app(_expected_app: &str, _budget: Duration) -> bool {
     false
 }
 
