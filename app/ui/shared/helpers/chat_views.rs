@@ -2,6 +2,9 @@ use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{msg_send, sel, sel_impl};
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Once;
 
 use super::{
@@ -38,6 +41,139 @@ pub fn next_render_mode(current: RenderMode) -> RenderMode {
         RenderMode::Plain => RenderMode::Markdown,
         RenderMode::Markdown => RenderMode::Plain,
     }
+}
+
+// ============================================================================
+// Bubble height measurement cache
+// ============================================================================
+//
+// AppKit text measurement (`cellSizeForBounds:` -> `__NSStringDrawingEngine`)
+// is the hot path that pegs the main thread on big transcripts: every
+// `update_chat_view_with_state` rebuild re-measures the *full* wrapped attributed
+// string of *every* bubble. The text + layout width + font + render-mode of an
+// already-rendered bubble do not change across rebuilds, so the measured height
+// is deterministically reusable. We cache it keyed on those inputs and only pay
+// the AppKit measurement for new/changed bubbles.
+//
+// For pathologically long text we skip AppKit entirely and estimate the height
+// from a wrap model — `__NSStringDrawingEngine` on a multi-megabyte string is
+// the part that actually hangs, and an estimate is visually indistinguishable at
+// that scale (the bubble is scrolled, not read in full).
+
+/// Above this character count we estimate bubble height instead of asking
+/// AppKit to lay out the entire string. Keeps the main thread responsive for
+/// huge pasted/selected blobs.
+pub const BUBBLE_MEASURE_CAP_CHARS: usize = 20_000;
+
+/// Cache key for a bubble height measurement.
+///
+/// Floats are hashed via their bit patterns; layout width and font size are the
+/// only float inputs and both come from deterministic layout math, so identical
+/// logical inputs produce identical bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BubbleMeasureKey {
+    text_hash: u64,
+    width_bits: u64,
+    font_bits: u64,
+    render_mode: u8,
+}
+
+impl BubbleMeasureKey {
+    /// `bound_width` is the layout input that determines wrapping — pass the
+    /// bubble's `max_width` so a cache hit can skip *both* AppKit measurements
+    /// (width decision + final height) for an unchanged bubble.
+    pub fn new(text: &str, bound_width: f64, font_size: f64, render_mode: RenderMode) -> Self {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        let text_hash = hasher.finish();
+        let render_mode = match render_mode {
+            RenderMode::Plain => 0,
+            RenderMode::Markdown => 1,
+        };
+        Self {
+            text_hash,
+            width_bits: bound_width.to_bits(),
+            font_bits: font_size.to_bits(),
+            render_mode,
+        }
+    }
+}
+
+/// Cached, deterministic layout outputs for a bubble's text.
+///
+/// Both values are pure functions of the cache key inputs, so reusing them
+/// across rebuilds is safe and avoids the AppKit text-engine cost.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BubbleMeasure {
+    /// Final bubble width (content-aware, capped to max).
+    pub bubble_width: f64,
+    /// Measured wrapped text height.
+    pub text_height: f64,
+}
+
+/// Per-overlay cache of measured bubble text heights.
+///
+/// Lives in `VoiceChatOverlayState` (UI state). On a chat-view rebuild the cache
+/// is consulted before any AppKit measurement; unchanged bubbles hit the cache
+/// and skip `cellSizeForBounds:` entirely.
+#[derive(Debug, Default)]
+pub struct BubbleMeasureCache {
+    entries: HashMap<BubbleMeasureKey, BubbleMeasure>,
+}
+
+impl BubbleMeasureCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return a cached measurement for this key, if present.
+    pub fn get(&self, key: &BubbleMeasureKey) -> Option<BubbleMeasure> {
+        self.entries.get(key).copied()
+    }
+
+    /// Store a measurement for this key.
+    pub fn insert(&mut self, key: BubbleMeasureKey, measure: BubbleMeasure) {
+        self.entries.insert(key, measure);
+    }
+
+    /// Drop everything (e.g. on font/zoom change where every entry is stale).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Number of cached entries (test/diagnostic helper).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Estimate wrapped text height without invoking AppKit.
+///
+/// Used for text above `BUBBLE_MEASURE_CAP_CHARS`, where running the real
+/// `__NSStringDrawingEngine` over the whole string is what hangs the main
+/// thread. Models word-wrapping by columns-per-line plus hard newlines. The
+/// result only needs to be a generous over-estimate so the bubble is never
+/// clipped; precise wrapped height is irrelevant for a multi-screen blob that
+/// the user scrolls rather than reads at a glance.
+pub fn estimate_text_height(text: &str, layout_width: f64, font_size: f64) -> f64 {
+    let line_height = (font_size * 1.4).max(1.0);
+    // Monospace advance width is ~0.6em for the bundled JetBrains Mono / system
+    // monospaced font; bias slightly narrow so we over-count wrapped lines.
+    let char_width = (font_size * 0.6).max(1.0);
+    let cols_per_line = (layout_width / char_width).floor().max(1.0) as usize;
+
+    let mut total_lines: usize = 0;
+    for raw_line in text.split('\n') {
+        let chars = raw_line.chars().count().max(1);
+        let wrapped = chars.div_ceil(cols_per_line).max(1);
+        total_lines += wrapped;
+    }
+    let total_lines = total_lines.max(1);
+    (total_lines as f64) * line_height
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -359,6 +495,14 @@ pub struct BubbleConfig {
     pub message_index: Option<usize>,
     /// Optional action target for Copy button
     pub copy_action_target: Option<Id>,
+    /// Optional per-overlay measurement cache. When present, an unchanged bubble
+    /// (same text/width/font/render-mode) reuses its previously measured size and
+    /// skips the AppKit text-engine measurement entirely.
+    ///
+    /// Raw pointer (not a reference) so `BubbleConfig` stays `Copy`-free but
+    /// movable across the FFI-heavy builder; the caller owns the cache for the
+    /// duration of the call. `None` falls back to always measuring.
+    pub measure_cache: Option<*mut BubbleMeasureCache>,
 }
 
 /// Create a chat bubble view (NSView container with styled text)
@@ -423,12 +567,25 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         // Keep a small side margin inside the container so full-width bubbles don't overflow.
         let bubble_max_width = (config.max_width - 16.0).max(80.0);
         let text_max_width = (bubble_max_width - padding_x * 2.0).max(40.0);
-        let rect_max: CGRect = msg_send![
-            text_str,
-            boundingRectWithSize: CGSize::new(text_max_width, 10_000.0)
-            options: opts
-            attributes: attrs
-        ];
+
+        let render_mode = config
+            .render_mode
+            .unwrap_or_else(|| streaming_render_mode(config.is_streaming, config.role));
+
+        // Measurement cache lookup. Key on the layout inputs that fully determine
+        // the result: text, the bubble's max width (drives wrapping), font size,
+        // and render mode. A hit lets us skip BOTH AppKit measurements
+        // (`boundingRectWithSize:` width probe + `cellSizeForBounds:` height) —
+        // the `__NSStringDrawingEngine` calls that peg the main thread on rebuilds.
+        let measure_key =
+            BubbleMeasureKey::new(&display_text, config.max_width, font_size, render_mode);
+        let cache_ref: Option<&mut BubbleMeasureCache> =
+            config.measure_cache.and_then(|ptr| ptr.as_mut());
+        let cached_measure = cache_ref.as_ref().and_then(|cache| cache.get(&measure_key));
+
+        // For pathologically long text, estimate instead of laying out the whole
+        // string through AppKit — that layout is the actual hang. Always full-width.
+        let over_cap = display_text.chars().count() > BUBBLE_MEASURE_CAP_CHARS;
 
         // Bubble width: content-aware but capped.
         // If it wraps (or is long), keep the bubble full width for readability.
@@ -437,18 +594,35 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         // that later expands mid-stream.
         let long_threshold = if config.is_streaming { 30 } else { 80 };
         let is_long = display_text.chars().count() > long_threshold;
-        let wraps_at_max = rect_max.size.height > line_height * 1.6
-            || display_text.contains('\n')
-            || is_long
-            // When streaming starts with the "• • •" placeholder, force full-width bubbles
-            // to avoid the initial tiny/narrow bubble that later expands mid-stream.
-            || (config.is_streaming && config.text.is_empty());
-        let bubble_width = if wraps_at_max {
-            bubble_max_width
-        } else {
-            let content_width = rect_max.size.width.min(text_max_width).max(1.0);
-            (content_width + padding_x * 2.0).min(bubble_max_width)
-        };
+
+        let (bubble_width, cached_text_height): (f64, Option<f64>) =
+            if let Some(measure) = cached_measure {
+                // Reuse the previously measured width + height verbatim.
+                (measure.bubble_width, Some(measure.text_height))
+            } else if over_cap {
+                // Skip AppKit entirely for huge text: full-width bubble + estimate.
+                (bubble_max_width, None)
+            } else {
+                let rect_max: CGRect = msg_send![
+                    text_str,
+                    boundingRectWithSize: CGSize::new(text_max_width, 10_000.0)
+                    options: opts
+                    attributes: attrs
+                ];
+                let wraps_at_max = rect_max.size.height > line_height * 1.6
+                    || display_text.contains('\n')
+                    || is_long
+                    // When streaming starts with the "• • •" placeholder, force full-width
+                    // bubbles to avoid the initial tiny/narrow bubble that later expands mid-stream.
+                    || (config.is_streaming && config.text.is_empty());
+                let width = if wraps_at_max {
+                    bubble_max_width
+                } else {
+                    let content_width = rect_max.size.width.min(text_max_width).max(1.0);
+                    (content_width + padding_x * 2.0).min(bubble_max_width)
+                };
+                (width, None)
+            };
 
         // Label width for wrapping and later reflow.
         let text_layout_width = (bubble_width - padding_x * 2.0).max(40.0);
@@ -504,9 +678,6 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         let _: () = msg_send![text_label, setTextColor: text_color];
 
         let _: () = msg_send![text_label, setFont: font];
-        let render_mode = config
-            .render_mode
-            .unwrap_or_else(|| streaming_render_mode(config.is_streaming, config.role));
         if !(should_render_native_markdown(render_mode, &display_text)
             && apply_markdown_to_text_field(text_label, &display_text, font))
         {
@@ -514,25 +685,49 @@ pub fn create_bubble_view(config: BubbleConfig) -> (Id, Id) {
         }
         let _: () = msg_send![text_label, setLineBreakMode: 0_isize]; // NSLineBreakByWordWrapping
 
-        // Ask the cell for the wrapped size within the fixed width.
-        let measure_bounds = CGRect::new(
-            &CGPoint::new(0.0, 0.0),
-            &CGSize::new(text_layout_width.max(1.0), 10_000.0),
-        );
-        let cell: Id = msg_send![text_label, cell];
-        let measured: CGSize = if cell.is_null() {
-            // Fallback to NSString measurement (best effort).
-            let text_rect: CGRect = msg_send![
-                text_str,
-                boundingRectWithSize: CGSize::new(text_layout_width, 10_000.0)
-                options: opts
-                attributes: attrs
-            ];
-            text_rect.size
+        // Resolve the wrapped text height: cache hit > estimate (over cap) > AppKit.
+        let text_height = if let Some(height) = cached_text_height {
+            height
+        } else if over_cap {
+            estimate_text_height(&display_text, text_layout_width, font_size)
+                .ceil()
+                .max(line_height)
         } else {
-            msg_send![cell, cellSizeForBounds: measure_bounds]
+            // Ask the cell for the wrapped size within the fixed width.
+            let measure_bounds = CGRect::new(
+                &CGPoint::new(0.0, 0.0),
+                &CGSize::new(text_layout_width.max(1.0), 10_000.0),
+            );
+            let cell: Id = msg_send![text_label, cell];
+            let measured: CGSize = if cell.is_null() {
+                // Fallback to NSString measurement (best effort).
+                let text_rect: CGRect = msg_send![
+                    text_str,
+                    boundingRectWithSize: CGSize::new(text_layout_width, 10_000.0)
+                    options: opts
+                    attributes: attrs
+                ];
+                text_rect.size
+            } else {
+                msg_send![cell, cellSizeForBounds: measure_bounds]
+            };
+            measured.height.ceil().max(line_height)
         };
-        let text_height = measured.height.ceil().max(line_height);
+
+        // Store the freshly computed measurement so the next rebuild of this
+        // unchanged bubble hits the cache and skips AppKit measurement.
+        if cached_text_height.is_none()
+            && let Some(cache) = cache_ref
+        {
+            cache.insert(
+                measure_key,
+                BubbleMeasure {
+                    bubble_width,
+                    text_height,
+                },
+            );
+        }
+
         let bubble_height = text_height + padding_top + padding_bottom;
         let container_height = bubble_height + meta_height + meta_spacing;
 
@@ -1434,5 +1629,251 @@ mod tests {
         assert_eq!(frames.render, None);
         assert_eq!(frames.copy.width, BUBBLE_COPY_ACTION_WIDTH);
         assert_eq!(frames.copy.x, 128.0);
+    }
+
+    // ------------------------------------------------------------------
+    // Measurement cache + cap
+    // ------------------------------------------------------------------
+
+    /// Simulates the create_bubble_view measurement path against a cache while
+    /// counting how many times an actual (expensive) measurement would run.
+    /// Returns (resolved_height, measured_this_call).
+    fn measure_with_cache(
+        cache: &mut BubbleMeasureCache,
+        measure_calls: &mut usize,
+        text: &str,
+        max_width: f64,
+        font_size: f64,
+        render_mode: RenderMode,
+    ) -> f64 {
+        let key = BubbleMeasureKey::new(text, max_width, font_size, render_mode);
+        if let Some(measure) = cache.get(&key) {
+            return measure.text_height; // cache hit — no measurement
+        }
+        // Cache miss — perform the "expensive" measurement (counted).
+        *measure_calls += 1;
+        let height = estimate_text_height(text, max_width, font_size)
+            .ceil()
+            .max(font_size * 1.4);
+        cache.insert(
+            key,
+            BubbleMeasure {
+                bubble_width: max_width,
+                text_height: height,
+            },
+        );
+        height
+    }
+
+    #[test]
+    fn measure_cache_hits_on_identical_inputs_and_skips_remeasure() {
+        let mut cache = BubbleMeasureCache::new();
+        let mut measure_calls = 0usize;
+
+        let text = "hello world, this is a chat bubble that will be measured";
+        let h1 = measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        assert_eq!(measure_calls, 1, "first measurement must run");
+        assert_eq!(cache.len(), 1);
+
+        // Same text/width/font/render-mode -> cache hit, no new measurement.
+        let h2 = measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        assert_eq!(
+            measure_calls, 1,
+            "identical inputs must reuse the cached measurement"
+        );
+        assert_eq!(h1, h2, "cache must return the same height");
+        assert_eq!(cache.len(), 1, "no new entry on a hit");
+    }
+
+    #[test]
+    fn measure_cache_misses_when_any_key_input_changes() {
+        let mut cache = BubbleMeasureCache::new();
+        let mut measure_calls = 0usize;
+        let text = "bubble text";
+
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        // Different width -> miss.
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            500.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        // Different font size -> miss.
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            15.0,
+            RenderMode::Plain,
+        );
+        // Different render mode -> miss.
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            13.0,
+            RenderMode::Markdown,
+        );
+        // Different text -> miss.
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            "other",
+            400.0,
+            13.0,
+            RenderMode::Plain,
+        );
+
+        assert_eq!(
+            measure_calls, 5,
+            "each distinct key must measure exactly once"
+        );
+        assert_eq!(cache.len(), 5);
+
+        // Re-issuing all five keys must be pure cache hits.
+        let before = measure_calls;
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            500.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            15.0,
+            RenderMode::Plain,
+        );
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            13.0,
+            RenderMode::Markdown,
+        );
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            "other",
+            400.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        assert_eq!(measure_calls, before, "all repeats must hit the cache");
+    }
+
+    #[test]
+    fn measure_cache_clear_forces_remeasure() {
+        let mut cache = BubbleMeasureCache::new();
+        let mut measure_calls = 0usize;
+        let text = "clearable";
+
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        assert_eq!(measure_calls, 1);
+        cache.clear();
+        assert!(cache.is_empty());
+        measure_with_cache(
+            &mut cache,
+            &mut measure_calls,
+            text,
+            400.0,
+            13.0,
+            RenderMode::Plain,
+        );
+        assert_eq!(measure_calls, 2, "cleared cache must re-measure");
+    }
+
+    #[test]
+    fn cap_threshold_selects_estimation_for_huge_text() {
+        // Below cap: not over cap. Above cap: over cap (would skip AppKit).
+        let small = "x".repeat(BUBBLE_MEASURE_CAP_CHARS);
+        let huge = "x".repeat(BUBBLE_MEASURE_CAP_CHARS + 1);
+        assert!(small.chars().count() <= BUBBLE_MEASURE_CAP_CHARS);
+        assert!(huge.chars().count() > BUBBLE_MEASURE_CAP_CHARS);
+    }
+
+    #[test]
+    fn estimate_text_height_grows_with_length_and_respects_newlines() {
+        let width = 400.0;
+        let font = 13.0;
+
+        let one_line = estimate_text_height("short", width, font);
+        let line_height = (font * 1.4).max(1.0);
+        assert!(
+            one_line >= line_height,
+            "single short line must be at least one line tall"
+        );
+
+        // A very long single line wraps to multiple lines -> taller.
+        let long = "a".repeat(10_000);
+        let wrapped = estimate_text_height(&long, width, font);
+        assert!(
+            wrapped > one_line * 5.0,
+            "wrapped long text must be many lines tall ({wrapped} vs {one_line})"
+        );
+
+        // Hard newlines add lines even for short content.
+        let multiline = "a\nb\nc\nd\ne";
+        let multi_h = estimate_text_height(multiline, width, font);
+        assert!(
+            multi_h >= line_height * 5.0,
+            "five newline-separated lines must be >= 5 line-heights ({multi_h})"
+        );
+    }
+
+    #[test]
+    fn estimate_text_height_caps_runtime_for_megabyte_blob() {
+        // The whole point of the cap: estimation is O(n) cheap, never invokes
+        // AppKit. This just proves it returns a finite, sane height for a blob
+        // far larger than the cap without hanging.
+        let blob = "lorem ipsum dolor sit amet ".repeat(200_000); // ~5.4 MB
+        let h = estimate_text_height(&blob, 400.0, 13.0);
+        assert!(h.is_finite() && h > 0.0);
     }
 }

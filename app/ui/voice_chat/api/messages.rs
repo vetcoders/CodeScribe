@@ -1121,6 +1121,13 @@ pub fn update_chat_view_with_state(state: &mut VoiceChatOverlayState, scroll_to_
             stack_view_add(container, empty_label);
         }
 
+        // Raw pointer to the measurement cache so each bubble reuses prior
+        // measurements and we skip AppKit's text engine for unchanged bubbles.
+        // A raw pointer (not &mut) avoids conflicting with the &mut state borrows
+        // taken by `attach_message_bubble_click_recognizer` inside the loop; only
+        // `create_bubble_view` touches the cache, so there is no aliasing.
+        let measure_cache_ptr: *mut BubbleMeasureCache = &mut state.bubble_measure_cache;
+
         let mut last_bubble: Option<Id> = None;
         let message_count = state.messages.len();
         for index in 0..message_count {
@@ -1148,6 +1155,7 @@ pub fn update_chat_view_with_state(state: &mut VoiceChatOverlayState, scroll_to_
                 metadata: message_metadata,
                 message_index: Some(index),
                 copy_action_target: state.action_handler.map(|p| p as Id),
+                measure_cache: Some(measure_cache_ptr),
             });
             if matches!(message_role, ChatRole::Assistant | ChatRole::Reasoning) {
                 attach_message_bubble_click_recognizer(state, bubble, index);

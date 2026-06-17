@@ -10,7 +10,7 @@ use std::time::{Instant, SystemTime};
 use codescribe_core::attachment::Attachment;
 
 use crate::ui::shared::status::UiStatus;
-use crate::ui_helpers::RenderMode;
+use crate::ui_helpers::{BubbleMeasureCache, RenderMode};
 
 /// Type alias for voice chat send callback
 pub type VoiceChatSendCallback = Arc<dyn Fn(String) + Send + Sync>;
@@ -155,6 +155,10 @@ pub struct VoiceChatOverlayState {
     pub message_render_modes: HashMap<usize, RenderMode>,
     /// Cached document stack height for amortized streaming layout updates.
     pub cached_agent_stack_height: Option<f64>,
+    /// Per-bubble text-height measurement cache. Avoids re-running AppKit's
+    /// `__NSStringDrawingEngine` for unchanged bubbles on every chat-view
+    /// rebuild (the main-thread hang on large transcripts).
+    pub bubble_measure_cache: BubbleMeasureCache,
     pub agent_input_bar: Option<usize>,
     pub agent_input_scroll_view: Option<usize>,
     pub agent_input_text_view: Option<usize>,
@@ -254,6 +258,7 @@ impl Default for VoiceChatOverlayState {
             agent_bubble_click_recognizers: Vec::new(),
             message_render_modes: HashMap::new(),
             cached_agent_stack_height: None,
+            bubble_measure_cache: BubbleMeasureCache::new(),
             agent_input_bar: None,
             agent_input_scroll_view: None,
             agent_input_text_view: None,
