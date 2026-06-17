@@ -854,6 +854,21 @@ pub fn request_permission_runtime_reconcile() {
         return;
     };
 
+    // P2.4/P3.4 DEFERRED (cross-cut, owned by the runtime/bin group):
+    // This builds a fresh current_thread runtime per call, which bypasses the
+    // intentional 4-worker cap of the main multi-threaded runtime
+    // (bin/codescribe.rs). The clean fix is to reuse a cached
+    // `tokio::runtime::Handle` from the main runtime. We CANNOT use
+    // `Handle::current()` here: the sole caller
+    // (ui/onboarding/permission_flow.rs::reconcile_permission_runtime_after_grant)
+    // is a synchronous fn driven from the AppKit/objc permission-grant flow on
+    // the main thread, which is NOT a tokio worker, so `Handle::current()` would
+    // panic with "there is no reactor running". A proper fix requires a
+    // startup-side `OnceLock<Handle>` populated in bin/codescribe.rs (the same
+    // cached-Handle pattern noted in ui/voice_chat/handlers/connectors.rs) —
+    // that lives outside this file's single-ownership domain. Until that cache
+    // exists, the per-call runtime is kept deliberately to avoid a main-thread
+    // panic regression.
     std::thread::spawn(move || {
         match tokio::runtime::Builder::new_current_thread()
             .enable_all()
