@@ -216,34 +216,65 @@ impl OpenAiProvider {
     }
 }
 
+/// Outcome of inspecting a `ResponseDone` for its effect on the chain.
+enum ChainEffect {
+    /// Clean terminal with a usable id: advance the chain to this id.
+    Advance(String),
+    /// Dirty terminal (EOF/timeout, failed/incomplete): reset the chain so the
+    /// next turn replays from local history instead of resuming a poisoned one.
+    Reset,
+    /// Not a terminal event: leave the chain untouched.
+    None,
+}
+
 /// Forward provider events to the consumer while advancing the chain id.
 ///
-/// The chain (`previous_response_id`) must only advance for turns the consumer
-/// actually received. We capture the candidate id from `ResponseDone`, deliver
-/// the event FIRST, and commit the chain ONLY on a successful send. If the
-/// consumer's `rx` was dropped (session gone), `tx.send` returns `Err`, we
-/// break without writing the chain, and a stale id cannot outlive the session
-/// (P3.7).
+/// The chain (`previous_response_id`) must only advance for turns that ended on
+/// a CLEAN terminal AND that the consumer actually received. We compute the
+/// chain effect from `ResponseDone { clean }`, deliver the event FIRST, and
+/// mutate the chain ONLY on a successful send:
+/// - clean terminal with id  -> advance the chain (P1.6 happy path);
+/// - dirty terminal          -> reset the chain to `None` so the next turn does
+///   a full replay (P1.6 chain-poisoning fix);
+/// - non-terminal events     -> untouched.
+///
+/// If the consumer's `rx` was dropped (session gone), `tx.send` returns `Err`,
+/// we break without mutating the chain, and a stale id cannot outlive the
+/// session (P3.7).
 async fn forward_events_and_track_chain(
     mut provider_rx: mpsc::Receiver<AgentEvent>,
     tx: mpsc::Sender<AgentEvent>,
     previous_response_id: Arc<Mutex<Option<String>>>,
 ) {
     while let Some(event) = provider_rx.recv().await {
-        let chain_update = match &event {
+        let chain_effect = match &event {
             AgentEvent::ResponseDone {
                 response_id: Some(response_id),
-            } if !response_id.is_empty() => Some(response_id.clone()),
-            _ => None,
+                clean: true,
+            } if !response_id.is_empty() => ChainEffect::Advance(response_id.clone()),
+            AgentEvent::ResponseDone { clean: false, .. } => ChainEffect::Reset,
+            _ => ChainEffect::None,
         };
 
         if tx.send(event).await.is_err() {
             break;
         }
 
-        if let Some(response_id) = chain_update {
-            let mut lock = previous_response_id.lock().await;
-            *lock = Some(response_id);
+        match chain_effect {
+            ChainEffect::Advance(response_id) => {
+                let mut lock = previous_response_id.lock().await;
+                *lock = Some(response_id);
+            }
+            ChainEffect::Reset => {
+                let mut lock = previous_response_id.lock().await;
+                if lock.is_some() {
+                    info!(
+                        "Agent provider chain reset after dirty terminal (provider=openai-responses); next turn will full-replay"
+                    );
+                    *lock = None;
+                }
+            }
+            ChainEffect::None => {}
         }
     }
 }
@@ -923,6 +954,7 @@ mod tests {
         provider_tx
             .send(AgentEvent::ResponseDone {
                 response_id: Some("resp_after_drop".to_string()),
+                clean: true,
             })
             .await
             .expect("provider channel should accept the event");
@@ -954,6 +986,7 @@ mod tests {
         provider_tx
             .send(AgentEvent::ResponseDone {
                 response_id: Some("resp_delivered".to_string()),
+                clean: true,
             })
             .await
             .expect("provider channel should accept the event");
@@ -969,6 +1002,83 @@ mod tests {
             stored_chain.lock().await.as_deref(),
             Some("resp_delivered"),
             "delivered clean ResponseDone must advance the chain"
+        );
+    }
+
+    /// P1.6: a DIRTY terminal (`clean=false`, e.g. EOF/timeout or a
+    /// failed/incomplete response) must RESET the chain so the next turn does a
+    /// full replay instead of resuming a poisoned `previous_response_id`.
+    #[tokio::test]
+    async fn dirty_terminal_resets_chain() {
+        // Pre-existing chain from a prior clean turn.
+        let stored_chain: Arc<Mutex<Option<String>>> =
+            Arc::new(Mutex::new(Some("resp_prev_clean".to_string())));
+
+        let (provider_tx, provider_rx) = mpsc::channel::<AgentEvent>(8);
+        let (consumer_tx, mut consumer_rx) = mpsc::channel::<AgentEvent>(8);
+
+        let forwarder = tokio::spawn(forward_events_and_track_chain(
+            provider_rx,
+            consumer_tx,
+            Arc::clone(&stored_chain),
+        ));
+
+        // Synthetic dirty terminal: an id may still be present, but clean=false.
+        provider_tx
+            .send(AgentEvent::ResponseDone {
+                response_id: Some("resp_dirty".to_string()),
+                clean: false,
+            })
+            .await
+            .expect("provider channel should accept the event");
+
+        let received = consumer_rx.recv().await.expect("event should be delivered");
+        assert!(matches!(
+            received,
+            AgentEvent::ResponseDone { clean: false, .. }
+        ));
+
+        drop(provider_tx);
+        forwarder.await.expect("forwarder task should finish");
+
+        assert!(
+            stored_chain.lock().await.is_none(),
+            "dirty terminal must reset the chain to None for full replay"
+        );
+    }
+
+    /// P1.6 counterpart: a clean terminal must NOT be downgraded — the chain
+    /// advances even when a prior chain id was present.
+    #[tokio::test]
+    async fn clean_terminal_keeps_chain() {
+        let stored_chain: Arc<Mutex<Option<String>>> =
+            Arc::new(Mutex::new(Some("resp_prev".to_string())));
+
+        let (provider_tx, provider_rx) = mpsc::channel::<AgentEvent>(8);
+        let (consumer_tx, mut consumer_rx) = mpsc::channel::<AgentEvent>(8);
+
+        let forwarder = tokio::spawn(forward_events_and_track_chain(
+            provider_rx,
+            consumer_tx,
+            Arc::clone(&stored_chain),
+        ));
+
+        provider_tx
+            .send(AgentEvent::ResponseDone {
+                response_id: Some("resp_next_clean".to_string()),
+                clean: true,
+            })
+            .await
+            .expect("provider channel should accept the event");
+
+        let _ = consumer_rx.recv().await.expect("event should be delivered");
+        drop(provider_tx);
+        forwarder.await.expect("forwarder task should finish");
+
+        assert_eq!(
+            stored_chain.lock().await.as_deref(),
+            Some("resp_next_clean"),
+            "clean terminal must advance the chain"
         );
     }
 }

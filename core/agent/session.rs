@@ -232,8 +232,23 @@ impl AgentSession {
                         });
                         entry.arguments = Some(arguments);
                     }
-                    AgentEvent::ResponseDone { response_id } => {
-                        self.thread_id = response_id;
+                    AgentEvent::ResponseDone { response_id, clean } => {
+                        // Only adopt the provider thread id on a clean terminal.
+                        // A dirty terminal (EOF/timeout, failed/incomplete) must
+                        // not persist a poisoned chain id; clearing it forces the
+                        // next turn to full-replay from local history (P1.6).
+                        if clean {
+                            self.thread_id = response_id;
+                        } else {
+                            if let Some(id) = response_id {
+                                warn!(
+                                    "Agent dirty terminal: discarding response id {} and resetting chain (provider={})",
+                                    id,
+                                    self.provider.name()
+                                );
+                            }
+                            self.thread_id = None;
+                        }
                     }
                     AgentEvent::Error(message) => {
                         warn!(
@@ -514,6 +529,7 @@ mod tests {
             .expect("test stream channel should accept tool call");
             tx.send(AgentEvent::ResponseDone {
                 response_id: Some("resp_loop".to_string()),
+                clean: true,
             })
             .await
             .expect("test stream channel should accept completion event");
@@ -635,6 +651,7 @@ mod tests {
                 .expect("test stream channel should accept completion text");
             tx.send(AgentEvent::ResponseDone {
                 response_id: Some("resp_retry_success".to_string()),
+                clean: true,
             })
             .await
             .expect("test stream channel should accept completion event");
@@ -785,6 +802,7 @@ mod tests {
             AgentEvent::TextDone("Hello from agent".to_string()),
             AgentEvent::ResponseDone {
                 response_id: Some("resp_success_1".to_string()),
+                clean: true,
             },
         ]]);
         let (ui_tx, mut ui_rx) = mpsc::channel(16);
@@ -838,6 +856,7 @@ mod tests {
             AgentEvent::TextDone("Hello".to_string()),
             AgentEvent::ResponseDone {
                 response_id: Some("resp_buffered".to_string()),
+                clean: true,
             },
         ]]);
         let (ui_tx, mut ui_rx) = mpsc::channel(16);
@@ -883,12 +902,14 @@ mod tests {
                 },
                 AgentEvent::ResponseDone {
                     response_id: Some("resp_after_tool".to_string()),
+                    clean: true,
                 },
             ],
             vec![
                 AgentEvent::TextDone("Recovered after tool fallback".to_string()),
                 AgentEvent::ResponseDone {
                     response_id: Some("resp_final".to_string()),
+                    clean: true,
                 },
             ],
         ]);

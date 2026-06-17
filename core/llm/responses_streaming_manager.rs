@@ -722,7 +722,14 @@ async fn run_agent_stream(
 
     if !sent_done_event
         && tx
-            .send(AgentEvent::ResponseDone { response_id })
+            .send(AgentEvent::ResponseDone {
+                response_id,
+                // A synthetic terminal is clean only when the provider sent a
+                // `[DONE]` sentinel. EOF/timeout without `[DONE]` (and without
+                // a prior `response.completed`/`response.done`, which would have
+                // set `sent_done_event`) is a dirty terminal.
+                clean: saw_done,
+            })
             .await
             .is_err()
     {
@@ -899,21 +906,80 @@ fn parse_agent_event(
         "response.function_call_arguments.delta" => parse_tool_call_args_delta(chunk, tracker),
         "response.function_call_arguments.done" => parse_tool_call_ready(chunk, tracker),
         "response.completed" | "response.done" => {
-            let response_id = chunk
+            let status = chunk
                 .response
                 .as_ref()
-                .map(|response| response.id.clone())
-                .filter(|id| !id.is_empty())
-                .or_else(|| {
-                    fallback_response_id
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty())
-                        .map(ToString::to_string)
-                });
-            Some(AgentEvent::ResponseDone { response_id })
+                .and_then(|response| response.status.as_deref());
+            // `response.done` is always emitted regardless of final state, so a
+            // non-`completed` status here is a dirty terminal (failed /
+            // incomplete / cancelled) that must NOT advance the chain. Surface
+            // it as an Error and reset by reporting `clean=false`.
+            match status {
+                Some("failed") => Some(response_failed_event(chunk)),
+                Some("incomplete") => Some(response_incomplete_event(chunk)),
+                Some("cancelled") => Some(AgentEvent::Error(
+                    "Agent response was cancelled before completion".to_string(),
+                )),
+                _ => {
+                    let response_id = terminal_response_id(chunk, fallback_response_id);
+                    Some(AgentEvent::ResponseDone {
+                        response_id,
+                        clean: true,
+                    })
+                }
+            }
         }
+        "response.failed" => Some(response_failed_event(chunk)),
+        "response.incomplete" => Some(response_incomplete_event(chunk)),
         _ => None,
     }
+}
+
+/// Resolve the response id reported on a terminal chunk, falling back to the id
+/// harvested from an earlier chunk in the same stream.
+fn terminal_response_id(chunk: &StreamChunk, fallback_response_id: Option<&str>) -> Option<String> {
+    chunk
+        .response
+        .as_ref()
+        .map(|response| response.id.clone())
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            fallback_response_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+/// Build an `AgentEvent::Error` from a `failed` terminal, surfacing the
+/// provider-reported error code/message when present.
+fn response_failed_event(chunk: &StreamChunk) -> AgentEvent {
+    let detail = chunk
+        .response
+        .as_ref()
+        .and_then(|response| response.error.as_ref())
+        .map(
+            |error| match (error.code.as_deref(), error.message.as_deref()) {
+                (Some(code), Some(message)) => format!("{code}: {message}"),
+                (Some(code), None) => code.to_string(),
+                (None, Some(message)) => message.to_string(),
+                (None, None) => "unknown error".to_string(),
+            },
+        )
+        .unwrap_or_else(|| "unknown error".to_string());
+    AgentEvent::Error(format!("Agent response failed: {detail}"))
+}
+
+/// Build an `AgentEvent::Error` from an `incomplete` terminal, surfacing the
+/// reason (e.g. `max_output_tokens`, `content_filter`) when present.
+fn response_incomplete_event(chunk: &StreamChunk) -> AgentEvent {
+    let reason = chunk
+        .response
+        .as_ref()
+        .and_then(|response| response.incomplete_details.as_ref())
+        .and_then(|details| details.reason.as_deref())
+        .unwrap_or("unspecified");
+    AgentEvent::Error(format!("Agent response incomplete: {reason}"))
 }
 
 fn parse_tool_call_start(chunk: &StreamChunk, tracker: &mut ToolCallTracker) -> Option<AgentEvent> {
@@ -1219,6 +1285,32 @@ struct StreamResponse {
     id: String,
     #[serde(default)]
     output: Vec<StreamOutputItem>,
+    /// Final response status reported by the Responses API. `response.done` is
+    /// "always emitted, no matter the final state"; clients must inspect this
+    /// to discriminate `completed` from `cancelled` / `failed` / `incomplete`.
+    /// (OpenAI Responses streaming, verified via Context7 2026-06-17.)
+    #[serde(default)]
+    status: Option<String>,
+    /// Populated when `status == "failed"`; null otherwise.
+    #[serde(default)]
+    error: Option<StreamResponseError>,
+    /// Populated when `status == "incomplete"`; null otherwise.
+    #[serde(default)]
+    incomplete_details: Option<StreamResponseIncompleteDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamResponseError {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamResponseIncompleteDetails {
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1649,6 +1741,127 @@ mod tests {
                 arguments: json!({"id": "abc"}),
             }
         );
+    }
+
+    /// P1.6: a `response.completed` (or `response.done` with status=completed)
+    /// is a CLEAN terminal and yields `ResponseDone { clean: true }`.
+    #[test]
+    fn parse_agent_event_completed_is_clean_terminal() {
+        let mut tracker = ToolCallTracker::default();
+        let chunk: StreamChunk = serde_json::from_value(json!({
+            "type": "response.completed",
+            "response": { "id": "resp_ok", "status": "completed" }
+        }))
+        .expect("valid completed chunk");
+
+        let event = parse_agent_event(&chunk, &mut tracker, None).expect("expected ResponseDone");
+        assert_eq!(
+            event,
+            AgentEvent::ResponseDone {
+                response_id: Some("resp_ok".to_string()),
+                clean: true,
+            }
+        );
+    }
+
+    /// P1.6: `response.completed` without an explicit status (legacy shape) is
+    /// still treated as clean so the happy path is preserved 1:1.
+    #[test]
+    fn parse_agent_event_completed_without_status_stays_clean() {
+        let mut tracker = ToolCallTracker::default();
+        let chunk: StreamChunk = serde_json::from_value(json!({
+            "type": "response.completed",
+            "response": { "id": "resp_legacy" }
+        }))
+        .expect("valid completed chunk");
+
+        let event = parse_agent_event(&chunk, &mut tracker, None).expect("expected ResponseDone");
+        assert_eq!(
+            event,
+            AgentEvent::ResponseDone {
+                response_id: Some("resp_legacy".to_string()),
+                clean: true,
+            }
+        );
+    }
+
+    /// P2.13: `response.failed` (top-level event) surfaces an Error carrying the
+    /// provider code/message, and never a ResponseDone that would poison the
+    /// chain. (OpenAI Responses streaming shape verified via Context7 2026-06-17.)
+    #[test]
+    fn parse_agent_event_response_failed_emits_error() {
+        let mut tracker = ToolCallTracker::default();
+        let chunk: StreamChunk = serde_json::from_value(json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_fail",
+                "status": "failed",
+                "error": { "code": "server_error", "message": "boom" }
+            }
+        }))
+        .expect("valid failed chunk");
+
+        let event = parse_agent_event(&chunk, &mut tracker, None).expect("expected Error event");
+        match event {
+            AgentEvent::Error(message) => {
+                assert!(message.contains("server_error"), "got: {message}");
+                assert!(message.contains("boom"), "got: {message}");
+            }
+            other => panic!("expected AgentEvent::Error, got {other:?}"),
+        }
+    }
+
+    /// P2.13: `response.done` with status=failed (always-emitted terminal) must
+    /// also map to Error, not a clean ResponseDone.
+    #[test]
+    fn parse_agent_event_done_with_failed_status_emits_error() {
+        let mut tracker = ToolCallTracker::default();
+        let chunk: StreamChunk = serde_json::from_value(json!({
+            "type": "response.done",
+            "response": {
+                "id": "resp_done_failed",
+                "status": "failed",
+                "error": { "message": "rate limited" }
+            }
+        }))
+        .expect("valid done chunk");
+
+        let event = parse_agent_event(&chunk, &mut tracker, None).expect("expected Error event");
+        assert!(matches!(event, AgentEvent::Error(message) if message.contains("rate limited")));
+    }
+
+    /// P2.13: `response.incomplete` surfaces the incomplete reason as an Error.
+    #[test]
+    fn parse_agent_event_response_incomplete_emits_error_with_reason() {
+        let mut tracker = ToolCallTracker::default();
+        let chunk: StreamChunk = serde_json::from_value(json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_incomplete",
+                "status": "incomplete",
+                "incomplete_details": { "reason": "max_output_tokens" }
+            }
+        }))
+        .expect("valid incomplete chunk");
+
+        let event = parse_agent_event(&chunk, &mut tracker, None).expect("expected Error event");
+        assert!(
+            matches!(event, AgentEvent::Error(message) if message.contains("max_output_tokens")),
+        );
+    }
+
+    /// P2.13: a cancelled terminal also maps to Error (not a clean ResponseDone).
+    #[test]
+    fn parse_agent_event_done_with_cancelled_status_emits_error() {
+        let mut tracker = ToolCallTracker::default();
+        let chunk: StreamChunk = serde_json::from_value(json!({
+            "type": "response.done",
+            "response": { "id": "resp_cancelled", "status": "cancelled" }
+        }))
+        .expect("valid done chunk");
+
+        let event = parse_agent_event(&chunk, &mut tracker, None).expect("expected Error event");
+        assert!(matches!(event, AgentEvent::Error(_)));
     }
 
     #[test]
