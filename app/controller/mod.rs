@@ -1810,11 +1810,16 @@ impl RecordingController {
         });
         let mut pe = PresentationEmitter::new(tb, delta_sink, None);
         if flush_voice_chat_on_vad_end {
+            // Assistive (variant A): VAD-end only refreshes the live UI bubble; it must
+            // NOT dispatch to the agent. The sole agent sender is the toggle-stop path
+            // (handle stop -> build_assistive_input -> send_assistive_with_agent_runtime),
+            // which sends ONE wrapped message carrying full context (selection + frontmost
+            // app). Committing on VAD-end as well made the same utterance reach the agent
+            // twice — plain via VAD-end and wrapped via toggle-stop — producing a double
+            // request and a double answer. Restores the "one utterance = one agent message"
+            // invariant (regression introduced by 57b1bcc; original invariant from c3ce222).
             pe.set_utterance_callback(Some(Arc::new(|text: String| {
                 crate::ui::voice_chat::append_voice_chat_user_utterance(&text);
-            })));
-            pe.set_vad_end_callback(Some(Arc::new(|| {
-                crate::ui::voice_chat::commit_last_user_message();
             })));
         }
 
