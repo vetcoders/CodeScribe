@@ -354,23 +354,6 @@ fn frontmost_app_name() -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn prefer_copy_fallback_for_app(frontmost_app: Option<&str>) -> bool {
-    let app = frontmost_app.unwrap_or("").trim().to_lowercase();
-    matches!(
-        app.as_str(),
-        "safari"
-            | "google chrome"
-            | "google chrome beta"
-            | "arc"
-            | "brave browser"
-            | "firefox"
-            | "microsoft edge"
-            | "orion"
-            | "vivaldi"
-    )
-}
-
-#[cfg(target_os = "macos")]
 fn selected_text_from_frontmost(
     max_chars: usize,
     copy_delay_ms: u64,
@@ -385,19 +368,23 @@ fn selected_text_from_frontmost(
         return Some(selected);
     }
 
-    // Cmd+C fallback is enabled by default for web browsers where AX selection is unreliable
-    // (notably Safari). The explicit env flag still overrides this behavior.
-    // We snapshot+restore to avoid clipboard pollution and treat "unchanged clipboard" as no selection.
-    let fallback_default = prefer_copy_fallback_for_app(frontmost_app);
-    if !env_flag("ASSISTIVE_CONTEXT_COPY_FALLBACK", fallback_default) {
-        if matches!(sel_len, Some(0)) {
-            debug!("Assistive context: selection length is 0; Cmd+C fallback disabled");
-        }
+    // AX returned no selection. Fall back to a synthetic Cmd+C for ANY app — terminals
+    // (Ghostty, iTerm2, Terminal), Electron apps, and anything else that does not expose
+    // AXSelectedText. Native AppKit apps never reach here because the AX path above returns
+    // early. The clipboard is snapshotted and restored below, and an unchanged clipboard is
+    // treated as "no selection", so this stays clean and avoids false positives. Set
+    // ASSISTIVE_CONTEXT_COPY_FALLBACK=0 to disable the fallback entirely.
+    if !env_flag("ASSISTIVE_CONTEXT_COPY_FALLBACK", true) {
+        debug!(
+            "Assistive context: AX gave no selection for {:?}; Cmd+C fallback disabled by env",
+            frontmost_app
+        );
         return None;
     }
-    if matches!(sel_len, Some(0)) {
-        debug!("Assistive context: AX range length=0; trying Cmd+C fallback");
-    }
+    debug!(
+        "Assistive context: AX gave no selection for {:?} (range len={:?}); trying Cmd+C fallback",
+        frontmost_app, sel_len
+    );
 
     // Fallback: snapshot clipboard + Cmd+C + restore.
     // This can fail in some apps and can mis-detect "no selection" when clipboard doesn't change.
