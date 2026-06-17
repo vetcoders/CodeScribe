@@ -43,6 +43,34 @@ use super::params::DecodingParams;
 /// Callback for streaming chunk results (called after each chunk is transcribed)
 pub type ChunkCallback<'a> = &'a dyn Fn(&str);
 
+/// Average decoder tokens per spoken word (BPE subwords + punctuation). Used to
+/// convert the words-per-second cap into a token budget for the runaway
+/// watchdog. Conservative (higher = looser budget).
+const RUNAWAY_TOKENS_PER_WORD: f32 = 2.0;
+
+/// Safety margin on the runaway token budget so legitimate fast/long speech is
+/// never cut: the watchdog only fires well past any plausible real word rate.
+const RUNAWAY_BUDGET_MARGIN: f32 = 2.0;
+
+/// Minimum token budget for the runaway watchdog regardless of audio length, so
+/// very short chunks still get enough headroom to emit normal short utterances.
+const RUNAWAY_MIN_BUDGET: usize = 64;
+
+/// Token budget for the in-loop runaway watchdog given the chunk audio length.
+///
+/// Derived from the shared words-per-second cap
+/// (`quality_gate::MAX_WORDS_PER_SEC`) times tokens-per-word and a generous
+/// safety margin. When generated tokens exceed this budget the decode loop bails
+/// instead of paying the full O(n^2)/O(n^3) cost of a runaway hallucination.
+fn runaway_token_budget(audio_sec: f32) -> usize {
+    let raw = (crate::pipeline::streaming::quality_gate::MAX_WORDS_PER_SEC
+        * audio_sec.max(0.0)
+        * RUNAWAY_TOKENS_PER_WORD
+        * RUNAWAY_BUDGET_MARGIN)
+        .ceil();
+    (raw as usize).max(RUNAWAY_MIN_BUDGET)
+}
+
 fn skipped_final_pass(options: FileTranscriptionOptions, reason: &str) -> Option<FinalPassVerdict> {
     match options.final_pass {
         FinalPassMode::None => None,
@@ -915,10 +943,27 @@ impl LocalWhisperEngine {
         let ngram_size = self.decoding_params.no_repeat_ngram_size;
         let mut ngram_blocker = NgramBlocker::new(ngram_size);
 
+        // Runaway watchdog: cap generated tokens at a generous multiple of the
+        // plausible word rate for this chunk's audio length, so a hallucinating
+        // decode bails early instead of grinding to max_new_tokens at O(n^2) cost.
+        let audio_sec = samples_16k.len() as f32 / whisper::SAMPLE_RATE as f32;
+        let runaway_budget = runaway_token_budget(audio_sec);
+        let mut runaway_tripped = false;
+
         let mut sum_logprob = 0.0f32;
         let mut token_count = 0usize;
 
         for step in 0..max_new_tokens {
+            if all_tokens.len() >= runaway_budget {
+                tracing::warn!(
+                    "Runaway watchdog tripped: {} tokens for {:.2}s audio (budget {})",
+                    all_tokens.len(),
+                    audio_sec,
+                    runaway_budget
+                );
+                runaway_tripped = true;
+                break;
+            }
             let token_tensor = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
             let hidden = self
                 .model
@@ -1055,6 +1100,17 @@ impl LocalWhisperEngine {
             tokens.push(best_token);
             all_tokens.push(best_token);
             ngram_blocker.observe(&all_tokens);
+        }
+
+        // Runaway decode: drop the transcript rather than emit a hallucinated
+        // wall of text. Mirrors the post-hoc quality gate's dropped contract.
+        if runaway_tripped {
+            let avg_logprob = (token_count > 0).then(|| sum_logprob / token_count as f32);
+            return Ok(RawTranscript {
+                avg_logprob,
+                quality_gate_dropped: true,
+                ..Default::default()
+            });
         }
 
         let (text, segments) = if timestamps_enabled {
@@ -1752,6 +1808,46 @@ mod dedup_tests {
             all.push(t);
             blocker.observe(&all);
         }
+    }
+
+    #[test]
+    fn runaway_watchdog_bails() {
+        // 1s of audio with 5 words/s cap, 2 tokens/word, 2x margin => 20 tokens,
+        // but RUNAWAY_MIN_BUDGET (64) floors it for short chunks.
+        assert_eq!(runaway_token_budget(1.0), RUNAWAY_MIN_BUDGET);
+
+        // 10s of audio: 5 * 10 * 2 * 2 = 200 tokens budget.
+        assert_eq!(runaway_token_budget(10.0), 200);
+
+        // The loop bails when generated tokens reach the budget, well before
+        // max_new_tokens (448). Simulate the in-loop guard for a runaway decode.
+        let audio_sec = 10.0;
+        let budget = runaway_token_budget(audio_sec);
+        let max_new_tokens = 448usize; // model max_target_positions ceiling
+        let mut generated = 0usize;
+        for _ in 0..max_new_tokens {
+            if generated >= budget {
+                break;
+            }
+            generated += 1; // pretend every step emits a non-EOT token
+        }
+        assert_eq!(generated, budget);
+        assert!(
+            generated < max_new_tokens,
+            "watchdog must bail before max_new_tokens"
+        );
+
+        // Budget is conservative: a normal 10s utterance at a realistic ~2.5
+        // words/s, 2 tokens/word = ~50 tokens, far below the 200 budget.
+        let normal_tokens = (2.5f32 * 10.0 * 2.0) as usize;
+        assert!(
+            normal_tokens < budget,
+            "normal speech ({normal_tokens}) must not trip budget ({budget})"
+        );
+
+        // Zero / negative audio_sec is clamped and floored, never panics.
+        assert_eq!(runaway_token_budget(0.0), RUNAWAY_MIN_BUDGET);
+        assert_eq!(runaway_token_budget(-5.0), RUNAWAY_MIN_BUDGET);
     }
 
     #[test]
