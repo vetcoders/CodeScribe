@@ -33,6 +33,15 @@ pub extern "C" fn on_attach_github(_this: &Object, _cmd: Sel, _sender: Id) {
     };
 
     // Fetch in background thread, then add attachment on main thread.
+    //
+    // P2.4 (DEFERRED — cross-cut): ideally this would reuse the main
+    // multi-threaded tokio runtime (bin: worker_threads = 4) via a cached
+    // `Handle`. But this is an objc `extern "C"` action firing on the AppKit
+    // main thread, which is NOT a tokio worker, so `Handle::current()` would
+    // panic and no global `Handle` is exposed to the voice_chat domain.
+    // Caching one requires a startup-side `OnceLock<Handle>` in bin/controller
+    // (GROUP controller/concurrency). Until that lands, keep the per-fetch
+    // current-thread runtime: connector fetches are rare and short-lived.
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -66,6 +75,10 @@ pub extern "C" fn on_attach_github(_this: &Object, _cmd: Sel, _sender: Id) {
                                 );
                                 push_attachment_if_allowed(&mut state, attachment, &mut skipped);
                                 state.attachments_last_sent = None;
+                                // P2.11: safe to render under the held lock —
+                                // render_attachment_chips is run-loop-free (see
+                                // its doc-comment in send.rs); no nested run-loop
+                                // can re-enter and re-lock OVERLAY_STATE.
                                 render_attachment_chips(&mut state);
                                 let names: Vec<String> = state
                                     .attachments
@@ -116,6 +129,11 @@ pub extern "C" fn on_attach_url(_this: &Object, _cmd: Sel, _sender: Id) {
     }
 
     // Fetch in background thread, then add attachment on main thread.
+    //
+    // P2.4 (DEFERRED — cross-cut): see `on_attach_github` above. Reusing the
+    // main runtime needs a startup-cached `Handle` (GROUP controller/concurrency);
+    // `Handle::current()` panics on the AppKit main thread. Per-fetch runtime
+    // retained until that cross-cut lands.
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -154,6 +172,9 @@ pub extern "C" fn on_attach_url(_this: &Object, _cmd: Sel, _sender: Id) {
                                 );
                                 push_attachment_if_allowed(&mut state, att, &mut skipped);
                                 state.attachments_last_sent = None;
+                                // P2.11: safe under the held lock — chip render is
+                                // run-loop-free (see render_attachment_chips_locked
+                                // doc-comment in send.rs).
                                 render_attachment_chips(&mut state);
                                 let names: Vec<String> = state
                                     .attachments
