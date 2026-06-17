@@ -913,6 +913,7 @@ impl LocalWhisperEngine {
             .max_target_positions
             .saturating_sub(tokens.len());
         let ngram_size = self.decoding_params.no_repeat_ngram_size;
+        let mut ngram_blocker = NgramBlocker::new(ngram_size);
 
         let mut sum_logprob = 0.0f32;
         let mut token_count = 0usize;
@@ -960,24 +961,14 @@ impl LocalWhisperEngine {
                 }
             }
 
-            // Apply no_repeat_ngram blocking (faster-whisper style)
-            // Block tokens that would create a repeated n-gram
-            // Need at least ngram_size tokens to have a potential repeat
-            if ngram_size > 0 && all_tokens.len() >= ngram_size {
-                // Look at last (ngram_size - 1) tokens as prefix
-                let prefix_start = all_tokens.len() + 1 - ngram_size;
-                let prefix = &all_tokens[prefix_start..];
-
-                // Find all earlier positions where this (n-1)-gram occurred
-                let search_end = all_tokens.len() - ngram_size + 1;
-                for i in 0..search_end {
-                    if all_tokens[i..i + ngram_size - 1] == *prefix {
-                        // Block the token that followed this n-gram
-                        let blocked_token = all_tokens[i + ngram_size - 1] as usize;
-                        if blocked_token < logits_vec.len() {
-                            logits_vec[blocked_token] = f32::NEG_INFINITY;
-                        }
-                    }
+            // Apply no_repeat_ngram blocking (faster-whisper style).
+            // Block tokens that would create a repeated n-gram. Uses an
+            // incremental lookup (see NgramBlocker) instead of a full O(n) scan
+            // of all_tokens per step.
+            for &blocked_token in ngram_blocker.blocked_tokens(&all_tokens) {
+                let idx = blocked_token as usize;
+                if idx < logits_vec.len() {
+                    logits_vec[idx] = f32::NEG_INFINITY;
                 }
             }
 
@@ -1063,6 +1054,7 @@ impl LocalWhisperEngine {
 
             tokens.push(best_token);
             all_tokens.push(best_token);
+            ngram_blocker.observe(&all_tokens);
         }
 
         let (text, segments) = if timestamps_enabled {
@@ -1366,6 +1358,70 @@ fn map_tensor_name(name: &str) -> String {
     new_name
 }
 
+/// Incremental no-repeat n-gram blocker.
+///
+/// Replaces the per-step O(n) full scan of `all_tokens` (which made the decode
+/// loop O(n^2) in blocking cost) with an O(1)-amortized map from each completed
+/// `(ngram_size - 1)`-gram to the set of tokens that have followed it. After
+/// every emitted token the new trailing window is recorded; before each step the
+/// current tail's `(ngram_size - 1)`-gram is looked up to find tokens to block.
+///
+/// Behavior is identical to the previous full-scan: it blocks exactly the tokens
+/// that ever followed the current `(ngram_size - 1)`-gram tail elsewhere in the
+/// generated sequence. `ngram_size == 0` disables blocking; sequences shorter
+/// than `ngram_size` produce no blocks.
+struct NgramBlocker {
+    ngram_size: usize,
+    // (n-1)-gram window -> tokens observed immediately after it.
+    seen: HashMap<Vec<u32>, Vec<u32>>,
+    emitted: usize,
+}
+
+impl NgramBlocker {
+    fn new(ngram_size: usize) -> Self {
+        Self {
+            ngram_size,
+            seen: HashMap::new(),
+            emitted: 0,
+        }
+    }
+
+    /// Tokens to block given the full generated sequence so far. Mirrors the
+    /// prefix = last (n-1) tokens lookup of the original scan.
+    fn blocked_tokens(&self, all_tokens: &[u32]) -> &[u32] {
+        if self.ngram_size == 0 || all_tokens.len() < self.ngram_size {
+            return &[];
+        }
+        let prefix = &all_tokens[all_tokens.len() + 1 - self.ngram_size..];
+        self.seen.get(prefix).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Record the newly completed (n-1)-gram windows after `all_tokens` grew by
+    /// one. Must be called after each push to `all_tokens`.
+    fn observe(&mut self, all_tokens: &[u32]) {
+        // A successor at position `len-1` completes the window
+        // all_tokens[len-1-(n-1) .. len-1] -> all_tokens[len-1].
+        if self.ngram_size == 0 {
+            self.emitted = all_tokens.len();
+            return;
+        }
+        // Catch up if observe was skipped (defensive; loop calls every push).
+        let win = self.ngram_size - 1;
+        while self.emitted < all_tokens.len() {
+            let succ_pos = self.emitted;
+            if succ_pos >= win {
+                let key = all_tokens[succ_pos - win..succ_pos].to_vec();
+                let succ = all_tokens[succ_pos];
+                let entry = self.seen.entry(key).or_default();
+                if !entry.contains(&succ) {
+                    entry.push(succ);
+                }
+            }
+            self.emitted += 1;
+        }
+    }
+}
+
 fn compression_ratio(text: &str) -> f32 {
     let original_len = text.len();
     if original_len == 0 {
@@ -1654,6 +1710,63 @@ mod dedup_tests {
         let input = "który zajmuje który zajmuje 56 GB. 56 GB. test test";
         let expected = "który zajmuje 56 GB. test";
         assert_eq!(dedup_repetitions(input), expected);
+    }
+
+    /// Reference implementation: the original full-scan n-gram block, used only
+    /// to prove the incremental NgramBlocker produces an identical block set.
+    fn reference_blocked(ngram_size: usize, all_tokens: &[u32]) -> Vec<u32> {
+        let mut blocked = Vec::new();
+        if ngram_size > 0 && all_tokens.len() >= ngram_size {
+            let prefix_start = all_tokens.len() + 1 - ngram_size;
+            let prefix = &all_tokens[prefix_start..];
+            let search_end = all_tokens.len() - ngram_size + 1;
+            for i in 0..search_end {
+                if all_tokens[i..i + ngram_size - 1] == *prefix {
+                    blocked.push(all_tokens[i + ngram_size - 1]);
+                }
+            }
+        }
+        blocked
+    }
+
+    fn assert_ngram_parity(ngram_size: usize, seq: &[u32]) {
+        let mut blocker = NgramBlocker::new(ngram_size);
+        let mut all: Vec<u32> = Vec::new();
+        for &t in seq {
+            // Lookup happens against the sequence as it stood before pushing t.
+            // Compare as sets: blocking a token is idempotent, so duplicate
+            // hits in the reference scan and the deduped incremental list have
+            // identical effect on the logits.
+            let mut inc: Vec<u32> = blocker.blocked_tokens(&all).to_vec();
+            let mut refr = reference_blocked(ngram_size, &all);
+            inc.sort_unstable();
+            inc.dedup();
+            refr.sort_unstable();
+            refr.dedup();
+            assert_eq!(
+                inc,
+                refr,
+                "block-set mismatch (n={ngram_size}) at len {}: inc={inc:?} ref={refr:?}",
+                all.len()
+            );
+            all.push(t);
+            blocker.observe(&all);
+        }
+    }
+
+    #[test]
+    fn ngram_block_parity() {
+        // Repetition-heavy synthetic sequence exercises the block path.
+        let seq = [5u32, 6, 7, 5, 6, 7, 5, 6, 7, 8, 9, 8, 9, 8, 9, 8];
+        for n in [0usize, 1, 2, 3, 5] {
+            assert_ngram_parity(n, &seq);
+        }
+        // Sequence shorter than n -> no blocks.
+        assert_ngram_parity(5, &[1, 2, 3]);
+        // Empty.
+        assert_ngram_parity(3, &[]);
+        // Single distinct token repeated (worst case for ngram_size==1).
+        assert_ngram_parity(1, &[42, 42, 42, 42]);
     }
 
     #[test]
