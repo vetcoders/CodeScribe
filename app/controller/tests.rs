@@ -477,24 +477,6 @@ fn test_should_use_toggle_adjudicated_stop_only_for_raw_toggle_when_enabled() {
 }
 
 #[test]
-fn test_raw_recording_streaming_source_marks_latency_critical_raw_modes() {
-    assert_eq!(
-        raw_recording_streaming_source(false, true, None),
-        Some(RecordingTranscriptSource::Streaming)
-    );
-    assert_eq!(
-        raw_recording_streaming_source(
-            false,
-            false,
-            Some(RecordingTranscriptSource::ToggleSessionAdjudicated)
-        ),
-        Some(RecordingTranscriptSource::ToggleSessionAdjudicated)
-    );
-    assert_eq!(raw_recording_streaming_source(true, true, None), None);
-    assert_eq!(raw_recording_streaming_source(false, false, None), None);
-}
-
-#[test]
 fn test_transcript_delivery_wrap_is_default_off() {
     let config = Config::default();
 
@@ -624,7 +606,6 @@ fn test_adjudicate_recording_truth_blocks_local_no_speech() {
         "preview text".to_string(),
         None,
         &session,
-        None,
     );
 
     assert!(verdict.raw_text.is_none());
@@ -652,7 +633,6 @@ fn test_adjudicate_recording_truth_marks_cloud_fallback_as_degraded() {
         "streaming fallback".to_string(),
         None,
         &SessionTelemetrySnapshot::default(),
-        None,
     );
 
     assert_eq!(verdict.raw_text.as_deref(), Some("streaming fallback"));
@@ -687,49 +667,67 @@ fn test_adjudicate_recording_truth_marks_cloud_fallback_as_degraded() {
 }
 
 #[test]
-fn test_adjudicate_recording_truth_can_select_streaming_verdict_without_fallback() {
+fn test_adjudicate_recording_truth_prefers_local_final_pass_over_streaming_preview() {
     let verdict = adjudicate_recording_truth(
         true,
-        false,
-        None,
-        "fast raw transcript".to_string(),
+        true,
+        Some(make_final_pass_verdict(
+            "czysty final pass",
+            82.0,
+            Some(-0.22),
+            false,
+        )),
+        "powtarzajacy sie streaming preview".to_string(),
         None,
         &SessionTelemetrySnapshot::default(),
-        Some(RecordingTranscriptSource::Streaming),
     );
 
-    assert_eq!(verdict.raw_text.as_deref(), Some("fast raw transcript"));
+    assert_eq!(verdict.raw_text.as_deref(), Some("czysty final pass"));
     assert_eq!(
         verdict.transcript_source,
-        Some(RecordingTranscriptSource::Streaming)
+        Some(RecordingTranscriptSource::LocalFinalPass)
     );
     assert_eq!(verdict.fallback_class, None);
     assert!(verdict.confidence_flags.is_empty());
     assert_eq!(verdict.commit_trigger, None);
-    assert_eq!(verdict.display_status, "Streaming preview");
+    assert_eq!(verdict.display_status, "Final-pass local");
 }
 
 #[test]
-fn test_adjudicate_recording_truth_preserves_toggle_source_for_fast_raw_stop() {
+fn test_adjudicate_recording_truth_marks_raw_streaming_preview_as_degraded_fallback() {
     let verdict = adjudicate_recording_truth(
         true,
-        false,
+        true,
         None,
         "toggle transcript".to_string(),
         None,
         &SessionTelemetrySnapshot::default(),
-        Some(RecordingTranscriptSource::ToggleSessionAdjudicated),
     );
 
     assert_eq!(verdict.raw_text.as_deref(), Some("toggle transcript"));
     assert_eq!(
         verdict.transcript_source,
-        Some(RecordingTranscriptSource::ToggleSessionAdjudicated)
+        Some(RecordingTranscriptSource::StreamingFallback)
     );
-    assert_eq!(verdict.fallback_class, None);
-    assert!(verdict.confidence_flags.is_empty());
-    assert_eq!(verdict.commit_trigger, None);
-    assert_eq!(verdict.display_status, "Toggle session adjudicated");
+    assert_eq!(
+        verdict.fallback_class,
+        Some(RecordingFallbackClass::Degraded)
+    );
+    assert!(
+        verdict
+            .confidence_flags
+            .contains(&TranscriptionConfidenceFlag::LocalFinalPassUnavailable)
+    );
+    assert!(
+        verdict
+            .confidence_flags
+            .contains(&TranscriptionConfidenceFlag::UnverifiedStream)
+    );
+    assert_eq!(
+        verdict.commit_trigger.as_deref(),
+        Some("streaming_preview_used_as_verdict")
+    );
+    assert_eq!(verdict.display_status, "Streaming fallback");
 }
 
 #[test]
@@ -741,7 +739,6 @@ fn test_adjudicate_recording_truth_uses_typed_cloud_primary_verdict() {
         "preview text".to_string(),
         Some(make_cloud_verdict("cloud primary")),
         &SessionTelemetrySnapshot::default(),
-        None,
     );
 
     assert_eq!(verdict.raw_text.as_deref(), Some("cloud primary"));
@@ -767,7 +764,6 @@ fn test_adjudicate_recording_truth_marks_low_logprob_as_unsafe() {
         "preview text".to_string(),
         None,
         &SessionTelemetrySnapshot::default(),
-        None,
     );
 
     assert_eq!(
