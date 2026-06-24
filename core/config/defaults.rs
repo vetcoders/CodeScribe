@@ -23,6 +23,10 @@ pub fn default_ai_assistive_max_tokens() -> i32 {
     0 // 0 = no limit
 }
 
+pub fn default_transcript_tag_template() -> String {
+    crate::transcript_tagging::DEFAULT_TRANSCRIPT_TAG_TEMPLATE.to_string()
+}
+
 pub fn default_show_tray_glyph() -> bool {
     true
 }

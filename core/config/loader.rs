@@ -126,6 +126,13 @@ impl Config {
         {
             self.transcript_send_mode = mode;
         }
+        if let Ok(val) = std::env::var("CODESCRIBE_TRANSCRIPT_TAGGING") {
+            self.transcript_tagging_enabled =
+                matches!(val.as_str(), "1" | "true" | "yes" | "on" | "enabled");
+        }
+        if let Ok(val) = std::env::var("CODESCRIBE_TRANSCRIPT_TAG_TEMPLATE") {
+            self.transcript_tag_template = val;
+        }
         if let Ok(val) = std::env::var("AI_MAX_TOKENS")
             && let Ok(tokens) = val.parse()
         {
@@ -342,6 +349,16 @@ impl Config {
         {
             self.ai_formatting_enabled = v;
         }
+        if std::env::var("CODESCRIBE_TRANSCRIPT_TAGGING").is_err()
+            && let Some(v) = settings.transcript_tagging_enabled
+        {
+            self.transcript_tagging_enabled = v;
+        }
+        if std::env::var("CODESCRIBE_TRANSCRIPT_TAG_TEMPLATE").is_err()
+            && let Some(ref v) = settings.transcript_tag_template
+        {
+            self.transcript_tag_template = v.clone();
+        }
         if std::env::var("FORMATTING_LEVEL").is_err()
             && let Some(ref v) = settings.formatting_level
         {
@@ -556,6 +573,7 @@ impl Config {
                     }
                 }
                 "AI_FORMATTING_ENABLED"
+                | "TRANSCRIPT_TAGGING_ENABLED"
                 | "BEEP_ON_START"
                 | "SHOW_DOCK_ICON"
                 | "TRANSCRIPTION_OVERLAY_ENABLED"
@@ -648,6 +666,9 @@ impl Config {
                     "TRANSCRIPT_SEND_MODE" => {
                         settings_ref.transcript_send_mode = Some((*value).to_string())
                     }
+                    "TRANSCRIPT_TAG_TEMPLATE" => {
+                        settings_ref.transcript_tag_template = Some((*value).to_string())
+                    }
                     "AUDIO_INPUT_DEVICE" => {
                         settings_ref.audio_input_device = Some((*value).to_string())
                     }
@@ -702,6 +723,7 @@ impl Config {
                     }
                     // ── Bools ──
                     "AI_FORMATTING_ENABLED"
+                    | "TRANSCRIPT_TAGGING_ENABLED"
                     | "BEEP_ON_START"
                     | "SHOW_DOCK_ICON"
                     | "TRANSCRIPTION_OVERLAY_ENABLED"
@@ -1019,6 +1041,25 @@ mod tests {
         }
     }
 
+    struct TestEnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl TestEnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            remove_env_for_test(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            restore_env_for_test(self.key, self.previous.take());
+        }
+    }
+
     fn setup_isolated_data_dir() -> TempDir {
         let tmp = TempDir::new().expect("tempdir");
         set_env_for_test("CODESCRIBE_DATA_DIR", tmp.path());
@@ -1081,6 +1122,7 @@ mod tests {
     #[serial]
     fn test_load_respects_transcription_overlay_enabled_from_settings_json() {
         let _tmp = setup_isolated_data_dir();
+        let _overlay_env = TestEnvGuard::unset("TRANSCRIPTION_OVERLAY_ENABLED");
 
         let mut settings = UserSettings::load();
         settings.transcription_overlay_enabled = Some(false);

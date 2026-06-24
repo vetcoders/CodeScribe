@@ -284,6 +284,14 @@ pub struct Config {
     #[serde(default)]
     pub transcript_send_mode: TranscriptSendMode,
 
+    /// Whether pasted dictation transcripts are wrapped in an epistemic tag.
+    #[serde(default)]
+    pub transcript_tagging_enabled: bool,
+
+    /// Template used when transcript tagging is enabled.
+    #[serde(default = "default_transcript_tag_template")]
+    pub transcript_tag_template: String,
+
     /// Maximum tokens for regular AI completions
     #[serde(default = "default_ai_max_tokens")]
     pub ai_max_tokens: i32,
@@ -431,6 +439,8 @@ impl Default for Config {
             whisper_language: Language::default(),
             ai_formatting_enabled: false,
             transcript_send_mode: TranscriptSendMode::default(),
+            transcript_tagging_enabled: false,
+            transcript_tag_template: default_transcript_tag_template(),
             ai_max_tokens: default_ai_max_tokens(),
             ai_assistive_max_tokens: default_ai_assistive_max_tokens(),
             show_tray_glyph: default_show_tray_glyph(),
@@ -489,7 +499,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::ShortcutBinding;
+    use super::{Config, ShortcutBinding};
 
     #[test]
     fn shortcut_binding_parser_rejects_legacy_aliases() {
@@ -497,5 +507,18 @@ mod tests {
         assert!("fn".parse::<ShortcutBinding>().is_err());
         assert!("double_lalt".parse::<ShortcutBinding>().is_err());
         assert!("double_ralt".parse::<ShortcutBinding>().is_err());
+    }
+
+    #[test]
+    fn default_config_keeps_hold_modifiers_enabled() {
+        // hold_exclusive=true makes Fn-hold RAW-only and disables the documented
+        // Fn+Shift→Chat / Fn+Cmd→Selection modifiers (HOTKEYS_CONTRACT.md). The
+        // canonical default MUST stay false so those combos work out of the box;
+        // exclusive is opt-in (HOLD_EXCLUSIVE=1). Guards the 2026-05-30 regression
+        // where the runtime default / .env.example shipped exclusive ON.
+        assert!(
+            !Config::default().hold_exclusive,
+            "Config default must keep hold modifiers enabled (hold_exclusive=false)"
+        );
     }
 }

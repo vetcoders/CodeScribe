@@ -48,12 +48,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 BUILD_ENV=(env)
+# All `-u` (unset) flags MUST precede any name=value assignments: BSD/macOS
+# `env` stops parsing options at the first assignment (unlike GNU env), so an
+# interleaved `-u` would be treated as the utility name (env: -u: No such file).
+BUILD_ENV+=(-u CODESCRIBE_EMBED_TTS)
 if [[ "$NO_EMBED" -eq 1 ]]; then
   BUILD_ENV+=(CODESCRIBE_NO_EMBED=1)
 else
-  BUILD_ENV+=(-u CODESCRIBE_NO_EMBED)
+  # Distribution DMG must be self-contained: Whisper embed is opt-in since
+  # 2026-06-10 (default builds resolve from HF cache at runtime).
+  BUILD_ENV+=(-u CODESCRIBE_NO_EMBED CODESCRIBE_EMBED_WHISPER=1)
 fi
-BUILD_ENV+=(-u CODESCRIBE_EMBED_TTS)
 
 echo "=== Build DMG ==="
 echo "App: $APP_NAME"

@@ -138,7 +138,10 @@ LLM_ASSISTIVE_API_KEY=sk-proj-xxx
 git clone https://github.com/VetCoders/CodeScribe.git
 cd CodeScribe
 
-# Install CLI (embedded-first Whisper + support assets — single-binary distribution)
+# Install the hook runner once (required for local commit/push gates)
+pipx install pre-commit
+
+# Install CLI + repo-local git hooks
 make install
 
 # Verify installation
@@ -160,9 +163,9 @@ Tagged builds can publish a signed-or-ad-hoc DMG through GitHub Releases:
 ```bash
 make build              # Debug build (embedded-first Whisper with runtime fallback)
 make release            # Release build (embedded-first Whisper + embedded support assets)
-make install            # Install CLI with embedded-first Whisper; runtime fallback stays available
+make install            # Install CLI with embedded-first Whisper + repo-local git hooks
 make install-app        # Build + install macOS .app (auto-downloads models if missing)
-make install-no-embed   # Install without optional embedding (runtime lookup required)
+make install-no-embed   # Install without optional embedding + repo-local git hooks
 ```
 
 ## Quick Start
@@ -440,7 +443,18 @@ See [`docs/BACKLOG.md`](docs/BACKLOG.md) for the working backlog and [`docs/ARCH
 
 ## License
 
-Apache License 2.0
+CodeScribe is licensed under the Functional Source License 1.1, ALv2 Future
+License (FSL-1.1-ALv2).
+
+This is a Fair Source / source-available license while the current FSL terms
+apply. You may read, fork, build, and modify the source for permitted purposes
+including personal use, education, research, and professional services.
+Competing Use is not permitted: do not make CodeScribe available as a
+commercial product or service that substitutes for CodeScribe.
+
+Each released version automatically converts to Apache-2.0 two years after the
+date we make that version available. See [`LICENSE`](LICENSE) and
+<https://fsl.software> for the full terms.
 
 ---
 

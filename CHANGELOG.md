@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **License** — Relicensed the public CodeScribe release surface from Apache-2.0 to FSL-1.1-ALv2 to support public availability while protecting against commercial repackaging; each version converts to Apache-2.0 after 2 years.
+
 ### Fixed
 
 - **Config loader test parity verified** — both `test_load_prefers_settings_json_over_promoted_env_file_values` and `test_runtime_env_does_not_persist_into_settings_during_migration` pass on this commit; closes the L1 marble flag carried from `0.9.2`.
