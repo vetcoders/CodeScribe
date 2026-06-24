@@ -80,6 +80,7 @@ install:
 	@cargo install --path . --force
 	@mkdir -p ~/.codescribe
 	@pwd > ~/.codescribe/repo_path
+	@$(MAKE) hooks
 	@echo "Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
 
 install-no-embed:
@@ -88,6 +89,7 @@ install-no-embed:
 	@CODESCRIBE_NO_EMBED=1 cargo install --path . --force
 	@mkdir -p ~/.codescribe
 	@pwd > ~/.codescribe/repo_path
+	@$(MAKE) hooks
 	@echo "Installed: codescribe $$(grep '^version' $(VERSION_FILE) | head -1 | sed 's/.*\"\(.*\)\"/v\1/')"
 	@echo "Note: Set CODESCRIBE_MODEL_PATH at runtime"
 
@@ -126,6 +128,7 @@ bundle: ensure-models release
 		'  <key>NSAccessibilityUsageDescription</key><string>Needed to monitor hotkeys and paste results.</string>' \
 		'  <key>NSInputMonitoringUsageDescription</key><string>Needed to detect global hotkeys.</string>' \
 		'  <key>NSScreenCaptureUsageDescription</key><string>Capture screen context for AI-assisted features.</string>' \
+		'  <key>NSAppleEventsUsageDescription</key><string>Needed to activate the previously focused app and restore selection context.</string>' \
 		'</dict>' \
 		'</plist>' \
 		> bundle/$(CODESCRIBE_APP_NAME).app/Contents/Info.plist; \

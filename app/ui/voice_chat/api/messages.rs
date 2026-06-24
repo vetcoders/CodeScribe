@@ -76,63 +76,84 @@ pub fn finalize_voice_chat_assistant_message() {
 pub fn add_voice_chat_error_message(text: &str) {
     let text_owned = text.to_string();
     Queue::main().exec_async(move || {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.active_assistant_stream_index = None;
-        state.active_reasoning_stream_index = None;
-        clear_agent_thinking_state(&mut state);
-        let mode = message_mode_label(&state);
-        state.messages.push(ChatMessage {
-            role: ChatRole::System,
-            text: text_owned.clone(),
-            is_streaming: false,
-            is_collapsed: false,
-            is_error: true,
-            timestamp: SystemTime::now(),
-            mode: Some(mode),
-        });
-        state.is_sending = false;
-        update_chat_view_with_state(&mut state, true);
-        update_send_button_with_state(&mut state);
+        // P2.10: build views via `run_when_overlay_unlocked`. This block locks
+        // OVERLAY_STATE and then calls `update_chat_view_with_state`, which spins
+        // AppKit layout/scroll work; running it while an OUTER main-thread frame
+        // still holds the non-reentrant guard self-deadlocks the mutex.
+        run_when_overlay_unlocked(move || add_voice_chat_error_message_impl(&text_owned));
     });
+}
+
+fn add_voice_chat_error_message_impl(text: &str) {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.active_assistant_stream_index = None;
+    state.active_reasoning_stream_index = None;
+    clear_agent_thinking_state(&mut state);
+    let mode = message_mode_label(&state);
+    state.messages.push(ChatMessage {
+        role: ChatRole::System,
+        text: text.to_string(),
+        is_streaming: false,
+        is_collapsed: false,
+        is_error: true,
+        timestamp: SystemTime::now(),
+        mode: Some(mode),
+        is_pending_followup: false,
+    });
+    state.is_sending = false;
+    update_chat_view_with_state(&mut state, true);
+    update_send_button_with_state(&mut state);
 }
 
 /// Add a non-error system message to the chat log.
 pub fn add_voice_chat_system_message(text: &str) {
     let text_owned = text.to_string();
     Queue::main().exec_async(move || {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        let mode = message_mode_label(&state);
-        state.messages.push(ChatMessage {
-            role: ChatRole::System,
-            text: text_owned.clone(),
-            is_streaming: false,
-            is_collapsed: false,
-            is_error: false,
-            timestamp: SystemTime::now(),
-            mode: Some(mode),
-        });
-        update_chat_view_with_state(&mut state, true);
+        // P2.10: see `add_voice_chat_error_message` — guard the view build.
+        run_when_overlay_unlocked(move || add_voice_chat_system_message_impl(&text_owned));
     });
+}
+
+fn add_voice_chat_system_message_impl(text: &str) {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mode = message_mode_label(&state);
+    state.messages.push(ChatMessage {
+        role: ChatRole::System,
+        text: text.to_string(),
+        is_streaming: false,
+        is_collapsed: false,
+        is_error: false,
+        timestamp: SystemTime::now(),
+        mode: Some(mode),
+        is_pending_followup: false,
+    });
+    update_chat_view_with_state(&mut state, true);
 }
 
 /// Add a user message to the chat
 pub fn add_voice_chat_user_message(text: &str) {
     let text_owned = text.to_string();
     Queue::main().exec_async(move || {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.active_user_stream_index = None;
-        let mode = message_mode_label(&state);
-        state.messages.push(ChatMessage {
-            role: ChatRole::User,
-            text: text_owned,
-            is_streaming: false,
-            is_collapsed: false,
-            is_error: false,
-            timestamp: SystemTime::now(),
-            mode: Some(mode),
-        });
-        update_chat_view_with_state(&mut state, true);
+        // P2.10: see `add_voice_chat_error_message` — guard the view build.
+        run_when_overlay_unlocked(move || add_voice_chat_user_message_impl(&text_owned));
     });
+}
+
+fn add_voice_chat_user_message_impl(text: &str) {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.active_user_stream_index = None;
+    let mode = message_mode_label(&state);
+    state.messages.push(ChatMessage {
+        role: ChatRole::User,
+        text: text.to_string(),
+        is_streaming: false,
+        is_collapsed: false,
+        is_error: false,
+        timestamp: SystemTime::now(),
+        mode: Some(mode),
+        is_pending_followup: false,
+    });
+    update_chat_view_with_state(&mut state, true);
 }
 
 /// Seed chat with a transcript and submit it as a user message.
@@ -154,8 +175,14 @@ pub fn handoff_transcript_to_chat(transcript: &str) {
 /// Used to drive "Thinking..." UI in the Agent tab of the voice chat overlay.
 pub fn set_voice_chat_agent_thinking(thinking: bool) {
     Queue::main().exec_async(move || {
-        let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        apply_agent_thinking(&mut state, thinking);
+        // P2.10: guard the lock-then-update path. `apply_agent_thinking` mutates
+        // the held guard and refreshes the status pill / send button; if an outer
+        // main-thread frame already holds OVERLAY_STATE, locking here would
+        // self-deadlock the non-reentrant mutex.
+        run_when_overlay_unlocked(move || {
+            let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            apply_agent_thinking(&mut state, thinking);
+        });
     });
 }
 
@@ -425,7 +452,11 @@ pub fn apply_delta_and_layout(state: &mut VoiceChatOverlayState, updated_index: 
 pub fn append_voice_chat_user_delta_impl(delta: &str) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     ensure_agent_tab_visible(&mut state);
-    let idx = get_or_create_streaming_message_index(&mut state, ChatRole::User);
+    let idx = if should_capture_pending_followup(&state) {
+        get_or_create_pending_followup_index(&mut state)
+    } else {
+        get_or_create_streaming_message_index(&mut state, ChatRole::User)
+    };
     if let Some(msg) = state.messages.get_mut(idx) {
         codescribe_core::pipeline::contracts::TranscriptDelta::from_raw(delta).apply(&mut msg.text);
         msg.is_streaming = true;
@@ -442,7 +473,11 @@ pub fn append_voice_chat_user_utterance_impl(text: &str) {
 
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     ensure_agent_tab_visible(&mut state);
-    let idx = get_or_create_streaming_message_index(&mut state, ChatRole::User);
+    let idx = if should_capture_pending_followup(&state) {
+        get_or_create_pending_followup_index(&mut state)
+    } else {
+        get_or_create_streaming_message_index(&mut state, ChatRole::User)
+    };
     if let Some(msg) = state.messages.get_mut(idx) {
         if !msg.text.trim().is_empty() && !msg.text.ends_with(char::is_whitespace) {
             msg.text.push(' ');
@@ -575,8 +610,13 @@ pub fn message_metadata(message: &ChatMessage) -> String {
     let when: DateTime<Local> = message.timestamp.into();
     let time = when.format("%H:%M").to_string();
     let role = message_role_label(message.role);
-    if let Some(mode) = message.mode.as_ref() {
+    let pending = message.is_pending_followup.then_some("Pending follow-up");
+    if let (Some(mode), Some(pending)) = (message.mode.as_ref(), pending) {
+        format!("{role} · {time} · {mode} · {pending}")
+    } else if let Some(mode) = message.mode.as_ref() {
         format!("{role} · {time} · {mode}")
+    } else if let Some(pending) = pending {
+        format!("{role} · {time} · {pending}")
     } else {
         format!("{role} · {time}")
     }
@@ -825,41 +865,56 @@ pub unsafe fn attach_message_bubble_click_recognizer(
 pub fn finalize_user_message_impl(text: &str) {
     let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
     ensure_agent_tab_visible(&mut state);
-    let idx = if let Some(idx) = state.active_user_stream_index.take() {
-        if is_valid_stream_message(&state, idx, ChatRole::User) {
-            idx
-        } else {
-            let mode = message_mode_label(&state);
-            state.messages.push(ChatMessage {
-                role: ChatRole::User,
-                text: String::new(),
-                is_streaming: false,
-                is_collapsed: false,
-                is_error: false,
-                timestamp: SystemTime::now(),
-                mode: Some(mode),
-            });
-            state.messages.len() - 1
-        }
-    } else {
-        let mode = message_mode_label(&state);
-        state.messages.push(ChatMessage {
-            role: ChatRole::User,
-            text: String::new(),
-            is_streaming: false,
-            is_collapsed: false,
-            is_error: false,
-            timestamp: SystemTime::now(),
-            mode: Some(mode),
-        });
-        state.messages.len() - 1
+    let idx = match state.active_user_stream_index.take() {
+        Some(idx) if is_valid_stream_message(&state, idx, ChatRole::User) => idx,
+        _ => reuse_or_push_finalized_user_message(&mut state, text),
     };
+    let preserve_pending_followup = state
+        .messages
+        .get(idx)
+        .map(|msg| msg.is_pending_followup)
+        .unwrap_or(false);
     if let Some(msg) = state.messages.get_mut(idx) {
         msg.text = text.to_string();
         msg.is_streaming = false;
         msg.is_error = false;
+        msg.is_pending_followup = preserve_pending_followup;
     }
     update_chat_view_with_state(&mut state, true);
+}
+
+/// Resolve the target index for a finalized user message when no live streaming
+/// index is available.
+///
+/// Reuses the last visible bubble only when it is itself a `User` message whose
+/// trimmed text already equals the final transcript; otherwise pushes a fresh
+/// empty user bubble. The assistive controller finalizes the same first utterance
+/// twice (full-rewrite render, then again right before send), and a cold overlay
+/// has no `active_user_stream_index` to reuse — without this guard the second
+/// finalize pushed a second identical bubble, rendering the first message twice
+/// (fix/assistive-double-send). Reuse never reaches back across an
+/// assistant/system/reasoning message: a closed turn stays closed, so a genuinely
+/// new utterance with identical text still gets its own bubble.
+fn reuse_or_push_finalized_user_message(state: &mut VoiceChatOverlayState, text: &str) -> usize {
+    if let Some(last) = state.messages.last()
+        && last.role == ChatRole::User
+        && last.text.trim() == text.trim()
+    {
+        return state.messages.len() - 1;
+    }
+
+    let mode = message_mode_label(state);
+    state.messages.push(ChatMessage {
+        role: ChatRole::User,
+        text: String::new(),
+        is_streaming: false,
+        is_collapsed: false,
+        is_error: false,
+        timestamp: SystemTime::now(),
+        mode: Some(mode),
+        is_pending_followup: false,
+    });
+    state.messages.len() - 1
 }
 
 pub fn finalize_user_message_state_only_impl() {
@@ -894,6 +949,7 @@ pub fn finalize_assistant_message_impl(text: &str, is_error: bool) {
                 is_error,
                 timestamp: SystemTime::now(),
                 mode: Some(mode),
+                is_pending_followup: false,
             });
             state.messages.len() - 1
         }
@@ -907,6 +963,7 @@ pub fn finalize_assistant_message_impl(text: &str, is_error: bool) {
             is_error,
             timestamp: SystemTime::now(),
             mode: Some(mode),
+            is_pending_followup: false,
         });
         state.messages.len() - 1
     };
@@ -988,6 +1045,7 @@ pub fn handoff_transcript_to_chat_impl(transcript: &str) {
             is_error: false,
             timestamp: SystemTime::now(),
             mode: Some(mode),
+            is_pending_followup: false,
         });
         state.is_sending = true;
         update_chat_view_with_state(&mut state, true);
@@ -1036,6 +1094,43 @@ pub fn is_valid_stream_message(state: &VoiceChatOverlayState, idx: usize, role: 
         .unwrap_or(false)
 }
 
+pub fn should_capture_pending_followup(state: &VoiceChatOverlayState) -> bool {
+    state.is_sending || state.is_agent_thinking
+}
+
+pub fn pending_followup_index(state: &VoiceChatOverlayState) -> Option<usize> {
+    state
+        .messages
+        .iter()
+        .rposition(|msg| msg.role == ChatRole::User && msg.is_pending_followup)
+}
+
+pub fn get_or_create_pending_followup_index(state: &mut VoiceChatOverlayState) -> usize {
+    if let Some(idx) = pending_followup_index(state) {
+        if let Some(msg) = state.messages.get_mut(idx) {
+            msg.is_streaming = true;
+            msg.is_collapsed = false;
+        }
+        state.active_user_stream_index = Some(idx);
+        return idx;
+    }
+
+    let mode = message_mode_label(state);
+    state.messages.push(ChatMessage {
+        role: ChatRole::User,
+        text: String::new(),
+        is_streaming: true,
+        is_collapsed: false,
+        is_error: false,
+        timestamp: SystemTime::now(),
+        mode: Some(mode),
+        is_pending_followup: true,
+    });
+    let idx = state.messages.len() - 1;
+    state.active_user_stream_index = Some(idx);
+    idx
+}
+
 pub fn get_or_create_streaming_message_index(
     state: &mut VoiceChatOverlayState,
     role: ChatRole,
@@ -1055,6 +1150,7 @@ pub fn get_or_create_streaming_message_index(
         is_error: false,
         timestamp: SystemTime::now(),
         mode: Some(mode),
+        is_pending_followup: false,
     });
     let idx = state.messages.len() - 1;
     if let Some(active_idx) = active_stream_index_mut(state, role) {
@@ -1097,6 +1193,9 @@ pub fn update_chat_view_with_state(state: &mut VoiceChatOverlayState, scroll_to_
             stack_view_add(container, empty_label);
         }
 
+        let mut measure_cache = std::mem::take(&mut state.bubble_measure_cache);
+        let measure_cache_ptr: *mut BubbleMeasureCache = &mut measure_cache;
+
         let mut last_bubble: Option<Id> = None;
         let message_count = state.messages.len();
         for index in 0..message_count {
@@ -1105,6 +1204,7 @@ pub fn update_chat_view_with_state(state: &mut VoiceChatOverlayState, scroll_to_
             let message_text = bubble_text_for_message(message);
             let message_is_streaming = bubble_streaming_for_message(message);
             let message_is_error = message.is_error;
+            let message_is_pending_followup = message.is_pending_followup;
             let message_render_mode =
                 message_render_mode_for(&state.message_render_modes, index, message);
             let message_metadata = if message_role == ChatRole::Reasoning && message.is_collapsed {
@@ -1124,6 +1224,7 @@ pub fn update_chat_view_with_state(state: &mut VoiceChatOverlayState, scroll_to_
                 metadata: message_metadata,
                 message_index: Some(index),
                 copy_action_target: state.action_handler.map(|p| p as Id),
+                measure_cache: Some(measure_cache_ptr),
             });
             if matches!(message_role, ChatRole::Assistant | ChatRole::Reasoning) {
                 attach_message_bubble_click_recognizer(state, bubble, index);
@@ -1137,13 +1238,17 @@ pub fn update_chat_view_with_state(state: &mut VoiceChatOverlayState, scroll_to_
             // Add commit/discard action bar for draft user messages
             if message_role == ChatRole::User
                 && index == message_count - 1
-                && !state.auto_send_enabled
-                && !state.is_sending
+                && (message_is_pending_followup || (!state.auto_send_enabled && !state.is_sending))
             {
-                let action_bar = create_commit_action_bar(state.action_handler);
+                let action_bar = if message_is_pending_followup {
+                    create_pending_followup_action_bar(state.action_handler)
+                } else {
+                    create_commit_action_bar(state.action_handler)
+                };
                 stack_view_add(container, action_bar);
             }
         }
+        state.bubble_measure_cache = measure_cache;
 
         // Ensure the document view size matches its arranged subviews; otherwise scrolling can
         // be disabled and long messages will just "grow" out of view.

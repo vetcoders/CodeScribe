@@ -32,6 +32,15 @@ mod macos {
     const K_CG_EVENT_KEY_DOWN: CGEventType = 10;
     const K_CG_EVENT_FLAGS_CHANGED: CGEventType = 12;
 
+    // CGEventType "tap disabled" sentinels. CoreGraphics emits these (the two
+    // highest u32 values) when it forcibly disables a tap — either because a
+    // listen-only callback was too slow or because of user input during a
+    // sensitive sequence. They live in <CoreGraphics/CGEvent.h> as stable ABI
+    // constants, named there `kCGEventTapDisabledByTimeout` and
+    // `kCGEventTapDisabledByUserInput`.
+    const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: CGEventType = 0xFFFF_FFFE;
+    const K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT: CGEventType = 0xFFFF_FFFF;
+
     // CGEventFlags masks
     const K_CG_EVENT_FLAG_MASK_CONTROL: CGEventFlags = 0x00040000;
     const K_CG_EVENT_FLAG_MASK_SHIFT: CGEventFlags = 0x00020000;
@@ -103,13 +112,19 @@ mod macos {
     struct HotkeyState {
         detector: HotkeyDetector,
         tx: Sender<HotkeyEvent>,
+        /// Shared runtime handle so the callback can read the live tap port
+        /// (`control.tap`) to re-arm it after macOS disables the tap. The
+        /// callback only ever *reads* this pointer — never invalidates or
+        /// frees it — so ownership/teardown in `request_stop`/`Drop` is intact.
+        control: Arc<RuntimeControl>,
     }
 
     impl HotkeyState {
-        fn new(tx: Sender<HotkeyEvent>) -> Self {
+        fn new(tx: Sender<HotkeyEvent>, control: Arc<RuntimeControl>) -> Self {
             Self {
                 detector: HotkeyDetector::default(),
                 tx,
+                control,
             }
         }
     }
@@ -195,7 +210,7 @@ mod macos {
     impl EventTapResources {
         fn new(tx: Sender<HotkeyEvent>, control: Arc<RuntimeControl>) -> Self {
             Self {
-                state: Box::new(HotkeyState::new(tx)),
+                state: Box::new(HotkeyState::new(tx, Arc::clone(&control))),
                 tap: None,
                 source: None,
                 run_loop: None,
@@ -324,6 +339,16 @@ mod macos {
         }
     }
 
+    /// Returns true if the CGEventType signals that macOS forcibly disabled
+    /// the tap (timeout from a slow callback, or user input). Pure logic — no
+    /// FFI — so it is unit-testable without a live tap or Accessibility perms.
+    fn is_tap_disabled_event(event_type: CGEventType) -> bool {
+        matches!(
+            event_type,
+            K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT | K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT
+        )
+    }
+
     fn map_keycode(keycode: i64) -> HotkeyPhysicalKey {
         match keycode {
             K_VK_OPTION => HotkeyPhysicalKey::LeftOption,
@@ -357,6 +382,38 @@ mod macos {
             return event;
         }
         let state = unsafe { &mut *state_ptr };
+
+        // macOS may forcibly disable a listen-only tap when our callback is too
+        // slow (timeout) or on user input. Without re-arming here, every hotkey
+        // (dictation/formatting/assistive) goes silently dead until restart.
+        // Re-enable the tap immediately and warn. We only *read* the live tap
+        // pointer from `control.tap`; we never invalidate or free it, so the
+        // ownership/teardown contract (swap-to-null in `request_stop`/`Drop`)
+        // is preserved — after stop the pointer is null and we no-op.
+        if is_tap_disabled_event(event_type) {
+            let reason = if event_type == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT {
+                "timeout (slow callback)"
+            } else {
+                "user input"
+            };
+            let tap = state.control.tap.load(Ordering::SeqCst) as CFMachPortRef;
+            if tap.is_null() {
+                tracing::warn!(
+                    "CGEventTap disabled by {reason} but tap port is null (shutting down); skipping re-arm"
+                );
+            } else {
+                unsafe {
+                    // SAFETY: `tap` is loaded from `RuntimeControl.tap` after a null check.
+                    // We only ask CoreGraphics to re-enable the live event tap; ownership,
+                    // invalidation, and release remain with the runtime control teardown path.
+                    CGEventTapEnable(tap, true);
+                }
+                tracing::warn!(
+                    "CGEventTap disabled by {reason}; re-armed tap to keep hotkeys alive"
+                );
+            }
+            return event;
+        }
 
         let flags = unsafe { CGEventGetFlags(event) };
         let modifiers = modifiers_from_flags(flags);
@@ -555,6 +612,20 @@ mod macos {
                 }
             });
             HotkeyRuntime::new(control, worker, running_guard)
+        }
+
+        #[test]
+        fn is_tap_disabled_event_detects_disabled_sentinels() {
+            assert!(is_tap_disabled_event(0xFFFF_FFFE));
+            assert!(is_tap_disabled_event(0xFFFF_FFFF));
+            assert!(is_tap_disabled_event(K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT));
+            assert!(is_tap_disabled_event(K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT));
+
+            assert!(!is_tap_disabled_event(K_CG_EVENT_KEY_DOWN));
+            assert!(!is_tap_disabled_event(K_CG_EVENT_FLAGS_CHANGED));
+            assert!(!is_tap_disabled_event(10));
+            assert!(!is_tap_disabled_event(12));
+            assert!(!is_tap_disabled_event(0));
         }
 
         #[test]

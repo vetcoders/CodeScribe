@@ -111,6 +111,7 @@ enum MigrateKind {
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     init_tracing();
+    install_panic_hook();
 
     // Build identity — first line in ~/.codescribe/logs/codescribe.log so every session
     // is unambiguously tied to a build. The 8-char commit matches the About dialog.
@@ -139,6 +140,47 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Install a global panic hook that logs every panic through `tracing` before
+/// the process unwinds or aborts.
+///
+/// This is the only diagnostic that survives `panic="abort"` in the release
+/// profile (Cargo.toml `[profile.release]`): `std::panic::set_hook` runs the
+/// hook BEFORE the abort, so even a panic crossing an `extern "C"` boundary —
+/// where `catch_unwind` is useless — leaves a symbolizable trace
+/// (payload + location + thread name + backtrace) in
+/// `~/.codescribe/logs/codescribe.log`.
+///
+/// MUST be installed AFTER `init_tracing()` (so a subscriber exists) and BEFORE
+/// the first task/thread is spawned, otherwise early panics would be silent.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        // Extract a human-readable payload (panic message).
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown location>".to_string());
+
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>").to_string();
+
+        let backtrace = std::backtrace::Backtrace::force_capture();
+
+        tracing::error!(
+            target: "panic",
+            thread = %thread_name,
+            location = %location,
+            "PANIC: {message}\nbacktrace:\n{backtrace}"
+        );
+    }));
+}
+
 fn init_tracing() {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{EnvFilter, fmt};
@@ -160,7 +202,8 @@ fn init_tracing() {
     let stderr_layer = fmt::layer()
         .with_ansi(true)
         .with_target(true)
-        .with_thread_ids(true);
+        .with_thread_ids(true)
+        .with_thread_names(true);
 
     let filter_layer = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -175,6 +218,7 @@ fn init_tracing() {
             .with_ansi(false)
             .with_target(true)
             .with_thread_ids(true)
+            .with_thread_names(true)
             .with_writer(move || (*file).try_clone().expect("Failed to clone log file"));
 
         let _ = tracing_subscriber::registry()
@@ -509,14 +553,7 @@ async fn handle_transcribe_live(language: Option<String>) -> Result<()> {
 }
 
 async fn run_daemon() -> Result<()> {
-    use anyhow::Context;
-    use codescribe::config::{Config, UserSettings};
-    use codescribe::controller::RecordingController;
-    use codescribe::os::hotkeys::HotkeyEvent;
-    use codescribe::{ipc, tray};
-    use crossbeam_channel::unbounded;
-    use std::sync::Arc;
-    use tokio::runtime::Handle;
+    use codescribe::tray;
 
     eprintln!("CodeScribe daemon starting...");
 
@@ -536,8 +573,33 @@ async fn run_daemon() -> Result<()> {
             .unwrap_or_else(|_| "unknown".into()),
     );
 
+    tray::run_with_startup(None, || {
+        tokio::spawn(async {
+            if let Err(e) = initialize_daemon_runtime().await {
+                tracing::error!("CodeScribe startup failed: {e:?}");
+                let _ = codescribe::tray::update_tray_status(codescribe::tray::TrayStatus::Error);
+                #[cfg(target_os = "macos")]
+                codescribe::os::notifications::notify("CodeScribe startup failed", &format!("{e}"));
+            }
+        });
+    })?;
+
+    Ok(())
+}
+
+async fn initialize_daemon_runtime() -> Result<()> {
+    use anyhow::Context;
+    use codescribe::config::{Config, UserSettings};
+    use codescribe::controller::RecordingController;
+    use codescribe::os::hotkeys::HotkeyEvent;
+    use codescribe::{ipc, tray};
+    use crossbeam_channel::unbounded;
+    use std::sync::Arc;
+    use tokio::runtime::Handle;
+
     let config = Config::load();
     let _user_settings = UserSettings::load();
+    let menu_rx = tray::menu_event_receiver()?;
     let _ = codescribe::qube_lifecycle::start_if_enabled();
 
     #[cfg(target_os = "macos")]
@@ -574,7 +636,6 @@ async fn run_daemon() -> Result<()> {
         }
     });
 
-    let menu_rx = tray::menu_event_receiver()?;
     let menu_controller = Arc::clone(&controller);
     let menu_handle = Handle::current();
     std::thread::spawn(move || {
@@ -678,7 +739,8 @@ async fn run_daemon() -> Result<()> {
         }
     });
 
-    tray::run_with_hotkeys(None)?;
+    let _ = tray::update_tray_status(tray::TrayStatus::Idle);
+    info!("CodeScribe daemon ready");
 
     Ok(())
 }

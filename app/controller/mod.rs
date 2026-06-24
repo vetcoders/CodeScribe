@@ -72,7 +72,8 @@ use codescribe_core::tts::AudioPlayer;
 // UI state for conversation mode
 use crate::ui::voice_chat::ConversationModeState;
 use codescribe_core::pipeline::contracts::{
-    FinalPassDisposition, TranscriptionConfidenceFlag, TranscriptionVerdict,
+    FileTranscriptionOptions, FinalPassDisposition, TranscriptionConfidenceFlag,
+    TranscriptionVerdict,
 };
 
 use helpers::{
@@ -780,15 +781,6 @@ fn should_allow_full_user_bubble_rewrite(
     !skip_user_bubble && !append_mode && !live_stream_session
 }
 
-// FORGOTTEN-GEM(vc-prune 2026-06-10): rewrite-permission policy written and
-// unit-tested below, but never wired into the assistant rewrite path — zero
-// runtime callers. Wire it where full-rewrite is decided or delete it with
-// its tests; operator decision tracked in the forgotten-gems report.
-#[allow(dead_code)]
-fn should_allow_full_assistant_rewrite(append_mode: bool, live_stream_session: bool) -> bool {
-    !append_mode && !live_stream_session
-}
-
 fn should_apply_transcription_action_contract(assistive: bool, live_stream_session: bool) -> bool {
     !assistive && !live_stream_session
 }
@@ -854,6 +846,21 @@ pub fn request_permission_runtime_reconcile() {
         return;
     };
 
+    // P2.4/P3.4 DEFERRED (cross-cut, owned by the runtime/bin group):
+    // This builds a fresh current_thread runtime per call, which bypasses the
+    // intentional 4-worker cap of the main multi-threaded runtime
+    // (bin/codescribe.rs). The clean fix is to reuse a cached
+    // `tokio::runtime::Handle` from the main runtime. We CANNOT use
+    // `Handle::current()` here: the sole caller
+    // (ui/onboarding/permission_flow.rs::reconcile_permission_runtime_after_grant)
+    // is a synchronous fn driven from the AppKit/objc permission-grant flow on
+    // the main thread, which is NOT a tokio worker, so `Handle::current()` would
+    // panic with "there is no reactor running". A proper fix requires a
+    // startup-side `OnceLock<Handle>` populated in bin/codescribe.rs (the same
+    // cached-Handle pattern noted in ui/voice_chat/handlers/connectors.rs) —
+    // that lives outside this file's single-ownership domain. Until that cache
+    // exists, the per-call runtime is kept deliberately to avoid a main-thread
+    // panic regression.
     std::thread::spawn(move || {
         match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1005,9 +1012,26 @@ fn paste_overlay_text_with_target(text: String, target_app: Option<String>) {
     #[cfg(target_os = "macos")]
     {
         if let Some(app_name) = target_app {
-            Queue::main().exec_async(move || activate_target_app(&app_name));
+            Queue::main().exec_async({
+                let app_name = app_name.clone();
+                move || activate_target_app(&app_name)
+            });
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(80));
+                // Confirm focus actually landed on the target before pasting,
+                // instead of a fixed sleep that is too short under a CPU spike and
+                // lets the synthetic Cmd+V hit the wrong window. `activate_target_app`
+                // uses `activateWithOptions`, and `wait_for_frontmost_app` reads
+                // `NSWorkspace.frontmostApplication`, so the confirm works regardless
+                // of the activation mechanism. Budget is bounded so a stuck
+                // activation cannot wedge the paste path; on miss we proceed
+                // best-effort, matching the selection-capture path.
+                let budget = Duration::from_millis(200);
+                if !crate::os::selection::wait_for_frontmost_app(&app_name, budget) {
+                    debug!(
+                        "Overlay paste: focus did not confirm on '{}' within {:?}; pasting best-effort",
+                        app_name, budget
+                    );
+                }
                 Queue::main().exec_async(move || paste_overlay_text_now(&text));
             });
         } else {
@@ -1405,82 +1429,6 @@ impl RecordingController {
         }
     }
 
-    /// Create a new recording controller with shared configuration
-    pub fn with_config(config: Arc<RwLock<Config>>) -> Self {
-        let cfg = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { config.read().await.clone() })
-        });
-
-        info!(
-            "Initializing RecordingController with shared config (hold_delay={}ms, beep={}, language={:?})",
-            cfg.hold_start_delay_ms, cfg.beep_on_start, cfg.whisper_language
-        );
-
-        let recorder = Self::init_streaming_recorder("RecordingController::with_config");
-
-        if !cfg!(test) {
-            match ModelManager::new() {
-                Ok(model_manager) => {
-                    if let Ok(models) = model_manager.list_models()
-                        && !models.is_empty()
-                    {
-                        info!("Available local models: {:?}", models);
-                    }
-                }
-                Err(error) => warn!("Model manager unavailable during startup: {error}"),
-            }
-        }
-
-        // Initialize Whisper engine if not already done (daemon pre-inits)
-        if !cfg!(test)
-            && !crate::whisper::is_initialized()
-            && let Err(e) = crate::whisper::init()
-        {
-            warn!("Failed to initialize Whisper engine: {}", e);
-        }
-
-        setup_voice_chat_send_callback(Arc::clone(&config));
-        if recorder.is_none() {
-            crate::ui::voice_chat::set_voice_chat_runtime_degraded(
-                true,
-                Some(RECORDER_RUNTIME_DEGRADED_REASON),
-            );
-        }
-        let (event_broadcast, _) = broadcast::channel::<IpcEvent>(256);
-        let session_telemetry = new_session_telemetry();
-
-        Self {
-            config,
-            state: Arc::new(RwLock::new(State::Idle)),
-            recorder: Arc::new(Mutex::new(recorder)),
-            assistive_mode: Arc::new(RwLock::new(false)),
-            hold_mode: Arc::new(RwLock::new(HoldMode::Raw)),
-            force_raw_mode: Arc::new(RwLock::new(false)),
-            force_ai_mode: Arc::new(RwLock::new(false)),
-            session_id: Arc::new(RwLock::new(None)),
-            hold_start_task: Arc::new(Mutex::new(None)),
-            hold_start_generation: Arc::new(AtomicU64::new(0)),
-            start_transition_in_flight: Arc::new(AtomicBool::new(false)),
-            serial_lock: Arc::new(Mutex::new(())),
-            vad_triggered: Arc::new(AtomicBool::new(false)),
-            assistive_loop_active: Arc::new(AtomicBool::new(false)),
-            toggle_user_has_text: Arc::new(AtomicBool::new(false)),
-            toggle_assistant_has_text: Arc::new(AtomicBool::new(false)),
-            assistive_context: Arc::new(RwLock::new(None)),
-            pre_overlay_frontmost_app: Arc::new(RwLock::new(None)),
-            opened_voice_chat_overlay_for_transcription: Arc::new(AtomicBool::new(false)),
-            last_segment_audio_offset: Arc::new(AtomicUsize::new(0)),
-            // Conversation mode (lazy init)
-            conversation_engine: Arc::new(Mutex::new(None)),
-            audio_player: Arc::new(Mutex::new(None)),
-            conversation_stop_flag: Arc::new(AtomicBool::new(false)),
-            conversation_generation: Arc::new(AtomicU64::new(0)),
-            conversation_task: Arc::new(Mutex::new(None)),
-            event_broadcast,
-            session_telemetry,
-        }
-    }
-
     /// Get current state
     pub async fn current_state(&self) -> State {
         *self.state.read().await
@@ -1595,9 +1543,19 @@ impl RecordingController {
         Ok(())
     }
 
-    async fn reset_session_after_start_failure(&self, context: &str) {
-        warn!("{context}: resetting controller flags after failed start");
-        self.set_state(State::Idle).await;
+    /// Atomically reset the full set of session-lifecycle fields owned by the
+    /// controller and flip `state` to Idle as the final mutation.
+    ///
+    /// This is the single source of truth for which fields constitute "session
+    /// state" so the various reset entry points (start-failure, finished
+    /// recording, toggle-stop, nuclear reset) can no longer drift apart in the
+    /// subset of fields they clear (P3.1). Each caller keeps its own UI /
+    /// telemetry / status-string tail.
+    ///
+    /// Ordering note (P2.2): every satellite flag is cleared before
+    /// `set_state(State::Idle)` so cross-thread readers (e.g. the VAD monitor
+    /// polling `current_state`) never observe Idle alongside stale flags.
+    async fn reset_session_fields(&self) {
         *self.assistive_mode.write().await = false;
         *self.hold_mode.write().await = HoldMode::Raw;
         *self.force_raw_mode.write().await = false;
@@ -1611,6 +1569,13 @@ impl RecordingController {
         self.toggle_user_has_text.store(false, Ordering::SeqCst);
         self.toggle_assistant_has_text
             .store(false, Ordering::SeqCst);
+        // `state` becomes Idle only once the rest of the session state is consistent.
+        self.set_state(State::Idle).await;
+    }
+
+    async fn reset_session_after_start_failure(&self, context: &str) {
+        warn!("{context}: resetting controller flags after failed start");
+        self.reset_session_fields().await;
         set_assistive_session(false);
         reset_session_telemetry(&self.session_telemetry);
         hide_hold_badge();
@@ -1618,17 +1583,7 @@ impl RecordingController {
     }
 
     async fn reset_finished_recording_state(&self) {
-        self.set_state(State::Idle).await;
-        *self.assistive_mode.write().await = false;
-        *self.hold_mode.write().await = HoldMode::Raw;
-        *self.force_raw_mode.write().await = false;
-        *self.force_ai_mode.write().await = false;
-        *self.session_id.write().await = None;
-        *self.assistive_context.write().await = None;
-        *self.pre_overlay_frontmost_app.write().await = None;
-        self.start_transition_in_flight
-            .store(false, Ordering::SeqCst);
-        self.assistive_loop_active.store(false, Ordering::SeqCst);
+        self.reset_session_fields().await;
         set_assistive_session(false);
         hide_hold_badge();
     }
@@ -1810,11 +1765,16 @@ impl RecordingController {
         });
         let mut pe = PresentationEmitter::new(tb, delta_sink, None);
         if flush_voice_chat_on_vad_end {
+            // Assistive (variant A): VAD-end only refreshes the live UI bubble; it must
+            // NOT dispatch to the agent. The sole agent sender is the toggle-stop path
+            // (handle stop -> build_assistive_input -> send_assistive_with_agent_runtime),
+            // which sends ONE wrapped message carrying full context (selection + frontmost
+            // app). Committing on VAD-end as well made the same utterance reach the agent
+            // twice — plain via VAD-end and wrapped via toggle-stop — producing a double
+            // request and a double answer. Restores the "one utterance = one agent message"
+            // invariant (regression introduced by 57b1bcc; original invariant from c3ce222).
             pe.set_utterance_callback(Some(Arc::new(|text: String| {
                 crate::ui::voice_chat::append_voice_chat_user_utterance(&text);
-            })));
-            pe.set_vad_end_callback(Some(Arc::new(|| {
-                crate::ui::voice_chat::commit_last_user_message();
             })));
         }
 
@@ -2328,6 +2288,12 @@ impl RecordingController {
         // Processing loop
         let mut last_response_check = std::time::Instant::now();
         let response_check_interval = Duration::from_millis(100);
+        // Track the last conversation state pushed to the UI so the per-chunk
+        // loop (~20Hz) only dispatches on the main thread when the state
+        // actually changes, instead of every audio chunk (P2.5). The status
+        // string is derived 1:1 from `ui_state`, so tracking the state covers
+        // both dispatches.
+        let mut last_emitted_conv_state: Option<ConversationModeState> = None;
 
         while !stop_flag.load(Ordering::SeqCst) {
             // Process incoming audio chunks
@@ -2356,8 +2322,12 @@ impl RecordingController {
                                 }
                                 _ => ("Listening...", ConversationModeState::Listening),
                             };
-                            crate::ui::voice_chat::update_voice_chat_status(status);
-                            crate::ui::voice_chat::update_conversation_state(ui_state);
+                            // Only dispatch to the main thread when the state changed.
+                            if last_emitted_conv_state != Some(ui_state) {
+                                crate::ui::voice_chat::update_voice_chat_status(status);
+                                crate::ui::voice_chat::update_conversation_state(ui_state);
+                                last_emitted_conv_state = Some(ui_state);
+                            }
                         }
                     }
                 }
@@ -2399,6 +2369,9 @@ impl RecordingController {
                     crate::ui::voice_chat::update_conversation_state(
                         ConversationModeState::AssistantSpeaking,
                     );
+                    // Keep the per-chunk dedup tracker in sync with the playback
+                    // dispatch so the next state change is still emitted (P2.5).
+                    last_emitted_conv_state = Some(ConversationModeState::AssistantSpeaking);
 
                     // Play response audio in separate blocking task (non-blocking for loop)
                     // This preserves full-duplex: we can still process mic while playing
@@ -2406,50 +2379,69 @@ impl RecordingController {
                     let stop_flag_clone = Arc::clone(&stop_flag);
                     let generation_clone = Arc::clone(&generation_counter);
                     let playback_active_clone = Arc::clone(&playback_active);
-                    let playback_active_reset = Arc::clone(&playback_active);
 
-                    // Wrap spawn in catch_unwind to reset playback_active if spawn itself fails
-                    let spawn_result =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let handle = tokio::runtime::Handle::current();
-                            tokio::task::spawn_blocking(move || {
-                                // Drop guard ensures playback_active is reset even on panic
-                                struct PlaybackGuard(Arc<AtomicBool>);
-                                impl Drop for PlaybackGuard {
-                                    fn drop(&mut self) {
-                                        self.0.store(false, Ordering::SeqCst);
-                                    }
-                                }
-                                let _guard = PlaybackGuard(Arc::clone(&playback_active_clone));
+                    let handle = tokio::runtime::Handle::current();
+                    // Run the playback body on a blocking worker. catch_unwind is
+                    // placed INSIDE the closure so it actually wraps the playback
+                    // body that runs on the worker thread (the previous version
+                    // wrapped only the spawn_blocking() call, which never panics
+                    // synchronously, so a panic in p.play()/block_on/UI update was
+                    // never caught). On Err we log the panic payload as the root
+                    // cause (P1.2).
+                    //
+                    // Reliability caveat: under panic="abort" (release builds) a
+                    // panic aborts the process before catch_unwind or the
+                    // PlaybackGuard Drop can run, so this recovery is effective
+                    // only under panic="unwind" (debug/tests). The real fix for
+                    // the release crash symptom is owned by the panic group
+                    // (panic hook P0.1 + abort/unwind decision P1.1).
+                    tokio::task::spawn_blocking(move || {
+                        // Resets playback_active when this scope exits (also on an
+                        // unwinding panic; NOT under panic="abort", see above).
+                        struct PlaybackGuard(Arc<AtomicBool>);
+                        impl Drop for PlaybackGuard {
+                            fn drop(&mut self) {
+                                self.0.store(false, Ordering::SeqCst);
+                            }
+                        }
+                        let _guard = PlaybackGuard(Arc::clone(&playback_active_clone));
 
-                                // Block this thread for playback, but don't block the async loop
-                                let player_guard = handle.block_on(player_clone.lock());
-                                if let Some(ref p) = *player_guard
-                                    && let Err(e) = p.play(&response_samples, response_rate)
-                                {
-                                    warn!("AudioPlayer.play error: {}", e);
-                                }
-                                // Only update UI if:
-                                // 1. Conversation wasn't stopped (stop_flag)
-                                // 2. This is still the current session (generation matches)
-                                // This prevents cross-session UI races
-                                let current_gen = generation_clone.load(Ordering::SeqCst);
-                                if !stop_flag_clone.load(Ordering::SeqCst)
-                                    && current_gen == my_generation
-                                {
-                                    crate::ui::voice_chat::update_voice_chat_status("Listening...");
-                                    crate::ui::voice_chat::update_conversation_state(
-                                        ConversationModeState::Listening,
-                                    );
-                                }
-                                // _guard dropped here, resets playback_active even on panic
-                            })
+                        let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            // Block this thread for playback, but don't block the async loop
+                            let player_guard = handle.block_on(player_clone.lock());
+                            if let Some(ref p) = *player_guard
+                                && let Err(e) = p.play(&response_samples, response_rate)
+                            {
+                                warn!("AudioPlayer.play error: {}", e);
+                            }
+                            // Only update UI if:
+                            // 1. Conversation wasn't stopped (stop_flag)
+                            // 2. This is still the current session (generation matches)
+                            // This prevents cross-session UI races
+                            let current_gen = generation_clone.load(Ordering::SeqCst);
+                            if !stop_flag_clone.load(Ordering::SeqCst)
+                                && current_gen == my_generation
+                            {
+                                crate::ui::voice_chat::update_voice_chat_status("Listening...");
+                                crate::ui::voice_chat::update_conversation_state(
+                                    ConversationModeState::Listening,
+                                );
+                            }
                         }));
 
-                    if spawn_result.is_err() {
-                        warn!("spawn_blocking panicked - resetting playback_active");
-                        playback_active_reset.store(false, Ordering::SeqCst);
-                    }
+                        if let Err(panic_payload) = body {
+                            let root_cause = panic_payload
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                            warn!(
+                                "Playback task panicked (root cause: {root_cause}); \
+                                 playback_active reset by guard"
+                            );
+                        }
+                        // _guard dropped here, resetting playback_active.
+                    });
                 }
             }
         }
@@ -3145,19 +3137,9 @@ impl RecordingController {
             None
         };
 
-        // Reset state
-        self.set_state(State::Idle).await;
-        *self.assistive_mode.write().await = false;
-        *self.hold_mode.write().await = HoldMode::Raw;
-        *self.force_raw_mode.write().await = false;
-        *self.force_ai_mode.write().await = false;
-        *self.session_id.write().await = None;
-        self.start_transition_in_flight
-            .store(false, Ordering::SeqCst);
-        self.assistive_loop_active.store(false, Ordering::SeqCst);
-        self.toggle_user_has_text.store(false, Ordering::SeqCst);
-        self.toggle_assistant_has_text
-            .store(false, Ordering::SeqCst);
+        // Reset state. `assistive_context` was already captured above (preserved
+        // path), so clearing it here via the shared helper is safe.
+        self.reset_session_fields().await;
 
         // Reset UI indicators
         hide_hold_badge();
@@ -3172,7 +3154,15 @@ impl RecordingController {
             let assistive_input = build_assistive_input(&session_transcript, &ctx);
             crate::ui::voice_chat::show_voice_chat_overlay();
             crate::ui::voice_chat::show_agent_tab();
-            crate::ui::voice_chat::finalize_voice_chat_user_message();
+            // Single source of truth: set the user bubble to EXACTLY the
+            // session_transcript that is sent to the agent. The streaming lane
+            // (`append_voice_chat_user_utterance`) skips empty utterances, so a
+            // state-only finalize could leave the bubble empty/absent while the
+            // agent still received the final-pass transcript. `finalize_user_message_impl`
+            // (via `set_voice_chat_user_text`) reuses the active streaming index if
+            // present, so this REPLACES the existing bubble rather than creating a
+            // second one — exactly one user bubble whose text == agent input.
+            crate::ui::voice_chat::set_voice_chat_user_text(&session_transcript);
             crate::ui::voice_chat::set_voice_chat_sending(true);
             crate::ui::voice_chat::update_voice_chat_status("Thinking…");
             helpers::send_assistive_with_agent_runtime(
@@ -3314,7 +3304,7 @@ impl RecordingController {
 
             let phase3 = std::time::Instant::now();
             info!(
-                "stop_toggle_inner: PHASE 3 — process_stopped_recording (Whisper final-pass + post-process + paste/handoff decision)"
+                "stop_toggle_inner: PHASE 3 — process_stopped_recording (truth selection + post-process + paste/handoff decision)"
             );
             let r = self
                 .process_stopped_recording(
@@ -3654,7 +3644,7 @@ impl RecordingController {
                     crate::whisper::transcribe_file_verdict(
                         &wav_path,
                         lang.as_deref(),
-                        codescribe_core::pipeline::contracts::FileTranscriptionOptions::default(),
+                        FileTranscriptionOptions::default(),
                     )
                 })
                 .await
@@ -4107,7 +4097,11 @@ impl RecordingController {
             // - Selection: if no selection was captured, we already downgraded to Chat mode.
             let assistive_input = build_assistive_input(&clean_text, &ctx);
             if chat_active {
-                crate::ui::voice_chat::finalize_voice_chat_user_message();
+                // Single source of truth: render the user bubble with exactly what
+                // the agent receives (clean_text), reusing the streaming bubble —
+                // same fix as the stop_toggle_recording path. Prevents the desync
+                // where the agent answers but no user bubble shows.
+                crate::ui::voice_chat::set_voice_chat_user_text(&clean_text);
                 crate::ui::voice_chat::set_voice_chat_sending(true);
                 send_assistive_with_agent_runtime(
                     assistive_input,
@@ -4529,14 +4523,7 @@ impl RecordingController {
 
     /// Internal helper to reset all state variables
     async fn reset_state(&self) {
-        self.set_state(State::Idle).await;
-        *self.assistive_mode.write().await = false;
-        *self.hold_mode.write().await = HoldMode::Raw;
-        *self.force_raw_mode.write().await = false;
-        *self.force_ai_mode.write().await = false;
-        *self.session_id.write().await = None;
-        *self.assistive_context.write().await = None;
-        *self.pre_overlay_frontmost_app.write().await = None;
+        self.reset_session_fields().await;
 
         // Hide UI indicators
         hide_hold_badge();

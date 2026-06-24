@@ -1,9 +1,21 @@
 //! Drawer tab: transcription/thread cards, filtering, rendering and loading.
 
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const DRAWER_PREVIEW_IDENTIFIER: &str = "codescribe_drawer_preview";
 const DRAWER_ACTION_IDENTIFIER: &str = "codescribe_drawer_action";
+
+/// Search-as-you-type debounce window. Fast typing only triggers ONE render
+/// (the last keystroke after the user pauses), not one render per character.
+const DRAWER_SEARCH_DEBOUNCE: Duration = Duration::from_millis(180);
+
+/// Monotonic generation token for search debounce. Each keystroke bumps this;
+/// a queued debounce callback only renders if its captured token is still the
+/// latest, so stale callbacks from earlier keystrokes are dropped. Lives at
+/// module scope (not in `OVERLAY_STATE`) so the keystroke path never has to
+/// `.lock()` the non-reentrant overlay mutex just to schedule a debounce.
+static DRAWER_SEARCH_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DrawerRowActionLayout {
@@ -23,11 +35,29 @@ pub enum DrawerSection {
     Older,
 }
 
-/// Refresh drawer entries from disk
+/// Refresh drawer entries from disk.
+///
+/// Disk I/O (favorites + `ThreadStore`/`ThreadIndex` scan) runs on a background
+/// thread; only the resulting owned `Vec` is marshalled back to the main thread
+/// for state assignment + render. This keeps the AppKit main thread responsive
+/// even when the thread index is large (P1.3 acceptance #4).
 pub fn refresh_drawer() {
-    Queue::main().exec_async(|| {
-        refresh_drawer_impl();
+    std::thread::spawn(|| {
+        let favorites = load_favorites_from_disk();
+        let entries = load_drawer_entries();
+        Queue::main().exec_async(move || {
+            apply_refreshed_drawer_entries(favorites, entries);
+        });
     });
+}
+
+/// Apply a freshly loaded (off-main) drawer snapshot on the main thread.
+fn apply_refreshed_drawer_entries(favorites: HashSet<String>, entries: Vec<DrawerEntry>) {
+    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.favorites = favorites;
+    let query = drawer_query_from_state(&state);
+    state.drawer_entries = entries;
+    render_drawer_entries(&mut state, &query);
 }
 
 pub fn drawer_row_action_layout(row_width: f64) -> DrawerRowActionLayout {
@@ -51,53 +81,76 @@ pub fn drawer_row_action_layout(row_width: f64) -> DrawerRowActionLayout {
     }
 }
 
-/// Filter drawer entries by query (reloads from disk)
+/// Filter drawer entries by query (search-as-you-type path).
+///
+/// This is the per-keystroke hot path. It does NOT touch disk: the full entry
+/// set is loaded once when the drawer opens / refreshes (`refresh_drawer`), and
+/// every keystroke filters that in-memory `state.drawer_entries` snapshot via
+/// `render_drawer_entries` (which calls `filtered_drawer_entries`). Re-reading
+/// `ThreadStore` / `ThreadIndex` on every character was the jank source (P1.3).
+///
+/// Renders are debounced: each call bumps `DRAWER_SEARCH_GENERATION` and queues
+/// a callback after `DRAWER_SEARCH_DEBOUNCE`; only the callback whose captured
+/// generation is still current performs the render, so a burst of fast typing
+/// collapses to a single render after the user pauses.
 pub fn filter_drawer(query: &str) {
     let query_owned = query.to_string();
-    Queue::main().exec_async(move || {
+    let generation = DRAWER_SEARCH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    Queue::main().exec_after(DRAWER_SEARCH_DEBOUNCE, move || {
+        // Stale callback: a newer keystroke superseded this one. Drop it.
+        if DRAWER_SEARCH_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
         let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.drawer_entries = load_drawer_entries_with_query(&query_owned);
         render_drawer_entries(&mut state, &query_owned);
     });
 }
 
-pub fn refresh_drawer_impl() {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    state.favorites = load_favorites_from_disk();
-    let query = drawer_query_from_state(&state);
-    state.drawer_entries = load_drawer_entries();
-    render_drawer_entries(&mut state, &query);
-}
-
 pub fn handle_card_copy(index: usize) {
-    let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = state.drawer_entries.get(index) {
+    // LATCH FIX: snapshot the entry identity under a brief lock, then do the disk
+    // read + clipboard write OFF the main thread. The previous version held
+    // OVERLAY_STATE across `ThreadStore::new()` + `load_thread` + `fs::read_to_string`
+    // on the AppKit main thread — a synchronous disk read that froze the run loop
+    // (and blocked every queued UI update behind the lock) for the read duration.
+    // `copy_to_clipboard` is CGEvent/pasteboard-based and thread-safe (clipboard.rs),
+    // so the whole body is safe off-main. Mirrors `refresh_drawer`'s off-main pattern.
+    let snapshot = {
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = state.drawer_entries.get(index) else {
+            return;
+        };
         if is_drawer_unavailable_placeholder(entry) {
             return;
         }
-        match &entry.source {
-            DrawerEntrySource::Thread { id } => {
-                if let Ok(store) = ThreadStore::new() {
-                    if let Ok(thread) = store.load_thread(id) {
-                        copy_to_clipboard(&thread_markdown_for_copy(&thread));
-                        return;
-                    }
-                    if let Ok(raw) = std::fs::read_to_string(&entry.path) {
-                        copy_to_clipboard(&raw);
-                    }
-                }
-            }
-            DrawerEntrySource::LegacyFile => {
-                if let Ok(contents) = std::fs::read_to_string(&entry.path) {
-                    copy_to_clipboard(&contents);
+        (entry.source.clone(), entry.path.clone())
+    };
+
+    let (source, path) = snapshot;
+    std::thread::spawn(move || match source {
+        DrawerEntrySource::Thread { id } => {
+            if let Ok(store) = ThreadStore::new() {
+                if let Ok(thread) = store.load_thread(&id) {
+                    copy_to_clipboard(&thread_markdown_for_copy(&thread));
+                } else if let Ok(raw) = std::fs::read_to_string(&path) {
+                    copy_to_clipboard(&raw);
                 }
             }
         }
-    }
+        DrawerEntrySource::LegacyFile => {
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                copy_to_clipboard(&contents);
+            }
+        }
+    });
 }
 
 pub fn handle_card_restore(index: usize) {
-    let thread = {
+    // LATCH FIX: snapshot the thread id under a brief lock, load it off the main
+    // thread, then marshal the owned `Thread` back to main for state assignment.
+    // The synchronous `ThreadStore::new()` + `load_thread` read previously ran on
+    // the main thread while holding OVERLAY_STATE — a disk read that froze the UI
+    // on every restore click. Mirrors `refresh_drawer`'s load-off-main / apply-on-main.
+    let id = {
         let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
         let Some(entry) = state.drawer_entries.get(index) else {
             return;
@@ -108,19 +161,27 @@ pub fn handle_card_restore(index: usize) {
         let DrawerEntrySource::Thread { id } = &entry.source else {
             return;
         };
+        id.clone()
+    };
+
+    std::thread::spawn(move || {
         let Ok(store) = ThreadStore::new() else {
             warn!("Failed to initialize ThreadStore for restore");
             return;
         };
-        match store.load_thread(id) {
+        let thread = match store.load_thread(&id) {
             Ok(thread) => thread,
             Err(error) => {
                 warn!("Failed to restore thread {id}: {error}");
                 return;
             }
-        }
-    };
+        };
+        Queue::main().exec_async(move || apply_restored_thread(thread));
+    });
+}
 
+/// Apply a freshly loaded (off-main) thread to the overlay on the main thread.
+fn apply_restored_thread(thread: Thread) {
     let title = thread.title.trim().to_string();
     let mut restored_messages = thread_messages_for_restore(&thread);
     let backend_thread = thread.clone();
@@ -133,6 +194,7 @@ pub fn handle_card_restore(index: usize) {
             is_error: false,
             timestamp: SystemTime::now(),
             mode: Some(mode_label(transcription_mode_from_thread_mode(&thread.mode)).to_string()),
+            is_pending_followup: false,
         });
     }
     tokio::spawn(async move {
@@ -251,39 +313,59 @@ pub fn handle_card_edit(index: usize) {
 }
 
 pub fn handle_card_delete(index: usize) {
-    let mut state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(entry) = state.drawer_entries.get(index) {
+    // LATCH FIX: snapshot the entry identity under a brief lock, then run the
+    // destructive disk ops (ThreadStore/fs delete + favorites rewrite) AND the
+    // full drawer reload off the main thread. The previous version deleted AND
+    // re-scanned the entire ThreadStore (`load_drawer_entries_with_query` ->
+    // `load_thread_drawer_entries`, a per-entry disk read) on the main thread
+    // while holding OVERLAY_STATE — a full disk re-scan that froze the UI.
+    // Reuses `apply_refreshed_drawer_entries` (the same apply path as `refresh_drawer`).
+    let snapshot = {
+        let state = OVERLAY_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = state.drawer_entries.get(index) else {
+            return;
+        };
         if is_drawer_unavailable_placeholder(entry) {
             return;
         }
-        let favorite_key = drawer_entry_favorite_key(entry);
-        match &entry.source {
+        (
+            entry.source.clone(),
+            entry.path.clone(),
+            drawer_entry_favorite_key(entry),
+        )
+    };
+
+    let (source, path, favorite_key) = snapshot;
+    std::thread::spawn(move || {
+        match &source {
             DrawerEntrySource::Thread { id } => {
                 if let Ok(store) = ThreadStore::new() {
                     if let Err(err) = store.delete_thread(id) {
                         warn!("Failed to delete thread {id}: {err}");
                     }
-                } else if let Err(err) = std::fs::remove_file(&entry.path) {
+                } else if let Err(err) = std::fs::remove_file(&path) {
                     warn!(
                         "Failed to delete thread fallback {}: {}",
-                        entry.path.display(),
+                        path.display(),
                         err
                     );
                 }
             }
             DrawerEntrySource::LegacyFile => {
-                if let Err(err) = std::fs::remove_file(&entry.path) {
-                    warn!("Failed to delete {}: {}", entry.path.display(), err);
+                if let Err(err) = std::fs::remove_file(&path) {
+                    warn!("Failed to delete {}: {}", path.display(), err);
                 }
             }
         }
-        state.favorites.remove(&favorite_key);
-        save_favorites_to_disk(&state.favorites);
-    }
-    state.favorites = load_favorites_from_disk();
-    let query = drawer_query_from_state(&state);
-    state.drawer_entries = load_drawer_entries_with_query(&query);
-    render_drawer_entries(&mut state, &query);
+
+        let mut favorites = load_favorites_from_disk();
+        favorites.remove(&favorite_key);
+        save_favorites_to_disk(&favorites);
+
+        let favorites = load_favorites_from_disk();
+        let entries = load_drawer_entries();
+        Queue::main().exec_async(move || apply_refreshed_drawer_entries(favorites, entries));
+    });
 }
 
 pub fn handle_card_favorite(index: usize) {
@@ -308,17 +390,26 @@ pub fn handle_card_favorite(index: usize) {
     } else {
         state.favorites.remove(&key);
     }
-    save_favorites_to_disk(&state.favorites);
 
-    if let Some(id) = thread_id
-        && let Ok(store) = ThreadStore::new()
-        && let Err(err) = store.set_thread_favorite(&id, is_favorite)
-    {
-        warn!("Failed to update thread favorite {id}: {err}");
-    }
+    // In-memory toggle + render stay on main for instant UI feedback.
     update_favorites_button_with_state(&mut state);
     let query = drawer_query_from_state(&state);
     render_drawer_entries(&mut state, &query);
+
+    // LATCH FIX: defer disk persistence (favorites file + ThreadStore favorite
+    // flag) off the main thread. Both writes previously ran on the main thread
+    // under the OVERLAY_STATE lock on every heart-toggle click.
+    let favorites_snapshot = state.favorites.clone();
+    drop(state);
+    std::thread::spawn(move || {
+        save_favorites_to_disk(&favorites_snapshot);
+        if let Some(id) = thread_id
+            && let Ok(store) = ThreadStore::new()
+            && let Err(err) = store.set_thread_favorite(&id, is_favorite)
+        {
+            warn!("Failed to update thread favorite {id}: {err}");
+        }
+    });
 }
 
 pub fn toggle_drawer_favorites_only_impl() {
@@ -1432,6 +1523,7 @@ pub fn thread_messages_for_restore(thread: &Thread) -> Vec<ChatMessage> {
                 is_error: false,
                 timestamp: system_time_from_unix_millis(message.timestamp.timestamp_millis()),
                 mode: Some(mode.clone()),
+                is_pending_followup: false,
             })
         })
         .collect()

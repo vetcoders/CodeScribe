@@ -269,6 +269,24 @@ struct DiscoveredMcpTool {
 }
 
 fn discover_mcp_tools_blocking(config: McpConfigFile) -> Result<Vec<DiscoveredMcpTool>> {
+    // P2.4 DEFERRED (cross-cut, owned by the runtime/bin group):
+    // This spawns a std::thread and builds a fresh current_thread runtime to run
+    // the MCP discovery handshake, which bypasses the intentional 4-worker cap of
+    // the main multi-threaded runtime (bin/codescribe.rs). The pattern is kept
+    // deliberately because this fn is a SYNC blocking call reached from
+    // `register` → `register_all_tools` → `initialize_agent_runtime`, which may
+    // itself run inside the main tokio runtime (agent-send path). Calling
+    // `Runtime::block_on` directly from within a running runtime panics, and the
+    // alternative — `Handle::current().block_on` — also panics when no reactor is
+    // current (e.g. the test/CLI call sites that drive this synchronously). The
+    // clean fix is to reuse a startup-cached `tokio::runtime::Handle` from the
+    // main runtime (the same cached-Handle pattern noted in
+    // app/controller/mod.rs::request_permission_runtime_reconcile and
+    // ui/voice_chat/handlers/connectors.rs), which requires a `OnceLock<Handle>`
+    // populated in bin/codescribe.rs — outside this file's single-ownership
+    // domain. Until that cache exists, the dedicated thread + current_thread
+    // runtime is the correct defensive choice (no runtime-nesting panic) and the
+    // join() makes the discovery cost bounded and one-shot per agent-runtime init.
     thread::spawn(move || -> Result<Vec<DiscoveredMcpTool>> {
         // Capture EVERY configured server (enabled or not) so the runtime cache
         // reports disabled servers truthfully instead of as "missing".

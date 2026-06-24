@@ -170,8 +170,35 @@ impl AgentRuntimeState {
         Ok((runtime, recovered_from_degraded))
     }
 
+    /// Hard degrade: the agent runtime is gone (provider unreachable / init
+    /// failed). Drops the whole runtime — conversation history is lost. Use only
+    /// when the runtime cannot be trusted to hold valid state.
     fn mark_runtime_degraded(&mut self) -> bool {
         self.runtime = None;
+        if self.runtime_degraded {
+            false
+        } else {
+            self.runtime_degraded = true;
+            true
+        }
+    }
+
+    /// Soft degrade (P1.7): a transient in-conversation failure that does NOT
+    /// invalidate the conversation. Keep the runtime and its `session.messages`
+    /// alive, but reset the provider chain (`previous_response_id`) so the next
+    /// turn does a full replay from local history instead of resuming a
+    /// possibly-poisoned chain. Returns true on the first transition into
+    /// degraded so the caller can surface the banner exactly once.
+    ///
+    /// Falls back to a hard degrade only if no runtime exists to preserve.
+    fn mark_runtime_degraded_preserving_context(&mut self) -> bool {
+        let Some(runtime) = self.runtime.as_mut() else {
+            return self.mark_runtime_degraded();
+        };
+        // restore_messages re-seeds the same history and clears the provider
+        // thread id (chain), giving us "keep messages, reset chain" in one step.
+        let preserved = runtime.session.messages().to_vec();
+        runtime.session.restore_messages(preserved);
         if self.runtime_degraded {
             false
         } else {
@@ -627,6 +654,35 @@ fn agent_send_error_allows_legacy_fallback(error: &anyhow::Error) -> bool {
     !message.starts_with("Provider stream error:")
 }
 
+/// P1.7: classify a send-path failure as transient (the provider blipped but
+/// the conversation is still valid) vs hard (provider down / runtime cannot be
+/// trusted). Transient failures get a SOFT degrade that preserves
+/// `session.messages` and only resets the chain; hard failures drop the runtime.
+///
+/// This mirrors the core-side `is_transient_stream_start_error` heuristic; it is
+/// duplicated app-side intentionally to avoid widening the core public surface
+/// just for the controller's degrade policy.
+fn agent_send_error_is_transient(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_lowercase();
+    [
+        "timeout",
+        "timed out",
+        "connection reset",
+        "connection refused",
+        "temporarily unavailable",
+        "temporary failure",
+        "broken pipe",
+        "eof",
+        "transport",
+        "rate limit",
+        "429",
+        "502",
+        "503",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
 async fn run_agent_send_path(
     runtime_state: &mut AgentRuntimeState,
     runtime_generation: u64,
@@ -698,7 +754,14 @@ async fn run_agent_send_path(
                 crate::ui::voice_chat::update_voice_chat_status("Agent error");
                 return Ok(());
             }
-            runtime_state.mark_runtime_degraded();
+            // P1.7: distinguish a transient provider blip (conversation still
+            // valid -> keep messages, reset chain) from a hard failure (drop the
+            // runtime). Both still mark the UI degraded and fall back to legacy.
+            if agent_send_error_is_transient(&error) {
+                runtime_state.mark_runtime_degraded_preserving_context();
+            } else {
+                runtime_state.mark_runtime_degraded();
+            }
             crate::ui::voice_chat::set_voice_chat_runtime_degraded(
                 true,
                 Some(RUNTIME_DEGRADED_REASON),
@@ -1279,6 +1342,158 @@ mod tests {
         );
 
         assert!(!agent_send_error_allows_legacy_fallback(&error));
+    }
+
+    /// Provider that completes one clean turn so the seeded session ends up with
+    /// both conversation history AND a provider thread id (chain) set.
+    struct CompletingTestProvider;
+
+    #[async_trait]
+    impl AgentProvider for CompletingTestProvider {
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _options: &StreamOptions,
+        ) -> anyhow::Result<mpsc::Receiver<AgentEvent>> {
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(AgentEvent::TextDone("hi back".to_string()))
+                .await
+                .expect("test channel should accept text");
+            tx.send(AgentEvent::ResponseDone {
+                response_id: Some("resp_seed".to_string()),
+                clean: true,
+            })
+            .await
+            .expect("test channel should accept completion");
+            Ok(rx)
+        }
+
+        fn build_tool_result(
+            &self,
+            call_id: &str,
+            content: Vec<ContentBlock>,
+            is_error: bool,
+        ) -> Message {
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: call_id.to_string(),
+                    content,
+                    is_error,
+                }],
+            )
+        }
+
+        fn build_image_block(&self, data: &[u8], media_type: &str) -> ContentBlock {
+            ContentBlock::Image {
+                data: data.to_vec(),
+                media_type: media_type.to_string(),
+            }
+        }
+
+        fn name(&self) -> &str {
+            "completing-test-provider"
+        }
+    }
+
+    fn seed_completed_runtime(thread_store_id: &str) -> AgentRuntime {
+        let (ui_tx, ui_rx) = mpsc::channel(8);
+        let mut session = AgentSession::new(
+            Box::new(CompletingTestProvider),
+            Arc::new(ToolRegistry::new()),
+            ui_tx,
+        );
+        let options = StreamOptions {
+            model: String::new(),
+            system_prompt: None,
+            max_tokens: None,
+            temperature: None,
+            reset_chain: false,
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should initialize");
+        rt.block_on(session.send("hello".to_string(), Vec::new(), &options))
+            .expect("seed turn should complete");
+        AgentRuntime {
+            session,
+            ui_rx,
+            thread_store_id: thread_store_id.to_string(),
+        }
+    }
+
+    /// P1.7: a transient in-conversation failure must SOFT-degrade — keep the
+    /// runtime and its `session.messages`, and reset only the chain. The proof:
+    /// messages survive (history non-empty) while the provider thread id (chain)
+    /// is cleared so the next turn full-replays.
+    #[test]
+    fn degrade_preserves_messages_on_transient() {
+        let runtime = seed_completed_runtime("thread_transient");
+        assert!(
+            !runtime.session.messages().is_empty(),
+            "seed must produce conversation history"
+        );
+        assert_eq!(
+            runtime.session.thread_id(),
+            Some("resp_seed"),
+            "seed must set the provider chain id"
+        );
+
+        let mut runtime_state = AgentRuntimeState {
+            runtime: Some(runtime),
+            runtime_generation: 3,
+            runtime_degraded: false,
+        };
+
+        let transient = anyhow::anyhow!("Failed to start 'openai' streaming")
+            .context("connection reset by peer");
+        assert!(
+            agent_send_error_is_transient(&transient),
+            "connection-reset error must classify as transient"
+        );
+
+        let newly_degraded = runtime_state.mark_runtime_degraded_preserving_context();
+        assert!(newly_degraded, "first soft degrade transitions the flag");
+
+        let runtime = runtime_state
+            .runtime
+            .as_ref()
+            .expect("soft degrade must keep the runtime alive");
+        assert!(
+            !runtime.session.messages().is_empty(),
+            "transient degrade must preserve session.messages"
+        );
+        assert_eq!(
+            runtime.session.thread_id(),
+            None,
+            "transient degrade must reset the chain so the next turn replays"
+        );
+        assert!(runtime_state.runtime_degraded);
+    }
+
+    /// Counterpart: a hard (non-transient) failure drops the runtime entirely.
+    #[test]
+    fn hard_degrade_drops_runtime_on_non_transient() {
+        let mut runtime_state = AgentRuntimeState {
+            runtime: Some(seed_completed_runtime("thread_hard")),
+            runtime_generation: 5,
+            runtime_degraded: false,
+        };
+
+        let hard = anyhow::anyhow!("Agent runtime was not initialized");
+        assert!(
+            !agent_send_error_is_transient(&hard),
+            "init failure must NOT classify as transient"
+        );
+
+        runtime_state.mark_runtime_degraded();
+        assert!(
+            runtime_state.runtime.is_none(),
+            "hard degrade must drop the runtime"
+        );
+        assert!(runtime_state.runtime_degraded);
     }
 
     #[test]

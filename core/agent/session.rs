@@ -232,10 +232,42 @@ impl AgentSession {
                         });
                         entry.arguments = Some(arguments);
                     }
-                    AgentEvent::ResponseDone { response_id } => {
-                        self.thread_id = response_id;
+                    AgentEvent::ResponseDone { response_id, clean } => {
+                        // Only adopt the provider thread id on a clean terminal.
+                        // A dirty terminal (EOF/timeout, failed/incomplete) must
+                        // not persist a poisoned chain id; clearing it forces the
+                        // next turn to full-replay from local history (P1.6).
+                        if clean {
+                            self.thread_id = response_id;
+                        } else {
+                            if let Some(id) = response_id {
+                                warn!(
+                                    "Agent dirty terminal: discarding response id {} and resetting chain (provider={})",
+                                    id,
+                                    self.provider.name()
+                                );
+                            }
+                            self.thread_id = None;
+                        }
                     }
                     AgentEvent::Error(message) => {
+                        // P2.13: reset the chain BEFORE returning. A provider
+                        // Error (e.g. a failed/incomplete/cancelled terminal
+                        // mapped to Error) must never leave `thread_id` pointing
+                        // at a poisoned response. The parser also emits a dirty
+                        // `ResponseDone { clean: false }` ahead of this Error so
+                        // both the session chain (here) and the provider chain
+                        // (`previous_response_id`) reset through the P1.6 path;
+                        // clearing here too is the belt-and-suspenders guard that
+                        // stays correct even if a provider surfaces an Error
+                        // without a preceding dirty terminal.
+                        if self.thread_id.is_some() {
+                            warn!(
+                                "Agent provider error: resetting chain (clearing thread_id) before returning (provider={})",
+                                self.provider.name()
+                            );
+                            self.thread_id = None;
+                        }
                         warn!(
                             "Agent provider stream error (provider={}): {}",
                             self.provider.name(),
@@ -514,6 +546,7 @@ mod tests {
             .expect("test stream channel should accept tool call");
             tx.send(AgentEvent::ResponseDone {
                 response_id: Some("resp_loop".to_string()),
+                clean: true,
             })
             .await
             .expect("test stream channel should accept completion event");
@@ -635,6 +668,7 @@ mod tests {
                 .expect("test stream channel should accept completion text");
             tx.send(AgentEvent::ResponseDone {
                 response_id: Some("resp_retry_success".to_string()),
+                clean: true,
             })
             .await
             .expect("test stream channel should accept completion event");
@@ -785,6 +819,7 @@ mod tests {
             AgentEvent::TextDone("Hello from agent".to_string()),
             AgentEvent::ResponseDone {
                 response_id: Some("resp_success_1".to_string()),
+                clean: true,
             },
         ]]);
         let (ui_tx, mut ui_rx) = mpsc::channel(16);
@@ -838,6 +873,7 @@ mod tests {
             AgentEvent::TextDone("Hello".to_string()),
             AgentEvent::ResponseDone {
                 response_id: Some("resp_buffered".to_string()),
+                clean: true,
             },
         ]]);
         let (ui_tx, mut ui_rx) = mpsc::channel(16);
@@ -883,12 +919,14 @@ mod tests {
                 },
                 AgentEvent::ResponseDone {
                     response_id: Some("resp_after_tool".to_string()),
+                    clean: true,
                 },
             ],
             vec![
                 AgentEvent::TextDone("Recovered after tool fallback".to_string()),
                 AgentEvent::ResponseDone {
                     response_id: Some("resp_final".to_string()),
+                    clean: true,
                 },
             ],
         ]);
@@ -1029,6 +1067,125 @@ mod tests {
         assert!(
             ui_events.contains(&AgentUiEvent::Done),
             "expected Done event, got {ui_events:?}"
+        );
+    }
+
+    /// P2.13 end-to-end: a failed/incomplete/cancelled terminal reaches the
+    /// session as a dirty `ResponseDone { clean: false }` followed by an
+    /// `Error`. The session MUST clear `thread_id` (chain reset) before
+    /// returning the error, so the next turn full-replays instead of resuming a
+    /// poisoned response chain. A follow-up clean send then adopts a fresh id.
+    #[tokio::test]
+    async fn dirty_terminal_then_error_resets_thread_id_and_next_turn_replays() {
+        let provider = ScriptedProvider::new(vec![
+            // Turn 1: failed terminal -> dirty ResponseDone, then Error.
+            vec![
+                AgentEvent::ResponseDone {
+                    response_id: Some("resp_failed".to_string()),
+                    clean: false,
+                },
+                AgentEvent::Error("Agent response failed: server_error: boom".to_string()),
+            ],
+            // Turn 2: clean success -> fresh chain id adopted.
+            vec![
+                AgentEvent::TextDone("Recovered next turn".to_string()),
+                AgentEvent::ResponseDone {
+                    response_id: Some("resp_recovered".to_string()),
+                    clean: true,
+                },
+            ],
+        ]);
+
+        let (ui_tx, mut ui_rx) = mpsc::channel(32);
+        let mut session =
+            AgentSession::new(Box::new(provider), Arc::new(ToolRegistry::new()), ui_tx);
+        // Pre-poison the chain as if a prior clean turn had advanced it.
+        session.thread_id = Some("resp_poisoned".to_string());
+
+        let options = StreamOptions {
+            model: "gpt-test".to_string(),
+            system_prompt: None,
+            max_tokens: None,
+            temperature: None,
+            reset_chain: false,
+        };
+
+        let error = session
+            .send("trigger failed terminal".to_string(), Vec::new(), &options)
+            .await
+            .expect_err("failed terminal must surface an error");
+        assert!(
+            error.to_string().contains("Provider stream error"),
+            "expected provider stream error, got: {error}"
+        );
+
+        // Chain reset: the poisoned id must be gone after the dirty terminal.
+        assert_eq!(
+            session.thread_id(),
+            None,
+            "dirty terminal + error must reset the chain (thread_id == None)"
+        );
+
+        // Next turn succeeds and adopts a fresh id (proving the chain recovered
+        // rather than staying stuck on the poisoned id).
+        session
+            .send("next turn".to_string(), Vec::new(), &options)
+            .await
+            .expect("recovered turn should complete");
+        assert_eq!(
+            session.thread_id(),
+            Some("resp_recovered"),
+            "a subsequent clean turn must adopt a fresh chain id"
+        );
+
+        let mut ui_events = Vec::new();
+        while let Ok(event) = ui_rx.try_recv() {
+            ui_events.push(event);
+        }
+        assert!(
+            ui_events.iter().any(|event| matches!(
+                event,
+                AgentUiEvent::Error(message) if message.contains("server_error")
+            )),
+            "expected provider Error surfaced to UI, got {ui_events:?}"
+        );
+    }
+
+    /// P2.13 belt-and-suspenders: even if a provider surfaces a bare `Error`
+    /// WITHOUT a preceding dirty `ResponseDone`, the session must still reset the
+    /// chain before returning, so a pre-existing `thread_id` cannot poison the
+    /// next turn.
+    #[tokio::test]
+    async fn bare_error_without_dirty_terminal_still_resets_thread_id() {
+        let provider = ScriptedProvider::new(vec![vec![AgentEvent::Error(
+            "Agent response was cancelled before completion".to_string(),
+        )]]);
+
+        let (ui_tx, mut _ui_rx) = mpsc::channel(16);
+        let mut session =
+            AgentSession::new(Box::new(provider), Arc::new(ToolRegistry::new()), ui_tx);
+        session.thread_id = Some("resp_poisoned".to_string());
+
+        let error = session
+            .send(
+                "bare error".to_string(),
+                Vec::new(),
+                &StreamOptions {
+                    model: "gpt-test".to_string(),
+                    system_prompt: None,
+                    max_tokens: None,
+                    temperature: None,
+                    reset_chain: false,
+                },
+            )
+            .await
+            .expect_err("bare error must surface");
+        assert!(error.to_string().contains("Provider stream error"));
+
+        assert_eq!(
+            session.thread_id(),
+            None,
+            "a bare Error must still clear the chain (belt-and-suspenders)"
         );
     }
 

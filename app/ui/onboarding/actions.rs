@@ -104,6 +104,7 @@ fn handle_permission_primary(kind: PermissionKind) {
     }
 
     if kind == PermissionKind::FullDiskAccess && already_requested {
+        let _ = request_permission(kind);
         start_full_disk_polling();
 
         {
