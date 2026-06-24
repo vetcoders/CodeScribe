@@ -1193,12 +1193,8 @@ pub fn update_chat_view_with_state(state: &mut VoiceChatOverlayState, scroll_to_
             stack_view_add(container, empty_label);
         }
 
-        // Raw pointer to the measurement cache so each bubble reuses prior
-        // measurements and we skip AppKit's text engine for unchanged bubbles.
-        // A raw pointer (not &mut) avoids conflicting with the &mut state borrows
-        // taken by `attach_message_bubble_click_recognizer` inside the loop; only
-        // `create_bubble_view` touches the cache, so there is no aliasing.
-        let measure_cache_ptr: *mut BubbleMeasureCache = &mut state.bubble_measure_cache;
+        let mut measure_cache = std::mem::take(&mut state.bubble_measure_cache);
+        let measure_cache_ptr: *mut BubbleMeasureCache = &mut measure_cache;
 
         let mut last_bubble: Option<Id> = None;
         let message_count = state.messages.len();
@@ -1252,6 +1248,7 @@ pub fn update_chat_view_with_state(state: &mut VoiceChatOverlayState, scroll_to_
                 stack_view_add(container, action_bar);
             }
         }
+        state.bubble_measure_cache = measure_cache;
 
         // Ensure the document view size matches its arranged subviews; otherwise scrolling can
         // be disabled and long messages will just "grow" out of view.
