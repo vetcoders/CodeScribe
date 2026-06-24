@@ -16,6 +16,14 @@ const BUILTIN_LEXICONS: &[(&str, &str)] = &[(
     include_str!("../../assets/programming.jsonl"),
 )];
 const SEED_JSONL: &str = include_str!("../../assets/seed.jsonl");
+/// Curated operator/command vocabulary. Spoken Polish UI-command phrases and
+/// their Whisper mis-hears normalize to the canonical *code token* the codebase
+/// actually uses (e.g. "schowek"/"schowku"/"schowka"/"schopku" -> "clipboard").
+/// Loaded rules-only via `load_seed_jsonl` (seed format gives whole-word +
+/// case control), so these common words never enter `protected_canonicals` and
+/// never trip the downstream loss-detection gate. Canonicals were confirmed
+/// real and high-frequency via `loct occurrences` before being chosen.
+const OPERATOR_VOCAB_JSONL: &str = include_str!("../../assets/operator_vocabulary.jsonl");
 /// Curated proper-noun / operator-vocabulary lexicon. Unlike the generic
 /// programming/seed sources, entries here are case-normalizing: a variant that
 /// differs from the canonical only by casing (e.g. "aicx" -> "AICX") still
@@ -125,6 +133,11 @@ impl Lexicon {
         let seed_count = load_seed_jsonl(SEED_JSONL, "seed", &mut builtin_rules);
         let seed_ms = t_seed.elapsed().as_millis();
 
+        // Operator/command vocabulary: spoken Polish UI commands + their
+        // mis-hears normalize to the canonical code token. Seed format (rules
+        // only) keeps these common words out of `protected_canonicals`.
+        let operator_count = load_seed_jsonl(OPERATOR_VOCAB_JSONL, "operator", &mut builtin_rules);
+
         // Protected terms load LAST among builtin sources so their brand casing
         // wins over any generic earlier rule that produced a lower-cased form.
         let mut protected_canonicals = Vec::new();
@@ -152,13 +165,14 @@ impl Lexicon {
 
         if total > 0 {
             info!(
-                "Loaded {} lexicon rules in {}ms (legacy={} in {}ms, seed={} in {}ms, protected={} terms={}, custom={} in {}ms, custom_path={})",
+                "Loaded {} lexicon rules in {}ms (legacy={} in {}ms, seed={} in {}ms, operator={}, protected={} terms={}, custom={} in {}ms, custom_path={})",
                 total,
                 total_ms,
                 legacy_count,
                 legacy_ms,
                 seed_count,
                 seed_ms,
+                operator_count,
                 protected_count,
                 protected_canonicals.len(),
                 custom_count,
@@ -1100,6 +1114,7 @@ mod tests {
             load_legacy_jsonl(source, label, &mut rules);
         }
         load_seed_jsonl(SEED_JSONL, "seed", &mut rules);
+        load_seed_jsonl(OPERATOR_VOCAB_JSONL, "operator", &mut rules);
         let mut canonicals = Vec::new();
         load_protected_jsonl(
             PROTECTED_TERMS_JSONL,
@@ -1172,6 +1187,29 @@ mod tests {
         assert_eq!(lex.apply(sentence), sentence);
         let pl = "To jest zwykłe zdanie bez żadnych nazw własnych";
         assert_eq!(lex.apply(pl), pl);
+    }
+
+    #[test]
+    fn test_polish_ui_command_phrase_preservation() {
+        // Regression class: Polish UI command phrases (and their Whisper
+        // mis-hears) must normalize to the canonical code token, never leak the
+        // garbage mutant. The reported goblin: "schowku" -> "schopku".
+        let lex = builtin_only_lexicon();
+        // The reported mutant and the whole "schowek" inflection family collapse
+        // to the invariant code token (clipboard never inflects in Polish).
+        assert_eq!(lex.apply("wrzuć do schopku"), "wrzuć do clipboard");
+        assert_eq!(lex.apply("otwórz schowek"), "otwórz clipboard");
+        assert_eq!(lex.apply("wrzuć do schowka"), "wrzuć do clipboard");
+        assert_eq!(lex.apply("zajrzyj do schowku"), "zajrzyj do clipboard");
+        // Other operator commands normalize to their code token.
+        assert_eq!(lex.apply("zrób skrinszot"), "zrób screenshot");
+        assert_eq!(lex.apply("zrób zrzut ekranu"), "zrób screenshot");
+        assert_eq!(lex.apply("wklej to"), "paste to");
+        assert_eq!(lex.apply("pokaż zaznaczenie"), "pokaż selection");
+        assert_eq!(lex.apply("zapisz transkrypt"), "zapisz transcript");
+        // Ordinary text without command vocabulary is untouched.
+        let plain = "To jest zwykłe zdanie o kotach i psach";
+        assert_eq!(lex.apply(plain), plain);
     }
 
     #[test]
