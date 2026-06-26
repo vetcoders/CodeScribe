@@ -153,6 +153,21 @@ pub fn clear_voice_chat_text_impl() {
     update_attach_button_ui(btn_ptr, 0, Vec::new());
 }
 
+/// After a send consumes the current attachments, clear them from the input bar
+/// but stash a copy in `last_sent_attachments` so the user can re-attach them via
+/// the attach menu instead of re-picking each file.
+fn clear_attachments_after_send_locked(state: &mut VoiceChatOverlayState) {
+    if state.attachments.is_empty() {
+        return;
+    }
+    state.last_sent_attachments = state.attachments.clone();
+    state.attachments.clear();
+    state.attachments_last_sent = None;
+    let btn_ptr = state.agent_attach_button;
+    render_attachment_chips_locked(state);
+    update_attach_button_ui(btn_ptr, 0, Vec::new());
+}
+
 /// Send the draft message (called from handlers)
 pub fn send_draft_message_impl() {
     let callback = {
@@ -195,6 +210,8 @@ pub fn send_draft_message_impl() {
                 mode: Some(mode),
                 is_pending_followup: false,
             });
+            // Sent once: clear the chip strip, keep a copy for re-attach.
+            clear_attachments_after_send_locked(&mut state);
         }
         push_prompt_history_locked(&mut state, &draft);
         follow_latest_after_manual_send_locked(&mut state);
@@ -277,6 +294,8 @@ pub fn commit_last_user_message_impl() {
                 mode: Some(mode),
                 is_pending_followup: false,
             });
+            // Sent once: clear the chip strip, keep a copy for re-attach.
+            clear_attachments_after_send_locked(&mut state);
         }
         state.is_sending = true;
         update_chat_view_with_state(&mut state, true);
