@@ -204,9 +204,10 @@ impl AgenticReadinessReport {
         &self.rows
     }
 
-    /// `true` only when every gating prerequisite (Vibecrafted / AICX / Loctree)
-    /// is non-blocking. PRView's missing integration is surfaced but never flips
-    /// this to `false` on its own — otherwise Agentic could never be ready.
+    /// `true` only when every gating prerequisite is non-blocking. The agentic
+    /// substrate is Vibecrafted + AICX + Loctree + PRView; all four are required.
+    /// A missing/disabled/failed PRView integration flips this to `false` just
+    /// like any other prerequisite — PRView is minimum substrate, not decoration.
     pub fn is_ready(&self) -> bool {
         self.ready
     }
@@ -273,52 +274,78 @@ fn classify_prereq(
     )
 }
 
-/// Classify PRView readiness.
+/// Classify PRView readiness as a **required** agentic prerequisite.
 ///
 /// Repo truth (loctree literal scan, 2026-06-26): there is NO `prview` MCP
 /// server name and no local prview command anywhere in CodeScribe. We refuse to
 /// invent a binary name. If a user has manually wired a server whose name
 /// contains "prview" we honour that real config; otherwise we report the exact
 /// evidence — missing integration — and never fake green readiness.
+///
+/// Returns the display row and whether the prerequisite is *blocking*, matching
+/// [`classify_prereq`]'s contract: a missing/disabled/failed PRView integration
+/// blocks Agentic readiness because PRView is minimum substrate, not decoration.
 fn classify_prview(
     config: &McpConfigFile,
     runtime: &BTreeMap<String, ServerRuntime>,
-) -> McpStatusRow {
+) -> (McpStatusRow, bool) {
     let detected = config
         .servers
-        .keys()
-        .find(|name| name.to_ascii_lowercase().contains("prview"));
-    match detected {
-        Some(name) => {
-            let (value, tone) = match runtime.get(name) {
-                Some(ServerRuntime::Tools(count)) => (
-                    format!("ready — {count} tool(s) live (via \"{name}\")"),
-                    McpRowTone::Good,
-                ),
-                Some(ServerRuntime::Failed(reason)) => {
-                    (format!("failed: {reason}"), McpRowTone::Bad)
-                }
-                Some(ServerRuntime::Disabled) => {
-                    (format!("disabled — \"{name}\""), McpRowTone::Warn)
-                }
-                None => (
-                    format!("configured — agent not started yet (via \"{name}\")"),
-                    McpRowTone::Warn,
-                ),
-            };
-            McpStatusRow {
-                label: "PRView integration:".to_string(),
-                value,
-                tone,
+        .iter()
+        .find(|(name, _)| name.to_ascii_lowercase().contains("prview"));
+    let (value, tone, blocking) = match detected {
+        Some((name, cfg)) => match runtime.get(name) {
+            // Real discovery succeeded — PRView tools are live.
+            Some(ServerRuntime::Tools(count)) => (
+                format!("ready — {count} tool(s) live (via \"{name}\")"),
+                McpRowTone::Good,
+                false,
+            ),
+            // Configured but discovery failed: surface the concrete reason.
+            Some(ServerRuntime::Failed(reason)) => {
+                (format!("failed: {reason}"), McpRowTone::Bad, true)
             }
-        }
-        None => McpStatusRow {
-            label: "PRView integration:".to_string(),
-            // `missing_prview_integration`: no MCP server, no local command.
-            value: "missing — no PRView MCP server or local command found".to_string(),
-            tone: McpRowTone::Warn,
+            // Disabled (via cache or the `enabled` flag) blocks the agentic lane.
+            Some(ServerRuntime::Disabled) => (
+                format!("disabled — set \"enabled\": true for \"{name}\""),
+                McpRowTone::Bad,
+                true,
+            ),
+            None => {
+                if cfg.enabled.unwrap_or(true) {
+                    // Config is correct; the agent runtime has not run discovery
+                    // yet. Not blocking — the substrate is present.
+                    (
+                        format!("configured — agent not started yet (via \"{name}\")"),
+                        McpRowTone::Warn,
+                        false,
+                    )
+                } else {
+                    (
+                        format!("disabled — set \"enabled\": true for \"{name}\""),
+                        McpRowTone::Bad,
+                        true,
+                    )
+                }
+            }
         },
-    }
+        // `missing_prview_integration`: no MCP server, no local command. Honest
+        // evidence preserved (loctree literal `prview` = 0 production occurrences),
+        // but PRView is required substrate, so its absence blocks readiness.
+        None => (
+            "missing (required) — no PRView MCP server or local command found".to_string(),
+            McpRowTone::Bad,
+            true,
+        ),
+    };
+    (
+        McpStatusRow {
+            label: "PRView integration:".to_string(),
+            value,
+            tone,
+        },
+        blocking,
+    )
 }
 
 /// Agentic-lane readiness probe: classifies the agentic substrate prerequisites
@@ -393,13 +420,17 @@ fn probe_agentic_readiness_at(path: &Path) -> AgenticReadinessReport {
         }
         prereq_rows.push(row);
     }
-    prereq_rows.push(classify_prview(&config, &runtime));
+    let (prview_row, prview_blocking) = classify_prview(&config, &runtime);
+    if prview_blocking {
+        blocking += 1;
+    }
+    prereq_rows.push(prview_row);
 
     let ready = blocking == 0;
     let verdict = if ready {
         McpStatusRow {
             label: "Agentic readiness:".to_string(),
-            value: "ready — core substrate present (PRView integration unavailable)".to_string(),
+            value: "ready — full agentic substrate present".to_string(),
             tone: McpRowTone::Good,
         }
     } else {
@@ -820,24 +851,27 @@ mod tests {
     }
 
     #[test]
-    fn agentic_recognizes_configured_aicx_and_loctree() {
+    fn agentic_recognizes_configured_full_substrate() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("mcp.json");
+        // Full required substrate: Vibecrafted + AICX + Loctree + a PRView-like
+        // server. A user who wires a "prview" server satisfies the prerequisite.
         let config = json!({
             "mcpServers": {
                 "vibecrafted-mcp": { "command": "vibecrafted-mcp", "enabled": true },
                 "aicx-mcp": { "command": "aicx-mcp", "enabled": true },
-                "loctree-mcp": { "command": "loctree-mcp", "enabled": true }
+                "loctree-mcp": { "command": "loctree-mcp", "enabled": true },
+                "vista-prview": { "command": "vista-prview", "enabled": true }
             }
         });
         fs::write(&path, config.to_string()).expect("write config");
 
         let report = probe_agentic_readiness_at(&path);
-        // All three prereqs are configured + enabled (no runtime discovery yet),
-        // so none block: the core substrate is recognized as present.
+        // All four prereqs are configured + enabled (no runtime discovery yet),
+        // so none block: the full agentic substrate is recognized as present.
         assert!(
             report.is_ready(),
-            "configured substrate should be ready: {:?}",
+            "configured full substrate should be ready: {:?}",
             report
                 .summary_rows()
                 .iter()
@@ -853,6 +887,40 @@ mod tests {
                 row.value
             );
         }
+        // A configured/enabled PRView-like server satisfies the PRView prereq.
+        let prview = find_row(&report, "PRView integration:");
+        assert_eq!(prview.tone, McpRowTone::Warn);
+        assert!(
+            prview.value.contains("configured") && prview.value.contains("vista-prview"),
+            "PRView-like server should satisfy the prerequisite, got: {}",
+            prview.value
+        );
+    }
+
+    #[test]
+    fn agentic_disabled_prview_server_blocks_readiness() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("mcp.json");
+        // Core substrate present, but the wired PRView-like server is disabled —
+        // a disabled required prerequisite must block readiness.
+        let config = json!({
+            "mcpServers": {
+                "vibecrafted-mcp": { "command": "vibecrafted-mcp", "enabled": true },
+                "aicx-mcp": { "command": "aicx-mcp", "enabled": true },
+                "loctree-mcp": { "command": "loctree-mcp", "enabled": true },
+                "vista-prview": { "command": "vista-prview", "enabled": false }
+            }
+        });
+        fs::write(&path, config.to_string()).expect("write config");
+
+        let report = probe_agentic_readiness_at(&path);
+        assert!(
+            !report.is_ready(),
+            "a disabled PRView server must block readiness"
+        );
+        let prview = find_row(&report, "PRView integration:");
+        assert_eq!(prview.tone, McpRowTone::Bad);
+        assert!(prview.value.contains("disabled"), "got: {}", prview.value);
     }
 
     #[test]
@@ -876,10 +944,11 @@ mod tests {
     }
 
     #[test]
-    fn agentic_prview_classified_missing_when_no_known_integration() {
+    fn agentic_prview_missing_blocks_readiness() {
         let temp = tempfile::tempdir().expect("temp dir");
         let path = temp.path().join("mcp.json");
-        // Full agentic substrate present, but no PRView surface anywhere.
+        // Core substrate present, but no PRView surface anywhere — this is the
+        // repo-truth baseline (loctree literal `prview` = 0 production hits).
         let config = json!({
             "mcpServers": {
                 "vibecrafted-mcp": { "command": "vibecrafted-mcp", "enabled": true },
@@ -891,16 +960,18 @@ mod tests {
 
         let report = probe_agentic_readiness_at(&path);
         let row = find_row(&report, "PRView integration:");
+        // Honest evidence preserved AND now flagged as a hard, blocking gap.
+        assert_eq!(row.tone, McpRowTone::Bad);
         assert!(
             row.value.contains("missing") && row.value.contains("PRView"),
             "PRView must be explicitly classified as missing, got: {}",
             row.value
         );
-        // PRView's missing integration must NOT, on its own, block readiness —
-        // otherwise Agentic could never be ready.
+        // PRView is required substrate: its absence blocks Agentic readiness even
+        // when Vibecrafted / AICX / Loctree are all present.
         assert!(
-            report.is_ready(),
-            "missing PRView alone should not block core readiness"
+            !report.is_ready(),
+            "missing PRView must block agentic readiness"
         );
     }
 
