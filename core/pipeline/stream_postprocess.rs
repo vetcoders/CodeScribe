@@ -22,7 +22,7 @@ const SEED_JSONL: &str = include_str!("../../assets/seed.jsonl");
 /// Loaded rules-only via `load_seed_jsonl` (seed format gives whole-word +
 /// case control), so these common words never enter `protected_canonicals` and
 /// never trip the downstream loss-detection gate. Canonicals were confirmed
-/// real and high-frequency via `loct occurrences` before being chosen.
+/// real and high-frequency via Loctree occurrences before being chosen.
 const OPERATOR_VOCAB_JSONL: &str = include_str!("../../assets/operator_vocabulary.jsonl");
 /// Curated proper-noun / operator-vocabulary lexicon. Unlike the generic
 /// programming/seed sources, entries here are case-normalizing: a variant that

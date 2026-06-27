@@ -16,6 +16,7 @@ use codescribe_core::agent::{
     AgentSession, AgentUiEvent, ContentBlock, ImageAttachment, Message, Role, StreamOptions,
     Thread, ThreadMessage, ThreadStore, ToolRegistry,
 };
+use codescribe_core::attachment::MAX_VISION_IMAGES;
 use serde_json::json;
 
 /// Global flag for current session mode.
@@ -429,6 +430,15 @@ async fn stream_final_text_to_chat_locally(text: &str) {
     }
 }
 
+/// Canonical casing for brand / proper-noun tokens that the generic title-caser
+/// would otherwise mangle (`github` -> `Github`). Matched case-insensitively.
+fn brand_casing(word: &str) -> Option<&'static str> {
+    match word.to_ascii_lowercase().as_str() {
+        "github" => Some("GitHub"),
+        _ => None,
+    }
+}
+
 /// Title-case a `snake_case` / `kebab-case` identifier into readable words.
 /// `brave_web_search` -> `Brave Web Search`.
 fn prettify_identifier(s: &str) -> String {
@@ -437,6 +447,12 @@ fn prettify_identifier(s: &str) -> String {
     for (i, word) in cleaned.split_whitespace().enumerate() {
         if i > 0 {
             out.push(' ');
+        }
+        // Preserve known brand casing instead of the naive first-letter
+        // capitalization that would render "github" as "Github".
+        if let Some(brand) = brand_casing(word) {
+            out.push_str(brand);
+            continue;
         }
         let mut chars = word.chars();
         if let Some(first) = chars.next() {
@@ -777,12 +793,6 @@ fn agent_send_error_is_transient(error: &anyhow::Error) -> bool {
     .any(|pattern| message.contains(pattern))
 }
 
-/// Maximum number of image attachments forwarded to the model per message.
-/// Kept in sync with the legacy (`ai_formatting`) cap so both send paths behave
-/// alike. Sized for real multi-image use (e.g. comparing several wireframes);
-/// vision-capable backends accept far more, images are size-capped individually.
-const MAX_AGENT_VISION_IMAGES: usize = 16;
-
 /// Split an outgoing payload into its visible text and the loaded image
 /// attachments referenced by the `ATTACHMENTS (image paths)` marker.
 ///
@@ -804,16 +814,16 @@ fn build_image_attachments_from_text(text: &str) -> (String, Vec<ImageAttachment
 
     let mut dropped: Vec<String> = Vec::new();
 
-    if paths.len() > MAX_AGENT_VISION_IMAGES {
-        for extra in &paths[MAX_AGENT_VISION_IMAGES..] {
+    if paths.len() > MAX_VISION_IMAGES {
+        for extra in &paths[MAX_VISION_IMAGES..] {
             dropped.push(file_label(extra));
         }
         warn!(
             "Too many image attachments ({}); forwarding first {} as vision input",
             paths.len(),
-            MAX_AGENT_VISION_IMAGES
+            MAX_VISION_IMAGES
         );
-        paths.truncate(MAX_AGENT_VISION_IMAGES);
+        paths.truncate(MAX_VISION_IMAGES);
     }
 
     let mut attachments = Vec::with_capacity(paths.len());
@@ -1293,7 +1303,7 @@ mod tests {
         // raw wire name in the conversation timeline.
         assert_eq!(
             friendly_tool_name("mcp__github__create_issue"),
-            "Create Issue · Github"
+            "Create Issue · GitHub"
         );
         // Bare snake_case identifier is title-cased.
         assert_eq!(friendly_tool_name("read_file"), "Read File");
@@ -1356,8 +1366,8 @@ mod tests {
         assert_eq!(tool_running_status("Web search"), "Searching web…");
         assert_eq!(tool_running_status("Local search"), "Searching…");
         assert_eq!(
-            tool_running_status("Create Issue · Github"),
-            "Running Create Issue · Github…"
+            tool_running_status("Create Issue · GitHub"),
+            "Running Create Issue · GitHub…"
         );
     }
 
@@ -1956,7 +1966,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cs_helpers_cap_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let mut lines = String::from("multi\n\nATTACHMENTS (image paths)\n");
-        for i in 0..(MAX_AGENT_VISION_IMAGES + 2) {
+        for i in 0..(MAX_VISION_IMAGES + 2) {
             let p = dir.join(format!("img{i}.png"));
             std::fs::write(&p, b"\x89PNG\r\n\x1a\nfake").unwrap();
             lines.push_str(&format!("- {}\n", p.display()));
@@ -1964,7 +1974,7 @@ mod tests {
         let (_cleaned, images, dropped) = build_image_attachments_from_text(&lines);
 
         // Cap honored, overflow surfaced (not silently dropped).
-        assert_eq!(images.len(), MAX_AGENT_VISION_IMAGES);
+        assert_eq!(images.len(), MAX_VISION_IMAGES);
         assert_eq!(dropped.len(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);

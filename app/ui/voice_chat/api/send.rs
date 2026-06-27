@@ -1126,16 +1126,26 @@ Tools (optional): `brew install poppler ocrmypdf tesseract-lang`.)\n",
             // Anything else gets an honest message and is NOT added to the image
             // paths list, so the agent send path never sees an unsendable image.
             if codescribe_core::attachment::image_media_type(path).is_some() {
-                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                if size > codescribe_core::attachment::MAX_VISION_IMAGE_BYTES {
-                    out.push_str(&format!(
-                        "(image too large for vision input: {} bytes > {} max; not sent)\n",
-                        size,
-                        codescribe_core::attachment::MAX_VISION_IMAGE_BYTES
-                    ));
-                } else {
-                    out.push_str("(image detected; will be sent as vision input)\n");
-                    image_paths.push(display.to_string());
+                // A metadata error (file removed between open and stat, permission
+                // race, special file) means we cannot vouch for the image — treat
+                // it as unreadable and NEVER claim it as valid vision input.
+                match std::fs::metadata(path) {
+                    Ok(meta)
+                        if meta.len() > codescribe_core::attachment::MAX_VISION_IMAGE_BYTES =>
+                    {
+                        out.push_str(&format!(
+                            "(image too large for vision input: {} bytes > {} max; not sent)\n",
+                            meta.len(),
+                            codescribe_core::attachment::MAX_VISION_IMAGE_BYTES
+                        ));
+                    }
+                    Ok(_) => {
+                        out.push_str("(image detected; will be sent as vision input)\n");
+                        image_paths.push(display.to_string());
+                    }
+                    Err(_) => {
+                        out.push_str("(skipped: image unreadable)\n");
+                    }
                 }
             } else {
                 out.push_str("(skipped: unsupported image format or not UTF-8 text)\n");

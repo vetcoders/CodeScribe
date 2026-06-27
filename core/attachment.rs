@@ -205,6 +205,16 @@ pub const IMAGE_PATHS_MARKER: &str = "ATTACHMENTS (image paths)";
 /// Default per-image byte cap honored when loading images for vision input.
 pub const MAX_VISION_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Maximum number of image attachments forwarded to the model per message.
+///
+/// Single source of truth for every vision send path: the agent send path
+/// (`controller/helpers.rs`) and the legacy formatter (`llm/ai_formatting.rs`)
+/// both read this cap so they behave alike instead of drifting out of two
+/// hand-synced local copies. Sized for real multi-image use (e.g. comparing
+/// several wireframes); vision-capable backends accept far more, and images are
+/// size-capped individually via [`MAX_VISION_IMAGE_BYTES`].
+pub const MAX_VISION_IMAGES: usize = 16;
+
 /// MIME media type for a vision-supported image, inferred from extension.
 ///
 /// Returns `None` for extensions the model APIs do not accept as image input
@@ -281,8 +291,11 @@ pub fn parse_image_attachment_block(text: &str) -> (String, Vec<PathBuf>) {
 
 /// Load an image file as `(bytes, media_type)` for vision input.
 ///
-/// Returns `None` (with a warning) when the extension is not a vision-supported
-/// image, the file is unreadable, or it exceeds `max_bytes`.
+/// Returns `None` **silently** when the extension is not a vision-supported
+/// image — these are classified as images for the UI but the model APIs reject
+/// them, so the early bail is expected and not worth a warning. Returns `None`
+/// **with a warning** when a supported image is unreadable, empty, or exceeds
+/// `max_bytes`.
 pub fn load_image_for_vision(path: &Path, max_bytes: u64) -> Option<(Vec<u8>, String)> {
     let media_type = image_media_type(path)?;
 

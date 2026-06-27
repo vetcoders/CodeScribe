@@ -206,14 +206,15 @@ fn record_tool_result_impl(
 /// block. The block is a separate message from the assistant answer, so folding
 /// tools into it never splits the streamed answer.
 pub fn ensure_tool_activity_block(state: &mut VoiceChatOverlayState) -> usize {
-    if let Some(idx) = state.active_tool_activity_index
-        && state
+    if let Some(idx) = state.active_tool_activity_index {
+        let still_open = state
             .messages
             .get(idx)
             .map(|msg| msg.role == ChatRole::ToolActivity)
-            .unwrap_or(false)
-    {
-        return idx;
+            .unwrap_or(false);
+        if still_open {
+            return idx;
+        }
     }
 
     let mode = message_mode_label(state);
@@ -730,8 +731,13 @@ fn break_long_runs(text: &str, max_run: usize) -> String {
 /// so CoreText never spins on the main thread. Normal messages pass through
 /// unchanged.
 pub fn cap_bubble_display_text(text: &str) -> String {
-    let capped = if text.chars().count() > MAX_BUBBLE_DISPLAY_CHARS {
-        let mut t: String = text.chars().take(MAX_BUBBLE_DISPLAY_CHARS).collect();
+    // Bounded traversal: stop at the (cap+1)-th char instead of counting the
+    // whole string. `char_indices().nth(MAX)` walks at most
+    // MAX_BUBBLE_DISPLAY_CHARS + 1 chars, so a giant pasted base64 blob never
+    // pays an O(N) count just to decide whether to truncate. The returned byte
+    // index is always a char boundary, so the slice stays UTF-8 safe.
+    let capped = if let Some((byte_idx, _)) = text.char_indices().nth(MAX_BUBBLE_DISPLAY_CHARS) {
+        let mut t = text[..byte_idx].to_string();
         t.push_str("\n… (truncated for display; full text preserved in the thread)");
         t
     } else {

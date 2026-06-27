@@ -459,18 +459,18 @@ fn encode_image_as_data_url(path: &std::path::Path) -> Option<String> {
 }
 
 fn build_responses_user_content(user_message: &str) -> Vec<InputContent> {
-    // Kept in sync with `MAX_AGENT_VISION_IMAGES` in the agent send path.
-    const MAX_IMAGES: usize = 16;
+    // One shared cap with the agent send path — see `attachment::MAX_VISION_IMAGES`.
+    use crate::attachment::MAX_VISION_IMAGES;
 
     let (mut cleaned, mut image_paths) =
         crate::attachment::parse_image_attachment_block(user_message);
-    if image_paths.len() > MAX_IMAGES {
+    if image_paths.len() > MAX_VISION_IMAGES {
         warn!(
             "Too many image attachments ({}); keeping first {}",
             image_paths.len(),
-            MAX_IMAGES
+            MAX_VISION_IMAGES
         );
-        image_paths.truncate(MAX_IMAGES);
+        image_paths.truncate(MAX_VISION_IMAGES);
     }
 
     if !image_paths.is_empty() {

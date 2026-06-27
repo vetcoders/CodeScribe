@@ -27,10 +27,11 @@ How image attachments travel from the chat UI to the model as real vision input.
    text and loads each listed image into an `ImageAttachment` via
    `attachment::load_image_for_vision`. These go to `AgentSession::send` as real
    image blocks. Images that fail to load are reported to the user (not silently
-   dropped) and the cap is `MAX_AGENT_VISION_IMAGES`.
+   dropped) and the cap is `attachment::MAX_VISION_IMAGES`.
 4. Legacy path: `ai_formatting::build_responses_user_content` uses the same
-   `attachment::parse_image_attachment_block` + `load_image_for_vision` contract,
-   so both routes behave identically.
+   `attachment::parse_image_attachment_block` + `load_image_for_vision` contract
+   and the same shared `attachment::MAX_VISION_IMAGES` cap, so both routes behave
+   identically.
 
 ## Image support / capability
 

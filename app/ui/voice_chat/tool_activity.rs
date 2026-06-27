@@ -369,6 +369,15 @@ fn fallback_source(display_name: &str) -> String {
     }
 }
 
+/// Canonical casing for brand / proper-noun tokens that the generic capitalizer
+/// would otherwise mangle (`github` → `Github`). Matched case-insensitively.
+fn brand_casing(word: &str) -> Option<&'static str> {
+    match word.to_ascii_lowercase().as_str() {
+        "github" => Some("GitHub"),
+        _ => None,
+    }
+}
+
 /// Prettify an unknown MCP server segment (`some-server` → `Some server`) so the
 /// summary stays readable without leaking the `mcp__` addressing scheme.
 fn prettify_source(server: &str) -> String {
@@ -376,7 +385,13 @@ fn prettify_source(server: &str) -> String {
         .chars()
         .map(|c| if c == '-' || c == '_' { ' ' } else { c })
         .collect();
-    let mut chars = cleaned.trim().chars();
+    let trimmed = cleaned.trim();
+    // Preserve known brand casing (`github` → `GitHub`) instead of the naive
+    // first-letter capitalization that would render "Github".
+    if let Some(brand) = brand_casing(trimmed) {
+        return brand.to_string();
+    }
+    let mut chars = trimmed.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => "Tool".to_string(),
@@ -769,5 +784,23 @@ mod tests {
         let summary = group.evidence_summary();
         assert!(summary.contains("- Some other server: ok."));
         assert!(!summary.contains("mcp__"));
+    }
+
+    #[test]
+    fn evidence_summary_preserves_github_brand_casing() {
+        // The generic capitalizer would yield "Github"; the source heading must
+        // read "GitHub" for the real brand.
+        let mut group = ToolActivityGroup::default();
+        group.mark_result(
+            "c1",
+            "mcp__github__create_issue",
+            "Create Issue · GitHub",
+            "ok",
+            false,
+        );
+        let summary = group.evidence_summary();
+        assert!(summary.contains("- GitHub: ok."));
+        assert!(!summary.contains("Github "));
+        assert!(!summary.contains("- Github:"));
     }
 }
