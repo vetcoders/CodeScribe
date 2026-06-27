@@ -1,215 +1,123 @@
-# CodeScribe Installation and Launch Guide
+# CodeScribe Installation
 
-This document describes the installation methods, configuration paths, and how the application locates its resources.
+This is the canonical install and launch guide for the current repository.
 
-## Installation Methods
+## Requirements
 
-### Method 1: CLI Install (Recommended for Development)
+- macOS 14 or newer.
+- Apple Silicon Mac.
+- Rust toolchain with Rust 2024 support.
+- `pipx` if you want local git hook setup through `pre-commit`.
+- OpenAI API key for AI formatting or assistive mode.
+
+Local-only dictation can run without an API key if local Whisper is available.
+
+## Development Install
 
 ```bash
-# Install CLI (embedded Silero + embedder; Whisper from cache/download)
+git clone https://github.com/VetCoders/CodeScribe.git
+cd CodeScribe
+
+pipx install pre-commit
 make install
+codescribe --version
 ```
 
-**Result**: Binary `codescribe` installed to `~/.cargo/bin/`, with install-time model/cache checks.
+`make install` installs the CLI and repo-local hooks. The standard build embeds Silero VAD and MiniLM support assets when available, then resolves Whisper from runtime lookup.
 
-**How it runs**: Direct execution from terminal or as background daemon.
-
-### Method 2: App Bundle (For Distribution)
+## App Install
 
 ```bash
-make bundle           # Creates bundle/CodeScribe.app
-make install-app      # Copies to /Applications/CodeScribe.app (auto-caches models)
+make install-app
 ```
 
-**Result**: Standard macOS .app bundle in `/Applications/`.
+This builds `CodeScribe.app`, installs it to `/Applications`, and performs model/cache preparation as needed. It prefers a stable local signing identity when one exists and falls back to ad-hoc signing only when no usable identity is available.
 
-**How it runs**: Double-click or launch from Spotlight.
-
-`make install-app` now prefers a stable local signing identity automatically:
-
-- `Apple Development: ...` if present
-- otherwise `Developer ID Application: ...`
-- only falls back to `adhoc` when no usable signing identity exists
-
-This matters because macOS TCC permissions are far more stable with a persistent code-signing identity than with ad-hoc signatures.
-
-### Method 3: DMG Distribution (For End Users)
+## Release DMGs
 
 ```bash
-make dmg-signed       # Build signed DMG
-make notarize         # Notarize with Apple (requires Developer ID)
-# or one-shot:
-# make release-dmgs    # Build + sign + notarize standard and full DMGs
+make release-dmgs
 ```
 
-**Result**: `CodeScribe_X.Y.Z.dmg` and `CodeScribe_X.Y.Z_full.dmg` ready for distribution. The standard DMG embeds Silero + embedder and resolves Whisper from cache/download. The full DMG embeds Silero + embedder + Whisper.
+Release DMGs must be Developer ID signed, notarized, stapled, and smoke-tested outside the developer environment before the landing page or README promises them as the primary path.
 
-## Configuration
+Expected variants:
 
-### Config Directory
+- `CodeScribe_<version>.dmg`: standard build with support assets and runtime Whisper cache/download.
+- `CodeScribe_<version>_full.dmg`: larger build with Whisper embedded too.
 
-Configuration is **tiered**:
+See `docs/RELEASE.md` for the public release gate.
 
-```
-~/Library/Application Support/CodeScribe/
-├── settings.json     # GUI-managed settings (regular-user tier)
-└── ...               # app data
+## Runtime Configuration
 
-~/.codescribe/
-├── .env              # Power-user overrides (optional)
-├── prompts/          # Custom AI prompts
-│   ├── formatting.txt
-│   └── assistive.txt
-├── history/          # Transcription history
-├── reports/          # Quality reports
-└── repo_path         # Path to source repo (set during install)
-```
+CodeScribe uses tiered configuration:
 
-**Secrets** (API keys) are stored in **macOS Keychain** under service `com.vetcoders.codescribe`.
+```text
+~/Library/Application Support/CodeScribe/settings.json
+    GUI-managed settings.
 
-### Environment Variables (.env)
+macOS Keychain service com.vetcoders.codescribe
+    API keys and secrets.
 
-The application loads configuration with these priorities:
+~/.codescribe/.env
+    Optional power-user overrides.
 
-1. **Environment variables** (highest priority)
-2. **~/.codescribe/.env** (power-user overrides)
-3. **settings.json** (GUI-managed defaults)
-4. **Built-in defaults** (fallback)
+~/.codescribe/prompts/
+    Optional custom formatting and assistive prompts.
 
-```mermaid
-flowchart TD
-    A[Application Start] --> B{Check ENV vars}
-    B -->|Set| C[Use ENV value]
-    B -->|Not set| D{Check ~/.codescribe/.env}
-    D -->|Exists| E[Load with dotenvy]
-    D -->|Missing| F[Skip .env]
-    E --> KC[Load Keychain secrets]
-    F --> KC
-    KC --> S[Load settings.json]
-    S --> K[Apply defaults for missing keys]
-    C --> L[Config Ready]
-    K --> L
+~/.codescribe/history/
+    Transcript history.
 ```
 
-### Key Configuration Variables
+Configuration priority is:
 
-```env
-# Speech-to-Text
-WHISPER_LANGUAGE=pl              # pl | en | de | fr
-USE_LOCAL_STT=1                  # 1 = keep local transcript as committed result
+1. Process environment.
+2. `~/.codescribe/.env`.
+3. `settings.json`.
+4. Built-in defaults.
 
-# Hotkeys timing / behavior
-# Per-mode bindings live in Settings -> Modes & Shortcuts (settings.json)
-HOLD_EXCLUSIVE=1
-DOUBLE_TAP_INTERVAL_MS=200       # 100–450
-TOGGLE_SILENCE_SEC=5.0
+## Launch
 
-# AI Formatting
-AI_FORMATTING_ENABLED=1
-LLM_ENDPOINT=https://api.openai.com/v1/responses
-LLM_MODEL=gpt-4.1
-LLM_API_KEY=sk-xxx
-
-# Optional: Mode-specific OpenAI overrides
-LLM_FORMATTING_{ENDPOINT,MODEL,API_KEY}=...
-LLM_ASSISTIVE_{ENDPOINT,MODEL,API_KEY}=...
+```bash
+codescribe
+make start
+make stop
+make logs
 ```
 
-## Bundle Structure
+## Permissions
 
+Grant these in System Settings > Privacy & Security:
+
+| Permission       | Purpose                                        |
+| ---------------- | ---------------------------------------------- |
+| Microphone       | Audio recording.                               |
+| Accessibility    | Hotkeys and paste automation.                  |
+| Input Monitoring | Modifier-only hotkey detection.                |
+| Screen Recording | Screenshot/vision-input agent tools when used. |
+
+After changing macOS permissions, restart CodeScribe.
+
+## Model Lookup
+
+Runtime Whisper lookup order:
+
+1. `CODESCRIBE_MODEL_PATH`.
+2. `~/.codescribe/models/whisper-large-v3-turbo-mlx-q8/`.
+3. `./models/whisper-large-v3-turbo-mlx-q8/`.
+4. Hugging Face cache snapshots for `LibraxisAI/whisper-large-v3-turbo-mlx-q8`.
+
+The required model files are `config.json`, `weights.safetensors`, `tokenizer.json`, and `mel_filters.npz`.
+
+## Useful Commands
+
+```bash
+make help
+make build
+make release
+make install
+make install-app
+make config
+make check
+make test-quick
 ```
-CodeScribe.app/
-└── Contents/
-    ├── Info.plist           # Bundle metadata (icon, identifier, version)
-    ├── MacOS/
-    │   └── codescribe       # Main executable
-    └── Resources/
-        └── AppIcon.icns     # Application icon
-```
-
-### Info.plist Keys
-
-| Key                          | Value                 | Purpose                      |
-| ---------------------------- | --------------------- | ---------------------------- |
-| CFBundleIdentifier           | com.codescribe.app    | Unique app identifier        |
-| CFBundleIconFile             | AppIcon               | Points to AppIcon.icns       |
-| CFBundleExecutable           | codescribe            | Main binary name             |
-| LSMinimumSystemVersion       | 14.0                  | Requires macOS Sonoma+       |
-| NSMicrophoneUsageDescription | ...                   | Microphone permission prompt |
-
-## Icons
-
-### Tray Icon
-
-- **Source**: `assets/icon.png` (embedded via `include_bytes!`)
-- **Location in code**: `src/tray/icons.rs`
-- **Size**: 44x44 pixels (Retina), 22x22 logical
-
-### Dock Icon
-
-- **For CLI**: Programmatically set via `set_dock_icon()` in `src/ui.rs`
-- **For Bundle**: Uses `CFBundleIconFile` from Info.plist pointing to `AppIcon.icns`
-- **Source**: `assets/AppIcon.icns`
-
-### Icon Loading Flow
-
-```mermaid
-flowchart LR
-    subgraph CLI["CLI Mode (codescribe)"]
-        A1[Start] --> A2[set_dock_icon]
-        A2 --> A3[NSImage from include_bytes]
-        A3 --> A4[setApplicationIconImage]
-    end
-
-    subgraph Bundle["Bundle Mode (.app)"]
-        B1[Start] --> B2[macOS reads Info.plist]
-        B2 --> B3[CFBundleIconFile = AppIcon]
-        B3 --> B4[Load AppIcon.icns from Resources]
-    end
-
-    subgraph Tray["Tray Icon (both modes)"]
-        C1[Tray init] --> C2[load_custom_icon]
-        C2 --> C3[include_bytes icon.png]
-        C3 --> C4[tray_icon::Icon]
-    end
-```
-
-## Permissions Required
-
-Grant in **System Settings > Privacy & Security**:
-
-| Permission       | Purpose                | When Prompted           |
-| ---------------- | ---------------------- | ----------------------- |
-| Microphone       | Audio recording        | First recording attempt |
-| Accessibility    | Global hotkeys, paste  | First hotkey press      |
-| Input Monitoring | Keyboard event capture | First hotkey press      |
-
-## Troubleshooting
-
-### Empty Dock Icon
-
-- **CLI mode**: `set_dock_icon()` should set it programmatically
-- **Bundle mode**: Check that `Info.plist` exists and has `CFBundleIconFile`
-- **Verify**: `plutil -lint /Applications/CodeScribe.app/Contents/Info.plist`
-
-### Empty Tray Icon
-
-- Check that `assets/icon.png` exists and is valid PNG
-- Rebuild with `cargo build --release`
-
-### Config Not Loading
-
-- Check `~/.codescribe/.env` exists
-- Verify syntax: `cat ~/.codescribe/.env`
-- Check logs: `codescribe -v` for verbose output
-
-### Hotkeys Not Working
-
-- Grant Accessibility permission
-- Grant Input Monitoring permission
-- Restart the application after granting
-
----
-
-_Created by M&K (c)2026 VetCoders_
