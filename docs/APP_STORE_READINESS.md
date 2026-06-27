@@ -52,7 +52,7 @@ is a question of **which product** goes to the store.
 |---------|--------------------------|-----------------|-----|
 | **Sandbox** | `scripts/entitlements.plist` explicitly **disables** App Sandbox (documented as "outside Mac App Store") | `app-sandbox = true` mandatory | **P0** |
 | **Entitlements** | `disable-library-validation`, `allow-unsigned-executable-memory`, `allow-dyld-environment-variables` — all required by embedded Whisper/MiniLM dylibs | Sandboxed apps must team-sign nested code; `disable-library-validation` conflicts | **P0/uncertain** |
-| **Privacy manifest** | none (`PrivacyInfo.xcprivacy` absent); app reads file mtimes via `std::fs` `metadata().modified()` in `core/state/history.rs`, `core/hf_cache.rs`, `core/attachment.rs` → **FileTimestamp** required-reason category, reason code **C617.1** (metadata of files in the app's own containers) | `PrivacyInfo.xcprivacy` declaring `NSPrivacyAccessedAPICategoryFileTimestamp` / `C617.1` | **P0** (draft template: `scripts/PrivacyInfo.xcprivacy.template`) |
+| **Privacy manifest** | none (`PrivacyInfo.xcprivacy` absent); app reads file mtimes via `std::fs` `metadata().modified()` in `core/state/history.rs`, `core/hf_cache.rs`, `core/attachment.rs`, **and runtime `core/pipeline/stream_postprocess.rs`** (lexicon mtime in config dir) → **FileTimestamp** required-reason category, reason code **C617.1** (metadata of files in the app's own containers) | `PrivacyInfo.xcprivacy` declaring `NSPrivacyAccessedAPICategoryFileTimestamp` / `C617.1` | **P0** (draft template: `scripts/PrivacyInfo.xcprivacy.template`) |
 | **App Privacy Details** | only a written `docs/guide/privacy.md`; no App Store Connect record | Nutrition-label questionnaire completed | **P1** (process, blocked on having an app record) |
 | **Purpose strings** | Mic, Accessibility, Input Monitoring, Screen Capture, Apple Events — generated in `Makefile` bundle target (lines 127–131) | Mic + Input Monitoring OK; Accessibility/Apple Events review-risky | **P1** |
 | **Basic vs Agentic** | Onboarding has Basic (safe default) + Agentic lanes; Agentic probes MCP readiness | Agentic capabilities are sandbox-incompatible | **architecture** |
@@ -149,3 +149,116 @@ assert either way from documentation alone.
 - **Does not** enable the sandbox, change entitlements, alter signing, touch the
   `Makefile`, or modify any PR36 work. Those are deliberate follow-ups, gated on
   the operator's decision to actually stand up a second SKU.
+
+---
+
+## ERi re-fire — board decision: App Store is the first-choice lane (2026-06-27)
+
+The operator has made a **board-level product decision**: the Mac App Store is
+now the **first-choice distribution lane** for CodeScribe. That does not reverse
+the technical verdict above — a single binary still cannot be both sandboxed (for
+the store) and un-sandboxed (for the agent). What it changes is the *action*: stop
+treating the Basic MAS SKU as a "maybe later" and treat it as the **primary lane
+to stand up**, with Developer ID/Agentic as the secondary power-user lane.
+
+A second ERi pass re-verified the two points the first draft left explicitly
+"uncertain". Both are now **resolved in favour of feasibility** — the Basic SKU is
+technically viable, not merely conceivable.
+
+### Resolved uncertainty 1 — embedded ML dylibs CAN ship sandboxed
+
+`disable-library-validation` is set today **only because the embedded Whisper /
+MiniLM dylibs are signed ad-hoc / under a foreign team**. Apple's library-validation
+policy lets a binary link any library signed with **the same team identifier** (or
+an Apple system library). So the fix is not an entitlement — it is **re-signing
+every nested dylib/framework under the app's own team ID at bundle time**. Do that
+and library validation is satisfied *and* the sandbox's "nested code must be
+team-signed" rule is met, with `disable-library-validation` removed entirely.
+
+- Library validation / nested-code signing: [TN2206: macOS Code Signing In Depth](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)
+- `allow-unsigned-executable-memory` is MAS-compatible (keep only if a launch test shows the ML runtime needs JIT): [allow-unsigned-executable-memory](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-unsigned-executable-memory)
+
+**Still requires a real `productbuild` + App Store Connect upload to fully settle** —
+documentation establishes the rule; only a live upload proves the embedded ML stack
+loads under the sandbox.
+
+### Resolved uncertainty 2 — global hotkeys survive the sandbox
+
+Listen-only **Input Monitoring** (`CGEventTap` via `CGPreflightListenEventAccess` /
+`CGRequestListenEventAccess`) **is available to sandboxed Mac App Store apps**. It
+uses the runtime *Input Monitoring* privilege, not the Accessibility privilege that
+the sandbox blocks. CodeScribe already detects hotkeys with `CGEventTap` (not the
+Accessibility-bound `NSEvent` monitor), so **hotkey detection carries into the
+Basic SKU unchanged**. What does *not* carry is *controlling other apps* (paste,
+focus-restore) — that needs Accessibility / Apple Events, which stay in the
+Developer ID SKU.
+
+- Source: Apple confirms `CGEventTap` + Input Monitoring works in sandbox where `NSEvent`/Accessibility does not — see [Apple Developer Forums: Accessibility permission in sandboxed app](https://developer.apple.com/forums/thread/707680) and the [App Sandbox Information upload reference](https://developer.apple.com/help/app-store-connect/reference/app-uploads/app-sandbox-information).
+
+### Required-reason API scope is widening (re-confirmed)
+
+The 2024-05-01 gate began with third-party SDKs, but Apple has stated the
+required-reason obligation **will expand to the entire app binary**, and since
+**2025-02-12** a new privacy-impacting SDK must ship a manifest. CodeScribe uses a
+FileTimestamp API directly in first-party code, so `PrivacyInfo.xcprivacy` is
+required regardless of SDKs — do not defer it.
+
+- [Privacy updates for App Store submissions](https://developer.apple.com/news/?id=3d8a9yyh) · [List of APIs that require declared reasons](https://developer.apple.com/news/?id=z6fu1dcu) · [TN3183: required reason API entries](https://developer.apple.com/documentation/technotes/tn3183-adding-required-reason-api-entries-to-your-privacy-manifest)
+
+### What this re-fire adds to the repo
+
+- **`scripts/entitlements.appstore-basic.plist`** — a clearly-marked **DRAFT**
+  sandbox-clean entitlement set for the Basic SKU: `app-sandbox = true`,
+  `device.audio-input`, **no** `disable-library-validation`, **no**
+  Accessibility / Apple Events / broad file access. Not wired into any build —
+  the starting point for the MAS build profile. Sibling to the shipping
+  `scripts/entitlements.plist` (Developer ID).
+- This section + the FileTimestamp precision fix (`stream_postprocess.rs` is an
+  additional runtime FileTimestamp site the first draft missed).
+- **No** Makefile / signing / sandbox changes; PR36's dirty work is untouched.
+
+### Concrete path to the Basic MAS SKU (commands the operator will run later)
+
+These are the *documented target commands*, not run by this pass (they need an
+Apple Distribution identity and a sandboxed build profile that do not exist yet):
+
+```bash
+# 0. Pre-req certs (operator, in Apple Developer portal — NOT done here):
+#    - "Apple Distribution" certificate
+#    - "Mac Installer Distribution" (3rd Party Mac Developer Installer) certificate
+#    - App record + bundle id in App Store Connect (pick ONE canonical id)
+
+# 1. Build the Basic profile (future Makefile target, sandbox-clean feature set).
+#    Sign the app AND re-sign each nested ML dylib under the SAME team id:
+codesign --force --options runtime \
+  --entitlements scripts/entitlements.appstore-basic.plist \
+  --sign "Apple Distribution: <Team Name> (<TEAMID>)" \
+  CodeScribe.app/Contents/MacOS/<each-nested-dylib>     # then the .app last
+
+# 2. Build the installer package for the store:
+productbuild --component CodeScribe.app /Applications \
+  --sign "3rd Party Mac Developer Installer: <Team Name> (<TEAMID>)" \
+  CodeScribe.pkg
+
+# 3. Validate + upload to App Store Connect (Transporter app or notarytool's
+#    successor for store delivery; altool was retired 2023-11-01):
+xcrun altool --validate-app -f CodeScribe.pkg -t macos ...   # or Transporter.app
+
+# 4. In App Store Connect: complete App Privacy Details ("nutrition labels"):
+#    Audio Data -> purpose "App Functionality", NOT linked to identity, NOT tracking.
+
+# Read-only gap check any time (this DOES run today):
+./scripts/appstore-preflight.sh
+```
+
+### Remaining true blockers (unchanged by this pass, ordered)
+
+- **P0** Stand up the sandboxed Basic build profile (new Makefile target +
+  `entitlements.appstore-basic.plist` wired in + nested-dylib re-signing).
+- **P0** Acquire Apple Distribution + Mac Installer Distribution certificates and
+  add a `productbuild` + App Store Connect upload step (none exist in the repo).
+- **P0** Ship `PrivacyInfo.xcprivacy` inside the bundle (template ready).
+- **P1** Resolve the bundle-id split to one canonical id (touches the dirty
+  `Makefile` — out of scope on this branch; see follow-up prompts).
+- **P1** Confirm the embedded ML stack actually loads sandboxed via a real
+  `productbuild` + upload (documentation-confident, not upload-proven).

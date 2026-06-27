@@ -115,6 +115,20 @@ else
     blocker "No App Store distribution path (productbuild/pkg, Apple Distribution cert, App Store Connect upload). Only Developer ID + notarization exists."
 fi
 
+# 7. Basic-SKU draft scaffolding — informational (does not affect exit code).
+echo ""
+echo "▶ Basic SKU draft scaffolding (informational)"
+if [ -f "scripts/entitlements.appstore-basic.plist" ]; then
+    ok "Draft sandbox entitlements present (scripts/entitlements.appstore-basic.plist)."
+else
+    yellow "  [info] No draft sandbox entitlements (scripts/entitlements.appstore-basic.plist)."
+fi
+if [ -f "scripts/PrivacyInfo.xcprivacy.template" ]; then
+    ok "Draft privacy manifest present (scripts/PrivacyInfo.xcprivacy.template)."
+else
+    yellow "  [info] No draft privacy manifest template."
+fi
+
 echo ""
 echo "───────────────────────────────────────────────────────────"
 echo "  Summary: $P0 P0 blocker(s), $P1 P1 warning(s)"
