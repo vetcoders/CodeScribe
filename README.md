@@ -65,7 +65,7 @@ flowchart TB
 
 > **Status:** current source version is `0.12.2` (see `Cargo.toml`) and ships as a native macOS tray/settings/overlay app with local live preview, tiered settings (`settings.json` + Keychain + optional `.env`), and quality-loop tooling.
 
-See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md) | [`docs/BACKLOG.md`](docs/BACKLOG.md) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+See: [`docs/WHISPER_LIVE.md`](docs/WHISPER_LIVE.md) | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## OpenAI Provider
 
@@ -254,7 +254,7 @@ pipeline, while overlays/chat bubbles still receive only backspace-encoded
 | **Formatting**        | Double‑tap `Left Option`  | AI formatting pass, auto‑paste             |
 | **Assistive (Agent)** | Double‑tap `Right Option` | Agent chat with optional selection context |
 
-See [`docs/BACKLOG.md`](docs/BACKLOG.md) for detailed mode descriptions and future enhancements (VAD, Overlay).
+See [`docs/guide/modes.md`](docs/guide/modes.md) for detailed mode descriptions.
 
 ## Configuration
 
@@ -448,7 +448,7 @@ Grant permissions in System Settings > Privacy & Security when prompted.
 - Preserve the explicit split between onboarding, settings, dictation overlay, and assistive overlay.
 - Ship the macOS distribution path cleanly: bundle, sign, and notarize the DMG story.
 
-See [`docs/BACKLOG.md`](docs/BACKLOG.md) for the working backlog, [`docs/PUBLIC_RELEASE_CHECKLIST.md`](docs/PUBLIC_RELEASE_CHECKLIST.md) for the public launch gate, and [`docs/ARCHITECTURE_VISION.md`](docs/ARCHITECTURE_VISION.md) for longer-range ideas that are not part of the current shipped surface.
+See [`docs/PUBLIC_RELEASE_CHECKLIST.md`](docs/PUBLIC_RELEASE_CHECKLIST.md) for the public launch gate.
 
 ## License
 

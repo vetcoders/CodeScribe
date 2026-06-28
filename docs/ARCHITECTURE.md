@@ -156,10 +156,7 @@ CodeScribe/
 │   │   └── privacy.md
 │   ├── ARCHITECTURE.md           # This file
 │   ├── WHISPER_LIVE.md           # Streaming transcription
-│   ├── TEAM_SETUP.md             # Developer setup
-│   └── future/                   # Aspirational docs
-│       ├── ARCHITECTURE_VISION.md
-│       └── FEASIBILITY_ANALYSIS.md
+│   └── TEAM_SETUP.md             # Developer setup
 │
 └── tests/                        # Integration tests
 ```
@@ -257,8 +254,6 @@ model:
 - [`guide/README.md`](guide/README.md) — User documentation
 - [`WHISPER_LIVE.md`](WHISPER_LIVE.md) — Runtime Whisper + streaming transcription
 - [`TEAM_SETUP.md`](TEAM_SETUP.md) — Developer setup guide
-- [`BACKLOG.md`](BACKLOG.md) — Feature backlog
-- [`future/ARCHITECTURE_VISION.md`](future/ARCHITECTURE_VISION.md) — Libraxis Qube Protocol vision
 
 ---
 
