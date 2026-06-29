@@ -21,13 +21,38 @@ struct CodescribeRedesignApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let showAgentNotification = Notification.Name("com.codescribe.redesign.showAgent")
+    private static let notificationObject = Bundle.main.bundleIdentifier ?? "com.codescribe.redesign"
+
     private let model = AppModel.shared
     private var agentWindow: NSWindow?
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
+    private var shouldExitForDuplicate = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard Self.isDuplicateInstance else { return }
+        shouldExitForDuplicate = true
+        DistributedNotificationCenter.default().postNotificationName(
+            Self.showAgentNotification,
+            object: Self.notificationObject,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+        NSApp.terminate(nil)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !shouldExitForDuplicate else { return }
         NSApp.setActivationPolicy(.accessory)
+
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(showAgentFromExternalLaunch),
+            name: Self.showAgentNotification,
+            object: Self.notificationObject,
+            suspensionBehavior: .deliverImmediately
+        )
 
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 300, height: 460)
@@ -49,6 +74,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         installStatusItem()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        DistributedNotificationCenter.default().removeObserver(self)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -97,5 +126,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             showTray()
         }
+    }
+
+    @objc private func showAgentFromExternalLaunch() {
+        showAgent()
+    }
+
+    private static var isDuplicateInstance: Bool {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return false }
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        return NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .contains { app in
+                app.processIdentifier != currentPID && !app.isTerminated
+            }
     }
 }
