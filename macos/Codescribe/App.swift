@@ -3,10 +3,10 @@ import SwiftUI
 
 // codescribe redesign — SwiftUI host (Option B), backed by the REAL codescribe engine
 // via UniFFI. WindowGroup AgentChat (renders reliably) + Settings (⌘,) + a MenuBarExtra
-// tray. Regular (dock) app so it is always reachable. NOTE: the menu-bar tray icon does
-// not reliably appear in this app yet (manual NSStatusItem stranded its button window
-// off-screen at (0,-6); SwiftUI MenuBarExtra is the current attempt) — parked for fresh
-// eyes; the app is fully usable via the window + dock meanwhile.
+// tray. Regular (dock) app so the Agent window stays reachable. NOTE: the menu-bar
+// tray icon does not reliably appear in this app yet (manual NSStatusItem stranded
+// its button window off-screen at (0,-6); SwiftUI MenuBarExtra is the current
+// attempt), so overlay access also lives in the app menu.
 @main
 struct CodescribeRedesignApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -22,6 +22,14 @@ struct CodescribeRedesignApp: App {
                 .frame(minWidth: 900, minHeight: 600)
         }
         .windowStyle(.titleBar)
+        .commands {
+            CommandMenu("Codescribe") {
+                Button("Open Dictation Overlay") {
+                    model.overlay.show()
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+            }
+        }
 
         MenuBarExtra("codescribe", systemImage: "waveform") {
             TrayMenuView(viewModel: model.tray)
