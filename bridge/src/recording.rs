@@ -9,7 +9,9 @@ use std::sync::{Arc, RwLock};
 
 use codescribe_core::audio::load_audio_file;
 use codescribe_core::audio::streaming_recorder::StreamingRecorder;
-use codescribe_core::pipeline::contracts::{EngineEvent, EventSink};
+use codescribe_core::pipeline::contracts::{
+    AnnotationKind, EngineEvent, EventSink, LayerSource, LayerSummary,
+};
 use codescribe_core::stt::whisper;
 use tokio::sync::Mutex;
 
@@ -22,6 +24,70 @@ pub struct CsTranscription {
     pub text: String,
     /// Detected (or requested) language code, e.g. `"pl"` / `"en"`.
     pub language: String,
+}
+
+/// Bridge-safe source for bounded transcript replacement events.
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsLayerSource {
+    TailPatch,
+    Lexicon,
+    InlineLlm,
+    FinalBam,
+}
+
+impl From<LayerSource> for CsLayerSource {
+    fn from(source: LayerSource) -> Self {
+        match source {
+            LayerSource::TailPatch => Self::TailPatch,
+            LayerSource::Lexicon => Self::Lexicon,
+            LayerSource::InlineLlm => Self::InlineLlm,
+            LayerSource::FinalBam => Self::FinalBam,
+        }
+    }
+}
+
+/// Bridge-safe annotation kind. `label` is set for paralingual annotations.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct CsAnnotationKind {
+    pub kind: String,
+    pub label: Option<String>,
+}
+
+impl From<&AnnotationKind> for CsAnnotationKind {
+    fn from(kind: &AnnotationKind) -> Self {
+        match kind {
+            AnnotationKind::HesitationPause => Self {
+                kind: "hesitation_pause".to_string(),
+                label: None,
+            },
+            AnnotationKind::Paralingual { label } => Self {
+                kind: "paralingual".to_string(),
+                label: Some(label.clone()),
+            },
+        }
+    }
+}
+
+/// Session-end counters emitted with `SessionFinalised`.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct CsLayerSummary {
+    pub tail_patch_replacements: u64,
+    pub lexicon_replacements: u64,
+    pub inline_llm_replacements: u64,
+    pub final_bam_replacements: u64,
+    pub annotations_inserted: u64,
+}
+
+impl From<&LayerSummary> for CsLayerSummary {
+    fn from(summary: &LayerSummary) -> Self {
+        Self {
+            tail_patch_replacements: summary.tail_patch_replacements,
+            lexicon_replacements: summary.lexicon_replacements,
+            inline_llm_replacements: summary.inline_llm_replacements,
+            final_bam_replacements: summary.final_bam_replacements,
+            annotations_inserted: summary.annotations_inserted,
+        }
+    }
 }
 
 /// Foreign callback trait — dictation events forwarded to Swift.
@@ -42,6 +108,22 @@ pub trait CsTranscriptionListener: Send + Sync {
     fn on_preview(&self, text: String);
     fn on_correction(&self, text: String, previous_text: String);
     fn on_final(&self, text: String);
+    fn on_replace_range(
+        &self,
+        utterance_id: u64,
+        start: u64,
+        end: u64,
+        text: String,
+        source: CsLayerSource,
+    );
+    fn on_insert_annotation(
+        &self,
+        utterance_id: u64,
+        position: u64,
+        text: String,
+        kind: CsAnnotationKind,
+    );
+    fn on_session_finalised(&self, session_id: String, layer_summary: CsLayerSummary);
     fn on_vad_active(&self, active: bool);
     fn on_no_speech(&self, reason: String);
     fn on_error(&self, message: String);
@@ -69,6 +151,36 @@ impl EventSink for CsEventSink {
                 .listener
                 .on_correction(text.clone(), previous_text.clone()),
             EngineEvent::UtteranceFinal { text, .. } => self.listener.on_final(text.clone()),
+            EngineEvent::ReplaceRange {
+                utterance_id,
+                start,
+                end,
+                text,
+                source,
+            } => self.listener.on_replace_range(
+                *utterance_id,
+                *start as u64,
+                *end as u64,
+                text.clone(),
+                (*source).into(),
+            ),
+            EngineEvent::InsertAnnotation {
+                utterance_id,
+                position,
+                text,
+                kind,
+            } => self.listener.on_insert_annotation(
+                *utterance_id,
+                *position as u64,
+                text.clone(),
+                kind.into(),
+            ),
+            EngineEvent::SessionFinalised {
+                session_id,
+                layer_summary,
+            } => self
+                .listener
+                .on_session_finalised(session_id.clone(), layer_summary.into()),
             // Recoverable engine warning — surface as a non-fatal error string.
             EngineEvent::Warning { code, message } => {
                 self.listener.on_error(format!("{code}: {message}"))

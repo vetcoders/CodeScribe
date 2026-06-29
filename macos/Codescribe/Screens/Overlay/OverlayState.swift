@@ -466,6 +466,9 @@ final class DictationListener: CsTranscriptionListener, @unchecked Sendable {
     func onFinal(text: String) {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applyFinal(text) } }
     }
+    func onReplaceRange(utteranceId: UInt64, start: UInt64, end: UInt64, text: String, source: CsLayerSource) {}
+    func onInsertAnnotation(utteranceId: UInt64, position: UInt64, text: String, kind: CsAnnotationKind) {}
+    func onSessionFinalised(sessionId: String, layerSummary: CsLayerSummary) {}
     func onVadActive(active: Bool) {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applyVad(active) } }
     }

@@ -12,7 +12,7 @@ use codescribe_core::ipc::{EngineEventWire, IpcEventPayload};
 use crossbeam_channel::unbounded;
 use tokio::runtime::Handle;
 
-use crate::recording::CsTranscriptionListener;
+use crate::recording::{CsAnnotationKind, CsLayerSummary, CsTranscriptionListener};
 use crate::{CsError, CsLanguage};
 
 type SharedController = Arc<Mutex<Option<Arc<RecordingController>>>>;
@@ -88,6 +88,34 @@ fn forward_event_to_listener(payload: IpcEventPayload, listener: Arc<dyn CsTrans
                 ..
             } => listener.on_correction(text, previous_text),
             EngineEventWire::UtteranceFinal { text, .. } => listener.on_final(text),
+            EngineEventWire::ReplaceRange {
+                utterance_id,
+                start,
+                end,
+                text,
+                source,
+            } => listener.on_replace_range(
+                utterance_id,
+                start as u64,
+                end as u64,
+                text,
+                source.into(),
+            ),
+            EngineEventWire::InsertAnnotation {
+                utterance_id,
+                position,
+                text,
+                kind,
+            } => listener.on_insert_annotation(
+                utterance_id,
+                position as u64,
+                text,
+                CsAnnotationKind::from(&kind),
+            ),
+            EngineEventWire::SessionFinalised {
+                session_id,
+                layer_summary,
+            } => listener.on_session_finalised(session_id, CsLayerSummary::from(&layer_summary)),
             EngineEventWire::Warning { code, message } => {
                 listener.on_error(format!("{code}: {message}"));
             }
