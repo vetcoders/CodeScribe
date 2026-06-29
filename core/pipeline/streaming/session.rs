@@ -14,7 +14,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::audio::chunker::{SpeechEvent, SpeechSession};
 use crate::pipeline::contracts::{
-    DropKind, EngineEvent, EventSink, LayerSource, TranscriptSegment, collect_confidence_flags,
+    DropKind, EngineEvent, EventSink, LayerSource, LayerSummary, TranscriptSegment,
+    collect_confidence_flags,
 };
 use crate::stt::scheduler::{SttLane, SttScheduler, SttTaskHandle};
 use crate::stt::tail_patcher::{
@@ -193,6 +194,20 @@ fn emit_tail_patch_result(
     }
 }
 
+fn emit_session_finalised(
+    event_sink: &dyn EventSink,
+    session_id: String,
+    tail_patch_replacements: u64,
+) {
+    event_sink.on_event(&EngineEvent::SessionFinalised {
+        session_id,
+        layer_summary: LayerSummary {
+            tail_patch_replacements,
+            ..LayerSummary::default()
+        },
+    });
+}
+
 // ── Unified transcription session (event-based) ─────────────────────────────
 
 /// Unified transcription session exposed as a single event-emitting pipeline.
@@ -213,6 +228,7 @@ pub(crate) async fn transcription_session(
     } = config;
 
     info!("Transcription session started (event-based pipeline)");
+    let session_id = uuid::Uuid::new_v4().to_string();
 
     let mut session = if let Some(sec) = utterance_silence_sec {
         SpeechSession::new_utterance_with_silence(sample_rate, sec)
@@ -1201,6 +1217,8 @@ pub(crate) async fn transcription_session(
         partial_dropped_count: partial_telemetry.dropped_count,
     });
 
+    emit_session_finalised(event_sink.as_ref(), session_id, tail_patch_replacements);
+
     if dropped_utterances > 0 {
         warn!(
             "Session dropped {} utterance(s) due to backpressure or scheduler stalls",
@@ -1431,6 +1449,25 @@ mod session_tests {
                 text,
                 source: LayerSource::TailPatch,
             }] if text == "kot"
+        ));
+    }
+
+    #[test]
+    fn session_finalised_emits_layer_summary() {
+        let collector = SessionEventCollector::new();
+        emit_session_finalised(&collector, "session-test".to_string(), 3);
+
+        assert!(matches!(
+            collector.events().as_slice(),
+            [EngineEvent::SessionFinalised {
+                session_id,
+                layer_summary,
+            }] if session_id == "session-test"
+                && layer_summary.tail_patch_replacements == 3
+                && layer_summary.lexicon_replacements == 0
+                && layer_summary.inline_llm_replacements == 0
+                && layer_summary.final_bam_replacements == 0
+                && layer_summary.annotations_inserted == 0
         ));
     }
 
