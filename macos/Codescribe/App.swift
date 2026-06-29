@@ -1,13 +1,11 @@
 import SwiftUI
 
 // codescribe redesign — SwiftUI host (Option B). Hosts the Agent Chat window, the
-// standard Settings scene (⌘,), and a menu-bar Tray — all backed by the REAL
-// codescribe engine through the UniFFI bridge. Overlay (live dictation NSPanel)
-// follows next.
+// standard Settings scene (⌘,), a menu-bar Tray, and the floating dictation
+// Overlay — all backed by the REAL codescribe engine through the UniFFI bridge.
 @main
 struct CodescribeRedesignApp: App {
-    @StateObject private var store = AgentChatStore(engine: RealChatEngine())
-    @StateObject private var trayVM = TrayViewModel(engine: RealTrayEngine())
+    @StateObject private var model = AppModel()
 
     init() {
         FontLoader.register()
@@ -15,7 +13,7 @@ struct CodescribeRedesignApp: App {
 
     var body: some Scene {
         WindowGroup("codescribe — Agent", id: "agent") {
-            AgentChatView(store: store)
+            AgentChatView(store: model.chat)
                 .frame(minWidth: 900, minHeight: 600)
         }
         .windowStyle(.titleBar)
@@ -27,28 +25,27 @@ struct CodescribeRedesignApp: App {
 
         // Menu-bar tray: status, dictation toggle, quick toggles, navigation.
         MenuBarExtra("codescribe", systemImage: "waveform") {
-            TrayMenuHost(vm: trayVM)
+            TrayMenuHost(model: model)
         }
         .menuBarExtraStyle(.window)
     }
 }
 
-/// Binds the tray's navigation intents to the SwiftUI scene actions (which are
-/// only available inside a View's environment). Open-overlay is wired when the
-/// Overlay panel lands.
+/// Binds the tray's navigation intents to the SwiftUI scene actions (only
+/// available inside a View's environment) + the overlay controller.
 private struct TrayMenuHost: View {
-    @ObservedObject var vm: TrayViewModel
+    @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        TrayMenuView(viewModel: vm)
+        TrayMenuView(viewModel: model.tray)
             .onAppear {
-                vm.onIntent = { intent in
+                model.tray.onIntent = { intent in
                     switch intent {
                     case .openChat: openWindow(id: "agent")
                     case .openSettings: openSettings()
-                    case .openOverlay: break // wired when the Overlay panel is integrated
+                    case .openOverlay: model.overlay.show()
                     }
                 }
             }
