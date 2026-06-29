@@ -205,6 +205,16 @@ impl CodescribeHotkeys {
         *guard = Some(listener);
     }
 
+    /// Prompt-free warmup for the shared recording controller.
+    ///
+    /// This intentionally does not start recording. It front-loads the expensive
+    /// local recorder/model setup after app launch so the first user-triggered
+    /// dictation does not sit in the overlay's `starting` state for seconds.
+    pub async fn prewarm_recording(&self) -> Result<(), CsError> {
+        let _ = ensure_controller(&shared_controller(), tokio::runtime::Handle::current());
+        Ok(())
+    }
+
     /// Start the same toggle recording flow used by the default hotkey.
     pub async fn start_recording(&self) -> Result<(), CsError> {
         let event = HotkeyEvent::ToggleNormal;

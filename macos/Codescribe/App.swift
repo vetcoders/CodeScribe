@@ -84,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         installStatusItem()
         startHotkeys()
+        prewarmRecordingController()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -150,6 +151,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 appLogger.info("Codescribe hotkeys active: \(hotkeys.isActive(), privacy: .public)")
             } catch {
                 appLogger.error("Codescribe hotkeys unavailable: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    private func prewarmRecordingController() {
+        Task { [hotkeys] in
+            do {
+                try await Task.sleep(nanoseconds: 750_000_000)
+                try await hotkeys.prewarmRecording()
+                appLogger.info("Codescribe recording controller prewarmed")
+            } catch {
+                appLogger.error("Codescribe recording prewarm failed: \(String(describing: error), privacy: .public)")
             }
         }
     }

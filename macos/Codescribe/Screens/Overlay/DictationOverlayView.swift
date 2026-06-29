@@ -123,7 +123,7 @@ struct DictationOverlayView: View {
 
     private var listeningBody: some View {
         VStack(alignment: .leading, spacing: 0) {
-            WaveformView(active: state.vadActive)
+            WaveformView(active: state.audioReady || state.vadActive)
                 .padding(.top, 6)
                 .padding(.bottom, 14)
             HStack(alignment: .bottom, spacing: 2) {

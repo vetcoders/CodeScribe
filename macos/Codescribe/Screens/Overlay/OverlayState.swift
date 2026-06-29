@@ -91,6 +91,7 @@ final class OverlayState: ObservableObject {
     @Published var committedUtterances: [String] = [] // accumulated finals, one item per utterance
     @Published var formattedText: String = ""  // finalized transcript after stop
     @Published var vadActive: Bool = false     // drives the WaveformView pulse
+    @Published var audioReady: Bool = false    // recorder confirmed; STT/VAD may still be warming
     @Published var warmingUp: Bool = false     // true after user intent, before audio/VAD proves life
     @Published var toast: String?              // transient no-speech / error notice
     @Published var errorMessage: String?
@@ -129,7 +130,7 @@ final class OverlayState: ObservableObject {
         return warmingUp ? "starting" : "recording"
     }
     var statusColor: Color { mode == .listening ? CSColor.terracotta : CSColor.oliveLight }
-    var statusRippling: Bool { mode == .listening && vadActive }
+    var statusRippling: Bool { mode == .listening && (audioReady || vadActive) }
 
     var tagText: String { mode == .listening ? "DICTATION" : "FINAL" }
     var tagColor: Color { mode == .listening ? CSColor.terracottaLight : CSColor.oliveLight }
@@ -138,6 +139,7 @@ final class OverlayState: ObservableObject {
     var footerRight: String {
         if isFormatting { return "formatting" }
         if mode == .listening && warmingUp { return "warming up" }
+        if mode == .listening && audioReady && liveText.isEmpty { return "audio live" }
         return mode == .listening ? "vad-gated preview" : "editable"
     }
 
@@ -228,6 +230,7 @@ final class OverlayState: ObservableObject {
             let raw = try await engine.stopRecording()
             recording = false
             vadActive = false
+            audioReady = false
             warmingUp = false
             commitPreviewIfNeeded()
             let visible = liveText
@@ -261,6 +264,7 @@ final class OverlayState: ObservableObject {
             Task { @MainActor in _ = try? await engine.stopRecording() }
         }
         vadActive = false
+        audioReady = false
         warmingUp = false
         onClose?()
     }
@@ -268,6 +272,7 @@ final class OverlayState: ObservableObject {
     func prepareForExternalStart() {
         mode = .listening
         warmingUp = true
+        audioReady = false
         if !recording {
             resetTranscript()
             formattedText = ""
@@ -279,7 +284,8 @@ final class OverlayState: ObservableObject {
     func handleRecordingStarted() {
         let wasRecording = recording
         mode = .listening
-        warmingUp = true
+        warmingUp = !wasRecording
+        audioReady = wasRecording
         if !wasRecording {
             resetTranscript()
             formattedText = ""
@@ -293,6 +299,7 @@ final class OverlayState: ObservableObject {
     func finishControllerRecording() {
         recording = false
         vadActive = false
+        audioReady = false
         warmingUp = false
         commitPreviewIfNeeded()
         formattedText = liveText
@@ -306,6 +313,7 @@ final class OverlayState: ObservableObject {
         guard !next.isEmpty else { return }
         mode = .listening
         warmingUp = false
+        audioReady = true
         if preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             preview = next
             return
@@ -327,6 +335,7 @@ final class OverlayState: ObservableObject {
 
         mode = .listening
         warmingUp = false
+        audioReady = true
         let previous = previousText.trimmingCharacters(in: .whitespacesAndNewlines)
         if replacesActivePreview(previous: previous, corrected: corrected) {
             return
@@ -355,6 +364,7 @@ final class OverlayState: ObservableObject {
     func applyFinal(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         warmingUp = false
+        audioReady = true
         if !trimmed.isEmpty {
             if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if previewExtendsVisibleText(current: preview, next: trimmed) {
@@ -483,7 +493,10 @@ final class OverlayState: ObservableObject {
 
     func applyVad(_ active: Bool) {
         vadActive = active
-        if active { warmingUp = false }
+        if active {
+            warmingUp = false
+            audioReady = true
+        }
     }
 
     func showToast(_ message: String) {
