@@ -122,11 +122,8 @@ pub struct CodescribeConfig {}
 
 #[uniffi::export]
 impl CodescribeConfig {
-    /// Warm the process env from Keychain + settings.json + default LLM runtime
-    /// (same startup the live app performs). Idempotent.
     #[uniffi::constructor]
     pub fn new() -> Self {
-        let _ = Config::load();
         Self {}
     }
 
@@ -221,6 +218,9 @@ impl CodescribeConfig {
 
     /// Presence booleans for every Keychain-backed API key.
     pub fn key_status(&self) -> CsKeyStatus {
+        // This endpoint is explicitly about keys, so it may prompt. Construction
+        // of SettingsViewModel/TrayViewModel should remain prompt-free.
+        let _ = Config::load();
         CsKeyStatus {
             llm_api_key_set: key_present("LLM_API_KEY"),
             stt_api_key_set: key_present("STT_API_KEY"),

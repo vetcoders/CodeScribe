@@ -48,13 +48,14 @@ final class SettingsViewModel: ObservableObject {
         self.engine = engine
         self.permissionProbe = permissionProbe
 
-        // Seed from whatever is available; fall back to safe defaults if the
-        // engine is absent or config has not been written yet.
+        // Keep construction side-effect free. SwiftUI may instantiate the
+        // Settings scene at app launch; live config/keychain reads happen in
+        // `refresh()` when the Settings window actually appears.
         self.permissions = permissionProbe.snapshot()
-        self.settings = engine?.loadSettings() ?? .sample
-        self.keyStatus = engine?.keyStatus() ?? .sampleAllSet
-        self.configDir = engine?.configDir() ?? ""
-        self.needsOnboarding = engine?.shouldShowOnboarding() ?? false
+        self.settings = .sample
+        self.keyStatus = .sampleAllSet
+        self.configDir = ""
+        self.needsOnboarding = false
     }
 
     /// Re-read live state (permissions can change while the window is open).

@@ -32,10 +32,6 @@ pub struct CodescribeAgent {}
 impl CodescribeAgent {
     #[uniffi::constructor]
     pub fn new() -> Self {
-        // Populate the process env (Keychain keys + settings.json + default LLM
-        // runtime endpoint/model) exactly like the live app's startup, so the
-        // assistive provider can be built. Idempotent; safe to call repeatedly.
-        let _ = codescribe_core::config::Config::load();
         Self {}
     }
 
@@ -43,6 +39,9 @@ impl CodescribeAgent {
     /// (LLM_ASSISTIVE_ENDPOINT / _MODEL / _API_KEY present). Same gate the live
     /// app uses before agent replies are possible.
     pub fn is_available(&self) -> bool {
+        // Warm settings + Keychain only when the agent surface is actually used.
+        // Constructing the Swift app model must not trigger a keychain prompt.
+        let _ = codescribe_core::config::Config::load();
         codescribe::agent::create_default_provider().is_ok()
     }
 
@@ -66,6 +65,9 @@ impl CodescribeAgent {
         thread_id: String,
         listener: Arc<dyn CsAgentListener>,
     ) -> Result<String, CsError> {
+        // Keep provider construction behavior identical to the old eager
+        // constructor path, but delay it until the user sends a message.
+        let _ = codescribe_core::config::Config::load();
         let provider = codescribe::agent::create_default_provider()?;
         let mut registry = ToolRegistry::new();
         codescribe::agent::tools::register_all_tools(&mut registry);
