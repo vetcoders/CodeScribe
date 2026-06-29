@@ -360,20 +360,20 @@ final class OverlayState: ObservableObject {
         }
     }
 
-    func applyFinal(_ text: String) {
+    func applyFinal(utteranceId: UInt64, _ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         warmingUp = false
         audioReady = true
         if !trimmed.isEmpty {
             if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if previewExtendsVisibleText(current: preview, next: trimmed) {
-                    appendCommittedSegment(trimmed)
+                    appendCommittedSegment(trimmed, utteranceId: utteranceId)
                     preview = ""
                     return
                 }
                 commitPreviewIfNeeded()
             }
-            appendCommittedSegment(trimmed)
+            appendCommittedSegment(trimmed, utteranceId: utteranceId)
         }
         preview = ""
     }
@@ -603,8 +603,8 @@ final class DictationListener: CsTranscriptionListener, @unchecked Sendable {
     func onCorrection(text: String, previousText: String) {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applyCorrection(text, previousText: previousText) } }
     }
-    func onFinal(text: String) {
-        DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applyFinal(text) } }
+    func onFinal(utteranceId: UInt64, text: String) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applyFinal(utteranceId: utteranceId, text) } }
     }
     func onReplaceRange(utteranceId: UInt64, start: UInt64, end: UInt64, text: String, source: CsLayerSource) {
         DispatchQueue.main.async {

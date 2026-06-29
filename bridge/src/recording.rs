@@ -95,7 +95,9 @@ impl From<&LayerSummary> for CsLayerSummary {
 /// Distilled from the engine's richer `EngineEvent` stream:
 /// - `on_preview` carries the latest interim/corrected utterance text
 ///   (replace-not-append semantics).
-/// - `on_final` carries a completed (VAD-bounded) utterance.
+/// - `on_final` carries a completed (VAD-bounded) utterance together with its
+///   `utterance_id`, so committed sinks can stamp the segment identity that
+///   later `on_replace_range` / `on_insert_annotation` patches target.
 /// - `on_vad_active` flips when speech starts/ends.
 /// - `on_no_speech` fires when a session/utterance produced no usable speech.
 /// - `on_error` carries recoverable engine warnings.
@@ -108,7 +110,7 @@ pub trait CsTranscriptionListener: Send + Sync {
     fn on_recording_stopped(&self);
     fn on_preview(&self, text: String);
     fn on_correction(&self, text: String, previous_text: String);
-    fn on_final(&self, text: String);
+    fn on_final(&self, utterance_id: u64, text: String);
     fn on_replace_range(
         &self,
         utterance_id: u64,
@@ -151,7 +153,9 @@ impl EventSink for CsEventSink {
             } => self
                 .listener
                 .on_correction(text.clone(), previous_text.clone()),
-            EngineEvent::UtteranceFinal { text, .. } => self.listener.on_final(text.clone()),
+            EngineEvent::UtteranceFinal {
+                utterance_id, text, ..
+            } => self.listener.on_final(*utterance_id, text.clone()),
             EngineEvent::ReplaceRange {
                 utterance_id,
                 start,
@@ -347,4 +351,80 @@ pub fn mic_permission_granted() -> bool {
 #[uniffi::export]
 pub fn request_mic_permission() -> bool {
     codescribe::os::permissions::request_microphone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    /// Captures the payload of the single listener call we assert on.
+    #[derive(Default)]
+    struct CapturingListener {
+        final_calls: StdMutex<Vec<(u64, String)>>,
+    }
+
+    impl CsTranscriptionListener for CapturingListener {
+        fn on_recording_preparing(&self) {}
+        fn on_recording_started(&self) {}
+        fn on_recording_stopped(&self) {}
+        fn on_preview(&self, _text: String) {}
+        fn on_correction(&self, _text: String, _previous_text: String) {}
+        fn on_final(&self, utterance_id: u64, text: String) {
+            self.final_calls.lock().unwrap().push((utterance_id, text));
+        }
+        fn on_replace_range(
+            &self,
+            _utterance_id: u64,
+            _start: u64,
+            _end: u64,
+            _text: String,
+            _source: CsLayerSource,
+        ) {
+        }
+        fn on_insert_annotation(
+            &self,
+            _utterance_id: u64,
+            _position: u64,
+            _text: String,
+            _kind: CsAnnotationKind,
+        ) {
+        }
+        fn on_session_finalised(&self, _session_id: String, _layer_summary: CsLayerSummary) {}
+        fn on_vad_active(&self, _active: bool) {}
+        fn on_no_speech(&self, _reason: String) {}
+        fn on_error(&self, _message: String) {}
+    }
+
+    /// The bridge must forward `utterance_id` on `UtteranceFinal` so committed
+    /// sinks can stamp segment identity that later `ReplaceRange` patches target.
+    /// Regression guard for the W3 keystone (identity flow into committed text).
+    #[test]
+    fn utterance_final_forwards_utterance_id() {
+        let listener = Arc::new(CapturingListener::default());
+        let sink = CsEventSink {
+            listener: listener.clone(),
+        };
+
+        sink.on_event(&EngineEvent::UtteranceFinal {
+            utterance_id: 7,
+            text: "ala ma kota".to_string(),
+            raw_text: "ala ma kota".to_string(),
+            start_ts: 0.0,
+            end_ts: 1.0,
+            segments: Vec::new(),
+            vad_speech_pct: None,
+            avg_logprob: None,
+            compression_ratio: None,
+            quality_gate_dropped: false,
+            confidence_flags: Vec::new(),
+        });
+
+        let calls = listener.final_calls.lock().unwrap();
+        assert_eq!(
+            calls.as_slice(),
+            &[(7, "ala ma kota".to_string())],
+            "on_final must receive the utterance_id from UtteranceFinal"
+        );
+    }
 }

@@ -87,7 +87,9 @@ fn forward_event_to_listener(payload: IpcEventPayload, listener: Arc<dyn CsTrans
                 previous_text,
                 ..
             } => listener.on_correction(text, previous_text),
-            EngineEventWire::UtteranceFinal { text, .. } => listener.on_final(text),
+            EngineEventWire::UtteranceFinal {
+                utterance_id, text, ..
+            } => listener.on_final(utterance_id, text),
             EngineEventWire::ReplaceRange {
                 utterance_id,
                 start,
