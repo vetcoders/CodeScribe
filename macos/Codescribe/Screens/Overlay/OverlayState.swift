@@ -315,28 +315,27 @@ final class OverlayState: ObservableObject {
     func applyPreview(_ text: String) {
         let next = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
-        mode = .listening
-        warmingUp = false
-        audioReady = true
+        markTranscriptActivity()
         if preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             preview = next
+            refreshFormattedTranscriptIfNeeded()
             return
         }
         if previewExtendsVisibleText(current: preview, next: next) {
             preview = next
+            refreshFormattedTranscriptIfNeeded()
             return
         }
         commitPreviewIfNeeded()
         preview = next
+        refreshFormattedTranscriptIfNeeded()
     }
 
     func applyCorrection(_ text: String, previousText: String) {
         let corrected = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !corrected.isEmpty else { return }
 
-        mode = .listening
-        warmingUp = false
-        audioReady = true
+        markTranscriptActivity()
         let previous = previousText.trimmingCharacters(in: .whitespacesAndNewlines)
         if replacesActivePreview(previous: previous, corrected: corrected) {
             return
@@ -348,9 +347,11 @@ final class OverlayState: ObservableObject {
         if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if previewExtendsVisibleText(current: preview, next: corrected) {
                 preview = corrected
+                refreshFormattedTranscriptIfNeeded()
             } else {
                 commitPreviewIfNeeded()
                 preview = corrected
+                refreshFormattedTranscriptIfNeeded()
             }
             return
         }
@@ -362,13 +363,13 @@ final class OverlayState: ObservableObject {
 
     func applyFinal(utteranceId: UInt64, _ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        warmingUp = false
-        audioReady = true
+        markTranscriptActivity()
         if !trimmed.isEmpty {
             if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if previewExtendsVisibleText(current: preview, next: trimmed) {
                     appendCommittedSegment(trimmed, utteranceId: utteranceId)
                     preview = ""
+                    refreshFormattedTranscriptIfNeeded()
                     return
                 }
                 commitPreviewIfNeeded()
@@ -376,6 +377,7 @@ final class OverlayState: ObservableObject {
             appendCommittedSegment(trimmed, utteranceId: utteranceId)
         }
         preview = ""
+        refreshFormattedTranscriptIfNeeded()
     }
 
     func applyReplaceRange(utteranceId: UInt64, start: UInt64, end: UInt64, text: String) {
@@ -417,18 +419,40 @@ final class OverlayState: ObservableObject {
         committedUtterances = []
     }
 
+    private func markTranscriptActivity() {
+        warmingUp = false
+        audioReady = true
+        if recording {
+            mode = .listening
+        }
+    }
+
     private func commitPreviewIfNeeded() {
         let active = preview.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !active.isEmpty else { return }
         appendCommittedSegment(active)
         preview = ""
+        refreshFormattedTranscriptIfNeeded()
     }
 
     private func appendCommittedSegment(_ text: String, utteranceId: UInt64? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if committedSegments.last.map({ normalized($0.text) == normalized(trimmed) }) == true {
-            return
+        if let lastIndex = committedSegments.indices.last,
+           normalized(committedSegments[lastIndex].text) == normalized(trimmed)
+        {
+            if let utteranceId {
+                if committedSegments[lastIndex].utteranceId == nil {
+                    committedSegments[lastIndex].utteranceId = utteranceId
+                    syncCommittedUtterances()
+                    return
+                }
+                if committedSegments[lastIndex].utteranceId == utteranceId {
+                    return
+                }
+            } else {
+                return
+            }
         }
         committedSegments.append(OverlayTranscriptSegment(utteranceId: utteranceId, text: trimmed))
         syncCommittedUtterances()
@@ -436,6 +460,13 @@ final class OverlayState: ObservableObject {
 
     private func syncCommittedUtterances() {
         committedUtterances = committedSegments.map(\.renderedText)
+        refreshFormattedTranscriptIfNeeded()
+    }
+
+    private func refreshFormattedTranscriptIfNeeded() {
+        if mode == .formatted {
+            formattedText = liveText
+        }
     }
 
     private func bestFinalTranscript(raw: String, visible: String) -> String {
@@ -461,10 +492,12 @@ final class OverlayState: ObservableObject {
         if previous.isEmpty {
             guard previewExtendsVisibleText(current: preview, next: corrected) else { return false }
             preview = corrected
+            refreshFormattedTranscriptIfNeeded()
             return true
         }
         if normalized(preview) == normalized(previous) {
             preview = corrected
+            refreshFormattedTranscriptIfNeeded()
             return true
         }
         return false
