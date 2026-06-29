@@ -1,10 +1,11 @@
 import SwiftUI
 
 /// Left rail: wordmark, search field, THREADS list (active = terracotta tint),
-/// and a dashed "+ New thread" footer. Threads are local in-memory state.
+/// and a dashed "+ New thread" footer.
 struct ThreadRail: View {
     @ObservedObject var store: AgentChatStore
     @State private var search: String = ""
+    @State private var deleteCandidate: ChatThread?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -60,7 +61,9 @@ struct ThreadRail: View {
                     ForEach(filteredThreads) { thread in
                         ThreadRow(
                             thread: thread,
-                            isActive: thread.id == store.selectedThreadID
+                            isActive: thread.id == store.selectedThreadID,
+                            onToggleFavorite: { store.toggleFavorite(thread) },
+                            onRequestDelete: { deleteCandidate = thread }
                         )
                         .contentShape(Rectangle())
                         .onTapGesture { store.select(thread.id) }
@@ -100,11 +103,35 @@ struct ThreadRail: View {
         .overlay(alignment: .trailing) {
             Rectangle().fill(CSColor.hairline(0.06)).frame(width: 1)
         }
+        .onChange(of: search) { _, newValue in
+            store.searchThreads(newValue)
+        }
+        .confirmationDialog(
+            "Delete this thread?",
+            isPresented: Binding(
+                get: { deleteCandidate != nil },
+                set: { if !$0 { deleteCandidate = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete Thread", role: .destructive) {
+                if let deleteCandidate {
+                    store.delete(deleteCandidate)
+                    self.deleteCandidate = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                deleteCandidate = nil
+            }
+        } message: {
+            Text("This removes the persisted conversation from the thread store.")
+        }
     }
 
     private var filteredThreads: [ChatThread] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return store.threads }
+        if store.usesRealThreadSearch { return store.threads }
         return store.threads.filter { $0.title.lowercased().contains(q) }
     }
 }
@@ -112,6 +139,8 @@ struct ThreadRail: View {
 private struct ThreadRow: View {
     let thread: ChatThread
     let isActive: Bool
+    let onToggleFavorite: () -> Void
+    let onRequestDelete: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -123,6 +152,17 @@ private struct ThreadRow: View {
                     .font(CSFont.ui(13, isActive ? .semibold : .medium))
                     .foregroundStyle(isActive ? ChatPalette.nameActive : ChatPalette.nameInactive)
                     .lineLimit(1)
+                Spacer(minLength: 4)
+                Button(action: onToggleFavorite) {
+                    Image(systemName: thread.isFavorite ? "star.fill" : "star")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(thread.isFavorite ? CSColor.oliveLight : CSColor.textFaintAlt)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .opacity(thread.isFavorite || isActive ? 1 : 0.38)
+                .help(thread.isFavorite ? "Unfavorite thread" : "Favorite thread")
             }
             Text(thread.meta)
                 .font(CSFont.mono(10, .medium))
@@ -137,5 +177,14 @@ private struct ThreadRow: View {
                 .strokeBorder(isActive ? CSColor.terracotta.opacity(0.28) : .clear, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contextMenu {
+            Button(thread.isFavorite ? "Unfavorite" : "Favorite") {
+                onToggleFavorite()
+            }
+            Divider()
+            Button("Delete Thread", role: .destructive) {
+                onRequestDelete()
+            }
+        }
     }
 }

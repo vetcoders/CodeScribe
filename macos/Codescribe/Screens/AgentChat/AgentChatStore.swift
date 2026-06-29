@@ -1,34 +1,13 @@
 import SwiftUI
 
-// MARK: - FFI GAP (read before extending this screen)
+// MARK: - Runtime contract (read before extending this screen)
 //
-// This is the Agent Chat MVP *shell*. The Rust core (VistaEngine, see
-// app/CodeScribe/Bridge/qube_ffi.swift) exposes exactly ONE agent primitive
-// today:
-//
-//     func formatText(text: String, assistive: Bool) async throws -> String   // SINGLE-SHOT
-//     func resetConversationForMode(mode: VistaAiMode)
-//     func hasActiveConversation() -> Bool
-//     func isFormattingAvailable() -> Bool
-//
-// There is NO streaming token API, NO thread persistence, NO tool-activity
-// event stream, and NO attachment surface in the core. Therefore, in this pass:
-//
-//   • Threads          → local, in-memory only (lost on quit; not on disk).
-//   • Tool activity     → static UI rows seeded for the demo thread; the core
-//                         emits no tool-call telemetry, so nothing is wired.
-//   • Streaming         → SIMULATED. `formatText` returns the whole reply at
-//                         once; we fake the word-by-word reveal + blink caret
-//                         purely in the UI to match the mock.
-//   • send(text)        → real FFI round-trip through `formatText(_:assistive:)`.
-//
-// TRACKED FOLLOW-UP (core change, out of scope here): real streaming chat needs
-// a UniFFI async-stream / event callback surface on VistaEngine plus thread
-// persistence + tool-call telemetry. Until that lands, everything above the
-// single `formatText` round-trip is an honest UI simulation.
-//
-// The real engine is injected in W2-01 via `AgentChatEngine`; this view-model
-// never instantiates `VistaEngine()` itself. The #Preview uses `MockChatEngine`.
+// This screen is backed by the real codescribe UniFFI bridge when constructed
+// from AppModel: `RealChatEngine` streams assistant deltas / tool events and
+// `RealThreadsEngine` reads persisted ThreadStore entries. The #Preview still
+// uses local mock data. Known remaining gaps: attachments are not wired, restored
+// structured tool/reasoning payloads are flattened by the thread adapter, and
+// composer shortcuts are still simplified.
 
 // MARK: - Engine seam (W2-01 injects the real adapter)
 
@@ -86,6 +65,7 @@ struct ChatThread: Identifiable {
     var title: String
     var meta: String        // mono subtitle, e.g. "active · restored" / "today · 18:40"
     var isRestored: Bool = false
+    var isFavorite: Bool = false
     var backendId: String? = nil      // codescribe ThreadStore id (nil = local-only, not yet persisted)
     var messagesLoaded: Bool = false  // lazy-load guard for persisted threads
     var messages: [ChatMessage] = []
@@ -98,7 +78,10 @@ struct ChatThread: Identifiable {
 /// `AgentChatEngine` so the #Preview mock stays standalone.
 protocol ChatThreadsProviding: AnyObject {
     func listThreads() -> [ChatThread]
+    func searchThreads(query: String) -> [ChatThread]
     func loadMessages(backendId: String) -> [ChatMessage]
+    func deleteThread(backendId: String) -> Bool
+    func setThreadFavorite(backendId: String, isFavorite: Bool) -> Bool
     /// Mint a fresh ThreadStore id for a new conversation (so it persists).
     func generateThreadId() -> String
 }
@@ -145,7 +128,9 @@ final class AgentChatStore: ObservableObject {
         threads.first { $0.id == selectedThreadID }
     }
 
-    // MARK: Thread ops (local, in-memory)
+    var usesRealThreadSearch: Bool { threadsProvider != nil }
+
+    // MARK: Thread ops
 
     func newThread() {
         let t = ChatThread(title: "New thread", meta: "now", messages: [])
@@ -154,9 +139,56 @@ final class AgentChatStore: ObservableObject {
         draft = ""
     }
 
+    func refreshThreads() {
+        guard let threadsProvider else { return }
+        replaceThreads(
+            with: threadsProvider.listThreads(),
+            selectingBackendId: currentThread?.backendId,
+            keepLocalDrafts: true
+        )
+    }
+
+    func searchThreads(_ query: String) {
+        guard let threadsProvider else { return }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            refreshThreads()
+        } else {
+            replaceThreads(
+                with: threadsProvider.searchThreads(query: trimmed),
+                selectingBackendId: currentThread?.backendId,
+                keepLocalDrafts: false,
+                allowEmpty: true
+            )
+        }
+    }
+
     func select(_ id: UUID) {
         selectedThreadID = id
         loadMessagesIfNeeded(id)
+    }
+
+    func toggleFavorite(_ thread: ChatThread) {
+        let next = !thread.isFavorite
+        guard let ti = threads.firstIndex(where: { $0.id == thread.id }) else { return }
+        if let backendId = thread.backendId {
+            guard threadsProvider?.setThreadFavorite(backendId: backendId, isFavorite: next) == true else { return }
+        }
+        threads[ti].isFavorite = next
+    }
+
+    func delete(_ thread: ChatThread) {
+        if let backendId = thread.backendId {
+            guard threadsProvider?.deleteThread(backendId: backendId) == true else { return }
+        }
+        threads.removeAll { $0.id == thread.id }
+        if selectedThreadID == thread.id {
+            selectedThreadID = threads.first?.id
+            if let selectedThreadID { loadMessagesIfNeeded(selectedThreadID) }
+        }
+        if threads.isEmpty {
+            newThread()
+        }
     }
 
     /// Lazily pull a persisted thread's messages the first time it is selected.
@@ -235,6 +267,7 @@ final class AgentChatStore: ObservableObject {
                     $0.isStreaming = false
                     $0.timestamp = self.now()
                 }
+                refreshThreads(selectingBackendId: backendId)
             } catch {
                 finish(assistantID, in: threadID,
                        text: "Something went wrong: \(error.localizedDescription)")
@@ -334,6 +367,58 @@ final class AgentChatStore: ObservableObject {
         f.dateFormat = "HH:mm"
         return f
     }()
+
+    private func refreshThreads(selectingBackendId backendId: String) {
+        guard let threadsProvider else { return }
+        replaceThreads(
+            with: threadsProvider.listThreads(),
+            selectingBackendId: backendId,
+            keepLocalDrafts: true
+        )
+    }
+
+    private func replaceThreads(
+        with incoming: [ChatThread],
+        selectingBackendId backendId: String?,
+        keepLocalDrafts: Bool,
+        allowEmpty: Bool = false
+    ) {
+        let previousSelectedID = selectedThreadID
+        let existingByBackend = Dictionary(
+            uniqueKeysWithValues: threads.compactMap { thread -> (String, ChatThread)? in
+                guard let backendId = thread.backendId else { return nil }
+                return (backendId, thread)
+            }
+        )
+
+        var next = incoming.map { remote -> ChatThread in
+            guard let backendId = remote.backendId, var existing = existingByBackend[backendId] else {
+                return remote
+            }
+            existing.title = remote.title
+            existing.meta = remote.meta
+            existing.isRestored = remote.isRestored
+            existing.isFavorite = remote.isFavorite
+            return existing
+        }
+
+        if keepLocalDrafts {
+            let locals = threads.filter { thread in
+                thread.backendId == nil && (thread.id == previousSelectedID || !thread.messages.isEmpty)
+            }
+            next.append(contentsOf: locals)
+        }
+
+        threads = next.isEmpty && !allowEmpty ? [ChatThread(title: "New thread", meta: "now", messages: [])] : next
+        if let backendId, let match = threads.first(where: { $0.backendId == backendId }) {
+            selectedThreadID = match.id
+        } else if let previousSelectedID, threads.contains(where: { $0.id == previousSelectedID }) {
+            selectedThreadID = previousSelectedID
+        } else {
+            selectedThreadID = threads.first?.id
+        }
+        if let selectedThreadID { loadMessagesIfNeeded(selectedThreadID) }
+    }
 
     // MARK: Seed (mock data — keeps #Preview standalone)
 
