@@ -147,6 +147,7 @@ impl ThreadStore {
 
     pub fn load_thread(&self, id: &str) -> Result<Thread> {
         let path = self.thread_path(id)?;
+        let path = canonical_existing_child(&self.threads_dir, &path)?;
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read thread file: {}", path.display()))?;
         let thread = serde_json::from_str::<Thread>(&raw)
@@ -289,6 +290,23 @@ fn validate_thread_id(id: &str) -> Result<()> {
         bail!("Thread id contains invalid path characters: {id}");
     }
     Ok(())
+}
+
+fn canonical_existing_child(base: &Path, path: &Path) -> Result<PathBuf> {
+    let base = base
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize base dir: {}", base.display()))?;
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize file path: {}", path.display()))?;
+    if !path.starts_with(&base) {
+        bail!(
+            "Thread path escaped threads dir: {} outside {}",
+            path.display(),
+            base.display()
+        );
+    }
+    Ok(path)
 }
 
 fn role_to_string(role: Role) -> &'static str {

@@ -11,7 +11,7 @@
 use directories::BaseDirs;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::defaults::{
@@ -843,12 +843,13 @@ impl Config {
     }
 
     /// Parse .env file into HashMap.
-    pub fn parse_env_file(path: &PathBuf) -> anyhow::Result<HashMap<String, String>> {
+    pub fn parse_env_file(path: &Path) -> anyhow::Result<HashMap<String, String>> {
         // `path` is always internally derived from `Config::env_path()`
         // (config_dir()/.env, or the `CODESCRIBE_ENV_PATH` override used by tests
         // and power users) — never raw request or end-user input. No external
         // path-traversal source reaches this read.
-        let contents = fs::read_to_string(path)?;
+        let path = canonical_existing_file(path)?;
+        let contents = fs::read_to_string(&path)?;
         let mut vars = HashMap::new();
 
         for line in contents.lines() {
@@ -1062,6 +1063,14 @@ impl Config {
 
         Self::config_dir().join(".env")
     }
+}
+
+fn canonical_existing_file(path: &Path) -> anyhow::Result<PathBuf> {
+    let path = path.canonicalize()?;
+    if !path.is_file() {
+        anyhow::bail!("Config env path is not a file: {}", path.display());
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
