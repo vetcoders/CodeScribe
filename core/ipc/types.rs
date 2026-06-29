@@ -232,6 +232,18 @@ impl From<&EngineEvent> for EngineEventWire {
                 partial_coalesced_count: *partial_coalesced_count,
                 partial_dropped_count: *partial_dropped_count,
             },
+            EngineEvent::ReplaceRange { .. } => Self::Warning {
+                code: "replace_range_unmapped".to_string(),
+                message: "ReplaceRange requires the W1 IPC wire surface".to_string(),
+            },
+            EngineEvent::InsertAnnotation { .. } => Self::Warning {
+                code: "insert_annotation_unmapped".to_string(),
+                message: "InsertAnnotation requires the W1 IPC wire surface".to_string(),
+            },
+            EngineEvent::SessionFinalised { .. } => Self::Warning {
+                code: "session_finalised_unmapped".to_string(),
+                message: "SessionFinalised requires the W1 IPC wire surface".to_string(),
+            },
             EngineEvent::Warning { code, message } => Self::Warning {
                 code: code.clone(),
                 message: message.clone(),

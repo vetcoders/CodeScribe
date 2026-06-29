@@ -466,6 +466,9 @@ impl EventSink for PresentationEmitter {
             EngineEvent::Warning { code, message } => {
                 tracing::warn!("Engine warning [{}]: {}", code, message);
             }
+            EngineEvent::ReplaceRange { .. }
+            | EngineEvent::InsertAnnotation { .. }
+            | EngineEvent::SessionFinalised { .. } => {}
         }
     }
 }
