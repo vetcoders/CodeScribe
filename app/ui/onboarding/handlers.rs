@@ -13,7 +13,9 @@ use super::actions::{
 };
 use super::render::render_current_step;
 use super::session::release_onboarding_lock;
-use super::state::{HotkeyModeChoice, LanguageChoice, ONBOARDING_STATE, UiRefs};
+use super::state::{
+    HotkeyModeChoice, LanguageChoice, ONBOARDING_STATE, OnboardingModeChoice, UiRefs,
+};
 
 static ACTION_HANDLER_CLASS: OnceLock<&'static Class> = OnceLock::new();
 static WINDOW_DELEGATE_CLASS: OnceLock<&'static Class> = OnceLock::new();
@@ -21,7 +23,7 @@ static WINDOW_DELEGATE_CLASS: OnceLock<&'static Class> = OnceLock::new();
 pub(super) fn action_handler_class() -> &'static Class {
     ACTION_HANDLER_CLASS.get_or_init(|| unsafe {
         let superclass = Class::get("NSObject").expect("NSObject class missing");
-        let mut decl = ClassDecl::new("CodeScribeOnboardingActionHandler", superclass)
+        let mut decl = ClassDecl::new("CodescribeOnboardingActionHandler", superclass)
             .expect("Failed to create onboarding action handler class");
 
         decl.add_method(
@@ -35,6 +37,10 @@ pub(super) fn action_handler_class() -> &'static Class {
         decl.add_method(
             sel!(onSkipAction:),
             on_skip_action as extern "C" fn(&Object, Sel, Id),
+        );
+        decl.add_method(
+            sel!(onModeSelected:),
+            on_mode_selected as extern "C" fn(&Object, Sel, Id),
         );
         decl.add_method(
             sel!(onLanguageSelected:),
@@ -52,7 +58,7 @@ pub(super) fn action_handler_class() -> &'static Class {
 pub(super) fn window_delegate_class() -> &'static Class {
     WINDOW_DELEGATE_CLASS.get_or_init(|| unsafe {
         let superclass = Class::get("NSObject").expect("NSObject class missing");
-        let mut decl = ClassDecl::new("CodeScribeOnboardingWindowDelegate", superclass)
+        let mut decl = ClassDecl::new("CodescribeOnboardingWindowDelegate", superclass)
             .expect("Failed to create onboarding window delegate class");
         decl.add_method(
             sel!(windowShouldClose:),
@@ -78,14 +84,27 @@ extern "C" fn on_skip_action(_this: &Object, _sel: Sel, _sender: Id) {
     handle_skip_action();
 }
 
+extern "C" fn on_mode_selected(_this: &Object, _sel: Sel, sender: Id) {
+    unsafe {
+        let tag: isize = msg_send![sender, tag];
+        let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.onboarding_mode = if tag == 1 {
+            OnboardingModeChoice::Agentic
+        } else {
+            OnboardingModeChoice::Basic
+        };
+    }
+    render_current_step();
+}
+
 extern "C" fn on_language_selected(_this: &Object, _sel: Sel, sender: Id) {
     unsafe {
         let tag: isize = msg_send![sender, tag];
         let mut state = ONBOARDING_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.language = if tag == 1 {
-            LanguageChoice::Polish
-        } else {
-            LanguageChoice::English
+        state.language = match tag {
+            1 => LanguageChoice::English,
+            2 => LanguageChoice::Polish,
+            _ => LanguageChoice::Auto,
         };
     }
     render_current_step();

@@ -497,7 +497,7 @@ fn test_transcript_delivery_wrap_uses_config_when_enabled() {
 
     assert_eq!(
         maybe_wrap_transcript_for_delivery("literal transcript", &config, "dictation"),
-        "<codescribe mode=\"dictation\" lang=\"pl\">\nliteral transcript\n</codescribe>"
+        "<codescribe mode=\"dictation\" lang=\"auto\">\nliteral transcript\n</codescribe>"
     );
 }
 
@@ -523,21 +523,26 @@ fn test_toggle_stop_event_preserves_active_session_identity() {
 
 #[tokio::test]
 #[serial]
-async fn test_agent_send_in_flight_blocks_new_hotkey_starts() {
+async fn test_agent_send_in_flight_blocks_nonassistive_hotkey_starts() {
+    // Contract (preserved): a *raw* dictation start fired while a background
+    // agent turn is still streaming stays blocked — barging a raw transcript
+    // into a live agent turn is never wanted, and it preserves the single audio
+    // pipeline. The block lands before the mode-flag section, so the controller
+    // stays Idle with default flags.
     let controller = RecordingController::new();
     helpers::set_agent_send_in_flight_for_test(true);
 
-    let selection_hold = HotkeyInput {
+    let raw_hold = HotkeyInput {
         key_type: HotkeyType::Hold,
         action: HotkeyAction::Down,
-        assistive: true,
-        hold_mode: HoldMode::Selection,
-        force_raw: false,
+        assistive: false,
+        hold_mode: HoldMode::Raw,
+        force_raw: true,
         force_ai: false,
     };
 
     controller
-        .handle_hotkey_event(selection_hold)
+        .handle_hotkey_event(raw_hold)
         .await
         .expect("agent-busy hotkey block should be non-fatal");
 
@@ -545,6 +550,97 @@ async fn test_agent_send_in_flight_blocks_new_hotkey_starts() {
     assert_eq!(*controller.hold_mode.read().await, HoldMode::Raw);
     assert!(!*controller.assistive_mode.read().await);
     helpers::set_agent_send_in_flight_for_test(false);
+}
+
+/// Assistive Talk Anytime — the agent-send gate decision is a pure function of
+/// (state, event, in-flight flag). These assertions pin the new contract
+/// without spawning the heavy async recording machinery.
+#[test]
+fn test_assistive_talk_anytime_gate_predicate() {
+    let assistive_chat_hold = HotkeyInput {
+        key_type: HotkeyType::Hold,
+        action: HotkeyAction::Down,
+        assistive: true,
+        hold_mode: HoldMode::Chat,
+        force_raw: false,
+        force_ai: false,
+    };
+    let raw_hold = HotkeyInput {
+        key_type: HotkeyType::Hold,
+        action: HotkeyAction::Down,
+        assistive: false,
+        hold_mode: HoldMode::Raw,
+        force_raw: true,
+        force_ai: false,
+    };
+    let assistive_toggle = HotkeyInput {
+        key_type: HotkeyType::Toggle,
+        action: HotkeyAction::Press,
+        assistive: true,
+        hold_mode: HoldMode::Raw,
+        force_raw: false,
+        force_ai: false,
+    };
+    let release = HotkeyInput {
+        key_type: HotkeyType::Hold,
+        action: HotkeyAction::Up,
+        assistive: true,
+        hold_mode: HoldMode::Chat,
+        force_raw: false,
+        force_ai: false,
+    };
+
+    // Classifier: only *start* events flagged assistive are Talk-Anytime starts.
+    assert!(is_assistive_start_event(&assistive_chat_hold));
+    assert!(is_assistive_start_event(&assistive_toggle));
+    assert!(!is_assistive_start_event(&raw_hold)); // raw start is not assistive
+    assert!(!is_assistive_start_event(&release)); // a release is not a start
+
+    // Talk Anytime: an assistive start is ALLOWED through while the agent
+    // answers in the background (Idle + in-flight) — it must reach the recording
+    // path so its utterance flows into the pending-follow-up buffer.
+    assert!(
+        !should_block_hotkey_during_agent_send(State::Idle, &assistive_chat_hold, true),
+        "FN+Shift Talk Anytime must not be ignored while an agent turn streams"
+    );
+    assert!(
+        !should_block_hotkey_during_agent_send(State::Idle, &assistive_toggle, true),
+        "assistive toggle Talk Anytime must not be ignored while an agent turn streams"
+    );
+
+    // Protected: a raw dictation start stays blocked during a streaming turn.
+    assert!(
+        should_block_hotkey_during_agent_send(State::Idle, &raw_hold, true),
+        "raw dictation must not barge a live agent turn"
+    );
+
+    // No agent in flight → nothing is gated (normal idle dictation works).
+    assert!(!should_block_hotkey_during_agent_send(
+        State::Idle,
+        &raw_hold,
+        false
+    ));
+    assert!(!should_block_hotkey_during_agent_send(
+        State::Idle,
+        &assistive_chat_hold,
+        false
+    ));
+
+    // Non-start events (key release) are never blocked by this gate, so a hold
+    // release can always cancel/finish even mid-turn.
+    assert!(!should_block_hotkey_during_agent_send(
+        State::Idle,
+        &release,
+        true
+    ));
+
+    // The gate only acts at Idle: while audio/transcription holds State::Busy the
+    // separate Busy guard owns the decision (this gate stays out of its way).
+    assert!(!should_block_hotkey_during_agent_send(
+        State::Busy,
+        &raw_hold,
+        true
+    ));
 }
 
 fn make_final_pass_verdict(
@@ -731,6 +827,51 @@ fn test_adjudicate_recording_truth_marks_raw_streaming_preview_as_degraded_fallb
 }
 
 #[test]
+fn test_adjudicate_recording_truth_cold_whisper_empty_live_recovers_via_final_pass() {
+    // P0 decoupling contract: recording readiness != Whisper readiness.
+    //
+    // Cold-start scenario — the user pressed record and spoke while Whisper was
+    // still loading (or had been idle-unloaded). The live worker therefore
+    // produced NOTHING (its chunks dropped under backpressure during the cold
+    // load), so `streaming_text` is empty. But audio capture never blocked: the
+    // full WAV was saved, and `finish_recording` ran the final pass on it,
+    // lazy-loading the engine. The beginning the user spoke during warm-up must
+    // be recovered, not lost — the saved audio path is the authoritative truth.
+    let verdict = adjudicate_recording_truth(
+        true,
+        true,
+        Some(make_final_pass_verdict(
+            "poczatek wypowiedzi z zimnego startu",
+            79.0,
+            Some(-0.28),
+            false,
+        )),
+        // Empty live preview: cold Whisper meant no live transcript at all.
+        String::new(),
+        None,
+        &SessionTelemetrySnapshot::default(),
+    );
+
+    assert_eq!(
+        verdict.raw_text.as_deref(),
+        Some("poczatek wypowiedzi z zimnego startu"),
+        "final pass on the saved WAV must recover speech spoken during Whisper warm-up"
+    );
+    assert_eq!(
+        verdict.transcript_source,
+        Some(RecordingTranscriptSource::LocalFinalPass),
+        "cold-start recovery is authoritative LocalFinalPass, not a degraded fallback"
+    );
+    assert_eq!(verdict.fallback_class, None);
+    assert!(
+        verdict.confidence_flags.is_empty(),
+        "a clean final-pass recovery carries no degraded/unverified flags"
+    );
+    assert_eq!(verdict.commit_trigger, None);
+    assert_eq!(verdict.display_status, "Final-pass local");
+}
+
+#[test]
 fn test_adjudicate_recording_truth_uses_typed_cloud_primary_verdict() {
     let verdict = adjudicate_recording_truth(
         false,
@@ -811,16 +952,6 @@ fn test_recorder_recovery_message_uses_settings_language() {
     assert!(message.contains("Open Settings"));
     assert!(!message.contains("Setup"));
     assert!(message.contains("Accessibility, Microphone"));
-}
-
-#[test]
-fn test_backend_recovery_message_uses_settings_language() {
-    let message =
-        RecordingController::format_backend_recovery_message(Some("Cloud endpoint timed out"));
-
-    assert!(message.contains("Open Settings"));
-    assert!(!message.contains("Setup"));
-    assert!(message.contains("Cloud endpoint timed out"));
 }
 
 // ── Pure-function unit tests for truth helpers (push_typed_flag,

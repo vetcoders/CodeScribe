@@ -1,7 +1,7 @@
-//! CodeScribe CLI - Local speech-to-text transcription
+//! Codescribe CLI - Local speech-to-text transcription
 //!
 //! Lightweight CLI for direct audio file transcription.
-//! For the tray app + overlay, use CodeScribe.app.
+//! For the tray app + overlay, use Codescribe.app.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -16,13 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-/// CodeScribe CLI - Local speech-to-text transcription
+/// Codescribe CLI - Local speech-to-text transcription
 ///
-/// For the full app with tray icon and hotkeys, run CodeScribe.app
+/// For the full app with tray icon and hotkeys, run Codescribe.app
 #[derive(Parser)]
 #[command(name = "codescribe")]
 #[command(version)]
-#[command(author = "VetCoders <hello@vetcoders.io>")]
+#[command(author = "Vetcoders <hello@vetcoders.io>")]
 #[command(about = "Local speech-to-text transcription", long_about = None)]
 struct Cli {
     /// Open config file in editor (creates default if missing)
@@ -40,6 +40,12 @@ enum Commands {
 
     /// Run as daemon with tray icon (default when no args)
     Daemon,
+
+    /// Query or drive the native app automation surface over IPC
+    App {
+        #[command(subcommand)]
+        command: AppCommand,
+    },
 
     /// Migrate transcript/audio filenames to ASCII + suffix naming
     MigrateHistory {
@@ -88,6 +94,52 @@ enum TranscribeMode {
     Live,
 }
 
+#[derive(Subcommand)]
+enum AppCommand {
+    /// Print the current native app automation state as JSON
+    State,
+    /// Run one native app automation action and print the resulting state as JSON
+    Action {
+        #[arg(value_enum)]
+        action: AppAutomationCliAction,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum AppAutomationCliAction {
+    ResetUi,
+    ShowSettings,
+    HideSettings,
+    ShowVoiceChat,
+    HideVoiceChat,
+    ShowTranscriptionOverlay,
+    HideTranscriptionOverlay,
+    TriggerTrayShowAgent,
+    TriggerTrayOpenSettings,
+    TriggerTrayContinueOnboarding,
+    TriggerDockReopen,
+}
+
+impl From<AppAutomationCliAction> for codescribe::ipc::AppAutomationAction {
+    fn from(value: AppAutomationCliAction) -> Self {
+        match value {
+            AppAutomationCliAction::ResetUi => Self::ResetUi,
+            AppAutomationCliAction::ShowSettings => Self::ShowSettings,
+            AppAutomationCliAction::HideSettings => Self::HideSettings,
+            AppAutomationCliAction::ShowVoiceChat => Self::ShowVoiceChat,
+            AppAutomationCliAction::HideVoiceChat => Self::HideVoiceChat,
+            AppAutomationCliAction::ShowTranscriptionOverlay => Self::ShowTranscriptionOverlay,
+            AppAutomationCliAction::HideTranscriptionOverlay => Self::HideTranscriptionOverlay,
+            AppAutomationCliAction::TriggerTrayShowAgent => Self::TriggerTrayShowAgent,
+            AppAutomationCliAction::TriggerTrayOpenSettings => Self::TriggerTrayOpenSettings,
+            AppAutomationCliAction::TriggerTrayContinueOnboarding => {
+                Self::TriggerTrayContinueOnboarding
+            }
+            AppAutomationCliAction::TriggerDockReopen => Self::TriggerDockReopen,
+        }
+    }
+}
+
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum MigrateKind {
     Raw,
@@ -102,7 +154,7 @@ enum MigrateKind {
 
 // Cap the multi-thread tokio runtime worker count. Default is one worker per
 // CPU core — on M3 Pro (11 cores) that spawns ~11 workers, each idle in
-// `__psynch_cvwait` consuming kernel resources + scheduler overhead. CodeScribe
+// `__psynch_cvwait` consuming kernel resources + scheduler overhead. Codescribe
 // is not compute-parallel (whisper runs on Metal device, audio on cpal thread,
 // LLM is single SSE stream); 4 workers cover IPC server + HTTP client + LLM
 // stream + occasional background tasks with headroom. Confirmed empirically:
@@ -116,7 +168,7 @@ async fn main() -> Result<()> {
     // Build identity — first line in ~/.codescribe/logs/codescribe.log so every session
     // is unambiguously tied to a build. The 8-char commit matches the About dialog.
     tracing::info!(
-        "CodeScribe v{} build {} ({})",
+        "Codescribe v{} build {} ({})",
         env!("CARGO_PKG_VERSION"),
         env!("CODESCRIBE_BUILD_COMMIT"),
         env!("CODESCRIBE_RUSTC_VERSION"),
@@ -132,11 +184,34 @@ async fn main() -> Result<()> {
     // Handle subcommands
     match cli.command {
         Some(Commands::Transcribe(args)) => handle_transcribe_command(args).await,
+        Some(Commands::App { command }) => handle_app_command(command),
         Some(Commands::MigrateHistory {
             dry_run,
             assume_kind,
         }) => handle_migrate_history_command(dry_run, assume_kind),
         Some(Commands::Daemon) | None => run_daemon().await,
+    }
+}
+
+fn handle_app_command(command: AppCommand) -> Result<()> {
+    use anyhow::bail;
+    use codescribe::ipc::{IpcCommand, IpcResponse, send_command_blocking};
+
+    let response = match command {
+        AppCommand::State => send_command_blocking(&IpcCommand::GetAppAutomationState),
+        AppCommand::Action { action } => send_command_blocking(&IpcCommand::RunAppAutomation {
+            action: action.into(),
+        }),
+    }
+    .map_err(anyhow::Error::msg)?;
+
+    match response {
+        IpcResponse::AppAutomationState(state) => {
+            println!("{}", serde_json::to_string_pretty(&state)?);
+            Ok(())
+        }
+        IpcResponse::Error(message) => bail!(message),
+        other => bail!("Unexpected IPC response for app command: {:?}", other),
     }
 }
 
@@ -349,7 +424,7 @@ async fn handle_transcribe_file(
         anyhow::bail!("File not found: {}", file.display());
     }
 
-    eprintln!("CodeScribe Local Transcription");
+    eprintln!("Codescribe Local Transcription");
     eprintln!("Audio: {}", file.display());
 
     // Initialize Whisper
@@ -490,7 +565,7 @@ async fn handle_transcribe_live(language: Option<String>) -> Result<()> {
     let language =
         language.or_else(|| codescribe_core::config::UserSettings::load().whisper_language);
 
-    eprintln!("CodeScribe Live Transcription");
+    eprintln!("Codescribe Live Transcription");
     eprintln!("Press Ctrl+C to stop.");
 
     whisper::init()?;
@@ -555,11 +630,11 @@ async fn handle_transcribe_live(language: Option<String>) -> Result<()> {
 async fn run_daemon() -> Result<()> {
     use codescribe::tray;
 
-    eprintln!("CodeScribe daemon starting...");
+    eprintln!("Codescribe daemon starting...");
 
     // ── Build metadata ──
     info!(
-        "CodeScribe {} | build={} | profile={} | rustc={} | exe={}",
+        "Codescribe {} | build={} | profile={} | rustc={} | exe={}",
         env!("CARGO_PKG_VERSION"),
         option_env!("CODESCRIBE_BUILD_COMMIT").unwrap_or("dev"),
         if cfg!(debug_assertions) {
@@ -576,10 +651,10 @@ async fn run_daemon() -> Result<()> {
     tray::run_with_startup(None, || {
         tokio::spawn(async {
             if let Err(e) = initialize_daemon_runtime().await {
-                tracing::error!("CodeScribe startup failed: {e:?}");
+                tracing::error!("Codescribe startup failed: {e:?}");
                 let _ = codescribe::tray::update_tray_status(codescribe::tray::TrayStatus::Error);
                 #[cfg(target_os = "macos")]
-                codescribe::os::notifications::notify("CodeScribe startup failed", &format!("{e}"));
+                codescribe::os::notifications::notify("Codescribe startup failed", &format!("{e}"));
             }
         });
     })?;
@@ -588,7 +663,6 @@ async fn run_daemon() -> Result<()> {
 }
 
 async fn initialize_daemon_runtime() -> Result<()> {
-    use anyhow::Context;
     use codescribe::config::{Config, UserSettings};
     use codescribe::controller::RecordingController;
     use codescribe::os::hotkeys::HotkeyEvent;
@@ -598,13 +672,23 @@ async fn initialize_daemon_runtime() -> Result<()> {
     use tokio::runtime::Handle;
 
     let config = Config::load();
+    let automation_mode = codescribe::app_automation_mode_enabled();
+    if automation_mode {
+        info!(
+            "App automation mode enabled: skipping Whisper preload, permissions bootstrap, quality daemon, and hotkey registration"
+        );
+    }
     let _user_settings = UserSettings::load();
     let menu_rx = tray::menu_event_receiver()?;
-    let _ = codescribe::qube_lifecycle::start_if_enabled();
+    if !automation_mode {
+        let _ = codescribe::qube_lifecycle::start_if_enabled();
+    }
 
     #[cfg(target_os = "macos")]
     {
-        codescribe::os::thermal::install_thermal_probe();
+        if !automation_mode {
+            codescribe::os::thermal::install_thermal_probe();
+        }
         codescribe::set_dock_icon();
         codescribe::apply_dock_icon_visibility(config.show_dock_icon);
         codescribe::install_basic_edit_menu();
@@ -614,12 +698,17 @@ async fn initialize_daemon_runtime() -> Result<()> {
         codescribe_core::attachment::AttachmentStore::cleanup_old(7);
     });
 
-    codescribe::whisper::init().context("Failed to initialize Whisper")?;
+    // Whisper is intentionally NOT eagerly loaded on the daemon startup path:
+    // recording must not depend on model readiness, and a missing/slow model
+    // must never abort app startup. `RecordingController::new()` kicks a
+    // best-effort background prewarm, and the live + final-pass paths lazy-load
+    // the engine on first use. Idle-unload reclaim (commit 2b8bb1f) stays intact:
+    // the engine may unload after inactivity and reload lazily on the next call.
     let controller = Arc::new(RecordingController::new());
     #[cfg(target_os = "macos")]
     codescribe::controller::register_overlay_controller(Arc::clone(&controller));
     #[cfg(target_os = "macos")]
-    {
+    if !automation_mode {
         codescribe::os::permissions::check_all_permissions();
 
         if codescribe::should_show_onboarding() {
@@ -627,7 +716,9 @@ async fn initialize_daemon_runtime() -> Result<()> {
         }
     }
 
-    sync_hotkey_config(&config);
+    if !automation_mode {
+        sync_hotkey_config(&config);
+    }
 
     let ipc_controller = Arc::clone(&controller);
     tokio::spawn(async move {
@@ -664,7 +755,7 @@ async fn initialize_daemon_runtime() -> Result<()> {
                                 #[cfg(target_os = "macos")]
                                 {
                                     codescribe::os::notifications::notify(
-                                        "CodeScribe",
+                                        "Codescribe",
                                         "Silero VAD is ready",
                                     );
                                 }
@@ -674,7 +765,7 @@ async fn initialize_daemon_runtime() -> Result<()> {
                                 #[cfg(target_os = "macos")]
                                 {
                                     codescribe::os::notifications::notify(
-                                        "CodeScribe",
+                                        "Codescribe",
                                         &format!("Silero VAD download failed: {e}"),
                                     );
                                 }
@@ -683,7 +774,9 @@ async fn initialize_daemon_runtime() -> Result<()> {
                     }
                     _ => {}
                 }
-                sync_hotkey_config(&config);
+                if !automation_mode {
+                    sync_hotkey_config(&config);
+                }
                 controller.set_config(config).await;
             });
 
@@ -708,9 +801,9 @@ async fn initialize_daemon_runtime() -> Result<()> {
         }
     });
 
-    if let Err(e) = hotkeys::install_global_hotkey_manager(tx) {
+    if !automation_mode && let Err(e) = hotkeys::install_global_hotkey_manager(tx) {
         eprintln!(
-            "Hotkeys waiting on permissions ({}). Grant Accessibility + Input Monitoring and CodeScribe will reinitialize them live.",
+            "Hotkeys waiting on permissions ({}). Grant Accessibility + Input Monitoring and Codescribe will reinitialize them live.",
             e
         );
     }
@@ -740,7 +833,7 @@ async fn initialize_daemon_runtime() -> Result<()> {
     });
 
     let _ = tray::update_tray_status(tray::TrayStatus::Idle);
-    info!("CodeScribe daemon ready");
+    info!("Codescribe daemon ready");
 
     Ok(())
 }
@@ -962,7 +1055,7 @@ async fn dispatch_hotkey_event(
             tracing::warn!("Hotkey double-tap blocked: {}", body);
             let _ =
                 codescribe::tray::update_tray_status(codescribe::tray::TrayStatus::HotkeyConflict);
-            codescribe::os::notifications::notify("CodeScribe hotkey conflict", &body);
+            codescribe::os::notifications::notify("Codescribe hotkey conflict", &body);
         }
     }
 

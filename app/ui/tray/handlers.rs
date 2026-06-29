@@ -74,9 +74,9 @@ fn resolve_menu_route(event_id: &MenuId, menu_ids: &MenuIds) -> Option<MenuRoute
 pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
     match resolve_menu_route(event_id, menu_ids) {
         Some(MenuRoute::CopyLast) => handle_copy_last(),
-        Some(MenuRoute::ShowOverlay) => crate::ui::voice_chat::show_voice_chat_overlay(),
-        Some(MenuRoute::ContinueOnboarding) => crate::ui::onboarding::show_onboarding_wizard(),
-        Some(MenuRoute::OpenSettings) => crate::ui::settings::show_settings_window(),
+        Some(MenuRoute::ShowOverlay) => handle_show_agent_action(),
+        Some(MenuRoute::ContinueOnboarding) => handle_continue_onboarding_action(),
+        Some(MenuRoute::OpenSettings) => handle_open_settings_action(),
         Some(MenuRoute::OpenHistory) => handle_open_history_folder(),
         Some(MenuRoute::CopyDiagnostics) => handle_copy_diagnostics(),
         Some(MenuRoute::Help) => handle_open_help(),
@@ -90,6 +90,18 @@ pub fn handle_menu_event(event_id: &MenuId, menu_ids: &MenuIds) {
         Some(MenuRoute::InstallSileroVad) => handle_install_silero_vad(),
         None => debug!("Unknown menu event id: {:?}", event_id),
     }
+}
+
+pub(crate) fn handle_show_agent_action() {
+    crate::ui::voice_chat::show_voice_chat_overlay();
+}
+
+pub(crate) fn handle_continue_onboarding_action() {
+    crate::ui::onboarding::show_onboarding_wizard();
+}
+
+pub(crate) fn handle_open_settings_action() {
+    crate::ui::settings::show_settings_window();
 }
 
 /// Copy last transcript to clipboard
@@ -124,7 +136,7 @@ fn handle_copy_diagnostics() {
         let _ = Command::new("osascript")
             .arg("-e")
             .arg(
-                r#"display notification "Copied diagnostics to clipboard" with title "CodeScribe""#,
+                r#"display notification "Copied diagnostics to clipboard" with title "Codescribe""#,
             )
             .spawn();
     }
@@ -165,7 +177,7 @@ fn handle_toggle_quick_notes() {
         let _ = Command::new("osascript")
             .arg("-e")
             .arg(format!(
-                r#"display notification "Quick Notes: {}" with title "CodeScribe""#,
+                r#"display notification "Quick Notes: {}" with title "Codescribe""#,
                 if new_state { "ON" } else { "OFF" }
             ))
             .spawn();
@@ -224,7 +236,7 @@ fn handle_open_help() {
         let url = if std::path::Path::new(&local_docs).exists() {
             local_docs
         } else {
-            "https://github.com/VetCoders/CodeScribe#readme".to_string()
+            "https://github.com/vetcoders/codescribe#readme".to_string()
         };
 
         info!("Opening help: {}", url);
@@ -241,13 +253,13 @@ fn handle_show_about() {
         let version = env!("CARGO_PKG_VERSION");
         let build = env!("CODESCRIBE_BUILD_COMMIT");
         let message = format!(
-            "CodeScribe v{} ({})\n\nSpeech-to-text for macOS\n\n𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by VetCoders (c)2024-2026 LibraxisAI",
+            "Codescribe v{} ({})\n\nSpeech-to-text for macOS\n\n𝚅𝚒𝚋𝚎𝚌𝚛𝚊𝚏𝚝𝚎𝚍. with AI Agents by Vetcoders (c)2024-2026 LibraxisAI",
             version, build
         );
 
         // Use osascript for native dialog
         let script = format!(
-            r#"display dialog "{}" buttons {{"OK"}} default button "OK" with title "About CodeScribe" with icon note"#,
+            r#"display dialog "{}" buttons {{"OK"}} default button "OK" with title "About Codescribe" with icon note"#,
             message
         );
 
@@ -271,7 +283,7 @@ fn handle_open_qube_report() {
         info!("No quality report available");
         let _ = Command::new("osascript")
             .arg("-e")
-            .arg(r#"display notification "No quality report available. Run: qube-daemon --daemon" with title "CodeScribe Quality""#)
+            .arg(r#"display notification "No quality report available. Run: qube-daemon --daemon" with title "Codescribe Quality""#)
             .spawn();
     }
 }

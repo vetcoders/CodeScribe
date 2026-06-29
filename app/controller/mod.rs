@@ -1,6 +1,6 @@
 //! Recording pipeline state machine controller
 //!
-//! This module implements the core hotkey-driven state machine for CodeScribe.
+//! This module implements the core hotkey-driven state machine for Codescribe.
 //! It manages recording lifecycle, state transitions, and interaction with the
 //! transcription backend.
 //!
@@ -650,10 +650,39 @@ fn is_hotkey_start_event(event: &HotkeyInput) -> bool {
     )
 }
 
-fn should_block_hotkey_during_agent_send(current_state: State, event: &HotkeyInput) -> bool {
+/// An assistive *start* hotkey — FN+Shift hold-down, an assistive toggle press,
+/// or any start event flagged `assistive` (Chat / Selection / assistive toggle).
+/// These are the "Talk Anytime" inputs the user fires to add a new voice intent
+/// while Emil/the agent is still answering.
+fn is_assistive_start_event(event: &HotkeyInput) -> bool {
+    is_hotkey_start_event(event) && event.assistive
+}
+
+/// Block a *new* hotkey start while a previously-dispatched agent turn is still
+/// streaming. This fires only at `State::Idle` — the controller has already
+/// returned the mic/transcription pipeline; the agent is answering in the
+/// background (a detached `tokio::spawn`, see `setup_voice_chat_send_callback`).
+///
+/// Exception — **Assistive Talk Anytime**: assistive start events are allowed
+/// through so the user can record a *new* voice intent while the agent answers.
+/// The resulting utterance is captured into the existing pending-follow-up
+/// buffer (`should_capture_pending_followup` → `get_or_create_pending_followup_index`),
+/// not dropped — the living intent grows instead of being ignored. Non-assistive
+/// (raw) dictation starts stay blocked: barging a raw transcript into a live
+/// agent turn is never wanted, and blocking preserves the single-pipeline
+/// guarantee for the dictation path.
+///
+/// `agent_send_in_flight` is passed in (rather than read from the global) so the
+/// decision is a pure function and unit-testable without touching shared state.
+fn should_block_hotkey_during_agent_send(
+    current_state: State,
+    event: &HotkeyInput,
+    agent_send_in_flight: bool,
+) -> bool {
     current_state == State::Idle
+        && agent_send_in_flight
         && is_hotkey_start_event(event)
-        && helpers::is_agent_send_in_flight()
+        && !is_assistive_start_event(event)
 }
 
 fn present_agent_send_hotkey_block() {
@@ -1156,7 +1185,7 @@ pub struct RecordingController {
     /// may steal focus and destroy the user's selection context.
     assistive_context: Arc<RwLock<Option<AssistiveContext>>>,
     /// App that was frontmost when the user initiated a hold session, before
-    /// CodeScribe badge/overlay UI can become frontmost.
+    /// Codescribe badge/overlay UI can become frontmost.
     pre_overlay_frontmost_app: Arc<RwLock<Option<String>>>,
     /// True when we opened the unified overlay solely to show a raw transcription preview.
     ///
@@ -1282,17 +1311,6 @@ impl RecordingController {
         }
     }
 
-    fn format_backend_recovery_message(detail: Option<&str>) -> String {
-        let mut message =
-            "Speech backend unavailable. Open Settings to verify the transcription provider, endpoint, and runtime service, then retry."
-                .to_string();
-        if let Some(detail) = detail.map(str::trim).filter(|text| !text.is_empty()) {
-            message.push_str(" Details: ");
-            message.push_str(detail);
-        }
-        message
-    }
-
     fn recording_recovery_guidance() -> String {
         let settings = crate::config::UserSettings::load();
         let dictation_binding = settings
@@ -1349,12 +1367,6 @@ impl RecordingController {
         Self::present_runtime_recovery_ui("Recorder unavailable", &message);
     }
 
-    fn present_backend_unavailable(context: &str, detail: Option<&str>) {
-        warn!("{context}: backend unavailable; routing to settings recovery");
-        let message = Self::format_backend_recovery_message(detail);
-        Self::present_runtime_recovery_ui("Backend unavailable", &message);
-    }
-
     /// Create a new recording controller with configuration loaded from disk
     pub fn new() -> Self {
         let config = Config::load();
@@ -1378,11 +1390,29 @@ impl RecordingController {
                 Err(error) => warn!("Model manager unavailable during startup: {error}"),
             }
 
-            // Initialize Whisper engine if not already done (daemon pre-inits)
-            if !crate::whisper::is_initialized()
-                && let Err(e) = crate::whisper::init()
-            {
-                warn!("Failed to initialize Whisper engine: {}", e);
+            if crate::app_automation_mode_enabled() {
+                info!("Skipping Whisper initialization in app automation mode");
+            } else if !crate::whisper::is_initialized() {
+                // Best-effort BACKGROUND prewarm — never block recording readiness.
+                //
+                // Product invariant: recording readiness is NOT Whisper readiness.
+                // Audio capture must start the moment the user presses record; the
+                // live pipeline and the final pass lazy-load the engine on first use
+                // (`with_engine`). A failed prewarm is a warning, not an app or
+                // recording failure. The idle-unload reaper (commit 2b8bb1f) may
+                // legitimately drop the engine later and the next call reloads it —
+                // pinning it here would undo that GPU/host-memory reclaim.
+                std::thread::Builder::new()
+                    .name("whisper-prewarm".into())
+                    .spawn(|| {
+                        if let Err(e) = crate::whisper::init() {
+                            warn!(
+                                "Whisper background prewarm failed (will lazy-load on first use): {}",
+                                e
+                            );
+                        }
+                    })
+                    .ok();
             }
         }
 
@@ -1602,6 +1632,12 @@ impl RecordingController {
                 };
                 crate::ui::voice_chat::update_voice_chat_status(final_status);
                 info!("Processing finished successfully. State reset to IDLE.");
+
+                // The transcription just freed large transient buffers (audio,
+                // mel, model scratch). Hand those freed-but-retained pages back
+                // to the OS now, while idle, instead of letting phys_footprint
+                // creep up across a long session.
+                codescribe_core::memory::release_freed_heap();
 
                 if let Some(reason) = outcome.no_speech_reason.as_deref() {
                     info!("NoSpeech outcome in finish_recording: reason={reason}");
@@ -1824,7 +1860,11 @@ impl RecordingController {
             current_state
         );
 
-        if should_block_hotkey_during_agent_send(current_state, &event) {
+        if should_block_hotkey_during_agent_send(
+            current_state,
+            &event,
+            helpers::is_agent_send_in_flight(),
+        ) {
             present_agent_send_hotkey_block();
             return Ok(());
         }
@@ -1967,7 +2007,19 @@ impl RecordingController {
             );
         }
 
-        // Ignore all hotkeys when busy
+        // Ignore all hotkeys when busy. `State::Busy` covers the active audio
+        // pipeline: recorder drain → transcription → (for the hold/toggle
+        // dictation path) the final assistive agent turn, which is awaited while
+        // `serial_lock` is held. Letting a second start through here would race a
+        // live audio/transcription pipeline, so it stays blocked unconditionally
+        // (acceptance: "non-assistive busy/audio/transcription paths remain
+        // protected; do not run two audio pipelines concurrently").
+        //
+        // Assistive "Talk Anytime" is handled one gate up, at the `Idle` agent-
+        // send gate (`should_block_hotkey_during_agent_send`): once a turn is
+        // dispatched in the background the controller returns to `Idle` and the
+        // mic is free, which is the only state where overlapping a new recording
+        // is safe.
         if current_state == State::Busy {
             info!("App busy; ignoring hotkey event");
             return Ok(());
@@ -2614,38 +2666,15 @@ impl RecordingController {
                 return;
             }
 
-            // Check backend health only after the dwell time has actually elapsed.
-            // A tap or transient Ctrl bump should be a full no-op, including no
-            // backend-unavailable UI.
-            if !cfg!(test) {
-                match crate::client::check_health().await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        warn!("Whisper engine not ready");
-                        Self::present_backend_unavailable("Hold-start health check", None);
-                        return;
-                    }
-                    Err(e) => {
-                        error!("Whisper engine unavailable: {}", e);
-                        let detail = e.to_string();
-                        Self::present_backend_unavailable(
-                            "Hold-start health check",
-                            Some(detail.as_str()),
-                        );
-                        return;
-                    }
-                }
-            }
-
             if hold_start_generation.load(Ordering::SeqCst) != task_generation {
-                debug!("Hold-start cancelled: superseded generation after health check");
+                debug!("Hold-start cancelled: superseded generation before recorder start");
                 return;
             }
 
             let current_state = *state.read().await;
             if current_state != State::Idle {
                 debug!(
-                    "Hold-start cancelled after health check: state changed to {}",
+                    "Hold-start cancelled before recorder start: state changed to {}",
                     current_state
                 );
                 return;
@@ -2706,9 +2735,11 @@ impl RecordingController {
                 Arc::clone(&session_telemetry),
             );
             if !cfg!(test) {
-                let start_result = rec
-                    .start_event_session(Some(language.as_str().to_string()))
-                    .await;
+                let language_hint = language.whisper_hint().map(str::to_string);
+                // Audio-first cold start: do not preflight Whisper here. The
+                // recorder starts feedback now while STT lazy-loads behind the
+                // StreamingRecorder backlog.
+                let start_result = rec.start_event_session(language_hint.clone()).await;
                 if let Err(e) = start_result {
                     if Self::is_already_in_progress_error(&e) {
                         warn!("Hold-start hit stale recorder lock; forcing stop and retrying once");
@@ -2722,9 +2753,7 @@ impl RecordingController {
                             event_broadcast.clone(),
                             Arc::clone(&session_telemetry),
                         );
-                        let retry_result = rec
-                            .start_event_session(Some(language.as_str().to_string()))
-                            .await;
+                        let retry_result = rec.start_event_session(language_hint).await;
                         if let Err(retry_err) = retry_result {
                             error!("Failed to start recorder after recovery: {retry_err}");
                             Self::clear_recorder_callbacks(rec);
@@ -2838,27 +2867,6 @@ impl RecordingController {
 
     /// Start recording in toggle mode (immediate, no delay)
     async fn start_toggle_recording(&self, is_assistive: bool) -> Result<()> {
-        // Check backend health before starting (skip in tests: no backend available)
-        if !cfg!(test) {
-            match crate::client::check_health().await {
-                Ok(true) => {}
-                Ok(false) => {
-                    warn!("Whisper engine not ready");
-                    Self::present_backend_unavailable("Toggle-start health check", None);
-                    return Ok(());
-                }
-                Err(e) => {
-                    error!("Whisper engine unavailable: {}", e);
-                    let detail = e.to_string();
-                    Self::present_backend_unavailable(
-                        "Toggle-start health check",
-                        Some(detail.as_str()),
-                    );
-                    return Ok(());
-                }
-            }
-        }
-
         // Acquire serial lock to prevent race conditions
         let _guard = self.serial_lock.lock().await;
 
@@ -2937,10 +2945,11 @@ impl RecordingController {
         );
 
         // Skip actual audio stream in tests (no CoreAudio device needed)
+        let language_hint = language.whisper_hint().map(str::to_string);
+        // Audio-first cold start: do not preflight Whisper here. The recorder
+        // starts feedback now while STT lazy-loads behind the StreamingRecorder backlog.
         if !cfg!(test)
-            && let Err(e) = recorder
-                .start_event_session(Some(language.as_str().to_string()))
-                .await
+            && let Err(e) = recorder.start_event_session(language_hint.clone()).await
         {
             if Self::is_already_in_progress_error(&e) {
                 warn!("Toggle start hit stale recorder lock; forcing stop and retrying once");
@@ -2955,10 +2964,7 @@ impl RecordingController {
                     self.event_broadcast.clone(),
                     Arc::clone(&self.session_telemetry),
                 );
-                if let Err(retry_err) = recorder
-                    .start_event_session(Some(language.as_str().to_string()))
-                    .await
-                {
+                if let Err(retry_err) = recorder.start_event_session(language_hint).await {
                     drop(recorder_guard);
                     self.reset_session_after_start_failure("Toggle-start retry")
                         .await;
@@ -3188,10 +3194,9 @@ impl RecordingController {
     /// text with a visible marker if AI formatting is unavailable or returns empty.
     async fn format_decision_text(&self, text: String) -> String {
         let language = self.config.read().await.whisper_language;
-        let lang_str = language.as_str().to_string();
         let result = crate::ai_formatting::format_text_with_status(
             &text,
-            Some(lang_str.as_str()),
+            language.whisper_hint(),
             false,
             None,
         )
@@ -3236,7 +3241,7 @@ impl RecordingController {
         // in a 45s timeout, but until now we couldn't tell WHICH await hung.
         // Operator reported "hands-off, double option, który potrafi wywołać
         // nagrywanie, ale nie potrafi zakończyć nagrywania" — confirmed in
-        // /Users/maciejgad/.codescribe/logs/codescribe.log @ 2026-05-13 23:03:22 PDT
+        // ~/.codescribe/logs/codescribe.log @ 2026-05-13 23:03:22 PDT
         // where "Stopping toggle recording with final-pass adjudication" was
         // followed by 41s of silence before watchdog forced recovery.
         // These per-phase elapsed logs will identify the exact hang point next
@@ -3574,7 +3579,7 @@ impl RecordingController {
 
         let config = self.config.read().await.clone();
         let language = config.whisper_language;
-        let language_opt = Some(language.as_str());
+        let language_opt = language.whisper_hint();
         let use_local_stt = config.use_local_stt;
         let raw_save_enabled = raw_save_enabled(assistive);
 
@@ -3814,7 +3819,7 @@ impl RecordingController {
         info!("Raw transcript captured ({} chars)", raw_text.len());
         let transcript_present = !raw_text.trim().is_empty();
 
-        let language_opt = Some(language.as_str().to_string());
+        let language_opt = language.whisper_hint().map(str::to_string);
         let pipeline_outcome = self
             .process_transcript_text_pipeline(types::TranscriptPipelineParams {
                 raw_text,
@@ -4368,7 +4373,7 @@ impl RecordingController {
                     info!("Quick note saved: {}", path.display());
                     #[cfg(target_os = "macos")]
                     crate::os::notifications::notify(
-                        "CodeScribe",
+                        "Codescribe",
                         &format!(
                             "Saved note: {}",
                             path.file_name().and_then(|s| s.to_str()).unwrap_or("note")

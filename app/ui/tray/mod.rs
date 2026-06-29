@@ -1,4 +1,4 @@
-//! System tray icon and menu for CodeScribe
+//! System tray icon and menu for Codescribe
 //!
 //! Provides visual status feedback and menu controls via macOS menu bar icon.
 //! Uses tao event loop for proper macOS integration.
@@ -27,7 +27,7 @@
 //! Quit
 //! ```
 
-mod handlers;
+pub(crate) mod handlers;
 mod icons;
 mod menu;
 mod state;
@@ -105,6 +105,11 @@ fn shutdown_hotkeys(hotkey_manager: &mut Option<hotkeys::HotkeyManager>) {
     }
     hotkeys::shutdown_global_hotkey_manager();
     *hotkey_manager = None;
+}
+
+pub fn handle_dock_reopen() {
+    debug!("Dock icon clicked -> opening Settings window");
+    crate::ui::settings::show_settings_window();
 }
 
 /// Run the tray application with optional hotkey manager
@@ -195,8 +200,7 @@ where
 
         // Handle dock icon click (macOS Reopen event)
         if let Event::Reopen { .. } = event {
-            debug!("Dock icon clicked → opening Settings window");
-            crate::ui::settings::show_settings_window();
+            handle_dock_reopen();
             return;
         }
 
@@ -301,18 +305,18 @@ mod tests {
 
     #[test]
     fn test_status_tooltips() {
-        assert_eq!(TrayStatus::Starting.tooltip(), "CodeScribe - Starting...");
-        assert_eq!(TrayStatus::Idle.tooltip(), "CodeScribe - Ready");
-        assert_eq!(TrayStatus::Listening.tooltip(), "CodeScribe - Recording...");
-        assert_eq!(TrayStatus::Thinking.tooltip(), "CodeScribe - Processing...");
-        assert_eq!(TrayStatus::Success.tooltip(), "CodeScribe - Done!");
+        assert_eq!(TrayStatus::Starting.tooltip(), "Codescribe - Starting...");
+        assert_eq!(TrayStatus::Idle.tooltip(), "Codescribe - Ready");
+        assert_eq!(TrayStatus::Listening.tooltip(), "Codescribe - Recording...");
+        assert_eq!(TrayStatus::Thinking.tooltip(), "Codescribe - Processing...");
+        assert_eq!(TrayStatus::Success.tooltip(), "Codescribe - Done!");
         assert_eq!(
             TrayStatus::Thermal.tooltip(),
-            "CodeScribe - Thermal throttling"
+            "Codescribe - Thermal throttling"
         );
         assert_eq!(
             TrayStatus::HotkeyConflict.tooltip(),
-            "CodeScribe - Hotkey conflict"
+            "Codescribe - Hotkey conflict"
         );
     }
 

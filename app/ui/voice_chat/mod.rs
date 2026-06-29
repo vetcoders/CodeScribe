@@ -8,6 +8,7 @@
 mod api;
 mod handlers;
 mod state;
+pub(crate) mod tool_activity;
 
 // Re-export public API
 pub use api::{
@@ -17,12 +18,13 @@ pub use api::{
     commit_last_user_message, commit_pending_followup_message, dispatch_voice_chat_send,
     edit_pending_followup_message, filter_drawer, finalize_voice_chat_assistant_message,
     finalize_voice_chat_user_message, handoff_transcript_to_chat, hide_voice_chat_overlay,
-    is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible, refresh_drawer,
-    reset_voice_chat_activity, send_voice_chat_draft, set_voice_chat_agent_thinking,
-    set_voice_chat_runtime_degraded, set_voice_chat_send_callback, set_voice_chat_sending,
-    set_voice_chat_target_app, set_voice_chat_text, set_voice_chat_user_text, show_agent_tab,
-    show_drawer_tab, update_conversation_state, update_drawer_after_save,
-    update_voice_chat_context_summary, update_voice_chat_status,
+    is_auto_send_enabled, is_conversation_active, is_voice_chat_overlay_visible,
+    record_tool_executing, record_tool_result, refresh_drawer, reset_voice_chat_activity,
+    send_voice_chat_draft, set_voice_chat_agent_thinking, set_voice_chat_runtime_degraded,
+    set_voice_chat_send_callback, set_voice_chat_sending, set_voice_chat_target_app,
+    set_voice_chat_text, set_voice_chat_user_text, show_agent_tab, show_drawer_tab,
+    update_conversation_state, update_drawer_after_save, update_voice_chat_context_summary,
+    update_voice_chat_status,
 };
 pub use state::{ConversationModeState, VoiceChatOverlayConfig};
 
@@ -245,7 +247,7 @@ fn show_voice_chat_overlay_impl() {
             defer: false
         ];
 
-        let _: () = msg_send![window, setTitle: ns_string("CodeScribe")];
+        let _: () = msg_send![window, setTitle: ns_string("Codescribe")];
         apply_shared_shell_panel_policy(window, &shell_policy);
 
         let delegate_class = window_delegate_class();
@@ -913,7 +915,7 @@ fn show_voice_chat_overlay_impl() {
         );
         let title_label = create_label(LabelConfig {
             frame: footer_brand_frame,
-            text: "CodeScribe".to_string(),
+            text: "Codescribe".to_string(),
             font_size: ui_tokens::SMALL_FONT_SIZE,
             bold: true,
             text_color: color_secondary_label(),
