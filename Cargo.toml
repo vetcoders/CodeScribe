@@ -30,10 +30,6 @@ keywords = ["speech-to-text", "whisper", "macos", "dictation", "audio"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
 [[bin]]
-name = "codescribe"
-path = "bin/codescribe.rs"
-
-[[bin]]
 name = "qube-report"
 path = "bin/qube_report.rs"
 
@@ -43,10 +39,6 @@ path = "bin/qube_daemon.rs"
 
 [lib]
 path = "app/lib.rs"
-
-[features]
-default = ["liquid_glass"]
-liquid_glass = []
 
 [dependencies]
 # Core library

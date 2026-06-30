@@ -1295,9 +1295,7 @@ impl RecordingController {
                 Err(error) => warn!("Model manager unavailable during startup: {error}"),
             }
 
-            if crate::app_automation_mode_enabled() {
-                info!("Skipping Whisper initialization in app automation mode");
-            } else if !crate::whisper::is_initialized() {
+            if !crate::whisper::is_initialized() {
                 // Best-effort BACKGROUND prewarm — never block recording readiness.
                 //
                 // Product invariant: recording readiness is NOT Whisper readiness.
