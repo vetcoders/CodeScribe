@@ -127,6 +127,10 @@ pub trait CsTranscriptionListener: Send + Sync {
         kind: CsAnnotationKind,
     );
     fn on_session_finalised(&self, session_id: String, layer_summary: CsLayerSummary);
+    /// Authoritative post-stop transcript (LocalFinalPass `final_formatted_text`):
+    /// the SAME clean text that is pasted/delivered and written to history. Surfaces
+    /// fire it once per dictation stop so the overlay FINAL matches delivery/Copy.
+    fn on_final_transcript_ready(&self, text: String);
     fn on_vad_active(&self, active: bool);
     fn on_no_speech(&self, reason: String);
     fn on_error(&self, message: String);
@@ -391,6 +395,7 @@ mod tests {
         ) {
         }
         fn on_session_finalised(&self, _session_id: String, _layer_summary: CsLayerSummary) {}
+        fn on_final_transcript_ready(&self, _text: String) {}
         fn on_vad_active(&self, _active: bool) {}
         fn on_no_speech(&self, _reason: String) {}
         fn on_error(&self, _message: String) {}

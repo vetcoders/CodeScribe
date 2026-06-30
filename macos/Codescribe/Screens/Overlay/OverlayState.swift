@@ -115,6 +115,11 @@ final class OverlayState: ObservableObject {
 
     private var recording = false
     private var committedSegments: [OverlayTranscriptSegment] = []
+    /// Authoritative post-stop transcript pushed by the Rust controller
+    /// (`on_final_transcript_ready` → LocalFinalPass `final_formatted_text`) — the
+    /// SAME text the delivery/paste and tray "Copy" use. When present it is the
+    /// FINAL the overlay shows, instead of the raw per-utterance streaming assembly.
+    private var authoritativeFinalText: String?
     private var toastTask: Task<Void, Never>?
     private var mockRevealTask: Task<Void, Never>?
 
@@ -228,15 +233,11 @@ final class OverlayState: ObservableObject {
     private func runStop() async {
         guard let engine else { return }
         do {
-            let raw = try await engine.stopRecording()
+            // The controller bridge returns "" here; the authoritative transcript
+            // is the id-ordered assembly of `UtteranceFinal` events (see liveText).
+            _ = try await engine.stopRecording()
             recording = false
-            vadActive = false
-            audioReady = false
-            warmingUp = false
-            commitPreviewIfNeeded()
-            let visible = liveText
-            formattedText = bestFinalTranscript(raw: raw, visible: visible)
-            mode = .formatted
+            finalizeTranscript()
         } catch {
             recording = false
             warmingUp = false
@@ -306,98 +307,63 @@ final class OverlayState: ObservableObject {
 
     func finishControllerRecording() {
         recording = false
-        vadActive = false
-        audioReady = false
-        warmingUp = false
-        commitPreviewIfNeeded()
-        formattedText = liveText
-        mode = .formatted
+        finalizeTranscript()
     }
 
     // MARK: Listener-driven mutations (called on the main actor by DictationListener)
 
+    /// `Preview` is utterance-LOCAL cumulative: each event carries the full
+    /// interim for the current (not-yet-finalised) utterance, and the bridge
+    /// clears it on every `UtteranceFinal`. So we simply mirror it — no prefix
+    /// matching, no commit-on-mismatch.
     func applyPreview(_ text: String) {
         let next = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
         markTranscriptActivity()
-        if applyCumulativePreview(next) {
-            return
-        }
-        if preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            preview = next
-            refreshFormattedTranscriptIfNeeded()
-            return
-        }
-        if previewExtendsVisibleText(current: preview, next: next) {
-            preview = next
-            refreshFormattedTranscriptIfNeeded()
-            return
-        }
-        commitPreviewIfNeeded()
         preview = next
         refreshFormattedTranscriptIfNeeded()
     }
 
+    /// `Correction` targets the current utterance. Scope it to the live preview;
+    /// if the preview was already finalised, patch only the most-recent committed
+    /// segment (and only when `previousText` matches it). Never a free normalized
+    /// search across all committed slots.
     func applyCorrection(_ text: String, previousText: String) {
         let corrected = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !corrected.isEmpty else { return }
-
         markTranscriptActivity()
-        let previous = previousText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if replacesActivePreview(previous: previous, corrected: corrected) {
-            return
-        }
-        if replacesCommittedUtterance(previous: previous, corrected: corrected) {
-            return
-        }
-        if applyCumulativePreview(corrected) {
-            return
-        }
 
         if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if previewExtendsVisibleText(current: preview, next: corrected) {
-                preview = corrected
-                refreshFormattedTranscriptIfNeeded()
-            } else {
-                commitPreviewIfNeeded()
-                preview = corrected
-                refreshFormattedTranscriptIfNeeded()
-            }
+            preview = corrected
+            refreshFormattedTranscriptIfNeeded()
             return
         }
 
-        if committedUtterances.last.map({ normalized($0) == normalized(corrected) }) != true {
-            appendCommittedSegment(corrected)
+        let previous = previousText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let lastIndex = committedSegments.indices.last,
+           previous.isEmpty || normalized(committedSegments[lastIndex].text) == normalized(previous)
+        {
+            committedSegments[lastIndex].text = corrected
+            committedSegments[lastIndex].annotations = []
+            syncCommittedUtterances()
+            return
         }
+
+        // No live preview and nothing to patch: surface it as the current interim.
+        preview = corrected
+        refreshFormattedTranscriptIfNeeded()
     }
 
+    /// `UtteranceFinal` is one completed VAD-bounded utterance, delivered in FIFO
+    /// order with a stable `utteranceId`. Key segments by that id and append in id
+    /// order — the authoritative ordering the bridge already provides. No lossy
+    /// normalized matching, no text-dedup (a legitimately repeated token must not
+    /// be dropped).
     func applyFinal(utteranceId: UInt64, _ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         markTranscriptActivity()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
-            if let cumulativeTail = tailAfterCommittedPrefix(in: trimmed) {
-                if !cumulativeTail.isEmpty {
-                    appendCommittedSegment(cumulativeTail, utteranceId: utteranceId)
-                } else if let lastIndex = committedSegments.indices.last,
-                          committedSegments[lastIndex].utteranceId == nil
-                {
-                    committedSegments[lastIndex].utteranceId = utteranceId
-                    syncCommittedUtterances()
-                }
-                preview = ""
-                refreshFormattedTranscriptIfNeeded()
-                return
-            }
-            if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if previewExtendsVisibleText(current: preview, next: trimmed) {
-                    appendCommittedSegment(trimmed, utteranceId: utteranceId)
-                    preview = ""
-                    refreshFormattedTranscriptIfNeeded()
-                    return
-                }
-                commitPreviewIfNeeded()
-            }
-            appendCommittedSegment(trimmed, utteranceId: utteranceId)
+            upsertFinalSegment(utteranceId: utteranceId, text: trimmed)
         }
         preview = ""
         refreshFormattedTranscriptIfNeeded()
@@ -430,16 +396,51 @@ final class OverlayState: ObservableObject {
     }
 
     func applySessionFinalised() {
+        finalizeTranscript()
+    }
+
+    /// The Rust controller's authoritative post-stop transcript (LocalFinalPass) —
+    /// the SAME text that is delivered/pasted and shown by tray "Copy". Stored so
+    /// the single `finalizeTranscript()` uses it instead of the raw streaming
+    /// assembly. Emitted inside the awaited stop pipeline, so it normally arrives
+    /// before the stop/finalise events; if it arrives AFTER (mode already
+    /// `.formatted`), replace the FINAL immediately. Live PREVIEW is untouched —
+    /// it stays raw-streaming on purpose ("live preview · raw").
+    func applyFinalTranscript(_ text: String) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        authoritativeFinalText = clean
+        if mode == .formatted {
+            formattedText = clean
+        }
+    }
+
+    /// Single authoritative finalize. `runStop`, `finishControllerRecording`, and
+    /// `applySessionFinalised` all funnel here so `formattedText` is produced from
+    /// ONE source rather than three paths each rewriting it from a different buffer.
+    /// Preference: the controller's authoritative LocalFinalPass text (matches
+    /// delivery/Copy); fall back to the id-ordered committed assembly only if that
+    /// event has not arrived.
+    private func finalizeTranscript() {
         warmingUp = false
+        vadActive = false
+        audioReady = false
         commitPreviewIfNeeded()
-        formattedText = liveText
+        formattedText = usableAuthoritativeFinalText ?? liveText
         mode = .formatted
+    }
+
+    private var usableAuthoritativeFinalText: String? {
+        guard let text = authoritativeFinalText else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func resetTranscript() {
         preview = ""
         committedSegments = []
         committedUtterances = []
+        authoritativeFinalText = nil
     }
 
     private func markTranscriptActivity() {
@@ -458,47 +459,29 @@ final class OverlayState: ObservableObject {
         refreshFormattedTranscriptIfNeeded()
     }
 
-    private func appendCommittedSegment(_ text: String, utteranceId: UInt64? = nil) {
+    /// Append a committed segment, keyed by `utteranceId`. Re-finals for an id we
+    /// already hold replace that slot in place (no duplicate, no drop); new ids
+    /// append in arrival order = id order, the bridge's FIFO ordering.
+    private func upsertFinalSegment(utteranceId: UInt64, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if let lastIndex = committedSegments.indices.last,
-           normalized(committedSegments[lastIndex].text) == normalized(trimmed)
-        {
-            if let utteranceId {
-                if committedSegments[lastIndex].utteranceId == nil {
-                    committedSegments[lastIndex].utteranceId = utteranceId
-                    syncCommittedUtterances()
-                    return
-                }
-                if committedSegments[lastIndex].utteranceId == utteranceId {
-                    return
-                }
-            } else {
-                return
-            }
+        if let index = committedSegments.firstIndex(where: { $0.utteranceId == utteranceId }) {
+            guard committedSegments[index].text != trimmed else { return }
+            committedSegments[index].text = trimmed
+            committedSegments[index].annotations = []
+        } else {
+            committedSegments.append(OverlayTranscriptSegment(utteranceId: utteranceId, text: trimmed))
         }
-        committedSegments.append(OverlayTranscriptSegment(utteranceId: utteranceId, text: trimmed))
         syncCommittedUtterances()
     }
 
-    private func applyCumulativePreview(_ text: String) -> Bool {
-        guard let tail = tailAfterCommittedPrefix(in: text) else { return false }
-        preview = tail
-        refreshFormattedTranscriptIfNeeded()
-        return true
-    }
-
-    private func tailAfterCommittedPrefix(in text: String) -> String? {
-        let full = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !full.isEmpty else { return nil }
-        let committed = committedSegments
-            .map(\.text)
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !committed.isEmpty else { return full }
-        guard full == committed || full.hasPrefix(committed) else { return nil }
-        let suffixStart = full.index(full.startIndex, offsetBy: committed.count)
-        return full[suffixStart...].trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Append an un-keyed committed segment (trailing preview at finalize time —
+    /// speech that never received its own `UtteranceFinal`).
+    private func appendCommittedSegment(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        committedSegments.append(OverlayTranscriptSegment(utteranceId: nil, text: trimmed))
+        syncCommittedUtterances()
     }
 
     private func syncCommittedUtterances() {
@@ -508,55 +491,11 @@ final class OverlayState: ObservableObject {
 
     private func refreshFormattedTranscriptIfNeeded() {
         if mode == .formatted {
-            formattedText = liveText
+            // Once the controller's authoritative final transcript is in, it wins:
+            // late streaming `UtteranceFinal` events must not clobber the FINAL with
+            // the raw streaming assembly. Without it, fall back to the live assembly.
+            formattedText = usableAuthoritativeFinalText ?? liveText
         }
-    }
-
-    private func bestFinalTranscript(raw: String, visible: String) -> String {
-        let rawTrimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let visibleTrimmed = visible.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !rawTrimmed.isEmpty else { return visibleTrimmed }
-        guard !visibleTrimmed.isEmpty else { return rawTrimmed }
-
-        let rawWords = normalized(rawTrimmed).split(separator: " ").count
-        let visibleWords = normalized(visibleTrimmed).split(separator: " ").count
-        return rawWords > visibleWords ? rawTrimmed : visibleTrimmed
-    }
-
-    private func previewExtendsVisibleText(current: String, next: String) -> Bool {
-        let currentKey = normalized(current)
-        let nextKey = normalized(next)
-        guard !currentKey.isEmpty, !nextKey.isEmpty else { return false }
-        return nextKey.hasPrefix(currentKey)
-    }
-
-    private func replacesActivePreview(previous: String, corrected: String) -> Bool {
-        guard !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        if previous.isEmpty {
-            guard previewExtendsVisibleText(current: preview, next: corrected) else { return false }
-            preview = corrected
-            refreshFormattedTranscriptIfNeeded()
-            return true
-        }
-        if normalized(preview) == normalized(previous) {
-            preview = corrected
-            refreshFormattedTranscriptIfNeeded()
-            return true
-        }
-        return false
-    }
-
-    private func replacesCommittedUtterance(previous: String, corrected: String) -> Bool {
-        guard !committedUtterances.isEmpty else { return false }
-        let previousKey = normalized(previous)
-        if let exact = committedUtterances.lastIndex(where: { normalized($0) == previousKey }) {
-            committedSegments[exact].text = corrected
-            committedSegments[exact].annotations = []
-            syncCommittedUtterances()
-            preview = ""
-            return true
-        }
-        return false
     }
 
     private func normalized(_ text: String) -> String {
@@ -698,6 +637,9 @@ final class DictationListener: CsTranscriptionListener, @unchecked Sendable {
     }
     func onSessionFinalised(sessionId: String, layerSummary: CsLayerSummary) {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applySessionFinalised() } }
+    }
+    func onFinalTranscriptReady(text: String) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applyFinalTranscript(text) } }
     }
     func onVadActive(active: Bool) {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applyVad(active) } }

@@ -3740,6 +3740,22 @@ impl RecordingController {
 
         let final_formatted_text = formatted_text.clone();
 
+        // Surface the authoritative final transcript to external dictation surfaces
+        // (the SwiftUI overlay). This is the same `final_formatted_text` that is
+        // pasted (auto-delivery) and written to history (tray "Copy"), so the overlay
+        // FINAL can replace its raw per-utterance streaming assembly with the clean
+        // LocalFinalPass text. Emitted here — inside the awaited stop pipeline, before
+        // the Idle StateChange — so it reaches the listener ahead of the stop/finalise
+        // events that drive the overlay's finalize.
+        if !assistive && !final_formatted_text.trim().is_empty() {
+            let _ = self.event_broadcast.send(IpcEvent {
+                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                payload: IpcEventPayload::FinalTranscript {
+                    text: final_formatted_text.clone(),
+                },
+            });
+        }
+
         let final_status = compose_final_status(&truth_display_status, output_kind);
         let truth_metadata = RecordingTruthMetadata {
             source: transcript_source,

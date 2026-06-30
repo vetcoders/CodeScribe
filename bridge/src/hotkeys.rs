@@ -77,6 +77,7 @@ fn forward_event_to_listener(payload: IpcEventPayload, listener: Arc<dyn CsTrans
             "idle" => listener.on_recording_stopped(),
             _ => {}
         },
+        IpcEventPayload::FinalTranscript { text } => listener.on_final_transcript_ready(text),
         IpcEventPayload::Engine(event) => match event {
             EngineEventWire::VadStart { .. } => listener.on_vad_active(true),
             EngineEventWire::VadEnd { .. } => listener.on_vad_active(false),

@@ -19,6 +19,12 @@ pub enum IpcEventPayload {
     Engine(EngineEventWire),
     #[serde(rename = "state_change")]
     StateChange { from: String, to: String },
+    /// Authoritative post-stop transcript (the LocalFinalPass `final_formatted_text`
+    /// that is pasted and written to history). Emitted once per dictation stop so
+    /// external surfaces (the SwiftUI overlay) can show the SAME clean text as the
+    /// delivery/Copy paths instead of the raw per-utterance streaming hypotheses.
+    #[serde(rename = "final_transcript")]
+    FinalTranscript { text: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
