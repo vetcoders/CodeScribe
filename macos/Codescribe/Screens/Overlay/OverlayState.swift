@@ -8,8 +8,8 @@ import AppKit
 // renders standalone against `MockDictationEngine`.
 //
 // TRANSCRIPT MODEL (new bridge semantics):
-//   on_preview    → interim utterance; replace active text or commit+append when
-//                   the stream advances to a new spoken fragment.
+//   on_preview    → interim text; accepts both utterance-local chunks and
+//                   cumulative session previews without duplicating committed text.
 //   on_correction → targeted replacement when previous_text matches; otherwise
 //                   preserve visible text and append the corrected fragment.
 //   on_final      → completed VAD-bounded utterance → commit + clear preview.
@@ -105,6 +105,7 @@ final class OverlayState: ObservableObject {
     var onSendToAgent: ((String) -> Void)?
     /// Dismiss the floating window — wired by the orchestrator.
     var onClose: (() -> Void)?
+    var onRecordingPreparing: (() -> Void)?
     var onRecordingStarted: (() -> Void)?
     var onRecordingStopped: (() -> Void)?
 
@@ -284,6 +285,7 @@ final class OverlayState: ObservableObject {
             errorMessage = nil
         }
         recording = true
+        onRecordingPreparing?()
     }
 
     func handleRecordingStarted() {
@@ -291,7 +293,9 @@ final class OverlayState: ObservableObject {
         warmingUp = false
         audioReady = true
         if !recording {
-            resetTranscript()
+            if liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                resetTranscript()
+            }
             formattedText = ""
             isFormatting = false
             errorMessage = nil
@@ -316,6 +320,9 @@ final class OverlayState: ObservableObject {
         let next = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
         markTranscriptActivity()
+        if applyCumulativePreview(next) {
+            return
+        }
         if preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             preview = next
             refreshFormattedTranscriptIfNeeded()
@@ -343,6 +350,9 @@ final class OverlayState: ObservableObject {
         if replacesCommittedUtterance(previous: previous, corrected: corrected) {
             return
         }
+        if applyCumulativePreview(corrected) {
+            return
+        }
 
         if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if previewExtendsVisibleText(current: preview, next: corrected) {
@@ -365,6 +375,19 @@ final class OverlayState: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         markTranscriptActivity()
         if !trimmed.isEmpty {
+            if let cumulativeTail = tailAfterCommittedPrefix(in: trimmed) {
+                if !cumulativeTail.isEmpty {
+                    appendCommittedSegment(cumulativeTail, utteranceId: utteranceId)
+                } else if let lastIndex = committedSegments.indices.last,
+                          committedSegments[lastIndex].utteranceId == nil
+                {
+                    committedSegments[lastIndex].utteranceId = utteranceId
+                    syncCommittedUtterances()
+                }
+                preview = ""
+                refreshFormattedTranscriptIfNeeded()
+                return
+            }
             if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 if previewExtendsVisibleText(current: preview, next: trimmed) {
                     appendCommittedSegment(trimmed, utteranceId: utteranceId)
@@ -456,6 +479,26 @@ final class OverlayState: ObservableObject {
         }
         committedSegments.append(OverlayTranscriptSegment(utteranceId: utteranceId, text: trimmed))
         syncCommittedUtterances()
+    }
+
+    private func applyCumulativePreview(_ text: String) -> Bool {
+        guard let tail = tailAfterCommittedPrefix(in: text) else { return false }
+        preview = tail
+        refreshFormattedTranscriptIfNeeded()
+        return true
+    }
+
+    private func tailAfterCommittedPrefix(in text: String) -> String? {
+        let full = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !full.isEmpty else { return nil }
+        let committed = committedSegments
+            .map(\.text)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !committed.isEmpty else { return full }
+        guard full == committed || full.hasPrefix(committed) else { return nil }
+        let suffixStart = full.index(full.startIndex, offsetBy: committed.count)
+        return full[suffixStart...].trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func syncCommittedUtterances() {

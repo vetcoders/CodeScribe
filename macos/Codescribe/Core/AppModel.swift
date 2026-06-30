@@ -30,6 +30,7 @@ final class OverlayController: ObservableObject {
 
     init(store: AgentChatStore) {
         state.engine = ControllerDictationEngine()
+        state.onRecordingPreparing = { [weak self] in self?.show() }
         state.onRecordingStarted = { [weak self] in self?.show() }
         state.onRecordingStopped = { [weak self] in self?.markStopped() }
         state.onClose = { [weak self] in self?.hide() }
