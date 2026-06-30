@@ -60,7 +60,6 @@ use crate::os::selection::{
     capture_frontmost_app_only_with_prior_frontmost, get_recent_assistive_context,
     store_recent_assistive_context,
 };
-use crate::{BadgeMode, hide_hold_badge, show_badge_for_mode};
 
 // Moshi conversation engine and audio output
 use codescribe_core::conversation::{ConversationEngine, MoshiConfig};
@@ -1508,13 +1507,11 @@ impl RecordingController {
         self.reset_session_fields().await;
         set_assistive_session(false);
         reset_session_telemetry(&self.session_telemetry);
-        hide_hold_badge();
     }
 
     async fn reset_finished_recording_state(&self) {
         self.reset_session_fields().await;
         set_assistive_session(false);
-        hide_hold_badge();
     }
 
     async fn handle_processed_recording_result(
@@ -1611,7 +1608,6 @@ impl RecordingController {
             .store(false, Ordering::SeqCst);
         set_assistive_session(false);
         reset_session_telemetry(&self.session_telemetry);
-        hide_hold_badge();
         info!("RECOVERY decision: stale active stream cleared, controller remains IDLE");
     }
 
@@ -2018,9 +2014,6 @@ impl RecordingController {
         self.set_state(State::Conversation).await;
         info!("STATE TRANSITION: IDLE → CONVERSATION");
 
-        // 6. Update badge
-        show_badge_for_mode(BadgeMode::Assistive);
-
         // 7. Start the conversation audio processing task
         let engine = Arc::clone(&self.conversation_engine);
         let player = Arc::clone(&self.audio_player);
@@ -2090,7 +2083,6 @@ impl RecordingController {
                     // Full cleanup on failure: state, session flag, badge
                     Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
                     helpers::set_conversation_session(false);
-                    hide_hold_badge();
                     return;
                 }
             };
@@ -2103,7 +2095,6 @@ impl RecordingController {
                 // Full cleanup on failure: state, session flag, badge
                 Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
                 helpers::set_conversation_session(false);
-                hide_hold_badge();
                 return;
             }
         }
@@ -2118,7 +2109,6 @@ impl RecordingController {
                     drop(rec_guard);
                     Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
                     helpers::set_conversation_session(false);
-                    hide_hold_badge();
                     return;
                 }
             };
@@ -2255,7 +2245,6 @@ impl RecordingController {
 
             Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
             helpers::set_conversation_session(false);
-            hide_hold_badge();
             info!(
                 "Loop cleanup: conversation ended unexpectedly (gen {})",
                 my_generation
@@ -2318,9 +2307,6 @@ impl RecordingController {
         // 7. Transition back to IDLE
         self.set_state(State::Idle).await;
         info!("STATE TRANSITION: CONVERSATION → IDLE");
-
-        // 8. Update badge
-        hide_hold_badge();
 
         Ok(())
     }
@@ -2526,14 +2512,6 @@ impl RecordingController {
                 crate::audio::play_sound_with_volume("Tink", sound_volume);
             }
 
-            // Show badge with appropriate mode (Hold=red solid, Assistive=purple)
-            let badge_mode = if is_assistive {
-                BadgeMode::Assistive
-            } else {
-                BadgeMode::Hold
-            };
-            show_badge_for_mode(badge_mode);
-
             if is_assistive {
                 // Capture context BEFORE starting (paste-back / frontmost tracking).
                 let prior_frontmost_app = pre_overlay_frontmost_app.read().await.clone();
@@ -2691,14 +2669,6 @@ impl RecordingController {
             crate::audio::play_sound_with_volume("Tink", sound_volume);
         }
 
-        // Show badge with appropriate mode
-        let badge_mode = if is_assistive {
-            BadgeMode::Assistive
-        } else {
-            BadgeMode::Toggle
-        };
-        show_badge_for_mode(badge_mode);
-
         if is_assistive {
             // Toggle-assistive is a hands-off chat loop with optional selection context.
             // Capture selection when available (best-effort), otherwise just app name.
@@ -2811,9 +2781,6 @@ impl RecordingController {
         // path), so clearing it here via the shared helper is safe.
         self.reset_session_fields().await;
 
-        // Reset UI indicators
-        hide_hold_badge();
-
         // Assistive: finalize the cumulative bubble and invoke the agent ONCE with the
         // complete session message.
         if assistive && !session_transcript.trim().is_empty() {
@@ -2925,7 +2892,6 @@ impl RecordingController {
         }
 
         self.set_state(State::Busy).await;
-        show_badge_for_mode(BadgeMode::Processing);
 
         let result = {
             let phase1 = std::time::Instant::now();
@@ -3013,7 +2979,6 @@ impl RecordingController {
             .store(false, Ordering::SeqCst);
         self.start_transition_in_flight
             .store(false, Ordering::SeqCst);
-        hide_hold_badge();
     }
 
     /// Save the current recording segment to disk WITHOUT stopping the recorder.
@@ -3097,9 +3062,6 @@ impl RecordingController {
         let hold_mode = *self.hold_mode.read().await;
         let force_raw = *self.force_raw_mode.read().await;
         let force_ai = *self.force_ai_mode.read().await;
-
-        // Switch badge to processing mode (orange, pulsing)
-        show_badge_for_mode(BadgeMode::Processing);
 
         let result = self
             .process_recording(session_id, assistive, hold_mode, force_raw, force_ai)
@@ -4025,9 +3987,6 @@ impl RecordingController {
     /// Internal helper to reset all state variables
     async fn reset_state(&self) {
         self.reset_session_fields().await;
-
-        // Hide UI indicators
-        hide_hold_badge();
 
         info!("State reset to IDLE complete");
     }
