@@ -999,12 +999,12 @@ fn activate_target_app(app_name: &str) {
         let Some(ns_workspace) = Class::get("NSWorkspace") else {
             return;
         };
-        let workspace: crate::ui_helpers::Id = msg_send![ns_workspace, sharedWorkspace];
-        let running: crate::ui_helpers::Id = msg_send![workspace, runningApplications];
+        let workspace: crate::os::Id = msg_send![ns_workspace, sharedWorkspace];
+        let running: crate::os::Id = msg_send![workspace, runningApplications];
         let count: usize = msg_send![running, count];
         for i in 0..count {
-            let app: crate::ui_helpers::Id = msg_send![running, objectAtIndex: i];
-            let name: crate::ui_helpers::Id = msg_send![app, localizedName];
+            let app: crate::os::Id = msg_send![running, objectAtIndex: i];
+            let name: crate::os::Id = msg_send![app, localizedName];
             if !name.is_null() {
                 let name_cstr: *const std::ffi::c_char = msg_send![name, UTF8String];
                 if !name_cstr.is_null() {

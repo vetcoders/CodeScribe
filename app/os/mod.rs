@@ -12,3 +12,8 @@ pub mod selection;
 pub mod shortcut_registry;
 #[cfg(target_os = "macos")]
 pub mod thermal;
+
+/// Objective-C object pointer alias (compatible with the `objc` crate's `msg_send!`).
+/// Migrated out of `app/ui/shared/helpers` so OS-level code no longer depends on `ui`.
+#[cfg(target_os = "macos")]
+pub type Id = *mut objc::runtime::Object;
