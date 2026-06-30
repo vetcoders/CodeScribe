@@ -335,7 +335,6 @@ pub struct TranscriptPipelineParams {
 pub struct TranscriptProcessOutcome {
     /// Why manual commit/decision mode should be shown (if required).
     pub commit_trigger: Option<String>,
-    pub final_status: String,
 }
 
 #[cfg(test)]

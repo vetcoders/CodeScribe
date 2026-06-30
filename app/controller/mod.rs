@@ -25,7 +25,6 @@
 mod helpers;
 mod types;
 
-pub(crate) use helpers::restore_agent_runtime_from_thread;
 pub use helpers::{
     is_assistive_session, is_conversation_session, set_assistive_session, set_conversation_session,
 };
@@ -769,16 +768,14 @@ struct ProcessRecordingOutcome {
     no_speech_reason: Option<String>,
     commit_trigger: Option<String>,
     transcript_present: bool,
-    final_status: String,
 }
 
 impl ProcessRecordingOutcome {
-    fn no_speech(reason: impl Into<String>, final_status: impl Into<String>) -> Self {
+    fn no_speech(reason: impl Into<String>) -> Self {
         Self {
             no_speech_reason: Some(reason.into()),
             commit_trigger: None,
             transcript_present: false,
-            final_status: final_status.into(),
         }
     }
 }
@@ -1237,28 +1234,6 @@ impl RecordingController {
             .ok_or_else(|| Self::recorder_unavailable_error(context))
     }
 
-    fn format_recorder_recovery_message(
-        missing_permissions: &[&str],
-        dictation_binding: &str,
-        formatting_binding: &str,
-        assistive_binding: &str,
-    ) -> String {
-        if missing_permissions.is_empty() {
-            format!(
-                "Mic unavailable: recorder failed to initialize. Open Settings to review hotkeys, input device, and runtime services, then retry. Configured shortcuts: Dictation={} • Formatting={} • Assistive={}.",
-                dictation_binding, formatting_binding, assistive_binding
-            )
-        } else {
-            format!(
-                "Mic unavailable: recorder failed to initialize. Missing permissions: {}. Open Settings to grant access, then retry your hotkey. Configured shortcuts: Dictation={} • Formatting={} • Assistive={}.",
-                missing_permissions.join(", "),
-                dictation_binding,
-                formatting_binding,
-                assistive_binding
-            )
-        }
-    }
-
     /// Create a new recording controller with configuration loaded from disk
     pub fn new() -> Self {
         Self::with_config(Config::load(), "RecordingController::new")
@@ -1364,14 +1339,6 @@ impl RecordingController {
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<IpcEvent> {
         self.event_broadcast.subscribe()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn publish_ipc_event_for_test(&self, payload: IpcEventPayload) {
-        let _ = self.event_broadcast.send(IpcEvent {
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            payload,
-        });
     }
 
     async fn set_state(&self, new_state: State) {
@@ -3322,7 +3289,7 @@ impl RecordingController {
                     write_truth_sidecar_logged(&audio_saved_path, &truth_metadata);
                 }
 
-                return Ok(ProcessRecordingOutcome::no_speech(reason, final_status));
+                return Ok(ProcessRecordingOutcome::no_speech(reason));
             }
         };
 
@@ -3366,7 +3333,6 @@ impl RecordingController {
             no_speech_reason: None,
             commit_trigger: pipeline_outcome.commit_trigger,
             transcript_present,
-            final_status: pipeline_outcome.final_status,
         })
     }
 
@@ -3967,10 +3933,7 @@ impl RecordingController {
             });
         }
 
-        Ok(types::TranscriptProcessOutcome {
-            commit_trigger,
-            final_status,
-        })
+        Ok(types::TranscriptProcessOutcome { commit_trigger })
     }
 
     /// Force reset to IDLE state without stopping recorder.

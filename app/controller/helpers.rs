@@ -282,54 +282,6 @@ fn initialize_agent_runtime() -> Result<AgentRuntime> {
     })
 }
 
-fn restore_thread_into_agent_runtime(mut runtime: AgentRuntime, thread: &Thread) -> AgentRuntime {
-    runtime.thread_store_id = thread.id.clone();
-    runtime.session.restore_messages(
-        thread
-            .messages
-            .iter()
-            .map(ThreadMessage::to_message)
-            .collect(),
-    );
-    runtime
-}
-
-fn initialize_agent_runtime_from_thread(thread: &Thread) -> Result<AgentRuntime> {
-    let runtime = initialize_agent_runtime()?;
-    let runtime = restore_thread_into_agent_runtime(runtime, thread);
-    Ok(runtime)
-}
-
-pub(crate) async fn restore_agent_runtime_from_thread(thread: Thread) -> Result<()> {
-    let generation = request_new_agent_thread_boundary();
-    let runtime_state = shared_agent_runtime_state();
-    let mut guard = runtime_state.lock().await;
-
-    if let Some(previous_runtime) = guard
-        .runtime
-        .as_ref()
-        .filter(|runtime| !runtime.session.messages().is_empty())
-        && let Err(error) = persist_runtime_thread(previous_runtime)
-    {
-        warn!("Failed to persist previous Agent runtime before restore: {error}");
-    }
-
-    match initialize_agent_runtime_from_thread(&thread) {
-        Ok(runtime) => {
-            guard.runtime_generation = generation;
-            guard.runtime = Some(runtime);
-            guard.runtime_degraded = false;
-            Ok(())
-        }
-        Err(error) => {
-            guard.runtime_generation = generation;
-            guard.runtime = None;
-            guard.runtime_degraded = true;
-            Err(error).context("Failed to initialize Agent runtime for restored thread")
-        }
-    }
-}
-
 fn build_agent_stream_options(ai_assistive_max_tokens: i32) -> StreamOptions {
     let max_tokens = u32::try_from(ai_assistive_max_tokens)
         .ok()
@@ -352,25 +304,6 @@ fn build_agent_stream_options(ai_assistive_max_tokens: i32) -> StreamOptions {
         // path will clone+override this to true for retry attempts only.
         reset_chain: false,
     }
-}
-
-fn chunk_text_for_local_chat_stream(text: &str, max_chars: usize) -> Vec<String> {
-    let max_chars = max_chars.max(1);
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-
-    for ch in text.chars() {
-        current.push(ch);
-        if current.chars().count() >= max_chars {
-            chunks.push(std::mem::take(&mut current));
-        }
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
-    chunks
 }
 
 /// Title-case a `snake_case` / `kebab-case` identifier into readable words.
@@ -452,19 +385,6 @@ pub(crate) fn friendly_tool_name(raw: &str) -> String {
         return format!("{tool_pretty} · {}", prettify_identifier(server));
     }
     prettify_identifier(raw)
-}
-
-/// Status-pill copy while a tool is running. Conversation timeline stays for
-/// conversation; transient activity lives in the status pill.
-pub(crate) fn tool_running_status(friendly: &str) -> String {
-    let lower = friendly.to_lowercase();
-    if lower.contains("web search") {
-        "Searching web…".to_string()
-    } else if lower.contains("search") {
-        "Searching…".to_string()
-    } else {
-        format!("Running {friendly}…")
-    }
 }
 
 /// Drain a single agent UI event.
@@ -1062,14 +982,6 @@ mod tests {
     use codescribe_core::agent::{AgentEvent, AgentProvider, ToolDefinition};
     use std::sync::atomic::AtomicUsize;
 
-    #[test]
-    fn local_chat_stream_chunks_preserve_unicode_and_order() {
-        let chunks = chunk_text_for_local_chat_stream("Zażółć gęślą jaźń", 4);
-
-        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 4));
-        assert_eq!(chunks.concat(), "Zażółć gęślą jaźń");
-    }
-
     // ── Collapsible Tool Evidence: friendly tool-name mapping ───────────────
 
     #[test]
@@ -1155,16 +1067,6 @@ mod tests {
         assert_eq!(
             friendly_tool_name("mcp__aicx-mcp__aicx_intents"),
             "AICX intents"
-        );
-    }
-
-    #[test]
-    fn tool_running_status_is_human_readable() {
-        assert_eq!(tool_running_status("Web search"), "Searching web…");
-        assert_eq!(tool_running_status("Local search"), "Searching…");
-        assert_eq!(
-            tool_running_status("Create Issue · Github"),
-            "Running Create Issue · Github…"
         );
     }
 
@@ -1650,54 +1552,6 @@ mod tests {
 
         assert!(!persisted);
         assert_eq!(persist_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn test_restore_thread_into_runtime_keeps_thread_id_and_history() {
-        let now = Utc::now();
-        let thread = Thread {
-            id: "thread_restored".to_string(),
-            created_at: now,
-            updated_at: now,
-            title: "Restored conversation".to_string(),
-            mode: "assistive".to_string(),
-            tags: Vec::new(),
-            notes: Vec::new(),
-            messages: vec![
-                ThreadMessage {
-                    role: "user".to_string(),
-                    content: vec![serde_json::json!({"type":"text","text":"hello"})],
-                    timestamp: now,
-                    metadata: None,
-                },
-                ThreadMessage {
-                    role: "assistant".to_string(),
-                    content: vec![serde_json::json!({"type":"text","text":"world"})],
-                    timestamp: now,
-                    metadata: None,
-                },
-            ],
-            summary: None,
-            total_tokens: None,
-            provider: "test".to_string(),
-            model: "test-model".to_string(),
-        };
-
-        let runtime =
-            restore_thread_into_agent_runtime(runtime_with_thread_id("thread_old"), &thread);
-
-        assert_eq!(runtime.thread_store_id, "thread_restored");
-        assert_eq!(runtime.session.messages().len(), 2);
-        assert_eq!(runtime.session.messages()[0].role, Role::User);
-        assert_eq!(runtime.session.messages()[1].role, Role::Assistant);
-        assert!(matches!(
-            &runtime.session.messages()[0].content[0],
-            ContentBlock::Text(text) if text == "hello"
-        ));
-        assert!(matches!(
-            &runtime.session.messages()[1].content[0],
-            ContentBlock::Text(text) if text == "world"
-        ));
     }
 
     #[test]

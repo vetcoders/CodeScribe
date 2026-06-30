@@ -967,20 +967,6 @@ fn test_recorder_runtime_recovery_requires_granted_microphone_and_missing_record
     ));
 }
 
-#[test]
-fn test_recorder_recovery_message_uses_settings_language() {
-    let message = RecordingController::format_recorder_recovery_message(
-        &["Accessibility", "Microphone"],
-        "DictationHotkey",
-        "FormattingHotkey",
-        "AssistiveHotkey",
-    );
-
-    assert!(message.contains("Open Settings"));
-    assert!(!message.contains("Setup"));
-    assert!(message.contains("Accessibility, Microphone"));
-}
-
 // ── Pure-function unit tests for truth helpers (push_typed_flag,
 //    truth_review_trigger, truth_display_status). These guard the
 //    truth-surface adjudicator primitives so regressions in precedence or
@@ -1715,14 +1701,12 @@ fn test_delta_first_guards_allow_full_rewrite_offline() {
 
 #[test]
 fn test_process_recording_outcome_no_speech_is_soft() {
-    let outcome =
-        ProcessRecordingOutcome::no_speech("vad_no_speech_detected", "No reliable speech detected");
+    let outcome = ProcessRecordingOutcome::no_speech("vad_no_speech_detected");
     assert_eq!(
         outcome.no_speech_reason.as_deref(),
         Some("vad_no_speech_detected")
     );
     assert!(outcome.commit_trigger.is_none());
-    assert_eq!(outcome.final_status, "No reliable speech detected");
 }
 
 #[tokio::test]
