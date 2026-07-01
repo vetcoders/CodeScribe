@@ -11,10 +11,10 @@ targets:
     info:
       path: Codescribe/Info.plist
       properties:
-        CFBundleDisplayName: CodeScribe
-        CFBundleName: CodeScribe
+        CFBundleDisplayName: Codescribe
+        CFBundleName: Codescribe
         LSUIElement: true
-        NSMicrophoneUsageDescription: "CodeScribe transcribes your speech locally with on-device Whisper."
+        NSMicrophoneUsageDescription: "Codescribe transcribes your speech locally with on-device Whisper."
     settings:
       base:
         # Dock/app icon — AppIcon.appiconset in Codescribe/Assets.xcassets.
