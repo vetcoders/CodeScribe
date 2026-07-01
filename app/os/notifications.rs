@@ -16,7 +16,7 @@ use tracing::warn;
 #[link(name = "UserNotifications", kind = "framework")]
 unsafe extern "C" {}
 
-use crate::ui_helpers::Id;
+use crate::os::Id;
 
 static AUTH_ONCE: Once = Once::new();
 

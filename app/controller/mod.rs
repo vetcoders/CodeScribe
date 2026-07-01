@@ -25,11 +25,10 @@
 mod helpers;
 mod types;
 
-pub(crate) use helpers::restore_agent_runtime_from_thread;
 pub use helpers::{
     is_assistive_session, is_conversation_session, set_assistive_session, set_conversation_session,
 };
-pub use types::{HotkeyAction, HotkeyInput, HotkeyType, State};
+pub use types::{HotkeyAction, HotkeyInput, HotkeyType, State, TranscriptionActionContractMode};
 
 use crate::presentation::emitter::PresentationEmitter;
 use crate::stream_postprocess::StreamPostProcessor;
@@ -42,7 +41,7 @@ use objc::{msg_send, sel, sel_impl};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -53,24 +52,19 @@ use crate::config::models::ModelManager;
 use crate::config::{Config, UserSettings};
 use crate::os::clipboard;
 use crate::os::hotkeys::HoldMode;
-use crate::os::permissions::{
-    PermissionStatus, check_accessibility, check_input_monitoring, check_microphone,
-};
+use crate::os::permissions::{PermissionStatus, check_microphone};
 use crate::os::selection::{
     AssistiveContext, build_assistive_input, capture_assistive_context,
     capture_assistive_context_with_prior_frontmost, capture_frontmost_app_only,
     capture_frontmost_app_only_with_prior_frontmost, get_recent_assistive_context,
     store_recent_assistive_context,
 };
-use crate::{BadgeMode, hide_hold_badge, show_badge_for_mode};
 
 // Moshi conversation engine and audio output
 use codescribe_core::conversation::{ConversationEngine, MoshiConfig};
 use codescribe_core::ipc::{IpcEvent, IpcEventPayload};
 use codescribe_core::tts::AudioPlayer;
 
-// UI state for conversation mode
-use crate::ui::voice_chat::ConversationModeState;
 use codescribe_core::pipeline::contracts::{
     FileTranscriptionOptions, FinalPassDisposition, TranscriptionConfidenceFlag,
     TranscriptionVerdict,
@@ -79,8 +73,7 @@ use codescribe_core::pipeline::contracts::{
 use helpers::{
     SessionTelemetrySnapshot, SharedSessionTelemetry, new_session_telemetry, raw_save_enabled,
     reset_agent_runtime_for_new_thread as reset_agent_runtime_for_new_thread_impl,
-    reset_session_telemetry, send_assistive_with_agent_runtime, setup_voice_chat_send_callback,
-    snapshot_session_telemetry,
+    reset_session_telemetry, send_assistive_with_agent_runtime, snapshot_session_telemetry,
 };
 use types::{
     RecordingFallbackClass, RecordingTranscriptSource, RecordingTruthMetadata, ValidatedAudioPath,
@@ -661,7 +654,7 @@ fn is_assistive_start_event(event: &HotkeyInput) -> bool {
 /// Block a *new* hotkey start while a previously-dispatched agent turn is still
 /// streaming. This fires only at `State::Idle` — the controller has already
 /// returned the mic/transcription pipeline; the agent is answering in the
-/// background (a detached `tokio::spawn`, see `setup_voice_chat_send_callback`).
+/// background (a detached `tokio::spawn`, see `send_assistive_with_agent_runtime`).
 ///
 /// Exception — **Assistive Talk Anytime**: assistive start events are allowed
 /// through so the user can record a *new* voice intent while the agent answers.
@@ -683,15 +676,6 @@ fn should_block_hotkey_during_agent_send(
         && agent_send_in_flight
         && is_hotkey_start_event(event)
         && !is_assistive_start_event(event)
-}
-
-fn present_agent_send_hotkey_block() {
-    info!("Agent response is still streaming; ignoring hotkey start");
-    if !cfg!(test) {
-        crate::ui::voice_chat::show_voice_chat_overlay();
-        crate::ui::voice_chat::show_agent_tab();
-        crate::ui::voice_chat::update_voice_chat_status("Agent is answering...");
-    }
 }
 
 fn transcript_output_category(output_kind: crate::state::history::TranscriptKind) -> &'static str {
@@ -754,10 +738,6 @@ const SHORT_AI_QUALITY_GATE_MIN_CHARS: usize = 10;
 const QUALITY_GATE_DROP_RATIO: f32 = 0.35;
 const QUALITY_GATE_DIFF_RATIO: f32 = 0.62;
 const QUALITY_GATE_CORRECTION_RATIO: f32 = 0.40;
-const RECORDER_RUNTIME_DEGRADED_REASON: &str =
-    "Microphone recorder unavailable. Voice capture is disabled.";
-const RECOVERY_UI_COOLDOWN_MS: u64 = 3_000;
-static RUNTIME_RECOVERY_LAST_SHOWN_MS: AtomicU64 = AtomicU64::new(0);
 
 fn should_attempt_recorder_runtime_recovery(
     microphone_status: PermissionStatus,
@@ -788,16 +768,14 @@ struct ProcessRecordingOutcome {
     no_speech_reason: Option<String>,
     commit_trigger: Option<String>,
     transcript_present: bool,
-    final_status: String,
 }
 
 impl ProcessRecordingOutcome {
-    fn no_speech(reason: impl Into<String>, final_status: impl Into<String>) -> Self {
+    fn no_speech(reason: impl Into<String>) -> Self {
         Self {
             no_speech_reason: Some(reason.into()),
             commit_trigger: None,
             transcript_present: false,
-            final_status: final_status.into(),
         }
     }
 }
@@ -852,13 +830,13 @@ fn resolve_transcription_action_contract_mode(
     force_ai: bool,
     ai_formatting_enabled: bool,
     ai_key_available: bool,
-) -> crate::ui::overlay::TranscriptionActionContractMode {
+) -> TranscriptionActionContractMode {
     if force_raw {
-        crate::ui::overlay::TranscriptionActionContractMode::Raw
+        TranscriptionActionContractMode::Raw
     } else if force_ai || (ai_formatting_enabled && ai_key_available) {
-        crate::ui::overlay::TranscriptionActionContractMode::AiFormat
+        TranscriptionActionContractMode::AiFormat
     } else {
-        crate::ui::overlay::TranscriptionActionContractMode::Raw
+        TranscriptionActionContractMode::Raw
     }
 }
 
@@ -1017,12 +995,12 @@ fn activate_target_app(app_name: &str) {
         let Some(ns_workspace) = Class::get("NSWorkspace") else {
             return;
         };
-        let workspace: crate::ui_helpers::Id = msg_send![ns_workspace, sharedWorkspace];
-        let running: crate::ui_helpers::Id = msg_send![workspace, runningApplications];
+        let workspace: crate::os::Id = msg_send![ns_workspace, sharedWorkspace];
+        let running: crate::os::Id = msg_send![workspace, runningApplications];
         let count: usize = msg_send![running, count];
         for i in 0..count {
-            let app: crate::ui_helpers::Id = msg_send![running, objectAtIndex: i];
-            let name: crate::ui_helpers::Id = msg_send![app, localizedName];
+            let app: crate::os::Id = msg_send![running, objectAtIndex: i];
+            let name: crate::os::Id = msg_send![app, localizedName];
             if !name.is_null() {
                 let name_cstr: *const std::ffi::c_char = msg_send![name, UTF8String];
                 if !name_cstr.is_null() {
@@ -1187,12 +1165,6 @@ pub struct RecordingController {
     /// App that was frontmost when the user initiated a hold session, before
     /// Codescribe badge/overlay UI can become frontmost.
     pre_overlay_frontmost_app: Arc<RwLock<Option<String>>>,
-    /// True when we opened the unified overlay solely to show a raw transcription preview.
-    ///
-    /// This lets us preserve the old behavior:
-    /// - If the user had the overlay already open (Drawer/Agent), don't close it after dictation.
-    /// - If we popped it open just for raw dictation, auto-hide it after processing.
-    opened_voice_chat_overlay_for_transcription: Arc<AtomicBool>,
 
     /// Sample offset (in the recorder buffer) marking the start of the next
     /// incremental segment. Advances on each `commit_segment` call so segment
@@ -1231,10 +1203,6 @@ pub struct RecordingController {
 impl RecordingController {
     fn recorder_unavailable_error(context: &str) -> anyhow::Error {
         warn!("{context}: streaming recorder unavailable; voice capture is disabled");
-        crate::ui::voice_chat::set_voice_chat_runtime_degraded(
-            true,
-            Some(RECORDER_RUNTIME_DEGRADED_REASON),
-        );
         anyhow::anyhow!("{context}: streaming recorder unavailable")
     }
 
@@ -1243,10 +1211,6 @@ impl RecordingController {
             Ok(recorder) => Some(recorder),
             Err(error) => {
                 warn!("{context}: failed to initialize streaming recorder: {error}");
-                crate::ui::voice_chat::set_voice_chat_runtime_degraded(
-                    true,
-                    Some(RECORDER_RUNTIME_DEGRADED_REASON),
-                );
                 None
             }
         }
@@ -1270,113 +1234,29 @@ impl RecordingController {
             .ok_or_else(|| Self::recorder_unavailable_error(context))
     }
 
-    fn should_emit_runtime_recovery_message() -> bool {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or_default();
-        loop {
-            let last_ms = RUNTIME_RECOVERY_LAST_SHOWN_MS.load(Ordering::SeqCst);
-            if now_ms.saturating_sub(last_ms) < RECOVERY_UI_COOLDOWN_MS {
-                return false;
-            }
-            if RUNTIME_RECOVERY_LAST_SHOWN_MS
-                .compare_exchange(last_ms, now_ms, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                return true;
-            }
-        }
+    /// Create a new recording controller with configuration loaded from disk
+    pub fn new() -> Self {
+        Self::with_config(Config::load(), "RecordingController::new")
     }
 
-    fn format_recorder_recovery_message(
-        missing_permissions: &[&str],
-        dictation_binding: &str,
-        formatting_binding: &str,
-        assistive_binding: &str,
-    ) -> String {
-        if missing_permissions.is_empty() {
-            format!(
-                "Mic unavailable: recorder failed to initialize. Open Settings to review hotkeys, input device, and runtime services, then retry. Configured shortcuts: Dictation={} • Formatting={} • Assistive={}.",
-                dictation_binding, formatting_binding, assistive_binding
-            )
-        } else {
-            format!(
-                "Mic unavailable: recorder failed to initialize. Missing permissions: {}. Open Settings to grant access, then retry your hotkey. Configured shortcuts: Dictation={} • Formatting={} • Assistive={}.",
-                missing_permissions.join(", "),
-                dictation_binding,
-                formatting_binding,
-                assistive_binding
-            )
-        }
-    }
-
-    fn recording_recovery_guidance() -> String {
-        let settings = crate::config::UserSettings::load();
-        let dictation_binding = settings
-            .mode_binding_for(crate::config::WorkMode::Dictation)
-            .label();
-        let formatting_binding = settings
-            .mode_binding_for(crate::config::WorkMode::Formatting)
-            .label();
-        let assistive_binding = settings
-            .mode_binding_for(crate::config::WorkMode::Assistive)
-            .label();
-        let mut missing_permissions = Vec::new();
-        if check_accessibility() != PermissionStatus::Granted {
-            missing_permissions.push("Accessibility");
-        }
-        if check_input_monitoring() != PermissionStatus::Granted {
-            missing_permissions.push("Input Monitoring");
-        }
-        if check_microphone() != PermissionStatus::Granted {
-            missing_permissions.push("Microphone");
-        }
-
-        Self::format_recorder_recovery_message(
-            &missing_permissions,
-            dictation_binding,
-            formatting_binding,
-            assistive_binding,
+    /// Create a new recording controller without populating secrets from Keychain.
+    ///
+    /// Used by the SwiftUI redesign dictation bridge: starting local recording must
+    /// not ask for API-key access as an incidental side effect.
+    pub fn new_without_keychain() -> Self {
+        Self::with_config(
+            Config::load_without_keychain(),
+            "RecordingController::new_without_keychain",
         )
     }
 
-    fn present_runtime_recovery_ui(status: &str, message: &str) {
-        let emit_recovery_message = Self::should_emit_runtime_recovery_message();
-        let overlay_visible = crate::ui::voice_chat::is_voice_chat_overlay_visible();
-        if emit_recovery_message || !overlay_visible {
-            crate::ui::voice_chat::show_voice_chat_overlay();
-            crate::ui::voice_chat::show_agent_tab();
-        }
-        crate::ui::voice_chat::update_voice_chat_status(status);
-        if emit_recovery_message {
-            crate::ui::voice_chat::add_voice_chat_error_message(message);
-            crate::ui::settings::show_settings_window();
-        } else {
-            debug!("Runtime recovery UI throttled (cooldown active)");
-        }
-    }
-
-    fn present_recorder_unavailable(context: &str) {
-        warn!("{context}: recorder unavailable; routing to settings recovery");
-        crate::ui::voice_chat::set_voice_chat_runtime_degraded(
-            true,
-            Some(RECORDER_RUNTIME_DEGRADED_REASON),
-        );
-        let message = Self::recording_recovery_guidance();
-        Self::present_runtime_recovery_ui("Recorder unavailable", &message);
-    }
-
-    /// Create a new recording controller with configuration loaded from disk
-    pub fn new() -> Self {
-        let config = Config::load();
-
+    fn with_config(config: Config, recorder_context: &str) -> Self {
         info!(
             "Initializing RecordingController (hold_delay={}ms, beep={}, language={:?})",
             config.hold_start_delay_ms, config.beep_on_start, config.whisper_language
         );
 
-        let recorder = Self::init_streaming_recorder("RecordingController::new");
+        let recorder = Self::init_streaming_recorder(recorder_context);
 
         if !cfg!(test) {
             match ModelManager::new() {
@@ -1390,24 +1270,28 @@ impl RecordingController {
                 Err(error) => warn!("Model manager unavailable during startup: {error}"),
             }
 
-            if crate::app_automation_mode_enabled() {
-                info!("Skipping Whisper initialization in app automation mode");
-            } else if !crate::whisper::is_initialized() {
+            if !crate::whisper::is_initialized() {
                 // Best-effort BACKGROUND prewarm — never block recording readiness.
                 //
-                // Product invariant: recording readiness is NOT Whisper readiness.
+                // Product invariant: recording readiness is NOT engine readiness.
                 // Audio capture must start the moment the user presses record; the
-                // live pipeline and the final pass lazy-load the engine on first use
-                // (`with_engine`). A failed prewarm is a warning, not an app or
-                // recording failure. The idle-unload reaper (commit 2b8bb1f) may
-                // legitimately drop the engine later and the next call reloads it —
-                // pinning it here would undo that GPU/host-memory reclaim.
+                // live pipeline and the final pass lazy-load the engine on first use.
+                // A failed prewarm is a warning, not an app or recording failure.
+                // The idle-unload reaper (commit 2b8bb1f) may legitimately drop the
+                // engine later and the next call reloads it — pinning it here would
+                // undo that GPU/host-memory reclaim.
+                //
+                // Warm the ACTIVE router engine (Apple SpeechAnalyzer on macOS 26+,
+                // Candle on fallback/older macOS) AND run a synthetic warmup
+                // inference, so the first dictation pays neither model-load nor
+                // Metal kernel-compilation latency — matching the old always-instant
+                // behaviour where the long-lived daemon was warm before first use.
                 std::thread::Builder::new()
-                    .name("whisper-prewarm".into())
+                    .name("stt-prewarm".into())
                     .spawn(|| {
-                        if let Err(e) = crate::whisper::init() {
+                        if let Err(e) = crate::stt::prewarm_active_engine() {
                             warn!(
-                                "Whisper background prewarm failed (will lazy-load on first use): {}",
+                                "STT background prewarm failed (will lazy-load on first use): {}",
                                 e
                             );
                         }
@@ -1417,12 +1301,8 @@ impl RecordingController {
         }
 
         let config = Arc::new(RwLock::new(config));
-        setup_voice_chat_send_callback(Arc::clone(&config));
         if recorder.is_none() {
-            crate::ui::voice_chat::set_voice_chat_runtime_degraded(
-                true,
-                Some(RECORDER_RUNTIME_DEGRADED_REASON),
-            );
+            warn!("Recorder unavailable at controller init; voice capture is disabled");
         }
         let (event_broadcast, _) = broadcast::channel::<IpcEvent>(256);
         let session_telemetry = new_session_telemetry();
@@ -1446,7 +1326,6 @@ impl RecordingController {
             toggle_assistant_has_text: Arc::new(AtomicBool::new(false)),
             assistive_context: Arc::new(RwLock::new(None)),
             pre_overlay_frontmost_app: Arc::new(RwLock::new(None)),
-            opened_voice_chat_overlay_for_transcription: Arc::new(AtomicBool::new(false)),
             last_segment_audio_offset: Arc::new(AtomicUsize::new(0)),
             // Conversation mode (lazy init)
             conversation_engine: Arc::new(Mutex::new(None)),
@@ -1468,14 +1347,6 @@ impl RecordingController {
         self.event_broadcast.subscribe()
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish_ipc_event_for_test(&self, payload: IpcEventPayload) {
-        let _ = self.event_broadcast.send(IpcEvent {
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            payload,
-        });
-    }
-
     async fn set_state(&self, new_state: State) {
         Self::set_state_with_broadcast(&self.state, &self.event_broadcast, new_state).await;
     }
@@ -1493,6 +1364,11 @@ impl RecordingController {
         };
 
         if old_state != new_state {
+            // Recording ended → always tear down the cursor badge (covers finalize,
+            // cancel, error, no-speech — any path back to Idle).
+            if new_state == State::Idle {
+                crate::os::hold_badge::hide_hold_badge();
+            }
             let _ = event_broadcast.send(IpcEvent {
                 timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 payload: IpcEventPayload::StateChange {
@@ -1521,7 +1397,6 @@ impl RecordingController {
 
         *recorder_guard = Self::init_streaming_recorder("Permission runtime reconcile");
         if recorder_guard.is_some() {
-            crate::ui::voice_chat::set_voice_chat_runtime_degraded(false, None);
             info!("Permission runtime reconcile: recorder runtime recovered after grant");
         }
     }
@@ -1608,14 +1483,11 @@ impl RecordingController {
         self.reset_session_fields().await;
         set_assistive_session(false);
         reset_session_telemetry(&self.session_telemetry);
-        hide_hold_badge();
-        crate::ui::voice_chat::update_voice_chat_status("Ready");
     }
 
     async fn reset_finished_recording_state(&self) {
         self.reset_session_fields().await;
         set_assistive_session(false);
-        hide_hold_badge();
     }
 
     async fn handle_processed_recording_result(
@@ -1625,12 +1497,6 @@ impl RecordingController {
     ) {
         match result {
             Ok(outcome) => {
-                let final_status = if outcome.final_status.trim().is_empty() {
-                    "Ready"
-                } else {
-                    outcome.final_status.as_str()
-                };
-                crate::ui::voice_chat::update_voice_chat_status(final_status);
                 info!("Processing finished successfully. State reset to IDLE.");
 
                 // The transcription just freed large transient buffers (audio,
@@ -1641,58 +1507,27 @@ impl RecordingController {
 
                 if let Some(reason) = outcome.no_speech_reason.as_deref() {
                     info!("NoSpeech outcome in finish_recording: reason={reason}");
-                    if !assistive {
-                        let opened = self
-                            .opened_voice_chat_overlay_for_transcription
-                            .swap(false, Ordering::SeqCst);
-                        if opened {
-                            crate::ui::voice_chat::hide_voice_chat_overlay();
-                        }
-                        crate::ui::overlay::update_transcription_status(final_status);
-                        crate::ui::overlay::schedule_auto_hide();
-                    }
                 } else if !assistive {
                     let cfg = self.config.read().await.clone();
-                    let show_decision_overlay = outcome.transcript_present
+
+                    if outcome.transcript_present
                         && cfg.transcription_overlay_enabled
-                        && !(cfg.quick_notes_enabled && cfg.quick_notes_save_only);
-
-                    let opened = self
-                        .opened_voice_chat_overlay_for_transcription
-                        .swap(false, Ordering::SeqCst);
-                    if opened {
-                        crate::ui::voice_chat::hide_voice_chat_overlay();
-                    }
-
-                    if show_decision_overlay {
-                        crate::ui::overlay::update_transcription_status(final_status);
+                        && !(cfg.quick_notes_enabled && cfg.quick_notes_save_only)
+                    {
                         let reason = outcome
                             .commit_trigger
                             .as_deref()
                             .unwrap_or("quality_gate_clean");
                         info!("COMMIT decision: trigger={reason}");
-                        crate::ui::overlay::enter_decision_mode();
-                        crate::ui::overlay::schedule_auto_hide();
                     } else if cfg.quick_notes_enabled && cfg.quick_notes_save_only {
                         info!("COMMIT decision: skipped (quick_notes_save_only)");
-                        crate::ui::overlay::hide_transcription_overlay();
                     } else {
                         info!("COMMIT decision: skipped (quality gate clean)");
-                        crate::ui::overlay::hide_transcription_overlay();
                     }
                 }
             }
             Err(e) => {
                 error!("Processing failed: {}", e);
-                crate::ui::voice_chat::update_voice_chat_status("Processing failed");
-
-                let opened = self
-                    .opened_voice_chat_overlay_for_transcription
-                    .swap(false, Ordering::SeqCst);
-                if opened {
-                    crate::ui::voice_chat::hide_voice_chat_overlay();
-                }
-                crate::ui::overlay::hide_transcription_overlay();
             }
         }
     }
@@ -1749,8 +1584,6 @@ impl RecordingController {
             .store(false, Ordering::SeqCst);
         set_assistive_session(false);
         reset_session_telemetry(&self.session_telemetry);
-        hide_hold_badge();
-        crate::ui::voice_chat::update_voice_chat_status("Ready");
         info!("RECOVERY decision: stale active stream cleared, controller remains IDLE");
     }
 
@@ -1783,7 +1616,7 @@ impl RecordingController {
     fn configure_toggle_event_sink(
         recorder: &mut StreamingRecorder,
         preview_deltas_enabled: bool,
-        flush_voice_chat_on_vad_end: bool,
+        _flush_voice_chat_on_vad_end: bool,
         event_broadcast: broadcast::Sender<IpcEvent>,
         session_telemetry: SharedSessionTelemetry,
     ) {
@@ -1799,20 +1632,7 @@ impl RecordingController {
             Arc::new(helpers::RoutingDeltaSink)
                 as Arc<dyn codescribe_core::pipeline::contracts::DeltaSink>
         });
-        let mut pe = PresentationEmitter::new(tb, delta_sink, None);
-        if flush_voice_chat_on_vad_end {
-            // Assistive (variant A): VAD-end only refreshes the live UI bubble; it must
-            // NOT dispatch to the agent. The sole agent sender is the toggle-stop path
-            // (handle stop -> build_assistive_input -> send_assistive_with_agent_runtime),
-            // which sends ONE wrapped message carrying full context (selection + frontmost
-            // app). Committing on VAD-end as well made the same utterance reach the agent
-            // twice — plain via VAD-end and wrapped via toggle-stop — producing a double
-            // request and a double answer. Restores the "one utterance = one agent message"
-            // invariant (regression introduced by 57b1bcc; original invariant from c3ce222).
-            pe.set_utterance_callback(Some(Arc::new(|text: String| {
-                crate::ui::voice_chat::append_voice_chat_user_utterance(&text);
-            })));
-        }
+        let pe = PresentationEmitter::new(tb, delta_sink, None);
 
         let pe: Arc<dyn codescribe_core::pipeline::contracts::EventSink> = Arc::new(pe);
         let ipc_sink: Arc<dyn codescribe_core::pipeline::contracts::EventSink> =
@@ -1865,7 +1685,7 @@ impl RecordingController {
             &event,
             helpers::is_agent_send_in_flight(),
         ) {
-            present_agent_send_hotkey_block();
+            info!("Agent response is still streaming; ignoring hotkey start");
             return Ok(());
         }
 
@@ -1898,18 +1718,7 @@ impl RecordingController {
                             *self.force_ai_mode.write().await = event.force_ai;
 
                             if matches!(current_state, State::RecHold | State::RecToggle) {
-                                let overlay_enabled =
-                                    self.config.read().await.transcription_overlay_enabled;
                                 set_assistive_session(false);
-                                self.opened_voice_chat_overlay_for_transcription
-                                    .store(false, Ordering::SeqCst);
-                                crate::ui::overlay::clear_transcription_text();
-                                if overlay_enabled {
-                                    crate::ui::overlay::show_transcription_overlay();
-                                    crate::ui::overlay::enter_recording_mode();
-                                } else {
-                                    crate::ui::overlay::hide_transcription_overlay();
-                                }
                             }
                         }
                         HoldMode::Chat => {
@@ -1930,19 +1739,7 @@ impl RecordingController {
                                 .await
                                 .unwrap_or_default();
                                 *self.assistive_context.write().await = Some(ctx);
-                                crate::ui::voice_chat::set_voice_chat_target_app(
-                                    self.assistive_context
-                                        .read()
-                                        .await
-                                        .clone()
-                                        .unwrap_or_default()
-                                        .frontmost_app,
-                                );
                                 set_assistive_session(true);
-                                crate::ui::overlay::hide_transcription_overlay();
-                                crate::ui::voice_chat::show_voice_chat_overlay();
-                                crate::ui::voice_chat::show_agent_tab();
-                                crate::ui::voice_chat::update_voice_chat_status("Listening...");
                             }
                         }
                         HoldMode::Selection => {
@@ -1963,19 +1760,7 @@ impl RecordingController {
                                 .await
                                 .unwrap_or_default();
                                 *self.assistive_context.write().await = Some(ctx);
-                                crate::ui::voice_chat::set_voice_chat_target_app(
-                                    self.assistive_context
-                                        .read()
-                                        .await
-                                        .clone()
-                                        .unwrap_or_default()
-                                        .frontmost_app,
-                                );
                                 set_assistive_session(true);
-                                crate::ui::overlay::hide_transcription_overlay();
-                                crate::ui::voice_chat::show_voice_chat_overlay();
-                                crate::ui::voice_chat::show_agent_tab();
-                                crate::ui::voice_chat::update_voice_chat_status("Listening...");
                             }
                         }
                     }
@@ -2147,7 +1932,6 @@ impl RecordingController {
             let recorder_guard = self.recorder.lock().await;
             if recorder_guard.is_none() {
                 let error = Self::recorder_unavailable_error("Conversation-start");
-                Self::present_recorder_unavailable("Conversation-start");
                 return Err(error);
             }
         }
@@ -2163,10 +1947,6 @@ impl RecordingController {
                         // Pre-initialize to load models now (rather than on first audio)
                         if let Err(e) = engine.init() {
                             error!("ConversationEngine init failed: {}", e);
-                            crate::ui::voice_chat::add_voice_chat_error_message(&format!(
-                                "Moshi init failed: {}",
-                                e
-                            ));
                             return Err(e);
                         }
                         *engine_guard = Some(engine);
@@ -2174,10 +1954,6 @@ impl RecordingController {
                     }
                     Err(e) => {
                         error!("Failed to create ConversationEngine: {}", e);
-                        crate::ui::voice_chat::add_voice_chat_error_message(&format!(
-                            "Moshi unavailable: {}",
-                            e
-                        ));
                         return Err(e);
                     }
                 }
@@ -2213,13 +1989,6 @@ impl RecordingController {
         // 5. Transition to CONVERSATION state
         self.set_state(State::Conversation).await;
         info!("STATE TRANSITION: IDLE → CONVERSATION");
-
-        // 6. Update UI
-        show_badge_for_mode(BadgeMode::Assistive);
-        crate::ui::voice_chat::show_voice_chat_overlay();
-        crate::ui::voice_chat::show_agent_tab();
-        crate::ui::voice_chat::update_voice_chat_status("Listening...");
-        crate::ui::voice_chat::update_conversation_state(ConversationModeState::Listening);
 
         // 7. Start the conversation audio processing task
         let engine = Arc::clone(&self.conversation_engine);
@@ -2287,14 +2056,10 @@ impl RecordingController {
                 Err(error) => {
                     error!("Conversation mode unavailable: {error}");
                     drop(rec_guard);
-                    // Full cleanup on failure: state, session flag, badge, UI
+                    // Full cleanup on failure: state, session flag, badge
                     Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
                     helpers::set_conversation_session(false);
-                    hide_hold_badge();
-                    crate::ui::voice_chat::update_conversation_state(
-                        ConversationModeState::Inactive,
-                    );
-                    Self::present_recorder_unavailable("Conversation-loop start");
+                    codescribe_core::memory::release_freed_heap();
                     return;
                 }
             };
@@ -2304,13 +2069,10 @@ impl RecordingController {
 
             if let Err(e) = rec.recorder.start().await {
                 error!("Failed to start recorder for conversation: {}", e);
-                // Full cleanup on failure: state, session flag, badge, UI
+                // Full cleanup on failure: state, session flag, badge
                 Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
                 helpers::set_conversation_session(false);
-                hide_hold_badge();
-                crate::ui::voice_chat::update_voice_chat_status("Recorder error");
-                crate::ui::voice_chat::update_conversation_state(ConversationModeState::Inactive);
-                crate::ui::voice_chat::add_voice_chat_error_message(&format!("Mic error: {}", e));
+                codescribe_core::memory::release_freed_heap();
                 return;
             }
         }
@@ -2325,11 +2087,7 @@ impl RecordingController {
                     drop(rec_guard);
                     Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
                     helpers::set_conversation_session(false);
-                    hide_hold_badge();
-                    crate::ui::voice_chat::update_conversation_state(
-                        ConversationModeState::Inactive,
-                    );
-                    Self::present_recorder_unavailable("Conversation-loop sample rate");
+                    codescribe_core::memory::release_freed_heap();
                     return;
                 }
             };
@@ -2340,12 +2098,6 @@ impl RecordingController {
         // Processing loop
         let mut last_response_check = std::time::Instant::now();
         let response_check_interval = Duration::from_millis(100);
-        // Track the last conversation state pushed to the UI so the per-chunk
-        // loop (~20Hz) only dispatches on the main thread when the state
-        // actually changes, instead of every audio chunk (P2.5). The status
-        // string is derived 1:1 from `ui_state`, so tracking the state covers
-        // both dispatches.
-        let mut last_emitted_conv_state: Option<ConversationModeState> = None;
 
         while !stop_flag.load(Ordering::SeqCst) {
             // Process incoming audio chunks
@@ -2353,34 +2105,10 @@ impl RecordingController {
                 Ok(Some(samples)) => {
                     // Feed audio to ConversationEngine
                     let mut engine_guard = engine.lock().await;
-                    if let Some(ref mut eng) = *engine_guard {
-                        if let Err(e) = eng.process_audio_any_rate(&samples, sample_rate) {
-                            warn!("ConversationEngine.process_audio error: {}", e);
-                        }
-
-                        // Update UI based on conversation state (only if still current session)
-                        let current_gen = generation_counter.load(Ordering::SeqCst);
-                        if current_gen == my_generation {
-                            let conv_state = eng.state();
-                            let (status, ui_state) = match conv_state {
-                                codescribe_core::conversation::context::ConversationState::UserSpeaking => {
-                                    ("You're speaking...", ConversationModeState::UserSpeaking)
-                                }
-                                codescribe_core::conversation::context::ConversationState::AssistantSpeaking => {
-                                    ("Moshi responding...", ConversationModeState::AssistantSpeaking)
-                                }
-                                codescribe_core::conversation::context::ConversationState::Processing => {
-                                    ("Processing...", ConversationModeState::Processing)
-                                }
-                                _ => ("Listening...", ConversationModeState::Listening),
-                            };
-                            // Only dispatch to the main thread when the state changed.
-                            if last_emitted_conv_state != Some(ui_state) {
-                                crate::ui::voice_chat::update_voice_chat_status(status);
-                                crate::ui::voice_chat::update_conversation_state(ui_state);
-                                last_emitted_conv_state = Some(ui_state);
-                            }
-                        }
+                    if let Some(ref mut eng) = *engine_guard
+                        && let Err(e) = eng.process_audio_any_rate(&samples, sample_rate)
+                    {
+                        warn!("ConversationEngine.process_audio error: {}", e);
                     }
                 }
                 Ok(None) => {
@@ -2417,19 +2145,9 @@ impl RecordingController {
                         continue;
                     }
 
-                    crate::ui::voice_chat::update_voice_chat_status("Moshi speaking...");
-                    crate::ui::voice_chat::update_conversation_state(
-                        ConversationModeState::AssistantSpeaking,
-                    );
-                    // Keep the per-chunk dedup tracker in sync with the playback
-                    // dispatch so the next state change is still emitted (P2.5).
-                    last_emitted_conv_state = Some(ConversationModeState::AssistantSpeaking);
-
                     // Play response audio in separate blocking task (non-blocking for loop)
                     // This preserves full-duplex: we can still process mic while playing
                     let player_clone = Arc::clone(&player);
-                    let stop_flag_clone = Arc::clone(&stop_flag);
-                    let generation_clone = Arc::clone(&generation_counter);
                     let playback_active_clone = Arc::clone(&playback_active);
 
                     let handle = tokio::runtime::Handle::current();
@@ -2465,19 +2183,6 @@ impl RecordingController {
                                 && let Err(e) = p.play(&response_samples, response_rate)
                             {
                                 warn!("AudioPlayer.play error: {}", e);
-                            }
-                            // Only update UI if:
-                            // 1. Conversation wasn't stopped (stop_flag)
-                            // 2. This is still the current session (generation matches)
-                            // This prevents cross-session UI races
-                            let current_gen = generation_clone.load(Ordering::SeqCst);
-                            if !stop_flag_clone.load(Ordering::SeqCst)
-                                && current_gen == my_generation
-                            {
-                                crate::ui::voice_chat::update_voice_chat_status("Listening...");
-                                crate::ui::voice_chat::update_conversation_state(
-                                    ConversationModeState::Listening,
-                                );
                             }
                         }));
 
@@ -2519,9 +2224,10 @@ impl RecordingController {
 
             Self::set_state_with_broadcast(&state, &event_broadcast, State::Idle).await;
             helpers::set_conversation_session(false);
-            hide_hold_badge();
-            crate::ui::voice_chat::update_voice_chat_status("Conversation ended");
-            crate::ui::voice_chat::update_conversation_state(ConversationModeState::Inactive);
+            // Return freed host memory to the OS after a conversation session
+            // (the dictation stop path already does this; conversation exits did
+            // not, leaving malloc retention). Memory-lifecycle only.
+            codescribe_core::memory::release_freed_heap();
             info!(
                 "Loop cleanup: conversation ended unexpectedly (gen {})",
                 my_generation
@@ -2583,12 +2289,9 @@ impl RecordingController {
 
         // 7. Transition back to IDLE
         self.set_state(State::Idle).await;
+        // Return freed host memory after a conversation session (see note above).
+        codescribe_core::memory::release_freed_heap();
         info!("STATE TRANSITION: CONVERSATION → IDLE");
-
-        // 8. Update UI
-        hide_hold_badge();
-        crate::ui::voice_chat::update_voice_chat_status("Conversation ended");
-        crate::ui::voice_chat::update_conversation_state(ConversationModeState::Inactive);
 
         Ok(())
     }
@@ -2639,8 +2342,6 @@ impl RecordingController {
         let hold_start_generation = Arc::clone(&self.hold_start_generation);
         let start_transition_in_flight = Arc::clone(&self.start_transition_in_flight);
         let session_telemetry = Arc::clone(&self.session_telemetry);
-        let opened_overlay_for_transcription =
-            Arc::clone(&self.opened_voice_chat_overlay_for_transcription);
 
         let task = tokio::spawn(async move {
             // Wait for the configured delay
@@ -2690,6 +2391,15 @@ impl RecordingController {
 
             let hold_mode = *hold_mode.read().await;
             let is_assistive = matches!(hold_mode, HoldMode::Chat | HoldMode::Selection);
+            // Cursor-following recording badge (config-gated): red for hold dictation,
+            // purple for assistive/agent. Works headless — no overlay needed.
+            if config.hold_indicator {
+                crate::os::hold_badge::show_badge_for_mode(if is_assistive {
+                    crate::os::hold_badge::BadgeMode::Assistive
+                } else {
+                    crate::os::hold_badge::BadgeMode::Hold
+                });
+            }
             let overlay_enabled = apply_runtime_transcription_profile(&config, is_assistive);
 
             // Start the recorder (skip in tests: no CoreAudio device needed)
@@ -2702,7 +2412,6 @@ impl RecordingController {
                     drop(rec_guard);
                     *session_id.write().await = None;
                     set_assistive_session(false);
-                    Self::present_recorder_unavailable("Hold-start");
                     return;
                 }
             };
@@ -2797,17 +2506,8 @@ impl RecordingController {
                 crate::audio::play_sound_with_volume("Tink", sound_volume);
             }
 
-            // Show badge with appropriate mode (Hold=red solid, Assistive=purple)
-            let badge_mode = if is_assistive {
-                BadgeMode::Assistive
-            } else {
-                BadgeMode::Hold
-            };
-            show_badge_for_mode(badge_mode);
-
             if is_assistive {
-                opened_overlay_for_transcription.store(false, Ordering::SeqCst);
-                // Capture context BEFORE showing any overlay (overlays can steal focus).
+                // Capture context BEFORE starting (paste-back / frontmost tracking).
                 let prior_frontmost_app = pre_overlay_frontmost_app.read().await.clone();
                 let ctx = match hold_mode {
                     HoldMode::Selection => tokio::task::spawn_blocking(move || {
@@ -2822,42 +2522,12 @@ impl RecordingController {
                     .unwrap_or_default(),
                 };
                 *assistive_context.write().await = Some(ctx);
-                crate::ui::voice_chat::set_voice_chat_target_app(
-                    assistive_context
-                        .read()
-                        .await
-                        .clone()
-                        .unwrap_or_default()
-                        .frontmost_app,
-                );
-
-                crate::ui::overlay::hide_transcription_overlay();
-                crate::ui::voice_chat::show_voice_chat_overlay();
-                crate::ui::voice_chat::show_agent_tab();
-                crate::ui::voice_chat::update_voice_chat_status("Listening...");
             } else {
                 // Capture frontmost app for paste actions (no selection/clipboard).
                 let ctx = tokio::task::spawn_blocking(capture_frontmost_app_only)
                     .await
                     .unwrap_or_default();
                 *assistive_context.write().await = Some(ctx);
-                crate::ui::voice_chat::set_voice_chat_target_app(
-                    assistive_context
-                        .read()
-                        .await
-                        .clone()
-                        .unwrap_or_default()
-                        .frontmost_app,
-                );
-                opened_overlay_for_transcription.store(false, Ordering::SeqCst);
-                crate::ui::overlay::clear_transcription_text();
-                if overlay_enabled {
-                    crate::ui::overlay::show_transcription_overlay();
-                    crate::ui::overlay::enter_recording_mode();
-                    crate::ui::overlay::update_transcription_status("Recording • Live preview");
-                } else {
-                    crate::ui::overlay::hide_transcription_overlay();
-                }
             }
         });
 
@@ -2899,6 +2569,15 @@ impl RecordingController {
         info!("Starting toggle recording (session={})", new_session_id);
 
         let config = self.config.read().await.clone();
+        // Cursor-following recording badge (config-gated): pulsing red for toggle /
+        // hands-off, purple for assistive/agent.
+        if config.hold_indicator {
+            crate::os::hold_badge::show_badge_for_mode(if is_assistive {
+                crate::os::hold_badge::BadgeMode::Assistive
+            } else {
+                crate::os::hold_badge::BadgeMode::Toggle
+            });
+        }
         let language = config.whisper_language;
         let toggle_silence_sec = config.toggle_silence_sec;
         let beep_enabled = config.beep_on_start;
@@ -2912,7 +2591,6 @@ impl RecordingController {
             Err(error) => {
                 drop(recorder_guard);
                 self.reset_session_after_start_failure("Toggle-start").await;
-                Self::present_recorder_unavailable("Toggle-start");
                 return Err(error);
             }
         };
@@ -2994,17 +2672,7 @@ impl RecordingController {
             crate::audio::play_sound_with_volume("Tink", sound_volume);
         }
 
-        // Show badge with appropriate mode
-        let badge_mode = if is_assistive {
-            BadgeMode::Assistive
-        } else {
-            BadgeMode::Toggle
-        };
-        show_badge_for_mode(badge_mode);
-
         if is_assistive {
-            self.opened_voice_chat_overlay_for_transcription
-                .store(false, Ordering::SeqCst);
             // Toggle-assistive is a hands-off chat loop with optional selection context.
             // Capture selection when available (best-effort), otherwise just app name.
             let ctx = tokio::task::spawn_blocking(capture_assistive_context)
@@ -3017,43 +2685,12 @@ impl RecordingController {
             .await
             .ok();
             *self.assistive_context.write().await = Some(ctx);
-            crate::ui::voice_chat::set_voice_chat_target_app(
-                self.assistive_context
-                    .read()
-                    .await
-                    .clone()
-                    .unwrap_or_default()
-                    .frontmost_app,
-            );
-
-            crate::ui::overlay::hide_transcription_overlay();
-            crate::ui::voice_chat::show_voice_chat_overlay();
-            crate::ui::voice_chat::show_agent_tab();
-            crate::ui::voice_chat::update_voice_chat_status("Listening...");
         } else {
             // Capture frontmost app for paste actions (no selection/clipboard).
             let ctx = tokio::task::spawn_blocking(capture_frontmost_app_only)
                 .await
                 .unwrap_or_default();
             *self.assistive_context.write().await = Some(ctx);
-            crate::ui::voice_chat::set_voice_chat_target_app(
-                self.assistive_context
-                    .read()
-                    .await
-                    .clone()
-                    .unwrap_or_default()
-                    .frontmost_app,
-            );
-            self.opened_voice_chat_overlay_for_transcription
-                .store(false, Ordering::SeqCst);
-            crate::ui::overlay::clear_transcription_text();
-            if overlay_enabled {
-                crate::ui::overlay::show_transcription_overlay();
-                crate::ui::overlay::enter_recording_mode();
-                crate::ui::overlay::update_transcription_status("Recording • Live preview");
-            } else {
-                crate::ui::overlay::hide_transcription_overlay();
-            }
         }
 
         Ok(())
@@ -3147,38 +2784,17 @@ impl RecordingController {
         // path), so clearing it here via the shared helper is safe.
         self.reset_session_fields().await;
 
-        // Reset UI indicators
-        hide_hold_badge();
-
-        // Hide transcription overlay explicitly on toggle stop
-        crate::ui::overlay::hide_transcription_overlay();
-
         // Assistive: finalize the cumulative bubble and invoke the agent ONCE with the
         // complete session message.
         if assistive && !session_transcript.trim().is_empty() {
             let ctx = assistive_ctx.unwrap_or_default();
             let assistive_input = build_assistive_input(&session_transcript, &ctx);
-            crate::ui::voice_chat::show_voice_chat_overlay();
-            crate::ui::voice_chat::show_agent_tab();
-            // Single source of truth: set the user bubble to EXACTLY the
-            // session_transcript that is sent to the agent. The streaming lane
-            // (`append_voice_chat_user_utterance`) skips empty utterances, so a
-            // state-only finalize could leave the bubble empty/absent while the
-            // agent still received the final-pass transcript. `finalize_user_message_impl`
-            // (via `set_voice_chat_user_text`) reuses the active streaming index if
-            // present, so this REPLACES the existing bubble rather than creating a
-            // second one — exactly one user bubble whose text == agent input.
-            crate::ui::voice_chat::set_voice_chat_user_text(&session_transcript);
-            crate::ui::voice_chat::set_voice_chat_sending(true);
-            crate::ui::voice_chat::update_voice_chat_status("Thinking…");
             helpers::send_assistive_with_agent_runtime(
                 assistive_input,
                 config.whisper_language,
                 config.ai_assistive_max_tokens,
             )
             .await;
-        } else {
-            crate::ui::voice_chat::update_voice_chat_status("Ready");
         }
 
         if let Some(e) = stop_error {
@@ -3279,8 +2895,6 @@ impl RecordingController {
         }
 
         self.set_state(State::Busy).await;
-        show_badge_for_mode(BadgeMode::Processing);
-        crate::ui::overlay::enter_processing_mode();
 
         let result = {
             let phase1 = std::time::Instant::now();
@@ -3368,9 +2982,6 @@ impl RecordingController {
             .store(false, Ordering::SeqCst);
         self.start_transition_in_flight
             .store(false, Ordering::SeqCst);
-        hide_hold_badge();
-        crate::ui::voice_chat::update_voice_chat_status("Ready");
-        crate::ui::overlay::hide_transcription_overlay();
     }
 
     /// Save the current recording segment to disk WITHOUT stopping the recorder.
@@ -3387,97 +2998,17 @@ impl RecordingController {
     /// is unavailable (protects against overlay button race). Errors only on
     /// actual save failures (e.g. recorder buffer lock poisoned during
     /// snapshot_wav).
-    async fn commit_segment(&self, with_augment: bool) -> Result<()> {
+    async fn commit_segment(&self, _with_augment: bool) -> Result<()> {
         let current_state = self.current_state().await;
         if current_state != State::RecToggle {
             warn!(
-                "commit_segment called while state={}; ignoring (overlay button race?)",
+                "commit_segment called while state={}; ignoring (legacy overlay action)",
                 current_state
             );
             return Ok(());
         }
 
-        // Read overlay text NOW — before any async work — so we capture what was
-        // visible at click time, not at save-completion time.
-        let segment_text = crate::ui::overlay::current_segment_text();
-        if segment_text.trim().is_empty() {
-            info!("commit_segment: empty segment text; skipping save");
-            return Ok(());
-        }
-
-        // Snapshot recorder buffer slice [last_segment_audio_offset..now].
-        let from_offset = self.last_segment_audio_offset.load(Ordering::SeqCst);
-        let snapshot = {
-            let recorder_guard = self.recorder.lock().await;
-            let Some(streaming) = recorder_guard.as_ref() else {
-                warn!("commit_segment: no recorder available; skipping save");
-                return Ok(());
-            };
-            streaming
-                .recorder
-                .snapshot_wav(from_offset)
-                .await
-                .context("snapshot_wav failed")?
-        };
-
-        let Some(snapshot) = snapshot else {
-            info!("commit_segment: no new audio since last segment; skipping save");
-            return Ok(());
-        };
-
-        info!(
-            "Segment commit: {} samples ({:.2}s) from buffer offset {} to {}, with_augment={}",
-            snapshot.sample_count,
-            snapshot.duration_sec,
-            from_offset,
-            snapshot.end_offset,
-            with_augment
-        );
-
-        // Save transcript + audio + Quick Notes through existing core helpers.
-        let now = chrono::Local::now();
-        let entry = codescribe_core::state::history::save_entry_with_timestamp(
-            segment_text.as_str(),
-            Some(now),
-            codescribe_core::state::history::TranscriptKind::Raw,
-        );
-
-        if codescribe_core::state::history::save_audio(
-            &snapshot.wav_path,
-            now,
-            Some(segment_text.as_str()),
-            codescribe_core::state::history::TranscriptKind::Raw,
-        )
-        .is_none()
-        {
-            warn!(
-                "Segment audio save returned None; transcript .txt saved at {}",
-                entry.path.display()
-            );
-        }
-
-        if let Err(e) =
-            codescribe_core::state::notes::append_quick_note(segment_text.as_str(), now, None)
-        {
-            warn!("Segment Quick Notes append failed: {}", e);
-        }
-
-        // Advance the segment marker so the next commit clips from here.
-        self.last_segment_audio_offset
-            .store(snapshot.end_offset, Ordering::SeqCst);
-
-        info!("Segment transcript saved: {}", entry.path.display());
-
-        // Augment: spawn LLM handoff off-thread (no main thread block).
-        if with_augment {
-            let text_for_chat = segment_text.clone();
-            tokio::spawn(async move {
-                crate::ui::voice_chat::show_voice_chat_overlay();
-                crate::ui::voice_chat::show_agent_tab();
-                crate::ui::voice_chat::handoff_transcript_to_chat(&text_for_chat);
-            });
-        }
-
+        info!("commit_segment: legacy transcription overlay actions were removed; skipping");
         Ok(())
     }
 
@@ -3534,9 +3065,6 @@ impl RecordingController {
         let hold_mode = *self.hold_mode.read().await;
         let force_raw = *self.force_raw_mode.read().await;
         let force_ai = *self.force_ai_mode.read().await;
-
-        // Switch badge to processing mode (orange, pulsing)
-        show_badge_for_mode(BadgeMode::Processing);
 
         let result = self
             .process_recording(session_id, assistive, hold_mode, force_raw, force_ai)
@@ -3596,7 +3124,6 @@ impl RecordingController {
             }
         };
 
-        let chat_active = assistive;
         let assistive_loop = assistive && self.assistive_loop_active.load(Ordering::SeqCst);
 
         let mut local_final_pass_verdict = None;
@@ -3635,10 +3162,6 @@ impl RecordingController {
                 local_final_pass_attempted = true;
                 let wav_path = path.as_path().to_path_buf();
                 let lang = language_opt.map(str::to_string);
-
-                if chat_active {
-                    crate::ui::voice_chat::update_voice_chat_status("Finalizing… (20%)");
-                }
 
                 info!(
                     "Running final-pass local STT adjudicator: {}",
@@ -3754,10 +3277,6 @@ impl RecordingController {
                     info!("NoSpeech outcome: reason={} stats=unavailable", reason);
                 }
                 if assistive_loop {
-                    if chat_active {
-                        crate::ui::voice_chat::set_voice_chat_sending(false);
-                        crate::ui::voice_chat::update_voice_chat_status("Listening...");
-                    }
                     warn!("NoSpeech in assistive loop; continuing hands-off listening");
                 }
 
@@ -3808,11 +3327,7 @@ impl RecordingController {
                     write_truth_sidecar_logged(&audio_saved_path, &truth_metadata);
                 }
 
-                if !assistive {
-                    crate::ui::overlay::update_transcription_status(&final_status);
-                }
-
-                return Ok(ProcessRecordingOutcome::no_speech(reason, final_status));
+                return Ok(ProcessRecordingOutcome::no_speech(reason));
             }
         };
 
@@ -3856,7 +3371,6 @@ impl RecordingController {
             no_speech_reason: None,
             commit_trigger: pipeline_outcome.commit_trigger,
             transcript_present,
-            final_status: pipeline_outcome.final_status,
         })
     }
 
@@ -3932,7 +3446,7 @@ impl RecordingController {
             truth_display_status,
             append_mode,
             live_stream_session,
-            user_needs_separator,
+            user_needs_separator: _user_needs_separator,
             assistant_needs_separator: _assistant_needs_separator,
             skip_user_bubble,
         } = p;
@@ -3982,7 +3496,6 @@ impl RecordingController {
                 Some(&raw_text),
             );
             info!("Raw transcript saved: {}", raw_entry.path.display());
-            crate::ui::voice_chat::update_drawer_after_save(raw_entry.path.as_path());
             Some(raw_entry.path)
         } else {
             None
@@ -4024,31 +3537,19 @@ impl RecordingController {
                 effective_hold_mode
             );
 
-            if chat_active {
-                crate::ui::voice_chat::show_voice_chat_overlay();
-                if skip_user_bubble {
-                    // Event pipeline: Preview already streamed text into the bubble.
-                    // Just finalize the user message (stop streaming indicator)
-                    // without re-writing the text.
-                    crate::ui::voice_chat::finalize_voice_chat_user_message();
-                    self.toggle_user_has_text.store(true, Ordering::SeqCst);
-                } else if !should_allow_full_user_bubble_rewrite(
-                    skip_user_bubble,
-                    append_mode,
-                    live_stream_session,
-                ) {
-                    // Delta-first path: avoid full rewrites while stream is active.
-                    if user_needs_separator {
-                        crate::ui::voice_chat::append_voice_chat_user_delta("\n\n");
-                    }
-                    crate::ui::voice_chat::append_voice_chat_user_delta(&clean_text);
-                    self.toggle_user_has_text.store(true, Ordering::SeqCst);
-                } else {
-                    crate::ui::voice_chat::set_voice_chat_user_text(&clean_text);
-                }
-                crate::ui::voice_chat::show_agent_tab();
-                crate::ui::voice_chat::set_voice_chat_sending(true);
-                crate::ui::voice_chat::update_voice_chat_status("Thinking… (35%)");
+            if chat_active
+                && (skip_user_bubble
+                    || !should_allow_full_user_bubble_rewrite(
+                        skip_user_bubble,
+                        append_mode,
+                        live_stream_session,
+                    ))
+            {
+                // Preserve controller state: the user-bubble was either finalized
+                // (event pipeline) or built from deltas (delta-first path); both mark
+                // that the toggle session carries user text. The full-rewrite branch
+                // does not set this flag.
+                self.toggle_user_has_text.store(true, Ordering::SeqCst);
             }
 
             let mut ctx = self
@@ -4066,20 +3567,6 @@ impl RecordingController {
                     .and_then(|c| c.frontmost_app);
             }
 
-            {
-                let app = ctx
-                    .frontmost_app
-                    .as_deref()
-                    .unwrap_or("?")
-                    .trim()
-                    .to_string();
-                let sel_len = ctx.selected_text.as_deref().unwrap_or("").len();
-                crate::ui::voice_chat::update_voice_chat_context_summary(&format!(
-                    "ctx: {} | sel: {}",
-                    app, sel_len
-                ));
-            }
-
             let missing_selection = matches!(effective_hold_mode, HoldMode::Selection)
                 && ctx.selected_text.as_deref().unwrap_or("").trim().is_empty();
             if missing_selection {
@@ -4087,14 +3574,6 @@ impl RecordingController {
                     "Selection mode requested, but no selected text captured; falling back to Chat mode"
                 );
                 effective_hold_mode = HoldMode::Chat;
-                if chat_active {
-                    crate::ui::voice_chat::update_voice_chat_status(
-                        "Selection unavailable - chat fallback",
-                    );
-                    crate::ui::voice_chat::add_voice_chat_system_message(
-                        "Selection was not detected. Continuing without selected-text context.",
-                    );
-                }
             }
 
             // Split behavior:
@@ -4102,12 +3581,6 @@ impl RecordingController {
             // - Selection: if no selection was captured, we already downgraded to Chat mode.
             let assistive_input = build_assistive_input(&clean_text, &ctx);
             if chat_active {
-                // Single source of truth: render the user bubble with exactly what
-                // the agent receives (clean_text), reusing the streaming bubble —
-                // same fix as the stop_toggle_recording path. Prevents the desync
-                // where the agent answers but no user bubble shows.
-                crate::ui::voice_chat::set_voice_chat_user_text(&clean_text);
-                crate::ui::voice_chat::set_voice_chat_sending(true);
                 send_assistive_with_agent_runtime(
                     assistive_input,
                     config.whisper_language,
@@ -4305,6 +3778,22 @@ impl RecordingController {
 
         let final_formatted_text = formatted_text.clone();
 
+        // Surface the authoritative final transcript to external dictation surfaces
+        // (the SwiftUI overlay). This is the same `final_formatted_text` that is
+        // pasted (auto-delivery) and written to history (tray "Copy"), so the overlay
+        // FINAL can replace its raw per-utterance streaming assembly with the clean
+        // LocalFinalPass text. Emitted here — inside the awaited stop pipeline, before
+        // the Idle StateChange — so it reaches the listener ahead of the stop/finalise
+        // events that drive the overlay's finalize.
+        if !assistive && !final_formatted_text.trim().is_empty() {
+            let _ = self.event_broadcast.send(IpcEvent {
+                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                payload: IpcEventPayload::FinalTranscript {
+                    text: final_formatted_text.clone(),
+                },
+            });
+        }
+
         let final_status = compose_final_status(&truth_display_status, output_kind);
         let truth_metadata = RecordingTruthMetadata {
             source: transcript_source,
@@ -4330,26 +3819,14 @@ impl RecordingController {
             write_truth_sidecar_logged(path, &truth_metadata);
         }
 
-        if !assistive {
-            crate::ui::overlay::update_transcription_status(&final_status);
-        }
-
         if should_apply_transcription_action_contract(assistive, live_stream_session)
             && config.transcription_overlay_enabled
         {
-            let action_contract_mode = resolve_transcription_action_contract_mode(
+            let _action_contract_mode = resolve_transcription_action_contract_mode(
                 force_raw,
                 force_ai,
                 config.ai_formatting_enabled,
                 ai_key_available,
-            );
-            // Keep the ephemeral transcription overlay in sync with what we will paste/save.
-            // This makes it easier to understand differences between streaming preview and final-pass output.
-            crate::ui::overlay::set_transcription_action_contract(
-                &raw_text,
-                &final_formatted_text,
-                action_contract_mode,
-                truth_display_status.clone(),
             );
         } else if !assistive {
             debug!(
@@ -4359,16 +3836,7 @@ impl RecordingController {
 
         // Quick Notes: optionally save to daily note file (dictation-only).
         if !assistive && config.quick_notes_enabled {
-            let frontmost_app = tokio::task::spawn_blocking(capture_frontmost_app_only)
-                .await
-                .ok()
-                .and_then(|ctx| ctx.frontmost_app);
-
-            match crate::state::notes::append_quick_note(
-                &formatted_text,
-                recording_timestamp,
-                frontmost_app.as_deref(),
-            ) {
+            match crate::state::notes::append_quick_note(&formatted_text, recording_timestamp) {
                 Ok(path) => {
                     info!("Quick note saved: {}", path.display());
                     #[cfg(target_os = "macos")]
@@ -4404,6 +3872,23 @@ impl RecordingController {
             write_truth_sidecar_logged(&audio_saved_path, &truth_metadata);
         }
 
+        // Overlay disabled = no decision surface. The action-driven gates above
+        // (commit_trigger / toggle-adjudicated / live-stream) hand the transcript
+        // to the overlay; with no overlay it would just vanish. Deliver headless by
+        // pasting directly at the cursor — unless there is nothing to paste (no
+        // speech) or Notes Mode chose save-only.
+        let overlay_disabled = !config.transcription_overlay_enabled;
+        let has_final_text = !final_formatted_text.trim().is_empty();
+        let notes_save_only = config.quick_notes_enabled && config.quick_notes_save_only;
+        if overlay_disabled
+            && !assistive
+            && truth_no_speech_reason.is_none()
+            && has_final_text
+            && !notes_save_only
+        {
+            should_auto_paste = true;
+        }
+
         if cfg!(test) {
             info!("Skipping paste in tests (mode={})", mode_label);
         } else if should_auto_paste {
@@ -4431,7 +3916,6 @@ impl RecordingController {
             );
             info!("Transcript saved: {}", entry.path.display());
             write_truth_sidecar_logged(&entry.path, &truth_metadata);
-            crate::ui::voice_chat::refresh_drawer();
         } else if assistive {
             info!(
                 "Assistive flow: skipping legacy final transcript save (ThreadStore is source of truth)"
@@ -4511,10 +3995,7 @@ impl RecordingController {
             });
         }
 
-        Ok(types::TranscriptProcessOutcome {
-            commit_trigger,
-            final_status,
-        })
+        Ok(types::TranscriptProcessOutcome { commit_trigger })
     }
 
     /// Force reset to IDLE state without stopping recorder.
@@ -4529,12 +4010,6 @@ impl RecordingController {
     /// Internal helper to reset all state variables
     async fn reset_state(&self) {
         self.reset_session_fields().await;
-
-        // Hide UI indicators
-        hide_hold_badge();
-
-        // Update shared UI status
-        crate::ui::voice_chat::update_voice_chat_status("Idle");
 
         info!("State reset to IDLE complete");
     }

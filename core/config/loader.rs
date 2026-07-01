@@ -11,11 +11,12 @@
 use directories::BaseDirs;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::defaults::{
-    default_assistive_model, default_formatting_model, default_llm_endpoint, default_llm_model,
+    default_assistive_model, default_assistive_provider, default_formatting_model,
+    default_formatting_provider, default_llm_endpoint, default_llm_model,
 };
 use super::types::{Config, Language, OverlayPositionMode, TranscriptSendMode};
 
@@ -31,6 +32,18 @@ impl Config {
     /// If the .env file doesn't exist or is malformed, returns default configuration
     /// without raising an error.
     pub fn load() -> Self {
+        Self::load_with_keychain_population(true)
+    }
+
+    /// Load runtime configuration without reading Keychain.
+    ///
+    /// This is for UI/runtime surfaces that must not trigger a macOS Keychain
+    /// password prompt as a side effect of starting local dictation.
+    pub fn load_without_keychain() -> Self {
+        Self::load_with_keychain_population(false)
+    }
+
+    fn load_with_keychain_population(populate_keychain: bool) -> Self {
         let env_path = Self::env_path();
         let mut file_env_vars: Option<HashMap<String, String>> = None;
 
@@ -56,8 +69,10 @@ impl Config {
             Self::inject_file_env_for_runtime(vars);
         }
 
-        // Load API keys from Keychain (only if not already set by .env)
-        super::keychain::populate_env_from_keychain();
+        // Load API keys from Keychain (only if not already set by .env).
+        if populate_keychain {
+            super::keychain::populate_env_from_keychain();
+        }
 
         // Load user settings from JSON
         let user_settings = super::settings::UserSettings::load();
@@ -117,8 +132,16 @@ impl Config {
         Self::config_init_set_env_if_missing("LLM_MODEL", default_llm_model());
         Self::config_init_set_env_if_missing("LLM_FORMATTING_ENDPOINT", &endpoint);
         Self::config_init_set_env_if_missing("LLM_FORMATTING_MODEL", default_formatting_model());
+        Self::config_init_set_env_if_missing(
+            "LLM_FORMATTING_PROVIDER",
+            default_formatting_provider(),
+        );
         Self::config_init_set_env_if_missing("LLM_ASSISTIVE_ENDPOINT", &endpoint);
         Self::config_init_set_env_if_missing("LLM_ASSISTIVE_MODEL", default_assistive_model());
+        Self::config_init_set_env_if_missing(
+            "LLM_ASSISTIVE_PROVIDER",
+            default_assistive_provider(),
+        );
     }
 
     /// Load configuration values from environment variables.
@@ -829,12 +852,13 @@ impl Config {
     }
 
     /// Parse .env file into HashMap.
-    pub fn parse_env_file(path: &PathBuf) -> anyhow::Result<HashMap<String, String>> {
+    pub fn parse_env_file(path: &Path) -> anyhow::Result<HashMap<String, String>> {
         // `path` is always internally derived from `Config::env_path()`
         // (config_dir()/.env, or the `CODESCRIBE_ENV_PATH` override used by tests
         // and power users) — never raw request or end-user input. No external
         // path-traversal source reaches this read.
-        let contents = fs::read_to_string(path)?;
+        let path = canonical_existing_file(path)?;
+        let contents = fs::read_to_string(&path)?;
         let mut vars = HashMap::new();
 
         for line in contents.lines() {
@@ -1048,6 +1072,14 @@ impl Config {
 
         Self::config_dir().join(".env")
     }
+}
+
+fn canonical_existing_file(path: &Path) -> anyhow::Result<PathBuf> {
+    let path = path.canonicalize()?;
+    if !path.is_file() {
+        anyhow::bail!("Config env path is not a file: {}", path.display());
+    }
+    Ok(path)
 }
 
 #[cfg(test)]

@@ -154,8 +154,8 @@ pipx install pre-commit
 # Install CLI + repo-local git hooks
 make install
 
-# Verify installation
-codescribe --version
+# Verify installation (prints the version)
+make version
 ```
 
 ### Install via Release DMG
@@ -186,7 +186,7 @@ codescribe
 
 # Open/create config file
 make config
-# or: codescribe --config
+# or: edit ~/.codescribe/.env directly
 
 # Verbose logging
 codescribe -v

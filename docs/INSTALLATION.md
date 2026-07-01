@@ -18,8 +18,8 @@ make install
 ### Method 2: App Bundle (For Distribution)
 
 ```bash
-make bundle           # Creates bundle/Codescribe.app
-make install-app      # Copies to /Applications/Codescribe.app (auto-caches models)
+make app PROFILE=release   # Builds macos/build/Build/Products/Release/Codescribe.app
+make install-app      # Builds + copies to /Applications/Codescribe.app (auto-caches models)
 ```
 
 **Result**: Standard macOS .app bundle in `/Applications/`.
@@ -132,7 +132,7 @@ Codescribe.app/
 
 | Key                          | Value                 | Purpose                      |
 | ---------------------------- | --------------------- | ---------------------------- |
-| CFBundleIdentifier           | com.codescribe.app    | Unique app identifier        |
+| CFBundleIdentifier           | com.vetcoders.codescribe | Unique app identifier     |
 | CFBundleIconFile             | AppIcon               | Points to AppIcon.icns       |
 | CFBundleExecutable           | codescribe            | Main binary name             |
 | LSMinimumSystemVersion       | 14.0                  | Requires macOS Sonoma+       |

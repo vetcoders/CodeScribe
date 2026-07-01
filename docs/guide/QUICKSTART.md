@@ -15,8 +15,8 @@ cd codescribe
 
 # Build and install
 make install           # Binary to ~/.cargo/bin/codescribe; ensures runtime model/cache availability
-make bundle            # Create codescribe.app
-make install-app       # Copy to /Applications
+make app PROFILE=release   # Build Codescribe.app
+make install-app       # Build + copy app to /Applications
 ```
 
 ### Option B: From Release (Users)
@@ -49,7 +49,7 @@ Recommended: configure codescribe in the **Settings** window.
 
 ```bash
 # Menu bar icon → Settings
-# or: codescribe --config (power-user overrides)
+# or: edit ~/.codescribe/.env (power-user overrides)
 ```
 
 ### Essential Settings
@@ -96,7 +96,7 @@ Look at the menu bar icon:
 
 ```bash
 # Check version
-codescribe --version
+make version
 
 # Check status
 make status
