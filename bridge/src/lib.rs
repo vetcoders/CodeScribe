@@ -19,6 +19,7 @@ uniffi::setup_scaffolding!();
 mod agent;
 mod config;
 mod hotkeys;
+mod notes;
 mod recording;
 mod threads;
 

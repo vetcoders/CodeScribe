@@ -30,8 +30,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let showAgentNotification = Notification.Name("com.vetcoders.codescribe.showAgent")
     private static let notificationObject = Bundle.main.bundleIdentifier ?? "com.vetcoders.codescribe"
 
+    private static let helpURL = URL(string: "https://vetcoders.github.io/codescribe/")!
+
     private let model = AppModel.shared
     private let hotkeys = CodescribeHotkeys()
+    // Stateless bridge handles backing the tray's app-level actions (notes,
+    // config paths, transcript history). Each call reads/writes live on-disk truth.
+    private let notes = CodescribeNotes()
+    private let config = CodescribeConfig()
+    private let threads = CodescribeThreads()
     private var agentWindow: NSWindow?
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
@@ -77,9 +84,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.overlay.prepareForRecordingStart()
             model.overlay.show()
         }
+        wireTrayActions()
         installStatusItem()
         startHotkeys()
         prewarmRecordingController()
+    }
+
+    /// Bind the tray's app-level action closures (Help / About / Notes /
+    /// Diagnostics) to real behaviour. Navigation intents are wired separately via
+    /// `onIntent`; these are the non-navigation actions the tray view invokes.
+    private func wireTrayActions() {
+        model.tray.onAbout = {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.orderFrontStandardAboutPanel(nil)
+        }
+        model.tray.onHelp = {
+            NSWorkspace.shared.open(Self.helpURL)
+        }
+
+        // ── Notes ──
+        model.tray.onOpenNotesFolder = { [notes] in
+            NSWorkspace.shared.open(URL(fileURLWithPath: notes.notesDir()))
+        }
+        model.tray.onOpenTodayNote = { [notes] in
+            let path = notes.todayNotePath()
+            if FileManager.default.fileExists(atPath: path) {
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            } else {
+                // No note captured today yet — reveal the notes folder instead.
+                NSWorkspace.shared.open(URL(fileURLWithPath: notes.notesDir()))
+            }
+        }
+        // Save the most recent transcript as a daily note, then paste it.
+        model.tray.onQuickNotes = { [notes, threads] in
+            guard let text = Self.latestTranscriptText(threads), !text.isEmpty else { return }
+            _ = try? notes.appendQuickNote(text: text)
+            try? notes.pasteText(text: text)
+        }
+        // Save-only variant: append to today's note without pasting.
+        model.tray.onSaveOnlyNotes = { [notes, threads] in
+            guard let text = Self.latestTranscriptText(threads), !text.isEmpty else { return }
+            _ = try? notes.appendQuickNote(text: text)
+        }
+
+        // ── Diagnostics ──
+        model.tray.onOpenLogFolder = { [config] in
+            // stream.log + .env + notes/transcriptions all live under the data dir.
+            NSWorkspace.shared.open(URL(fileURLWithPath: config.configDir()))
+        }
+        model.tray.onCopyDebugInfo = { [config, notes, hotkeys] in
+            Task { @MainActor in
+                let recording = await hotkeys.isRecording()
+                let settings = config.loadSettings()
+                let info = Bundle.main.infoDictionary
+                let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+                let build = info?["CFBundleVersion"] as? String ?? "?"
+                let stt = settings.useLocalStt
+                    ? "local (\(settings.localModel))"
+                    : "cloud (\(settings.sttEndpoint ?? "default"))"
+                let text = [
+                    "codescribe debug info",
+                    "app version: \(version) (\(build))",
+                    "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)",
+                    "recording: \(recording)",
+                    "STT engine: \(stt)",
+                    "config dir: \(config.configDir())",
+                    "notes dir: \(notes.notesDir())",
+                ].joined(separator: "\n")
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+        }
+    }
+
+    /// Text of the most recent transcript artifact, mirroring the tray engine's
+    /// `latestTranscriptText` (newest history entry → its file contents).
+    private static func latestTranscriptText(_ threads: CodescribeThreads) -> String? {
+        guard let path = threads.recentHistory(limit: 1).first?.path else { return nil }
+        return try? threads.readHistoryText(path: path)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
