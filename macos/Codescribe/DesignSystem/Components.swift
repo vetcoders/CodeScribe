@@ -52,9 +52,17 @@ struct StatusPill: View {
                         .frame(width: 9, height: 9)
                         .scaleEffect(ripple ? 2.7 : 0.5)
                         .opacity(ripple ? 0 : 0.7)
+                    // Animated pulse dot is rendered ONLY while rippling. Removing it
+                    // from the view tree in Idle physically tears down the
+                    // repeatForever animation — a Transaction(animation: nil) snap
+                    // does NOT cancel an in-flight repeatForever, which left it
+                    // ticking the render loop at ~30% CPU in Idle.
+                    Circle().fill(color).frame(width: 6, height: 6)
+                        .opacity(pulse ? 1 : 0.7)
+                } else {
+                    Circle().fill(color).frame(width: 6, height: 6)
+                        .opacity(0.7)
                 }
-                Circle().fill(color).frame(width: 6, height: 6)
-                    .opacity(pulse ? 1 : 0.7)
             }
             .frame(width: 9, height: 9)
             Text(text)
@@ -66,10 +74,55 @@ struct StatusPill: View {
         .background(color.opacity(0.12))
         .overlay(Capsule().strokeBorder(color.opacity(0.3), lineWidth: 1))
         .clipShape(Capsule())
-        .onAppear {
+        .onAppear { syncStatusAnimations() }
+        .onChange(of: rippling) { _, _ in syncStatusAnimations() }
+    }
+
+    /// `pulse` and `ripple` drive `.repeatForever` animations. They must run ONLY
+    /// while the pill represents a live/active state (`rippling`). Previously the
+    /// softpulse was started unconditionally in `onAppear` and never stopped — and
+    /// because this pill lives in the always-visible overlay header, that left a
+    /// repeatForever ticking the SwiftUI view graph every frame in Idle (100% CPU,
+    /// re-rasterizing the host panel's shadow + rounded-rect strokes each frame).
+    /// Gate it on `rippling` and, when inactive, snap the state back with animation
+    /// disabled so the in-flight repeatForever is torn down rather than left running.
+    private func syncStatusAnimations() {
+        if rippling {
             withAnimation(CSMotion.softpulse) { pulse = true }
-            if rippling { withAnimation(CSMotion.ripple) { ripple = true } }
+            withAnimation(CSMotion.ripple) { ripple = true }
+        } else {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                pulse = false
+                ripple = false
+            }
         }
+    }
+}
+
+/// Non-animated status pill for Idle/final states. A SEPARATE view type (distinct
+/// SwiftUI identity) with NO @State and NO onAppear animation — so it can never
+/// keep a `.repeatForever` ticking the render loop while visible in Idle. The
+/// header swaps to this type whenever the pill is not in a live/rippling state, so
+/// the animated pill is removed from the tree (which actually tears the animation
+/// down) instead of relying on a fragile in-place cancel.
+struct StaticStatusPill: View {
+    let text: String
+    var color: Color = CSColor.oliveLight
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 6, height: 6).opacity(0.7)
+                .frame(width: 9, height: 9)
+            Text(text)
+                .font(CSFont.metaMono)
+                .foregroundStyle(color)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(color.opacity(0.12))
+        .overlay(Capsule().strokeBorder(color.opacity(0.3), lineWidth: 1))
+        .clipShape(Capsule())
     }
 }
 

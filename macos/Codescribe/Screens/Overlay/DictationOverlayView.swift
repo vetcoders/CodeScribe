@@ -57,12 +57,21 @@ struct DictationOverlayView: View {
     private var header: some View {
         HStack(spacing: 12) {
             Wordmark(size: 15)
-            StatusPill(
-                text: state.statusText,
-                color: state.statusColor,
-                rippling: state.statusRippling
-            )
-            .padding(.leading, 6)
+            // Swap the whole VIEW TYPE on live vs idle, not just a flag: the
+            // animated pill (with @State + repeatForever) exists ONLY while live,
+            // and is replaced by a static pill of different identity in idle/final,
+            // so SwiftUI tears down its animation instead of leaving it ticking.
+            if state.statusRippling {
+                StatusPill(
+                    text: state.statusText,
+                    color: state.statusColor,
+                    rippling: true
+                )
+                .padding(.leading, 6)
+            } else {
+                StaticStatusPill(text: state.statusText, color: state.statusColor)
+                    .padding(.leading, 6)
+            }
             Spacer(minLength: 0)
             HStack(spacing: 14) {
                 Image(systemName: "mic")

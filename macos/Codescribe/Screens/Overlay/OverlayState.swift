@@ -120,6 +120,13 @@ final class OverlayState: ObservableObject {
     /// SAME text the delivery/paste and tray "Copy" use. When present it is the
     /// FINAL the overlay shows, instead of the raw per-utterance streaming assembly.
     private var authoritativeFinalText: String?
+    /// Once a session is finalized (mode `.formatted` / Idle), the transcript is
+    /// FROZEN. Late streaming events (Preview/Correction/UtteranceFinal/VAD) that the
+    /// engine may still emit during/after teardown are DROPPED instead of mutating
+    /// `@Published` state — otherwise each late apply re-invalidates the hosting view
+    /// (TextEditor re-layout) and spins the SwiftUI render graph at 100% CPU in Idle.
+    /// The authoritative `FinalTranscript` is the only post-finalize update allowed.
+    private var finalized = false
     private var toastTask: Task<Void, Never>?
     private var mockRevealTask: Task<Void, Never>?
 
@@ -276,6 +283,7 @@ final class OverlayState: ObservableObject {
     }
 
     func handleRecordingPreparing() {
+        finalized = false
         mode = .listening
         warmingUp = true
         audioReady = false
@@ -290,6 +298,7 @@ final class OverlayState: ObservableObject {
     }
 
     func handleRecordingStarted() {
+        finalized = false
         mode = .listening
         warmingUp = false
         audioReady = true
@@ -317,6 +326,7 @@ final class OverlayState: ObservableObject {
     /// clears it on every `UtteranceFinal`. So we simply mirror it — no prefix
     /// matching, no commit-on-mismatch.
     func applyPreview(_ text: String) {
+        guard !finalized else { return }
         let next = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
         markTranscriptActivity()
@@ -329,6 +339,7 @@ final class OverlayState: ObservableObject {
     /// segment (and only when `previousText` matches it). Never a free normalized
     /// search across all committed slots.
     func applyCorrection(_ text: String, previousText: String) {
+        guard !finalized else { return }
         let corrected = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !corrected.isEmpty else { return }
         markTranscriptActivity()
@@ -360,6 +371,7 @@ final class OverlayState: ObservableObject {
     /// normalized matching, no text-dedup (a legitimately repeated token must not
     /// be dropped).
     func applyFinal(utteranceId: UInt64, _ text: String) {
+        guard !finalized else { return }
         markTranscriptActivity()
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
@@ -370,6 +382,7 @@ final class OverlayState: ObservableObject {
     }
 
     func applyReplaceRange(utteranceId: UInt64, start: UInt64, end: UInt64, text: String) {
+        guard !finalized else { return }
         guard let index = committedSegments.lastIndex(where: { $0.utteranceId == utteranceId }) else {
             showToast("Skipped unbound transcript patch")
             return
@@ -382,6 +395,7 @@ final class OverlayState: ObservableObject {
     }
 
     func applyInsertAnnotation(utteranceId: UInt64, position: UInt64, text: String) {
+        guard !finalized else { return }
         let annotation = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !annotation.isEmpty else { return }
         guard let index = committedSegments.lastIndex(where: { $0.utteranceId == utteranceId }) else {
@@ -408,9 +422,11 @@ final class OverlayState: ObservableObject {
     /// it stays raw-streaming on purpose ("live preview · raw").
     func applyFinalTranscript(_ text: String) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
+        // Dedupe: this event fires once per stop, but a redundant re-emit must not
+        // reassign `@Published` state (each write re-invalidates the TextEditor).
+        guard !clean.isEmpty, clean != authoritativeFinalText else { return }
         authoritativeFinalText = clean
-        if mode == .formatted {
+        if mode == .formatted, formattedText != clean {
             formattedText = clean
         }
     }
@@ -426,8 +442,12 @@ final class OverlayState: ObservableObject {
         vadActive = false
         audioReady = false
         commitPreviewIfNeeded()
-        formattedText = usableAuthoritativeFinalText ?? liveText
+        let resolved = usableAuthoritativeFinalText ?? liveText
+        if formattedText != resolved { formattedText = resolved }
         mode = .formatted
+        // FREEZE: from here, late streaming events are dropped (see the apply guards)
+        // so nothing keeps mutating @Published state and re-rendering in Idle.
+        finalized = true
     }
 
     private var usableAuthoritativeFinalText: String? {
@@ -441,6 +461,7 @@ final class OverlayState: ObservableObject {
         committedSegments = []
         committedUtterances = []
         authoritativeFinalText = nil
+        finalized = false
     }
 
     private func markTranscriptActivity() {
@@ -494,7 +515,10 @@ final class OverlayState: ObservableObject {
             // Once the controller's authoritative final transcript is in, it wins:
             // late streaming `UtteranceFinal` events must not clobber the FINAL with
             // the raw streaming assembly. Without it, fall back to the live assembly.
-            formattedText = usableAuthoritativeFinalText ?? liveText
+            // Dedupe the write — an identical reassignment still re-invalidates the
+            // bound TextEditor and feeds the Idle render churn.
+            let resolved = usableAuthoritativeFinalText ?? liveText
+            if formattedText != resolved { formattedText = resolved }
         }
     }
 
@@ -506,6 +530,9 @@ final class OverlayState: ObservableObject {
     }
 
     func applyVad(_ active: Bool) {
+        // Drop late VAD toggles after finalize: the waveform is gone in Idle and a
+        // stray `vadActive` flip is just another needless @Published invalidation.
+        guard !finalized else { return }
         vadActive = active
         if active {
             warmingUp = false
@@ -645,7 +672,16 @@ final class DictationListener: CsTranscriptionListener, @unchecked Sendable {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.applyVad(active) } }
     }
     func onNoSpeech(reason: String) {
-        DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.showToast("No speech: \(reason)") } }
+        // Distinguish genuine silence from "speech was present but the quality
+        // gates rejected it" — the latter must not lie to the user as "No speech".
+        let message: String
+        switch reason {
+        case "all_speech_rejected_by_quality_gate":
+            message = "Speech too quiet or short — adjust mic"
+        default:
+            message = "No speech"
+        }
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.state?.showToast(message) } }
     }
     func onError(message: String) {
         DispatchQueue.main.async {
