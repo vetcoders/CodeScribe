@@ -147,6 +147,9 @@ struct TrayMenuView: View {
                 title: "Transcription Overlay",
                 isOn: viewModel.overlayEnabled
             ) { viewModel.setOverlayEnabled($0) }
+            toggleRow(icon: "◲", title: "Notes Mode", isOn: viewModel.notesModeEnabled) {
+                viewModel.setNotesMode($0)
+            }
         }
     }
 
@@ -181,11 +184,11 @@ struct TrayMenuView: View {
 
             if viewModel.notesExpanded {
                 TrayDisclosureChildren {
-                    TrayChildRow(title: "Quick Notes", suffix: "(save)") {
-                        viewModel.onQuickNotes()
+                    TrayChildRow(title: "Save last transcript") {
+                        viewModel.onSaveLastTranscript()
                     }
-                    TrayChildRow(title: "Save-only", suffix: "(no paste)") {
-                        viewModel.onSaveOnlyNotes()
+                    TrayChildRow(title: "Save selection") {
+                        viewModel.onSaveSelection()
                     }
                     TrayChildRow(title: "Open notes folder") {
                         viewModel.onOpenNotesFolder()

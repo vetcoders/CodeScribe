@@ -118,16 +118,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSWorkspace.shared.open(URL(fileURLWithPath: notes.notesDir()))
             }
         }
-        // Save the most recent transcript as a daily note, then paste it.
-        model.tray.onQuickNotes = { [notes, threads] in
+        // One-shot: append the most recent transcript to the daily note. No paste
+        // — Notes is a brain-dump destination, not delivery to the cursor.
+        model.tray.onSaveLastTranscript = { [notes, threads] in
             guard let text = Self.latestTranscriptText(threads), !text.isEmpty else { return }
-            _ = try? notes.appendQuickNote(text: text)
-            try? notes.pasteText(text: text)
+            _ = try? notes.saveText(text: text)
         }
-        // Save-only variant: append to today's note without pasting.
-        model.tray.onSaveOnlyNotes = { [notes, threads] in
-            guard let text = Self.latestTranscriptText(threads), !text.isEmpty else { return }
-            _ = try? notes.appendQuickNote(text: text)
+        // One-shot: capture the current selection (AX, clipboard fallback) into the
+        // daily note.
+        model.tray.onSaveSelection = { [notes] in
+            _ = try? notes.saveSelection()
         }
 
         // ── Diagnostics ──

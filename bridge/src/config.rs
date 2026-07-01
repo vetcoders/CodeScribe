@@ -120,6 +120,9 @@ pub struct CsConfigEntry {
 pub struct CsTrayToggles {
     pub show_dock_icon: bool,
     pub transcription_overlay_enabled: bool,
+    /// Notes Mode: voice → daily note (no paste). Backed by the core
+    /// `quick_notes_enabled` + `quick_notes_save_only` pair, flipped together.
+    pub notes_mode_enabled: bool,
 }
 
 /// Thin handle to the codescribe config engine. Stateless: each method reloads
@@ -204,6 +207,9 @@ impl CodescribeConfig {
             transcription_overlay_enabled: settings
                 .transcription_overlay_enabled
                 .unwrap_or(defaults.transcription_overlay_enabled),
+            notes_mode_enabled: settings
+                .quick_notes_enabled
+                .unwrap_or(defaults.quick_notes_enabled),
         }
     }
 

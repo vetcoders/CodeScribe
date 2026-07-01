@@ -17,6 +17,7 @@ final class TrayViewModel: ObservableObject {
     // Quick config toggles (reflected on disk via the engine).
     @Published var showDockIcon: Bool = true
     @Published var overlayEnabled: Bool = true
+    @Published var notesModeEnabled: Bool = false
 
     // Disclosure state for the nested groups. Notes is expanded by default to
     // match the static mock; Diagnostics and History are collapsed.
@@ -40,8 +41,8 @@ final class TrayViewModel: ObservableObject {
     var onAbout: () -> Void = {}
     var onQuit: () -> Void = { NSApplication.shared.terminate(nil) }
 
-    var onQuickNotes: () -> Void = {}
-    var onSaveOnlyNotes: () -> Void = {}
+    var onSaveLastTranscript: () -> Void = {}
+    var onSaveSelection: () -> Void = {}
     var onOpenNotesFolder: () -> Void = {}
     var onOpenTodayNote: () -> Void = {}
 
@@ -72,6 +73,7 @@ final class TrayViewModel: ObservableObject {
         if let toggles = engine.currentToggles() {
             showDockIcon = toggles.showDockIcon
             overlayEnabled = toggles.overlayEnabled
+            notesModeEnabled = toggles.notesMode
         }
         Task { [weak self] in
             guard let self else { return }
@@ -117,6 +119,13 @@ final class TrayViewModel: ObservableObject {
     func setOverlayEnabled(_ enabled: Bool) {
         overlayEnabled = enabled
         engine?.setQuickToggle(.transcriptionOverlay, enabled: enabled)
+    }
+
+    /// Notes Mode: dictation → daily note (no paste). Distinct from normal
+    /// dictation, which pastes at the cursor.
+    func setNotesMode(_ enabled: Bool) {
+        notesModeEnabled = enabled
+        engine?.setNotesMode(enabled)
     }
 
     // MARK: - History actions (route through the engine seam)

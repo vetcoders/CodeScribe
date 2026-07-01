@@ -38,18 +38,47 @@ impl CodescribeNotes {
             .into_owned()
     }
 
-    /// Append `text` as a raw entry to today's daily note, returning the note
-    /// file path. Wraps `state::notes::append_quick_note` (errors on empty text).
-    pub fn append_quick_note(&self, text: String) -> Result<String, CsError> {
+    /// Append `text` to today's daily note and toast "Saved note". The one-shot
+    /// save behind the tray's "Save last transcript" action — no paste, because
+    /// Notes is a brain-dump destination, not delivery to the cursor.
+    pub fn save_text(&self, text: String) -> Result<String, CsError> {
         let path = notes::append_quick_note(&text, Local::now())?;
+        notify_saved(&path);
         Ok(path.to_string_lossy().into_owned())
     }
 
-    /// Paste `text` into the frontmost app via the shared clipboard path, which
-    /// also respects the restore-clipboard setting. Wraps
-    /// `codescribe::clipboard::paste_text` (the same delivery dictation uses).
-    pub fn paste_text(&self, text: String) -> Result<(), CsError> {
-        codescribe::clipboard::paste_text(&text)?;
-        Ok(())
+    /// Capture the user's current selection and append it to the daily note.
+    /// Prefers the real UI selection via Accessibility; only when there is none
+    /// does it fall back to the clipboard — which may be *stale* content, not a
+    /// guaranteed live selection. Returns the saved text, or `None` when there
+    /// was nothing to capture.
+    pub fn save_selection(&self) -> Result<Option<String>, CsError> {
+        const MAX_SELECTION_CHARS: usize = 500_000;
+        let text = codescribe::os::selection::get_selected_text(MAX_SELECTION_CHARS)
+            .filter(|selection| !selection.trim().is_empty())
+            .or_else(|| {
+                codescribe::os::clipboard::get_clipboard()
+                    .ok()
+                    .filter(|clip| !clip.trim().is_empty())
+            });
+
+        match text {
+            Some(text) => {
+                let path = notes::append_quick_note(&text, Local::now())?;
+                notify_saved(&path);
+                Ok(Some(text))
+            }
+            None => Ok(None),
+        }
     }
 }
+
+/// Best-effort "Saved note: <file>" toast (macOS only).
+#[cfg(target_os = "macos")]
+fn notify_saved(path: &std::path::Path) {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("note");
+    codescribe::os::notifications::notify("Codescribe", &format!("Saved note: {name}"));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn notify_saved(_path: &std::path::Path) {}

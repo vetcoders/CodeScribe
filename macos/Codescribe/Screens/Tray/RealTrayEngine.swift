@@ -40,13 +40,21 @@ final class RealTrayEngine: TrayEngine {
         try await hotkeys.stopRecording()
     }
 
-    func currentToggles() -> (showDockIcon: Bool, overlayEnabled: Bool)? {
+    func currentToggles() -> (showDockIcon: Bool, overlayEnabled: Bool, notesMode: Bool)? {
         let toggles = config.trayToggles()
-        return (toggles.showDockIcon, toggles.transcriptionOverlayEnabled)
+        return (toggles.showDockIcon, toggles.transcriptionOverlayEnabled, toggles.notesModeEnabled)
     }
 
     func setQuickToggle(_ toggle: TrayQuickToggle, enabled: Bool) {
         try? config.updateConfig(key: toggle.configKey, value: enabled ? "1" : "0")
+    }
+
+    func setNotesMode(_ enabled: Bool) {
+        // Notes Mode = dictation routed to the daily note without pasting, i.e.
+        // quick-notes enabled AND save-only, flipped together.
+        let value = enabled ? "1" : "0"
+        try? config.updateConfig(key: "QUICK_NOTES_ENABLED", value: value)
+        try? config.updateConfig(key: "QUICK_NOTES_SAVE_ONLY", value: value)
     }
 
     func latestHistoryPath() -> String? {

@@ -47,8 +47,11 @@ protocol TrayEngine: AnyObject {
 
     /// Current values for the tray's quick toggles, read from on-disk settings.
     /// `nil` when settings cannot be loaded.
-    func currentToggles() -> (showDockIcon: Bool, overlayEnabled: Bool)?
+    func currentToggles() -> (showDockIcon: Bool, overlayEnabled: Bool, notesMode: Bool)?
     func setQuickToggle(_ toggle: TrayQuickToggle, enabled: Bool)
+    /// Notes Mode is a two-key flag (quick-notes enabled + save-only), flipped
+    /// together, so it gets its own setter rather than the single-key path.
+    func setNotesMode(_ enabled: Bool)
 
     /// Path of the most recent transcript artifact, or `nil` when none exist.
     func latestHistoryPath() -> String?
@@ -68,6 +71,7 @@ final class MockTrayEngine: TrayEngine {
     var agentAvailable: Bool
     var showDockIcon: Bool
     var overlayEnabled: Bool
+    var notesMode: Bool
     var historyPath: String
     var transcriptText: String
 
@@ -75,12 +79,14 @@ final class MockTrayEngine: TrayEngine {
          agentAvailable: Bool = true,
          showDockIcon: Bool = true,
          overlayEnabled: Bool = false,
+         notesMode: Bool = false,
          historyPath: String = "/tmp/codescribe/history/2026-06-28-1422.md",
          transcriptText: String = "Sample transcript.") {
         self.recording = recording
         self.agentAvailable = agentAvailable
         self.showDockIcon = showDockIcon
         self.overlayEnabled = overlayEnabled
+        self.notesMode = notesMode
         self.historyPath = historyPath
         self.transcriptText = transcriptText
     }
@@ -91,8 +97,8 @@ final class MockTrayEngine: TrayEngine {
     func startRecording() async throws { recording = true }
     func stopRecording() async throws { recording = false }
 
-    func currentToggles() -> (showDockIcon: Bool, overlayEnabled: Bool)? {
-        (showDockIcon, overlayEnabled)
+    func currentToggles() -> (showDockIcon: Bool, overlayEnabled: Bool, notesMode: Bool)? {
+        (showDockIcon, overlayEnabled, notesMode)
     }
 
     func setQuickToggle(_ toggle: TrayQuickToggle, enabled: Bool) {
@@ -101,6 +107,8 @@ final class MockTrayEngine: TrayEngine {
         case .transcriptionOverlay: overlayEnabled = enabled
         }
     }
+
+    func setNotesMode(_ enabled: Bool) { notesMode = enabled }
 
     func latestHistoryPath() -> String? { historyPath }
     func latestTranscriptText() -> String? { transcriptText }
