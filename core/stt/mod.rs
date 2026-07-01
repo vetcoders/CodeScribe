@@ -161,7 +161,7 @@ fn candle_try_transcribe_long_with_segments(
 }
 
 /// Initialize whichever STT engine is active by env.
-pub(crate) fn init_active_engine() -> anyhow::Result<()> {
+pub fn init_active_engine() -> anyhow::Result<()> {
     match selected_engine() {
         SttEngine::Onnx => onnx_adapter::init(),
         SttEngine::Apple => {
@@ -169,6 +169,55 @@ pub(crate) fn init_active_engine() -> anyhow::Result<()> {
         }
         SttEngine::Candle => whisper::init(),
     }
+}
+
+/// Sample rate of the synthetic warmup buffer.
+const WARMUP_SAMPLE_RATE: u32 = 16_000;
+
+/// Prewarm the ACTIVE STT engine end-to-end so the first real dictation pays
+/// neither model-load nor (for the Candle/Metal path) first-inference Metal
+/// kernel-compilation latency, and (for the Apple path) neither the bridge
+/// spawn nor the SpeechAnalyzer asset/probe readiness.
+///
+/// This is deliberately routed through the exact same `transcribe_long_with_segments`
+/// path the live pipeline uses, so whichever engine actually serves transcripts
+/// at runtime gets warmed: on macOS 26+ the router selects Apple SpeechAnalyzer
+/// and transparently falls back to Candle when the bridge is unavailable
+/// ([`run_apple_or_whisper`]). Warming the hardcoded Candle singleton alone (the
+/// previous behaviour) missed the active engine whenever Apple routing won, and
+/// even on the Candle path it only loaded weights without compiling kernels —
+/// both leaving the first dictation cold.
+///
+/// Best-effort: the warmup transcription's result is intentionally discarded and
+/// its errors are logged, never propagated, so a cold-path hiccup can never block
+/// recording readiness. `init_active_engine` failures (e.g. no model on disk) are
+/// surfaced so callers can log them.
+pub fn prewarm_active_engine() -> anyhow::Result<()> {
+    init_active_engine()?;
+
+    // Push a short synthetic utterance through the real routing so the serving
+    // engine compiles its kernels / spins up its bridge before the user dictates.
+    let warmup = synthetic_warmup_audio();
+    match transcribe_long_with_segments(&warmup, WARMUP_SAMPLE_RATE, Some("en")) {
+        Ok(_) => tracing::info!("STT active-engine warmup inference complete"),
+        Err(error) => {
+            tracing::warn!("STT active-engine warmup inference failed (non-fatal): {error:#}")
+        }
+    }
+    Ok(())
+}
+
+/// One second of very low-amplitude tone at 16 kHz. Non-silent (so the full
+/// encoder+decoder path executes during warmup) yet quiet enough that it yields
+/// no spurious transcript text.
+fn synthetic_warmup_audio() -> Vec<f32> {
+    let n = WARMUP_SAMPLE_RATE as usize;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / WARMUP_SAMPLE_RATE as f32;
+            0.0005 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
+        })
+        .collect()
 }
 
 /// Transcribe a single chunk (blocking lock on whichever engine is active).

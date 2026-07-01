@@ -215,16 +215,20 @@ impl CodescribeHotkeys {
     /// dictation does not sit in the overlay's `starting` state for seconds.
     pub async fn prewarm_recording(&self) -> Result<(), CsError> {
         let _ = ensure_controller(&shared_controller(), tokio::runtime::Handle::current());
-        if !codescribe::whisper::is_initialized() {
-            tokio::task::spawn_blocking(codescribe::whisper::init)
-                .await
-                .map_err(|error| CsError::Recording {
-                    msg: format!("Whisper prewarm task failed: {error}"),
-                })?
-                .map_err(|error| CsError::Recording {
-                    msg: format!("Whisper prewarm failed: {error}"),
-                })?;
-        }
+        // Warm the ACTIVE engine the router will actually use (Apple SpeechAnalyzer
+        // on macOS 26+, Candle on fallback/older macOS) — not a hardcoded Candle
+        // singleton. `prewarm_active_engine` also runs a synthetic warmup inference,
+        // so the first user dictation pays neither model-load nor Metal
+        // kernel-compilation latency. Idempotent; safe to race the controller's own
+        // background prewarm.
+        tokio::task::spawn_blocking(codescribe::stt::prewarm_active_engine)
+            .await
+            .map_err(|error| CsError::Recording {
+                msg: format!("STT prewarm task failed: {error}"),
+            })?
+            .map_err(|error| CsError::Recording {
+                msg: format!("STT prewarm failed: {error}"),
+            })?;
         Ok(())
     }
 

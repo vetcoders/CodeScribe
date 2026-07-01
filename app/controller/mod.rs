@@ -1273,19 +1273,25 @@ impl RecordingController {
             if !crate::whisper::is_initialized() {
                 // Best-effort BACKGROUND prewarm — never block recording readiness.
                 //
-                // Product invariant: recording readiness is NOT Whisper readiness.
+                // Product invariant: recording readiness is NOT engine readiness.
                 // Audio capture must start the moment the user presses record; the
-                // live pipeline and the final pass lazy-load the engine on first use
-                // (`with_engine`). A failed prewarm is a warning, not an app or
-                // recording failure. The idle-unload reaper (commit 2b8bb1f) may
-                // legitimately drop the engine later and the next call reloads it —
-                // pinning it here would undo that GPU/host-memory reclaim.
+                // live pipeline and the final pass lazy-load the engine on first use.
+                // A failed prewarm is a warning, not an app or recording failure.
+                // The idle-unload reaper (commit 2b8bb1f) may legitimately drop the
+                // engine later and the next call reloads it — pinning it here would
+                // undo that GPU/host-memory reclaim.
+                //
+                // Warm the ACTIVE router engine (Apple SpeechAnalyzer on macOS 26+,
+                // Candle on fallback/older macOS) AND run a synthetic warmup
+                // inference, so the first dictation pays neither model-load nor
+                // Metal kernel-compilation latency — matching the old always-instant
+                // behaviour where the long-lived daemon was warm before first use.
                 std::thread::Builder::new()
-                    .name("whisper-prewarm".into())
+                    .name("stt-prewarm".into())
                     .spawn(|| {
-                        if let Err(e) = crate::whisper::init() {
+                        if let Err(e) = crate::stt::prewarm_active_engine() {
                             warn!(
-                                "Whisper background prewarm failed (will lazy-load on first use): {}",
+                                "STT background prewarm failed (will lazy-load on first use): {}",
                                 e
                             );
                         }

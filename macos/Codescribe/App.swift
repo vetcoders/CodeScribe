@@ -158,7 +158,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func prewarmRecordingController() {
         Task { [hotkeys] in
             do {
-                try await Task.sleep(nanoseconds: 750_000_000)
+                // Start warmup as early as possible after launch so the engine
+                // (model load + first-inference kernel compile) is ready before the
+                // user's first dictation. A brief settle keeps it off the very first
+                // UI frame; the heavy work runs on a background blocking thread.
+                try await Task.sleep(nanoseconds: 100_000_000)
                 try await hotkeys.prewarmRecording()
                 appLogger.info("Codescribe recording controller prewarmed")
             } catch {
