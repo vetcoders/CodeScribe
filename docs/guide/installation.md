@@ -28,8 +28,8 @@
 git clone https://github.com/vetcoders/codescribe.git
 cd codescribe
 make install          # Install CLI to ~/.cargo/bin and ensure runtime model/cache availability
-make bundle           # Optional: create bundle/Codescribe.app
-make install-app      # Optional: copy app to /Applications
+make app PROFILE=release   # Optional: build Codescribe.app
+make install-app      # Optional: build + copy app to /Applications
 ```
 
 ---
@@ -64,13 +64,13 @@ Codescribe needs these permissions to function:
 Open Terminal and run:
 
 ```bash
-codescribe --version
+make version
 ```
 
 Expected output:
 
 ```
-Codescribe 0.7.x
+v0.12.x
 ```
 
 Test transcription:
@@ -99,7 +99,7 @@ Codescribe stores configuration in:
 Create default config:
 
 ```bash
-codescribe --config
+make config
 ```
 
 ---

@@ -18,8 +18,8 @@ make install
 ### Method 2: App Bundle (For Distribution)
 
 ```bash
-make bundle           # Creates bundle/Codescribe.app
-make install-app      # Copies to /Applications/Codescribe.app (auto-caches models)
+make app PROFILE=release   # Builds macos/build/Build/Products/Release/Codescribe.app
+make install-app      # Builds + copies to /Applications/Codescribe.app (auto-caches models)
 ```
 
 **Result**: Standard macOS .app bundle in `/Applications/`.
