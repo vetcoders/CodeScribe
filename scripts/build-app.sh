@@ -87,8 +87,22 @@ cp "$DYLIB" "$FRAMEWORKS/"
 # re-prompting every time an unsigned binary's cdhash changes — the same
 # identifier make install-app uses. `--deep` also covers the just-embedded dylib.
 BUNDLE_ID="${CODESCRIBE_BUNDLE_ID:-com.vetcoders.codescribe}"
-echo "==> [7/7] Ad-hoc signing $SCHEME.app (stable identifier: $BUNDLE_ID)"
-codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP"
+# Prefer a REAL signing identity (Developer ID / Apple Development). Its designated
+# requirement is certificate-based, so a TCC grant (Accessibility / Input
+# Monitoring) survives rebuilds. Ad-hoc (`--sign -`) is cdhash-based, so the grant
+# dies on every rebuild — fall back to it only when no real identity exists.
+SIGN_ID="${CODESCRIBE_CODESIGN_IDENTITY:-}"
+if [ -z "$SIGN_ID" ] || [ "$SIGN_ID" = "-" ]; then
+  SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
+  [ -z "$SIGN_ID" ] && SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
+fi
+if [ -n "$SIGN_ID" ]; then
+  echo "==> [7/7] Signing $SCHEME.app with stable identity: $SIGN_ID"
+  codesign --force --deep --sign "$SIGN_ID" --identifier "$BUNDLE_ID" "$APP"
+else
+  echo "==> [7/7] Ad-hoc signing $SCHEME.app (no stable identity — TCC re-grants per build)"
+  codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP"
+fi
 
 echo "==> App built: $APP"
 echo "    (portability: dylib is @rpath-relative and embedded; project.yml adds"
